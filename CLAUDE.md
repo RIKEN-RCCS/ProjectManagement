@@ -398,7 +398,7 @@ python3 scripts/slack_pipeline.py ...
 
 - `scripts/db_utils.py` の `open_db()` が全スクリプトのDB接続を一元管理する
 - 鍵の読み込み優先順位: 環境変数 `PM_DB_KEY` > `~/.secrets/pm_db_key.txt`
-- Slack DB（`{channel_id}.db`）は `slack_pipeline.py` が管理するため暗号化対象外
+- `pm.db` および `{channel_id}.db`（Slack DB）の全DBを暗号化対象とする
 
 ### 初回セットアップ
 
@@ -408,8 +408,8 @@ python3 scripts/db_utils.py --gen-key
 # → ~/.secrets/pm_db_key.txt に 64文字のランダム鍵を生成（chmod 600）
 
 # 2. 既存の平文DBを暗号化DBに変換（初回のみ）
-python3 scripts/db_migrate.py data/pm.db
-# → data/pm.db.bak にバックアップを作成してから変換・検証
+python3 scripts/db_migrate.py data/pm.db data/C08SXA4M7JT.db data/C0A9KG036CS.db
+# → 各 .bak にバックアップを作成してから変換・検証
 ```
 
 **鍵ファイルを紛失すると暗号化済みDBは復元不可能。パスワードマネージャー等に必ずバックアップすること。**

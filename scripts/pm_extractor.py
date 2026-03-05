@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db_utils import open_db, open_db_plain
+from db_utils import open_db
 
 # --------------------------------------------------------------------------- #
 # パス解決
@@ -99,12 +99,11 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     )
 
 
-def open_slack_db(db_path: Path) -> sqlite3.Connection:
+def open_slack_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     if not db_path.exists():
         print(f"ERROR: Slack DBが見つかりません: {db_path}", file=sys.stderr)
         sys.exit(1)
-    # Slack DBは暗号化対象外（slack_pipeline.py が別途管理）
-    return open_db_plain(db_path)
+    return open_db(db_path, encrypt=not no_encrypt)
 
 
 # --------------------------------------------------------------------------- #
@@ -323,7 +322,7 @@ def main() -> None:
     if args.since:
         log(f"[INFO] since       : {args.since}")
 
-    slack_conn = open_slack_db(slack_db_path)
+    slack_conn = open_slack_db(slack_db_path, no_encrypt=args.no_encrypt)
     pm_conn = init_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
     context = load_context_from_claude_md()
 

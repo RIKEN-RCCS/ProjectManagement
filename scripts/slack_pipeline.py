@@ -26,6 +26,10 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from io import StringIO
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db_utils import open_db
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -88,6 +92,8 @@ def parse_args():
                         help="全スレッドを強制的に再要約（差分無視）")
     parser.add_argument("--skip-canvas", action="store_true", default=False,
                         help="Canvas 投稿をスキップ")
+    parser.add_argument("--no-encrypt", action="store_true", default=False,
+                        help="DBを暗号化しない（平文モード）")
     return parser.parse_args()
 
 
@@ -132,12 +138,8 @@ CREATE TABLE IF NOT EXISTS summaries (
 """
 
 
-def init_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    conn.commit()
-    return conn
+def init_db(db_path: str, no_encrypt: bool = False) -> sqlite3.Connection:
+    return open_db(Path(db_path), encrypt=not no_encrypt, schema=SCHEMA)
 
 
 def db_upsert_message(conn: sqlite3.Connection, channel_id: str, msg: dict) -> None:
@@ -850,7 +852,7 @@ async def main():
     overall_path = os.path.join(repo_root, "data", f"slack_summarize_{channel_id}_overall.md")
 
     print(f"DB: {db_path}")
-    conn = init_db(db_path)
+    conn = init_db(db_path, no_encrypt=args.no_encrypt)
 
     # ---- ステップ1: 差分取得 & DB保存 ----
     if not args.skip_fetch:
