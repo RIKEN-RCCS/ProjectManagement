@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-meeting_parser.py
+pm_meeting_import.py
 
 会議文字起こし（Whisper出力Markdown）を解析し、pm.db に保存する。
 
 Usage:
-    python3 scripts/meeting_parser.py meetings/GMT20260302-032528_Recording.txt [options]
+    python3 scripts/pm_meeting_import.py meetings/GMT20260302-032528_Recording.txt [options]
 
 Options:
     --meeting-name NAME     会議種別名（CLAUDE.md の「会議の種類」参照）
