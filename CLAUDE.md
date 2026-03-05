@@ -218,7 +218,7 @@ slack/
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）
 │   ├── meeting_parser.py            # 議事録 → pm.db
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db
-│   ├── pm_report.py                 # pm.db → レポート・Canvas投稿（未実装）
+│   ├── pm_report.py                 # pm.db → レポート・Canvas投稿
 │   ├── trans.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト（whisper_vad.pyを呼び出す）
 │   ├── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 │   └── [旧スクリプト]
@@ -317,6 +317,36 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --dry-run --output result.txt
 | `--force-reextract` | - | 抽出済みスレッドも再処理 |
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
 | `--output PATH` | - | 標準出力の内容をファイルにも保存 |
+
+### 5. PMレポート・アジェンダ生成・Canvas投稿（pm_report.py）
+
+```sh
+# 週次進捗レポートを生成してCanvas投稿
+python3 scripts/pm_report.py
+
+# 直近1ヶ月のデータのみ対象にしてレポート生成
+python3 scripts/pm_report.py --since 2026-02-01
+
+# 次回Leader_Meetingのアジェンダ草案を生成
+python3 scripts/pm_report.py --mode agenda --meeting-name Leader_Meeting
+
+# レポート+アジェンダの両方を生成して投稿
+python3 scripts/pm_report.py --mode both
+
+# 確認用（Canvas投稿なし）
+python3 scripts/pm_report.py --dry-run --output report.md
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--mode MODE` | `report` | `report` / `agenda` / `both` |
+| `--meeting-name NAME` | `Leader_Meeting` | 次回会議種別名（agenda モード時） |
+| `--canvas-id ID` | `F0AAD2494VB` | 投稿先 Canvas ID |
+| `--since YYYY-MM-DD` | なし（全期間） | この日付以降のデータのみ対象 |
+| `--skip-canvas` | - | Canvas 投稿をスキップ |
+| `--dry-run` | - | Canvas 投稿なし・結果を標準出力のみ |
+| `--output PATH` | - | 出力をファイルにも保存 |
 
 ---
 
@@ -472,9 +502,9 @@ Slack から取得した最新返信 msg_ts  vs  summaries.last_reply_ts
 - `source_ref` により背景（会議議事録 or Slackスレッド）に常に遡れる設計
 - 差分処理: `slack_extractions` テーブルで抽出済みスレッドを管理、変化なしはLLM呼び出しゼロ
 
-### フェーズ3: PMレポートと次回会議アジェンダ自動生成（将来）
+### フェーズ3: PMレポートと次回会議アジェンダ自動生成（実装済み）
 
 - 未完了アクションアイテム一覧（担当者・期限付き）の自動生成
 - 次回会議アジェンダ草案（未解決課題 + Slackで浮上した検討事項）
 - 週次/月次進捗レポート
-- リスク検知（「問題」「障害」「遅延」等を含むスレッドへの自動フラグ）
+- リスク検知（「問題」「障害」「遅延」等を含むアイテムへの自動フラグ）
