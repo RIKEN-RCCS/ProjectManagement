@@ -11,7 +11,7 @@
 # 例: sbatch trans.sh a.mp4 b.mp4 c.mp4
 #     sbatch trans.sh a.mp4 b.mp4 --skip 30
 
-WHISPER_VAD=/lvs0/dne1/rccs-nghpcadu/hikaru.inoue/MCP/slack/scripts/whisper_vad.py
+WHISPER_VAD=/lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/whisper_vad.py
 
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
