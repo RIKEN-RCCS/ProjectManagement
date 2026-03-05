@@ -151,6 +151,21 @@ slack-bolt
 slack-sdk
 ```
 
+### Slack Bot Token の取得
+
+以下のスクリプトの実行には Slack Bot Token（`xoxb-...`）が必要。
+
+1. Slack API サイト（api.slack.com/apps）でアプリを作成する
+2. 「OAuth & Permissions」で以下のBot Token Scopesを付与する:
+   - `channels:history` - メッセージ取得
+   - `channels:read` - チャンネル情報取得
+   - `users:read` - ユーザー名取得
+   - `files:read` - Canvas（ファイル）取得
+   - `canvases:read` - Canvas内容読み取り
+   - `canvases:write` - Canvas編集
+3. アプリをワークスペースにインストールし、「Bot User OAuth Token」をコピーする
+4. アプリを対象チャンネルに招待する（`/invite @アプリ名`）
+
 ### トークン設定（安全な方法）
 
 ```sh
