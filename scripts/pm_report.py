@@ -257,15 +257,32 @@ AGENDA_PROMPT = """
 
 
 def format_action_items(items: list[dict]) -> str:
+    """Canvas に貼るアクションアイテム表（ID・対応状況列付き）"""
+    if not items:
+        return "（なし）"
+    header = "| ID | 担当者 | 内容 | 期限 | ソース | 対応状況 |"
+    sep    = "|----|--------|------|------|--------|----------|"
+    rows = [header, sep]
+    for a in items:
+        ai_id    = a.get("id", "")
+        assignee = a.get("assignee") or "未定"
+        content  = a.get("content", "").replace("|", "｜")
+        due      = a.get("due_date") or ""
+        source   = a.get("source") or ""
+        note     = a.get("note") or ""
+        rows.append(f"| {ai_id} | {assignee} | {content} | {due} | {source} | {note} |")
+    return "\n".join(rows)
+
+
+def format_action_items_text(items: list[dict]) -> str:
+    """LLMプロンプト用テキスト形式（表ではなく箇条書き）"""
     if not items:
         return "（なし）"
     lines = []
     for a in items:
         assignee = a.get("assignee") or "未定"
         due = f" 期限:{a['due_date']}" if a.get("due_date") else ""
-        source = f" [{a.get('source', '')}]" if a.get("source") else ""
-        ref = f" {a.get('source_ref', '')}" if a.get("source_ref") else ""
-        lines.append(f"- [{assignee}]{due} {a['content']}{source}{ref}")
+        lines.append(f"- [ID:{a.get('id','')}][{assignee}]{due} {a['content']}")
     return "\n".join(lines)
 
 
@@ -301,15 +318,24 @@ def generate_report(
         context=context,
         today=today,
         ai_count=len(action_items),
-        action_items=format_action_items(action_items),
+        action_items=format_action_items_text(action_items),
         d_count=len(decisions),
         decisions=format_decisions(decisions),
         m_count=len(meetings),
         meetings=format_meetings(meetings),
         risk_count=len(risk_items),
-        risk_items=format_action_items(risk_items),
+        risk_items=format_action_items_text(risk_items),
     )
-    return call_claude(prompt, timeout=300)
+    llm_output = call_claude(prompt, timeout=300)
+    # LLM出力のアクションアイテムセクションを表形式に差し替える
+    table = format_action_items(action_items)
+    llm_output = re.sub(
+        r"(## 未完了アクションアイテム\n)(.+?)(\n## )",
+        lambda m: m.group(1) + table + "\n" + m.group(3),
+        llm_output,
+        flags=re.DOTALL,
+    )
+    return llm_output
 
 
 def generate_agenda(
@@ -325,13 +351,22 @@ def generate_agenda(
         today=today,
         meeting_name=meeting_name,
         ai_count=len(action_items),
-        action_items=format_action_items(action_items),
+        action_items=format_action_items_text(action_items),
         d_count=len(decisions),
         decisions=format_decisions(decisions),
         risk_count=len(risk_items),
-        risk_items=format_action_items(risk_items),
+        risk_items=format_action_items_text(risk_items),
     )
-    return call_claude(prompt, timeout=300)
+    llm_output = call_claude(prompt, timeout=300)
+    # 持ち越し確認セクションを表形式に差し替える
+    table = format_action_items(action_items)
+    llm_output = re.sub(
+        r"(## 前回からの持ち越し確認\n)(.+?)(\n## )",
+        lambda m: m.group(1) + table + "\n" + m.group(3),
+        llm_output,
+        flags=re.DOTALL,
+    )
+    return llm_output
 
 
 # --------------------------------------------------------------------------- #

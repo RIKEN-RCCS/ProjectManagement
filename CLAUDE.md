@@ -348,6 +348,33 @@ python3 scripts/pm_report.py --dry-run --output report.md
 | `--dry-run` | - | Canvas 投稿なし・結果を標準出力のみ |
 | `--output PATH` | - | 出力をファイルにも保存 |
 
+### 6. Canvas対応状況 → pm.db 同期（pm_sync_canvas.py）
+
+会議中にCanvas上の「対応状況」列に記入された内容をpm.dbに反映する。
+
+**運用フロー**:
+1. `pm_report.py` でアクションアイテム表をCanvas投稿（対応状況列は空）
+2. 会議中にメンバーがCanvas上の「対応状況」列に記入
+3. 会議後に本スクリプトを実行してpm.dbを更新
+
+```sh
+# 通常運用
+python3 scripts/pm_sync_canvas.py
+
+# 確認用（DB更新なし）
+python3 scripts/pm_sync_canvas.py --dry-run
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--canvas-id ID` | `F0AAD2494VB` | 対象 Canvas ID |
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--dry-run` | - | DB保存なし・結果を標準出力のみ |
+
+**完了判定キーワード**（`status='closed'` に更新）: `完了` `done` `済` `対応済` `解決` `closed` `finish` `finished`
+
+それ以外の記入内容は `note` 列に保存（`status` は `open` のまま）
+
 ---
 
 ## 環境変数
