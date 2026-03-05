@@ -34,6 +34,9 @@ from pathlib import Path
 from slack_bolt import App
 from slack_sdk.errors import SlackApiError
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db_utils import open_db
+
 # --------------------------------------------------------------------------- #
 # 定数・パス解決
 # --------------------------------------------------------------------------- #
@@ -71,13 +74,11 @@ def load_context() -> str:
 # --------------------------------------------------------------------------- #
 # pm.db 読み込み
 # --------------------------------------------------------------------------- #
-def open_pm_db(db_path: Path) -> sqlite3.Connection:
+def open_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     if not db_path.exists():
         print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
         sys.exit(1)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return open_db(db_path, encrypt=not no_encrypt)
 
 
 def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list[dict]:
@@ -417,6 +418,7 @@ def main() -> None:
     parser.add_argument("--skip-canvas", action="store_true", help="Canvas 投稿をスキップ")
     parser.add_argument("--dry-run", action="store_true", help="Canvas 投稿なし・結果を標準出力のみ")
     parser.add_argument("--output", default=None, help="出力をファイルにも保存")
+    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_PM_DB
@@ -433,7 +435,7 @@ def main() -> None:
     log(f"[INFO] since     : {args.since or '全期間'}")
     log(f"[INFO] 生成日    : {today}")
 
-    conn = open_pm_db(db_path)
+    conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
     context = load_context()
 
     action_items = fetch_open_action_items(conn, args.since)

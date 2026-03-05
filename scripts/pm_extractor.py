@@ -32,6 +32,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db_utils import open_db, open_db_plain
+
 # --------------------------------------------------------------------------- #
 # パス解決
 # --------------------------------------------------------------------------- #
@@ -86,26 +89,22 @@ CREATE TABLE IF NOT EXISTS slack_extractions (
 """
 
 
-def init_pm_db(db_path: Path) -> sqlite3.Connection:
+def init_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    # 既存DBへのマイグレーション: note列がなければ追加
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(action_items)").fetchall()]
-    if "note" not in cols:
-        conn.execute("ALTER TABLE action_items ADD COLUMN note TEXT")
-    conn.commit()
-    return conn
+    return open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        schema=SCHEMA,
+        migrations=["ALTER TABLE action_items ADD COLUMN note TEXT"],
+    )
 
 
 def open_slack_db(db_path: Path) -> sqlite3.Connection:
     if not db_path.exists():
         print(f"ERROR: Slack DBが見つかりません: {db_path}", file=sys.stderr)
         sys.exit(1)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    # Slack DBは暗号化対象外（slack_pipeline.py が別途管理）
+    return open_db_plain(db_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -304,6 +303,7 @@ def main() -> None:
     parser.add_argument("--force-reextract", action="store_true", help="抽出済みスレッドも再処理")
     parser.add_argument("--dry-run", action="store_true", help="DB保存なし・結果を標準出力のみ")
     parser.add_argument("--output", default=None, help="標準出力の内容をファイルにも保存")
+    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
     args = parser.parse_args()
 
     channel_id = args.channel
@@ -324,7 +324,7 @@ def main() -> None:
         log(f"[INFO] since       : {args.since}")
 
     slack_conn = open_slack_db(slack_db_path)
-    pm_conn = init_pm_db(pm_db_path)
+    pm_conn = init_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
     context = load_context_from_claude_md()
 
     summaries = fetch_summaries(slack_conn, channel_id, args.since)

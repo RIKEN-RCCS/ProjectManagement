@@ -37,6 +37,9 @@ from pathlib import Path
 from slack_bolt import App
 from slack_sdk.errors import SlackApiError
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db_utils import open_db
+
 # --------------------------------------------------------------------------- #
 # 定数
 # --------------------------------------------------------------------------- #
@@ -164,19 +167,15 @@ def is_close_keyword(note: str) -> bool:
 # --------------------------------------------------------------------------- #
 # pm.db 更新
 # --------------------------------------------------------------------------- #
-def open_pm_db(db_path: Path) -> sqlite3.Connection:
+def open_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     if not db_path.exists():
         print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
         sys.exit(1)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    # マイグレーション: note列がなければ追加
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(action_items)").fetchall()]
-    if "note" not in cols:
-        conn.execute("ALTER TABLE action_items ADD COLUMN note TEXT")
-        conn.commit()
-        print("[INFO] action_items に note 列を追加しました")
-    return conn
+    return open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        migrations=["ALTER TABLE action_items ADD COLUMN note TEXT"],
+    )
 
 
 def update_action_item(
@@ -223,6 +222,7 @@ def main() -> None:
     parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="対象 Canvas ID")
     parser.add_argument("--db", default=None, help="pm.db のパス")
     parser.add_argument("--dry-run", action="store_true", help="DB保存なし・結果を標準出力のみ")
+    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_PM_DB
@@ -248,7 +248,7 @@ def main() -> None:
         print("更新対象なし。終了します。")
         return
 
-    conn = open_pm_db(db_path)
+    conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
 
     closed_count = noted_count = not_found_count = 0
 
