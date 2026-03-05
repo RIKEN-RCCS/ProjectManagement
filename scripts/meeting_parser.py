@@ -25,6 +25,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db_utils import open_db
+
 # --------------------------------------------------------------------------- #
 # パス解決
 # --------------------------------------------------------------------------- #
@@ -71,15 +74,14 @@ CREATE TABLE IF NOT EXISTS decisions (
 """
 
 
-def init_db(db_path: Path) -> sqlite3.Connection:
+def init_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.executescript(SCHEMA)
-    # 既存DBへのマイグレーション: note列がなければ追加
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(action_items)").fetchall()]
-    if "note" not in cols:
-        conn.execute("ALTER TABLE action_items ADD COLUMN note TEXT")
-    conn.commit()
+    conn = open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        schema=SCHEMA,
+        migrations=["ALTER TABLE action_items ADD COLUMN note TEXT"],
+    )
     return conn
 
 
@@ -278,6 +280,7 @@ def main():
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     parser.add_argument("--dry-run", action="store_true", help="DB保存なし・結果を標準出力のみ")
     parser.add_argument("--output", default=None, help="標準出力の内容を保存するファイルパス")
+    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
     args = parser.parse_args()
 
     input_path = Path(args.input_file).resolve()
@@ -345,7 +348,7 @@ def main():
             output_file.close()
         return
 
-    conn = init_db(db_path)
+    conn = init_db(db_path, no_encrypt=args.no_encrypt)
 
     existing = conn.execute(
         "SELECT meeting_id FROM meetings WHERE meeting_id = ?", (meeting_id,)
