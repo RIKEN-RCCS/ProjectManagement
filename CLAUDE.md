@@ -388,6 +388,40 @@ source ~/.secrets/slack_tokens.sh
 python3 scripts/slack_pipeline.py ...
 ```
 
+---
+
+## DBの暗号化
+
+`pm.db` は SQLCipher（AES-256）で暗号化している。ファイルが漏洩しても鍵なしでは内容を読めない。
+
+### 暗号化の仕組み
+
+- `scripts/db_utils.py` の `open_db()` が全スクリプトのDB接続を一元管理する
+- 鍵の読み込み優先順位: 環境変数 `PM_DB_KEY` > `~/.secrets/pm_db_key.txt`
+- Slack DB（`{channel_id}.db`）は `slack_pipeline.py` が管理するため暗号化対象外
+
+### 初回セットアップ
+
+```sh
+# 1. 鍵を生成（初回のみ）
+python3 scripts/db_utils.py --gen-key
+# → ~/.secrets/pm_db_key.txt に 64文字のランダム鍵を生成（chmod 600）
+
+# 2. 既存の平文DBを暗号化DBに変換（初回のみ）
+python3 scripts/db_migrate.py data/pm.db
+# → data/pm.db.bak にバックアップを作成してから変換・検証
+```
+
+**鍵ファイルを紛失すると暗号化済みDBは復元不可能。パスワードマネージャー等に必ずバックアップすること。**
+
+### 各スクリプトの暗号化オプション
+
+全スクリプトに `--no-encrypt` オプションがあり、平文モードで動作させることができる（暗号化を使わない場合や移行作業時に使用）。
+
+| オプション | 説明 |
+|---|---|
+| `--no-encrypt` | 平文の sqlite3 で接続する（暗号化しない） |
+
 ローカルLLM（OpenAI互換API）を使う場合:
 ```sh
 export OPENAI_API_BASE="http://..."

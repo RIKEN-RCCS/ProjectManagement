@@ -178,6 +178,28 @@ chmod 600 ~/.secrets/slack_tokens.sh
 
 ---
 
+## セキュリティ
+
+### DBの暗号化（SQLCipher AES-256）
+
+`pm.db`（決定事項・アクションアイテム・会議情報を含む）は SQLCipher による AES-256 暗号化を採用している。ファイルが漏洩しても鍵なしでは内容を読めない。
+
+暗号化鍵は `~/.secrets/pm_db_key.txt`（`chmod 600`）または環境変数 `PM_DB_KEY` から読み込む。すべてのスクリプトで DB 接続を `scripts/db_utils.py` に一元管理することで、暗号化を透過的に適用している。
+
+#### 初回セットアップ
+
+```sh
+# 鍵を生成
+python3 scripts/db_utils.py --gen-key
+
+# 既存の平文DBを暗号化DBに変換（バックアップを自動作成）
+python3 scripts/db_migrate.py data/pm.db
+```
+
+生成した鍵はパスワードマネージャー等に必ずバックアップすること。**鍵を紛失すると暗号化済みDBは復元不可能。**
+
+---
+
 ## 注意事項
 
 - `claude -p` はClaude Codeセッション内からは実行不可。`meeting_parser.py`, `pm_extractor.py`, `pm_report.py` は**Claude Codeの外のターミナル**から実行すること。
