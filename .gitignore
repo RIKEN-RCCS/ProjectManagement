@@ -1,0 +1,34 @@
+# Slack data (contains confidential messages)
+data/*.db
+
+# Meeting transcripts and audio (機密性2)
+meetings/*.md
+meetings/*.txt
+meetings/*.m4a
+meetings/*.mp4
+meetings/*.wav
+
+# Generated summary files
+data/slack_summarize*.md
+
+# HuggingFace cache
+.hf_cache/
+hf_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Secrets
+.secrets/
+*.secrets
+
+# Slurm logs
+slurm-*.out
+
+# Temporary files
+*.tmp
+.work_*/

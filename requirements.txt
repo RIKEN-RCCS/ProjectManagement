@@ -1,0 +1,12 @@
+# requirements.txt
+# slack_pipeline.py, pm_extractor.py, meeting_parser.py で使用
+
+# Slack SDK
+slack-bolt
+slack-sdk
+
+# MCP (Model Context Protocol) client
+mcp
+
+# claude CLI は別途インストールが必要（npm / pip 経由）
+# https://docs.anthropic.com/en/docs/claude-code
