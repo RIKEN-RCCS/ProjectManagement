@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pm_bulk_import.py
+pm_meeting_bulk_import.py
 
 meetings/ ディレクトリ内の議事録ファイルを一括で pm.db に登録する。
 
@@ -10,18 +10,18 @@ meetings/ ディレクトリ内の議事録ファイルを一括で pm.db に登
   - _parsed.md で終わるファイルは対象外
 
 Usage:
-    python3 scripts/pm_bulk_import.py
-    python3 scripts/pm_bulk_import.py --meetings-dir meetings/
-    python3 scripts/pm_bulk_import.py --dry-run
-    python3 scripts/pm_bulk_import.py --force
-    python3 scripts/pm_bulk_import.py --since 2026-01-01
+    python3 scripts/pm_meeting_bulk_import.py
+    python3 scripts/pm_meeting_bulk_import.py --meetings-dir meetings/
+    python3 scripts/pm_meeting_bulk_import.py --dry-run
+    python3 scripts/pm_meeting_bulk_import.py --force
+    python3 scripts/pm_meeting_bulk_import.py --since 2026-01-01
 
 Options:
     --meetings-dir DIR      議事録ディレクトリ（デフォルト: meetings/）
     --db PATH               pm.db のパス（デフォルト: data/pm.db）
     --since YYYY-MM-DD      この日付以降のファイルのみ対象
     --force                 既存レコードを上書き
-    --dry-run               meeting_parser.py を実行せず対象ファイルを表示のみ
+    --dry-run               pm_meeting_import.py を実行せず対象ファイルを表示のみ
     --no-encrypt            DBを暗号化しない（平文モード）
 """
 
@@ -75,12 +75,12 @@ def run_meeting_parser(
     no_encrypt: bool,
 ) -> bool:
     """
-    meeting_parser.py を呼び出す。
+    pm_meeting_import.py を呼び出す。
     戻り値: 成功したら True
     """
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "scripts" / "meeting_parser.py"),
+        str(REPO_ROOT / "scripts" / "pm_meeting_import.py"),
         str(file_path),
         "--held-at", held_at,
         "--meeting-name", meeting_name,
@@ -152,7 +152,7 @@ def main() -> None:
             force=args.force, dry_run=args.dry_run, no_encrypt=args.no_encrypt,
         )
         if ok:
-            # 既存レコードのスキップ判定（meeting_parser.py の出力から判断）
+            # 既存レコードのスキップ判定（pm_meeting_import.py の出力から判断）
             success += 1
         else:
             failed += 1

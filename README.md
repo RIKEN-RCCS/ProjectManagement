@@ -19,7 +19,7 @@
       v
 [文字起こし .md]
       |
-      | meeting_parser.py
+      | pm_meeting_import.py
       v
 [pm.db] <------- pm_extractor.py <--- [{channel_id}.db]
    |                                          ^
@@ -44,8 +44,8 @@
 |---|---|
 | `slack_pipeline.py` | Slackメッセージを取得・要約してCanvas投稿、`{channel_id}.db`に保存 |
 | `trans.sh` + `whisper_vad.py` | 会議録音をSlurmジョブとしてWhisperで文字起こし |
-| `pm_bulk_import.py` | `meetings/` の議事録ファイルを一括でpm.dbに登録 |
-| `meeting_parser.py` | 文字起こし議事録をLLMで解析してpm.dbに保存（1ファイル単位） |
+| `pm_meeting_bulk_import.py` | `meetings/` の議事録ファイルを一括でpm.dbに登録 |
+| `pm_meeting_import.py` | 文字起こし議事録をLLMで解析してpm.dbに保存（1ファイル単位） |
 | `pm_extractor.py` | Slack DB内のスレッド要約からアクションアイテム・決定事項を抽出してpm.dbに保存 |
 | `pm_report.py` | pm.dbから週次進捗レポートを生成してSlack Canvasに投稿 |
 | `pm_sync_canvas.py` | Canvas上の「対応状況」列を読み取りpm.dbを更新 |
@@ -107,10 +107,10 @@ sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4
 `meetings/` ディレクトリ内の `YYYY-MM-DD_{会議名}.md` ファイルをまとめて登録する。
 
 ```sh
-python3 scripts/pm_bulk_import.py
+python3 scripts/pm_meeting_bulk_import.py
 
 # 特定日付以降のみ
-python3 scripts/pm_bulk_import.py --since 2026-01-01
+python3 scripts/pm_meeting_bulk_import.py --since 2026-01-01
 ```
 
 ### 3. Slack要約からアクションアイテムを抽出
@@ -209,7 +209,7 @@ python3 scripts/db_migrate.py data/pm.db data/C08SXA4M7JT.db data/C0A9KG036CS.db
 
 ## 注意事項
 
-- `claude -p` はClaude Codeセッション内からは実行不可。`meeting_parser.py`, `pm_extractor.py`, `pm_report.py` は**Claude Codeの外のターミナル**から実行すること。
+- `claude -p` はClaude Codeセッション内からは実行不可。`pm_meeting_import.py`, `pm_extractor.py`, `pm_report.py` は**Claude Codeの外のターミナル**から実行すること。
 - Slack Canvasは表示できない文字（特殊Unicode）を含むとAPIエラーになる。スクリプト内で`sanitize_for_canvas()`による除去処理を実施済み。
 - pm_report.pyは上書き投稿のみ対応。初回実行前にCanvasの内容を手動で削除しておくこと。
 - Slack DBはチャンネルごとに独立（`data/{channel_id}.db`）。pm.dbは複数チャンネル・複数会議を横断して統合する。
