@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS action_items (
     assignee     TEXT,
     due_date     TEXT,
     status       TEXT DEFAULT 'open',
+    note         TEXT,
     source       TEXT DEFAULT 'meeting',
     source_ref   TEXT,
     extracted_at TEXT
@@ -90,6 +91,10 @@ def init_pm_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # 既存DBへのマイグレーション: note列がなければ追加
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(action_items)").fetchall()]
+    if "note" not in cols:
+        conn.execute("ALTER TABLE action_items ADD COLUMN note TEXT")
     conn.commit()
     return conn
 
