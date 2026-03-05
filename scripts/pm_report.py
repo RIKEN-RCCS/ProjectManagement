@@ -3,23 +3,22 @@
 pm_report.py
 
 pm.db から決定事項・アクションアイテム・会議情報を読み込み、
-LLMで週次/月次進捗レポートと次回会議アジェンダ草案を生成して
-Slack Canvas に投稿する。
+LLMで週次進捗レポートを生成して Slack Canvas に投稿する。
+
+レポート構成:
+  サマリー → 直近の決定事項 → 要注意事項 → 未完了アクションアイテム（表形式）
 
 Usage:
     python3 scripts/pm_report.py
     python3 scripts/pm_report.py --since 2026-01-01
-    python3 scripts/pm_report.py --mode agenda --meeting-name Leader_Meeting
     python3 scripts/pm_report.py --dry-run --output report.md
 
 Options:
     --db PATH               pm.db のパス（デフォルト: data/pm.db）
-    --mode MODE             生成モード: report（デフォルト）/ agenda / both
-    --meeting-name NAME     次回会議種別（agenda モード時に使用）
     --canvas-id ID          投稿先 Canvas ID
     --since YYYY-MM-DD      この日付以降のデータのみ対象
     --skip-canvas           Canvas 投稿をスキップ
-    --dry-run               DB保存なし・結果を標準出力のみ
+    --dry-run               結果を標準出力のみ（Canvas投稿なし）
     --output PATH           標準出力の内容をファイルにも保存
 """
 
@@ -84,7 +83,7 @@ def open_pm_db(db_path: Path) -> sqlite3.Connection:
 def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list[dict]:
     query = """
         SELECT a.id, a.content, a.assignee, a.due_date, a.status,
-               a.source, a.source_ref, a.extracted_at, a.meeting_id,
+               a.note, a.source, a.source_ref, a.extracted_at, a.meeting_id,
                m.kind as meeting_kind, m.held_at as meeting_held_at
         FROM action_items a
         LEFT JOIN meetings m ON a.meeting_id = m.meeting_id
@@ -188,71 +187,18 @@ REPORT_PROMPT = """
 
 ## 出力形式
 
-以下のセクション構成でMarkdownレポートを出力してください:
+以下の3セクションのみMarkdownで出力してください。アクションアイテムの表は別途追加するため出力不要です。
 
 # 富岳NEXT プロジェクト進捗レポート（{today}）
 
 ## サマリー
 （3〜5行で全体状況を要約）
 
-## 未完了アクションアイテム
-（担当者・期限付きの表形式または箇条書き）
-
 ## 直近の決定事項
 （箇条書き、ソース参照付き）
 
 ## 要注意事項
-（リスク・懸念・遅延の可能性があるもの）
-
-## 次のステップ
-（次回会議までに対応すべき事項）
-"""
-
-AGENDA_PROMPT = """
-あなたは富岳NEXTプロジェクトのプロジェクトマネージャーです。
-以下のプロジェクト情報をもとに、次回{meeting_name}の会議アジェンダ草案を生成してください。
-
-## 指示
-
-1. **優先度順に整理**: 重要・緊急度の高い議題を先に
-2. **時間配分の目安を付ける**: 各アジェンダ項目に目安時間を記載
-3. **未解決事項を反映**: 前回持ち越しのアクションアイテムを確認事項に含める
-4. **Markdown形式で出力**: Slack Canvas での表示を想定
-
-## プロジェクト文脈
-
-{context}
-
-## データ（生成日: {today}）
-
-### 未完了アクションアイテム（{ai_count}件）
-
-{action_items}
-
-### 直近の決定事項（{d_count}件）
-
-{decisions}
-
-### リスク・懸念事項（{risk_count}件）
-
-{risk_items}
-
-## 出力形式
-
-以下の構成でMarkdownアジェンダを出力してください:
-
-# 次回{meeting_name} アジェンダ草案（{today}版）
-
-## 前回からの持ち越し確認
-（未完了アクションアイテムの進捗確認）
-
-## 主要議題
-（優先度順、各項目に目安時間）
-
-## その他・情報共有
-
-## 次回アクションアイテム確認
-（この会議で決まりそなアクションの確認）
+（リスク・懸念・遅延の可能性があるもの。なければ「特になし」と記載）
 """
 
 
@@ -327,46 +273,39 @@ def generate_report(
         risk_items=format_action_items_text(risk_items),
     )
     llm_output = call_claude(prompt, timeout=300)
-    # LLM出力のアクションアイテムセクションを表形式に差し替える
+    # LLMが生成したMarkdownテーブルを箇条書きに変換（Canvasに2つのテーブルが混在するのを防ぐ）
+    llm_output = _table_to_list(llm_output)
+    # アクションアイテム表をLLM出力の末尾に追記
     table = format_action_items(action_items)
-    llm_output = re.sub(
-        r"(## 未完了アクションアイテム\n)(.+?)(\n## )",
-        lambda m: m.group(1) + table + "\n" + m.group(3),
-        llm_output,
-        flags=re.DOTALL,
-    )
-    return llm_output
+    return llm_output.rstrip() + f"\n\n## 未完了アクションアイテム\n\n{table}"
 
 
-def generate_agenda(
-    action_items: list[dict],
-    decisions: list[dict],
-    risk_items: list[dict],
-    context: str,
-    today: str,
-    meeting_name: str,
-) -> str:
-    prompt = AGENDA_PROMPT.format(
-        context=context,
-        today=today,
-        meeting_name=meeting_name,
-        ai_count=len(action_items),
-        action_items=format_action_items_text(action_items),
-        d_count=len(decisions),
-        decisions=format_decisions(decisions),
-        risk_count=len(risk_items),
-        risk_items=format_action_items_text(risk_items),
-    )
-    llm_output = call_claude(prompt, timeout=300)
-    # 持ち越し確認セクションを表形式に差し替える
-    table = format_action_items(action_items)
-    llm_output = re.sub(
-        r"(## 前回からの持ち越し確認\n)(.+?)(\n## )",
-        lambda m: m.group(1) + table + "\n" + m.group(3),
-        llm_output,
-        flags=re.DOTALL,
-    )
-    return llm_output
+def _table_to_list(text: str) -> str:
+    """LLM出力内のMarkdownテーブルを箇条書きに変換する"""
+    lines = text.splitlines()
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # テーブルヘッダー行を検出
+        if re.match(r"^\s*\|.+\|", line):
+            headers = [c.strip() for c in line.strip().strip("|").split("|")]
+            i += 1
+            # セパレーター行をスキップ
+            if i < len(lines) and re.match(r"^\s*\|[-| :]+\|", lines[i]):
+                i += 1
+            # データ行を箇条書きに変換
+            while i < len(lines) and re.match(r"^\s*\|.+\|", lines[i]):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                parts = [f"{h}: {c}" for h, c in zip(headers, cells) if c]
+                result.append("- " + ", ".join(parts))
+                i += 1
+        else:
+            result.append(line)
+            i += 1
+    return "\n".join(result)
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -436,6 +375,10 @@ def sanitize_for_canvas(text: str) -> str:
         return ""
 
     text = "".join(keep_char(c) for c in text)
+
+    # 連続する空行を1行に圧縮
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
     return text
 
 
@@ -447,6 +390,7 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         sys.exit(1)
     print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
     app = App(token=token)
+
     try:
         app.client.canvases_edit(
             canvas_id=canvas_id,
@@ -459,7 +403,6 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
     except SlackApiError as e:
         print(f"Slack API エラー: {e.response['error']}", file=sys.stderr)
         print(f"レスポンス詳細: {e.response}", file=sys.stderr)
-        print(f"コンテンツ先頭500文字:\n{content[:500]}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -469,10 +412,6 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="pm.db → 進捗レポート・アジェンダ生成・Canvas投稿")
     parser.add_argument("--db", default=None, help="pm.db のパス")
-    parser.add_argument("--mode", choices=["report", "agenda", "both"], default="report",
-                        help="生成モード (デフォルト: report)")
-    parser.add_argument("--meeting-name", default="Leader_Meeting",
-                        help="次回会議種別名 (agenda モード時に使用)")
     parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="投稿先 Canvas ID")
     parser.add_argument("--since", default=None, help="この日付以降のデータのみ対象 (YYYY-MM-DD)")
     parser.add_argument("--skip-canvas", action="store_true", help="Canvas 投稿をスキップ")
@@ -491,7 +430,6 @@ def main() -> None:
             output_file.write(msg + "\n")
 
     log(f"[INFO] pm.db     : {db_path}")
-    log(f"[INFO] mode      : {args.mode}")
     log(f"[INFO] since     : {args.since or '全期間'}")
     log(f"[INFO] 生成日    : {today}")
 
@@ -508,25 +446,12 @@ def main() -> None:
     log(f"[INFO] 決定事項          : {len(decisions)}件")
     log(f"[INFO] 会議              : {len(meetings)}件")
 
-    results: list[tuple[str, str]] = []  # (mode_label, content)
-
-    if args.mode in ("report", "both"):
-        log("\n[INFO] 進捗レポートを生成中...")
-        report = generate_report(action_items, decisions, meetings, risk_items, context, today)
-        report = sanitize_for_canvas(report)
-        log("\n" + "=" * 60)
-        log(report)
-        log("=" * 60)
-        results.append(("report", report))
-
-    if args.mode in ("agenda", "both"):
-        log(f"\n[INFO] {args.meeting_name} アジェンダ草案を生成中...")
-        agenda = generate_agenda(action_items, decisions, risk_items, context, today, args.meeting_name)
-        agenda = sanitize_for_canvas(agenda)
-        log("\n" + "=" * 60)
-        log(agenda)
-        log("=" * 60)
-        results.append(("agenda", agenda))
+    log("\n[INFO] 進捗レポートを生成中...")
+    report = generate_report(action_items, decisions, meetings, risk_items, context, today)
+    report = sanitize_for_canvas(report)
+    log("\n" + "=" * 60)
+    log(report)
+    log("=" * 60)
 
     if args.dry_run or args.skip_canvas:
         log("[INFO] Canvas 投稿をスキップしました")
@@ -534,10 +459,7 @@ def main() -> None:
             output_file.close()
         return
 
-    # Canvas 投稿: both の場合はレポート + アジェンダを連結
-    if results:
-        content = "\n\n---\n\n".join(c for _, c in results)
-        post_to_canvas(args.canvas_id, content)
+    post_to_canvas(args.canvas_id, report)
 
     if output_file:
         output_file.close()

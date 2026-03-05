@@ -31,6 +31,7 @@ import os
 import re
 import sqlite3
 import sys
+import urllib.request
 from pathlib import Path
 
 from slack_bolt import App
@@ -59,85 +60,99 @@ def fetch_canvas_content(canvas_id: str) -> str:
 
     app = App(token=token)
 
-    # Canvas はファイルとして files.info で取得できる
-    try:
-        resp = app.client.files_info(file=canvas_id)
-    except SlackApiError as e:
-        print(f"ERROR: Canvas 取得失敗: {e.response['error']}", file=sys.stderr)
-        sys.exit(1)
-
-    file_info = resp.get("file", {})
-
-    # Canvas の本文は "plain_text" または "preview" フィールドに入る場合がある
-    # まず canvases_sections_lookup で全セクションを取得する
+    # 1. canvases_sections_lookup（テーブル行を含むセクション）
     try:
         sections_resp = app.client.canvases_sections_lookup(
             canvas_id=canvas_id,
-            criteria={"contains_text": "|"},  # テーブル行は | を含む
+            criteria={"contains_text": "|"},
         )
         sections = sections_resp.get("sections", [])
-        lines = []
-        for sec in sections:
-            lines.append(sec.get("content", ""))
-        return "\n".join(lines)
-    except SlackApiError:
-        pass
+        content = "\n".join(sec.get("content", "") for sec in sections)
+        if content.strip():
+            return content
+    except SlackApiError as e:
+        print(f"[DEBUG] canvases_sections_lookup failed: {e.response['error']}")
 
-    # fallback: files.info の plain_text
-    plain = file_info.get("plain_text") or file_info.get("preview", "")
-    return plain
+    # 2. files.info の url_private をダウンロード
+    try:
+        resp = app.client.files_info(file=canvas_id)
+        file_info = resp.get("file", {})
+        url = file_info.get("url_private") or file_info.get("url_private_download", "")
+        if url:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+            print(f"[DEBUG] url_private download: {len(raw)} bytes, content-type hint from url: {url[:80]}")
+            if raw.strip():
+                return raw
+    except Exception as e:
+        print(f"[DEBUG] url_private download failed: {e}")
+
+    return ""
 
 
 # --------------------------------------------------------------------------- #
-# テーブルパース
+# テーブルパース（HTML形式）
 # --------------------------------------------------------------------------- #
+def strip_html_tags(text: str) -> str:
+    """HTMLタグを除去してテキストのみ返す"""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&").replace("&nbsp;", " ")
+    return text.strip()
+
+
 def parse_action_items_table(content: str) -> list[dict]:
     """
-    Canvas 内の以下形式のMarkdownテーブルを解析する:
-    | ID | 担当者 | 内容 | 期限 | ソース | 対応状況 |
-    |----|--------|------|------|--------|----------|
-    | 5  | 井上 晃 | ... | ...  | ...    | 完了     |
+    Canvas から取得したHTML内の<table>を解析する。
+    ヘッダー行に「ID」と「対応状況」を含むテーブルを対象とする。
 
     戻り値: [{"id": 5, "note": "完了"}, ...]
              対応状況が空のものは除外
     """
     results = []
-    in_table = False
-    header_found = False
+    seen_ids: set[int] = set()  # Canvas全体で重複排除
 
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            if in_table:
-                in_table = False
+    # <table>...</table> を全て抽出
+    tables = re.findall(r"<table>.*?</table>", content, re.DOTALL)
+
+    for table_html in tables:
+        # <tr>...</tr> を抽出
+        rows = re.findall(r"<tr>.*?</tr>", table_html, re.DOTALL)
+        if not rows:
             continue
 
-        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        # ヘッダー行を解析して列インデックスを特定
+        header_cells = re.findall(r"<td>.*?</td>", rows[0], re.DOTALL)
+        headers = [strip_html_tags(c) for c in header_cells]
 
-        # ヘッダー行を検出
-        if not header_found:
-            if "ID" in cells and "対応状況" in cells:
-                header_found = True
-                in_table = True
-                # 列インデックスを取得
-                id_idx = cells.index("ID")
-                note_idx = cells.index("対応状況")
+        if "ID" not in headers or "対応状況" not in headers:
             continue
 
-        # セパレーター行をスキップ
-        if all(re.fullmatch(r"[-:]+", c) for c in cells if c):
-            continue
+        id_idx = headers.index("ID")
+        note_idx = headers.index("対応状況")
 
-        if in_table and len(cells) > max(id_idx, note_idx):
+        # データ行を解析
+        for row_html in rows[1:]:
+            cells_html = re.findall(r"<td>.*?</td>", row_html, re.DOTALL)
+            cells = [strip_html_tags(c) for c in cells_html]
+
+            if len(cells) <= max(id_idx, note_idx):
+                continue
+
             raw_id = cells[id_idx].strip()
-            raw_note = cells[note_idx].strip()
+            # ゼロ幅スペース等の不可視文字を除去して実質的な内容を判定
+            raw_note = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "", cells[note_idx]).strip()
 
-            # IDが数値でなければデータ行ではない
             if not raw_id.isdigit():
                 continue
 
-            if raw_note:  # 対応状況が記入されているものだけ
-                results.append({"id": int(raw_id), "note": raw_note})
+            ai_id = int(raw_id)
+            if ai_id in seen_ids:
+                continue  # 重複テーブルによる同一IDのスキップ
+            seen_ids.add(ai_id)
+
+            if raw_note:
+                results.append({"id": ai_id, "note": raw_note})
 
     return results
 
@@ -155,6 +170,12 @@ def open_pm_db(db_path: Path) -> sqlite3.Connection:
         sys.exit(1)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # マイグレーション: note列がなければ追加
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(action_items)").fetchall()]
+    if "note" not in cols:
+        conn.execute("ALTER TABLE action_items ADD COLUMN note TEXT")
+        conn.commit()
+        print("[INFO] action_items に note 列を追加しました")
     return conn
 
 
