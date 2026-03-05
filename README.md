@@ -44,10 +44,13 @@
 |---|---|
 | `slack_pipeline.py` | Slackメッセージを取得・要約してCanvas投稿、`{channel_id}.db`に保存 |
 | `trans.sh` + `whisper_vad.py` | 会議録音をSlurmジョブとしてWhisperで文字起こし |
-| `meeting_parser.py` | 文字起こし議事録をLLMで解析してpm.dbに保存 |
+| `pm_bulk_import.py` | `meetings/` の議事録ファイルを一括でpm.dbに登録 |
+| `meeting_parser.py` | 文字起こし議事録をLLMで解析してpm.dbに保存（1ファイル単位） |
 | `pm_extractor.py` | Slack DB内のスレッド要約からアクションアイテム・決定事項を抽出してpm.dbに保存 |
 | `pm_report.py` | pm.dbから週次進捗レポートを生成してSlack Canvasに投稿 |
 | `pm_sync_canvas.py` | Canvas上の「対応状況」列を読み取りpm.dbを更新 |
+| `db_utils.py` | DB接続の一元管理（SQLCipher暗号化対応） |
+| `db_migrate.py` | 既存の平文DBを暗号化DBに変換 |
 
 ---
 
@@ -99,11 +102,15 @@ sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4
 
 出力: `GMT20260302-032528_Recording.md`（タイムスタンプ・話者ラベル付き）
 
-### 2. 文字起こしをpm.dbに保存
+### 2. 議事録を一括でpm.dbに登録
+
+`meetings/` ディレクトリ内の `YYYY-MM-DD_{会議名}.md` ファイルをまとめて登録する。
 
 ```sh
-python3 scripts/meeting_parser.py meetings/GMT20260302-032528_Recording.md \
-    --meeting-name "Leader_Meeting" --held-at 2026-03-02
+python3 scripts/pm_bulk_import.py
+
+# 特定日付以降のみ
+python3 scripts/pm_bulk_import.py --since 2026-01-01
 ```
 
 ### 3. Slack要約からアクションアイテムを抽出
