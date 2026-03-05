@@ -320,13 +320,13 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --dry-run --output result.txt
 
 ```sh
 # 週次進捗レポートを生成してCanvas投稿
-~/.venv_x86_64/bin/python3 scripts/pm_report.py
+python3 scripts/pm_report.py
 
 # 直近1ヶ月のデータのみ対象にしてレポート生成
-~/.venv_x86_64/bin/python3 scripts/pm_report.py --since 2026-02-01
+python3 scripts/pm_report.py --since 2026-02-01
 
 # 確認用（Canvas投稿なし）
-~/.venv_x86_64/bin/python3 scripts/pm_report.py --dry-run --output report.md
+python3 scripts/pm_report.py --dry-run --output report.md
 ```
 
 | オプション | デフォルト | 説明 |
@@ -349,10 +349,10 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --dry-run --output result.txt
 
 ```sh
 # 通常運用
-~/.venv_x86_64/bin/python3 scripts/pm_sync_canvas.py
+python3 scripts/pm_sync_canvas.py
 
 # 確認用（DB更新なし）
-~/.venv_x86_64/bin/python3 scripts/pm_sync_canvas.py --dry-run
+python3 scripts/pm_sync_canvas.py --dry-run
 ```
 
 | オプション | デフォルト | 説明 |
