@@ -218,19 +218,13 @@ slack/
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）
 │   ├── meeting_parser.py            # 議事録 → pm.db
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db
-│   ├── pm_report.py                 # pm.db → レポート・Canvas投稿
+│   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿
+│   ├── pm_sync_canvas.py            # Canvas「対応状況」列 → pm.db 同期
 │   ├── trans.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト（whisper_vad.pyを呼び出す）
-│   ├── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
-│   └── [旧スクリプト]
-│       ├── pipeline.sh              # C08SXA4M7JT用、運用中
-│       ├── slack_mcp_client.py
-│       ├── slack_mcp_client.sh
-│       ├── slack_summarize.py
-│       ├── slack_summarize.py.openai
-│       └── canvas_edit_test.py
+│   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 └── data/                            # DBと出力ファイル
     ├── {channel_id}.db              # Slackデータ（例: C0A9KG036CS.db）
-    ├── pm.db                        # PM統合データ（未実装）
+    ├── pm.db                        # PM統合データ
     └── slack_summarize_*.md         # 全体要約（デバッグ・履歴用）
 ```
 
@@ -318,30 +312,26 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --dry-run --output result.txt
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
 | `--output PATH` | - | 標準出力の内容をファイルにも保存 |
 
-### 5. PMレポート・アジェンダ生成・Canvas投稿（pm_report.py）
+### 5. PMレポート生成・Canvas投稿（pm_report.py）
+
+レポート構成: **サマリー → 直近の決定事項 → 要注意事項 → 未完了アクションアイテム（表形式）**
+
+未完了アクションアイテム表には ID・担当者・内容・期限・ソース・対応状況 の列があり、会議中にCanvas上で対応状況を直接記入できる。
 
 ```sh
 # 週次進捗レポートを生成してCanvas投稿
-python3 scripts/pm_report.py
+~/.venv_x86_64/bin/python3 scripts/pm_report.py
 
 # 直近1ヶ月のデータのみ対象にしてレポート生成
-python3 scripts/pm_report.py --since 2026-02-01
-
-# 次回Leader_Meetingのアジェンダ草案を生成
-python3 scripts/pm_report.py --mode agenda --meeting-name Leader_Meeting
-
-# レポート+アジェンダの両方を生成して投稿
-python3 scripts/pm_report.py --mode both
+~/.venv_x86_64/bin/python3 scripts/pm_report.py --since 2026-02-01
 
 # 確認用（Canvas投稿なし）
-python3 scripts/pm_report.py --dry-run --output report.md
+~/.venv_x86_64/bin/python3 scripts/pm_report.py --dry-run --output report.md
 ```
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--db PATH` | `data/pm.db` | pm.db のパス |
-| `--mode MODE` | `report` | `report` / `agenda` / `both` |
-| `--meeting-name NAME` | `Leader_Meeting` | 次回会議種別名（agenda モード時） |
 | `--canvas-id ID` | `F0AAD2494VB` | 投稿先 Canvas ID |
 | `--since YYYY-MM-DD` | なし（全期間） | この日付以降のデータのみ対象 |
 | `--skip-canvas` | - | Canvas 投稿をスキップ |
@@ -359,10 +349,10 @@ python3 scripts/pm_report.py --dry-run --output report.md
 
 ```sh
 # 通常運用
-python3 scripts/pm_sync_canvas.py
+~/.venv_x86_64/bin/python3 scripts/pm_sync_canvas.py
 
 # 確認用（DB更新なし）
-python3 scripts/pm_sync_canvas.py --dry-run
+~/.venv_x86_64/bin/python3 scripts/pm_sync_canvas.py --dry-run
 ```
 
 | オプション | デフォルト | 説明 |
@@ -409,9 +399,10 @@ export OPENAI_MODEL="..."
 
 ## 注意事項
 
-- `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。`slack_pipeline.py` はClaude Codeの外のターミナルから実行すること。
+- `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。各スクリプトはClaude Codeの外のターミナルから実行すること。
 - `call_claude()` 内で `CLAUDECODE` 環境変数を子プロセスから除外する処理を実装済み。
 - `slack-mcp-server` バイナリが必要。PATH、`~/bin/`、`~/.local/bin/` の順で探索する。
+- Python仮想環境は `~/.venv_x86_64` を使用。`~/.venv_x86_64/bin/python3 scripts/xxx.py` で実行する。
 
 ---
 
