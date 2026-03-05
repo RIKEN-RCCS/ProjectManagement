@@ -140,9 +140,14 @@ AIおよびシミュレーションの両面で世界最高水準の性能を達
 - Ozakiスキーム（高精度行列演算を低精度演算器で実現する手法）
 - バーチャル富岳（ソフトウェア検証環境）
 - Tadashi（コード生成・最適化AIツール、スライド中に図示）
+- GENESIS（分子動力学シミュレーション）
+- SALMON（Scalable Ab-initio Light-Matter simulator for Optics and Nanoscience）
+- SCALE-LETKF（Coupled weather simulation and data assimilation application）
+- E-Wave（地震シミュレーションアプリ）
+- FrontFlow/Blue（CFD）
+- LQCD-DWF-HMC（Hybrid Monte-Carlo algorithm of domain wall fermions in Lattice QCD）
 - FFVHC-ACE（次世代流体解析ソルバー）
 - UWABAMI+INAZUMA（一般相対論的輻射磁気流体コード）
-- E-Wave（地震シミュレーションアプリ）
 - Spack (HPCソフトウェアのパッケージ管理ツール)
 - Ramble (Spackと連携して動作するHPCワークロード管理・実験自動化ツール)
 
@@ -167,11 +172,6 @@ AIおよびシミュレーションの両面で世界最高水準の性能を達
 ### 会議の種類と頻度
 
 - Leader_Meeting: 週1回、アプリケーション開発エリアのユニットリーダー、WGのリーダーおよびサブリーダーとの情報共有会
-- 次世代計算基盤部門ミーティング: 隔週、富岳NEXTのマネージメント室から近藤先生、ユニットリーダーへの情報共有、相談会議
-- Division_Regular_Meeting: 隔週、富岳NEXTの技術的な意思決定会議
-- Division_Technical_Meeting: 隔週、富岳NEXTの技術的な検討会議
-- Nishida_Meeting: 週1回、西田さんとの情報共有会
-- Aoki_Meeting: 週1回、青木先生、西田さんとの情報共有会議
 - SubWG_Meeting: 不定期、HPCアプリケーションWGのSubWGの打合せ
 - Co-design_RF_Syncup_Meeting: 月1回、コデザイン検討会議 3者会議の富士通との準備会議
 - Co-design_RN_Syncup_Meeting: 月1回、コデザイン検討会議 3者会議のNVIDIAとの準備会議
@@ -191,7 +191,7 @@ AIおよびシミュレーションの両面で世界最高水準の性能を達
 | チャンネルID | 用途 | 対応Canvas |
 |---|---|---|
 | `C08SXA4M7JT` | 20_1_リーダ会議メンバ | `F0AAD2494VB` |
-| `C0A9KG036CS` | personal | `F0AA24YH2F9` |
+| `C0A9KG036CS` | personal | `F0AA24YH2F9` | for DEBUG purpose
 
 ---
 
