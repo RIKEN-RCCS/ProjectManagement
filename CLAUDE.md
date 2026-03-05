@@ -177,6 +177,10 @@ AIおよびシミュレーションの両面で世界最高水準の性能を達
 - Co-design_RN_Syncup_Meeting: 月1回、コデザイン検討会議 3者会議のNVIDIAとの準備会議
 - Co-design_Review_Meeting 3社会議: 月1回、コデザイン検討会議本番
 
+### チャンネルID・Canvas IDの調べ方
+
+<!-- TODO: 調べ方を記述する -->
+
 ### Slackチャンネル一覧
 
 | チャンネルID | 用途 | 対応Canvas |
