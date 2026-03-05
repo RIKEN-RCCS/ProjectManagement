@@ -373,15 +373,69 @@ def generate_agenda(
 # Slack Canvas 投稿
 # --------------------------------------------------------------------------- #
 def sanitize_for_canvas(text: str) -> str:
-    for old, new in {
-        "～": " - ", "〜": " - ", "–": " - ", "—": " - ",
-        "−": " - ", "‑": "-", "（": "(", "）": ")",
-    }.items():
+    # 記号・特殊文字を標準的な文字に置換
+    replacements = {
+        # ダッシュ・ハイフン類
+        "\u2013": "-", "\u2014": "-", "\u2015": "-",
+        "\u2212": "-", "\u2011": "-", "\u2010": "-",
+        # 波ダッシュ・チルダ類
+        "\uff5e": "-", "\u301c": "-",
+        # 全角括弧
+        "\uff08": "(", "\uff09": ")",
+        # 全角記号
+        "\uff0c": ",", "\uff0e": ".", "\uff01": "!",
+        "\uff1a": ":", "\uff1b": ";", "\uff1f": "?",
+        # 引用符類
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        "\u300c": '"', "\u300d": '"', "\u300e": '"', "\u300f": '"',
+        # 矢印類
+        "\u2192": "->", "\u2190": "<-", "\u2194": "<->",
+        "\u21d2": "=>", "\u21d0": "<=", "\u21d4": "<=>",
+        "\u25b6": ">", "\u25c0": "<",
+        # 点・中黒
+        "\u30fb": ".", "\u2022": "-", "\u2023": "-",
+        "\u25cf": "-", "\u25cb": "-", "\u2027": ".",
+        # スペース類
+        "\u3000": " ", "\u00a0": " ",
+        # その他よく出る記号
+        "\u2026": "...", "\u22ef": "...",
+        "\u00d7": "x", "\u00f7": "/",
+        "\u2605": "*", "\u2606": "*",
+        "\u2713": "OK", "\u2714": "OK", "\u2715": "NG", "\u2716": "NG",
+        "\u25a0": "-", "\u25a1": "-",
+    }
+    for old, new in replacements.items():
         text = text.replace(old, new)
+
+    # h4以下の見出しはh3に統一（Canvasで未サポート）
     text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
-    url_pattern = r"(?<!\[)(?<!\()(?<!\<)https?://[^\s\)>]+"
-    text = re.sub(url_pattern,
-                  lambda m: f"<{m.group(0).rstrip('.,;:!?、。')}>", text)
+    # インデントされた番号リストをリストに変換
+    text = re.sub(r"^(\s+)\d+\.\s+", r"\1- ", text, flags=re.MULTILINE)
+
+    # 上記で対処できなかった非ASCII・非日本語の特殊記号を除去
+    # 日本語(CJK)・英数字・基本記号・改行・スペースは保持
+    def keep_char(c: str) -> str:
+        cp = ord(c)
+        # ASCII printable
+        if 0x20 <= cp <= 0x7E:
+            return c
+        # 改行・タブ
+        if c in ("\n", "\t"):
+            return c
+        # 日本語: ひらがな・カタカナ・漢字・半角カタカナ・記号
+        if 0x3000 <= cp <= 0x9FFF:
+            return c
+        if 0xF900 <= cp <= 0xFAFF:
+            return c
+        if 0xFF00 <= cp <= 0xFFEF:
+            return c
+        # latin拡張（アクセント付き文字など）
+        if 0x00C0 <= cp <= 0x024F:
+            return c
+        # それ以外の特殊記号は除去
+        return ""
+
+    text = "".join(keep_char(c) for c in text)
     return text
 
 
@@ -391,6 +445,7 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         print("ERROR: SLACK_BOT_TOKEN または SLACK_MCP_XOXB_TOKEN を設定してください",
               file=sys.stderr)
         sys.exit(1)
+    print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
     app = App(token=token)
     try:
         app.client.canvases_edit(
@@ -403,6 +458,8 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         print(f"✓ Canvas 更新成功: {canvas_id}")
     except SlackApiError as e:
         print(f"Slack API エラー: {e.response['error']}", file=sys.stderr)
+        print(f"レスポンス詳細: {e.response}", file=sys.stderr)
+        print(f"コンテンツ先頭500文字:\n{content[:500]}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -471,17 +528,19 @@ def main() -> None:
         log("=" * 60)
         results.append(("agenda", agenda))
 
-    if args.output and output_file:
-        output_file.close()
-
     if args.dry_run or args.skip_canvas:
         log("[INFO] Canvas 投稿をスキップしました")
+        if output_file:
+            output_file.close()
         return
 
     # Canvas 投稿: both の場合はレポート + アジェンダを連結
     if results:
         content = "\n\n---\n\n".join(c for _, c in results)
         post_to_canvas(args.canvas_id, content)
+
+    if output_file:
+        output_file.close()
 
 
 if __name__ == "__main__":
