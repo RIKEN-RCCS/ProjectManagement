@@ -1,0 +1,11 @@
+# requirements-whisper.txt
+# whisper_vad.py (Singularity コンテナ内) で使用
+# whisper.sif に含まれているライブラリ
+
+torch
+torchaudio
+numpy
+transformers       # WhisperProcessor, WhisperForConditionalGeneration
+pyannote.audio     # 話者分離 Pipeline
+silero-vad         # SileroVAD
+deepfilternet      # DeepFilterNet ノイズ除去 (df.enhance)
