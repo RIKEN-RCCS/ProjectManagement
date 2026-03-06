@@ -167,17 +167,36 @@ def main() -> None:
     print(f"[INFO] ゴール       : {len(goals)} 件")
     print(f"[INFO] マイルストーン: {len(milestones)} 件")
 
-    if args.dry_run:
-        print("\n-- ゴール --")
-        for g in goals:
-            print(f"  [{g['id']}] {g['name']}")
-        print("\n-- マイルストーン --")
-        for m in milestones:
-            print(f"  [{m['id']}] {m['name']}  期限: {m.get('due_date', '未定')}  エリア: {m.get('area', '')}")
-        print("\n[INFO] --dry-run のためDB保存をスキップしました")
-        return
+    yaml_goal_ids = {g["id"] for g in goals}
+    yaml_ms_ids   = {m["id"] for m in milestones}
 
     conn = open_db_with_schema(db_path, args.no_encrypt)
+
+    # DBに存在するがyamlにないIDを検出
+    db_goal_ids = {r[0] for r in conn.execute("SELECT goal_id FROM goals").fetchall()}
+    db_ms_ids   = {r[0] for r in conn.execute("SELECT milestone_id FROM milestones").fetchall()}
+    obsolete_goals = db_goal_ids - yaml_goal_ids
+    obsolete_ms    = db_ms_ids   - yaml_ms_ids
+
+    if args.dry_run:
+        print("\n-- ゴール（追加/更新）--")
+        for g in goals:
+            print(f"  [{g['id']}] {g['name']}")
+        print("\n-- マイルストーン（追加/更新）--")
+        for m in milestones:
+            print(f"  [{m['id']}] {m['name']}  期限: {m.get('due_date', '未定')}  エリア: {m.get('area', '')}")
+        if obsolete_goals:
+            print("\n-- ゴール（削除予定）--")
+            for gid in obsolete_goals:
+                print(f"  [{gid}] DBから削除されます")
+        if obsolete_ms:
+            print("\n-- マイルストーン（削除予定）--")
+            for mid in obsolete_ms:
+                print(f"  [{mid}] DBから削除されます（紐づいた action_items の milestone_id は NULL になります）")
+        print("\n[INFO] --dry-run のためDB保存をスキップしました")
+        conn.close()
+        return
+
     now = datetime.now().isoformat()
 
     for g in goals:
@@ -210,10 +229,19 @@ def main() -> None:
         )
         print(f"  [MS] {m['id']}: {m['name']}  期限: {m.get('due_date', '未定')}")
 
+    # yaml にないゴール・マイルストーンをDBから削除（完全同期）
+    for gid in obsolete_goals:
+        conn.execute("DELETE FROM goals WHERE goal_id = ?", (gid,))
+        print(f"  [削除] ゴール {gid}")
+    for mid in obsolete_ms:
+        # 紐づいた action_items の milestone_id を NULL に
+        conn.execute("UPDATE action_items SET milestone_id = NULL WHERE milestone_id = ?", (mid,))
+        conn.execute("DELETE FROM milestones WHERE milestone_id = ?", (mid,))
+        print(f"  [削除] マイルストーン {mid}（紐づき action_items の milestone_id を NULL に更新）")
+
     conn.commit()
     conn.close()
-    print(f"\n✓ pm.db に保存完了: {db_path}")
-    print("  action_items.milestone_id カラムも追加済み（既存データへの影響なし）")
+    print(f"\n✓ pm.db に同期完了: {db_path}")
 
 
 if __name__ == "__main__":
