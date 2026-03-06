@@ -2,18 +2,21 @@
 """
 pm_sync_canvas.py
 
-Slack Canvas の「未完了アクションアイテム」表から「対応状況」列を収集し、
-pm.db を更新する。
+Slack Canvas の「未完了アクションアイテム」表を読み取り pm.db を更新する。
+
+対応状況列だけでなく、担当者・内容・期限の変更もDBに反映する。
+会議中に誤記や期限修正が発生した場合に対応できる。
 
 会議後のワークフロー:
-  1. pm_report.py でアクションアイテム表をCanvas投稿（対応状況列は空）
-  2. 会議中にメンバーがCanvas上の「対応状況」列に記入
+  1. pm_report.py でアクションアイテム表をCanvas投稿
+  2. 会議中にメンバーがCanvas上の各列を直接編集
   3. 会議後に本スクリプトを実行してpm.dbを更新
 
 完了判定キーワード（status='closed' に更新）:
   完了, done, 済, 対応済, 解決, closed, finish, finished
 
-上記以外の記入がある場合: note列に保存（status は 'open' のまま）
+上記以外の対応状況記入: note列に保存（status は 'open' のまま）
+担当者・内容・期限: Canvas値が非空かつDB値と異なる場合のみ上書き
 
 Usage:
     python3 scripts/pm_sync_canvas.py
@@ -109,8 +112,8 @@ def parse_action_items_table(content: str) -> list[dict]:
     Canvas から取得したHTML内の<table>を解析する。
     ヘッダー行に「ID」と「対応状況」を含むテーブルを対象とする。
 
-    戻り値: [{"id": 5, "note": "完了"}, ...]
-             対応状況が空のものは除外
+    戻り値: [{"id": 5, "assignee": "...", "content": "...", "due_date": "...", "note": "..."}, ...]
+             ID が有効な全行を返す（空フィールドは空文字列）
     """
     results = []
     seen_ids: set[int] = set()  # Canvas全体で重複排除
@@ -131,21 +134,31 @@ def parse_action_items_table(content: str) -> list[dict]:
         if "ID" not in headers or "対応状況" not in headers:
             continue
 
-        id_idx = headers.index("ID")
-        note_idx = headers.index("対応状況")
+        id_idx       = headers.index("ID")
+        note_idx     = headers.index("対応状況")
+        assignee_idx = headers.index("担当者") if "担当者" in headers else None
+        content_idx  = headers.index("内容")   if "内容"   in headers else None
+        due_idx      = headers.index("期限")   if "期限"   in headers else None
+
+        required_max = max(
+            idx for idx in [id_idx, note_idx, assignee_idx, content_idx, due_idx]
+            if idx is not None
+        )
+
+        def get_cell(cells: list[str], idx: int | None) -> str:
+            if idx is None or idx >= len(cells):
+                return ""
+            return re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "", cells[idx]).strip()
 
         # データ行を解析
         for row_html in rows[1:]:
             cells_html = re.findall(r"<td>.*?</td>", row_html, re.DOTALL)
             cells = [strip_html_tags(c) for c in cells_html]
 
-            if len(cells) <= max(id_idx, note_idx):
+            if len(cells) <= required_max:
                 continue
 
             raw_id = cells[id_idx].strip()
-            # ゼロ幅スペース等の不可視文字を除去して実質的な内容を判定
-            raw_note = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "", cells[note_idx]).strip()
-
             if not raw_id.isdigit():
                 continue
 
@@ -154,8 +167,13 @@ def parse_action_items_table(content: str) -> list[dict]:
                 continue  # 重複テーブルによる同一IDのスキップ
             seen_ids.add(ai_id)
 
-            if raw_note:
-                results.append({"id": ai_id, "note": raw_note})
+            results.append({
+                "id":       ai_id,
+                "assignee": get_cell(cells, assignee_idx),
+                "content":  get_cell(cells, content_idx),
+                "due_date": get_cell(cells, due_idx),
+                "note":     get_cell(cells, note_idx),
+            })
 
     return results
 
@@ -182,34 +200,65 @@ def update_action_item(
     conn: sqlite3.Connection,
     ai_id: int,
     note: str,
+    canvas_assignee: str,
+    canvas_content: str,
+    canvas_due_date: str,
     dry_run: bool,
-) -> str:
+) -> tuple[str, list[str]]:
     """
     アクションアイテムを更新する。
-    戻り値: 'closed' / 'noted' / 'not_found'
+    - note: 対応状況（完了キーワードなら status='closed'）
+    - canvas_assignee/content/due_date: Canvas上で変更があれば上書き（空欄は無視）
+
+    戻り値: (result_str, changed_fields)
+        result_str   : 'closed' / 'noted' / 'unchanged' / 'not_found'
+        changed_fields: 変更されたフィールド名のリスト
     """
     row = conn.execute(
-        "SELECT id, content, status FROM action_items WHERE id = ?", (ai_id,)
+        "SELECT id, content, assignee, due_date, status FROM action_items WHERE id = ?",
+        (ai_id,),
     ).fetchone()
 
     if not row:
-        return "not_found"
+        return "not_found", []
 
-    if is_close_keyword(note):
-        new_status = "closed"
-        new_note = note
+    updates: dict[str, object] = {}
+    changed_fields: list[str] = []
+
+    # 対応状況（note / status）
+    if note:
+        new_status = "closed" if is_close_keyword(note) else row["status"]
+        updates["status"] = new_status
+        updates["note"] = note
+        changed_fields.append("対応状況")
     else:
-        new_status = row["status"]  # status は変更しない
-        new_note = note
+        new_status = row["status"]
+
+    # 担当者・内容・期限 — Canvas値が非空かつDB値と異なる場合のみ更新
+    if canvas_assignee and canvas_assignee != (row["assignee"] or ""):
+        updates["assignee"] = canvas_assignee
+        changed_fields.append("担当者")
+    if canvas_content and canvas_content != (row["content"] or ""):
+        updates["content"] = canvas_content
+        changed_fields.append("内容")
+    if canvas_due_date and canvas_due_date != (row["due_date"] or ""):
+        updates["due_date"] = canvas_due_date
+        changed_fields.append("期限")
+
+    if not updates:
+        return "unchanged", []
 
     if not dry_run:
-        conn.execute(
-            "UPDATE action_items SET status = ?, note = ? WHERE id = ?",
-            (new_status, new_note, ai_id),
-        )
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [ai_id]
+        conn.execute(f"UPDATE action_items SET {set_clause} WHERE id = ?", values)
         conn.commit()
 
-    return "closed" if new_status == "closed" else "noted"
+    if new_status == "closed":
+        return "closed", changed_fields
+    if note:
+        return "noted", changed_fields
+    return "updated", changed_fields
 
 
 # --------------------------------------------------------------------------- #
@@ -242,7 +291,7 @@ def main() -> None:
     print(f"[INFO] 取得完了 ({len(content)} 文字)")
 
     items = parse_action_items_table(content)
-    print(f"[INFO] 対応状況が記入されたアクションアイテム: {len(items)} 件")
+    print(f"[INFO] テーブルから読み込んだアクションアイテム: {len(items)} 件")
 
     if not items:
         print("更新対象なし。終了します。")
@@ -250,26 +299,41 @@ def main() -> None:
 
     conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
 
-    closed_count = noted_count = not_found_count = 0
+    closed_count = noted_count = updated_count = not_found_count = unchanged_count = 0
 
     for item in items:
         ai_id = item["id"]
-        note = item["note"]
-        result = update_action_item(conn, ai_id, note, args.dry_run)
+        result, changed = update_action_item(
+            conn,
+            ai_id,
+            note=item["note"],
+            canvas_assignee=item["assignee"],
+            canvas_content=item["content"],
+            canvas_due_date=item["due_date"],
+            dry_run=args.dry_run,
+        )
 
         if result == "closed":
-            print(f"  [完了] ID={ai_id} → status='closed'  note='{note}'")
+            print(f"  [完了] ID={ai_id} → status='closed'  note='{item['note']}'  変更={changed}")
             closed_count += 1
         elif result == "noted":
-            print(f"  [メモ] ID={ai_id} → note='{note}'")
+            print(f"  [メモ] ID={ai_id} → note='{item['note']}'  変更={changed}")
             noted_count += 1
+        elif result == "updated":
+            print(f"  [更新] ID={ai_id} → 変更={changed}")
+            updated_count += 1
+        elif result == "unchanged":
+            unchanged_count += 1
         else:
             print(f"  [未検出] ID={ai_id} は pm.db に存在しません")
             not_found_count += 1
 
     conn.close()
 
-    print(f"\n完了: 完了マーク={closed_count}件, メモ保存={noted_count}件, 未検出={not_found_count}件")
+    print(
+        f"\n完了: 完了マーク={closed_count}件, メモ保存={noted_count}件, "
+        f"フィールド更新={updated_count}件, 変更なし={unchanged_count}件, 未検出={not_found_count}件"
+    )
     if args.dry_run:
         print("[INFO] --dry-run のため DB保存をスキップしました")
 
