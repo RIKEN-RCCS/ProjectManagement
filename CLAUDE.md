@@ -641,7 +641,7 @@ python3 scripts/pm_meeting_bulk_import.py --list
 python3 scripts/pm_meeting_bulk_import.py --list --since 2026-02-01
 ```
 
-### フェーズ5: ゴール・マイルストーン管理と達成状況トラッキング（TODO）
+### フェーズ5: ゴール・マイルストーン管理と達成状況トラッキング（実装済み）
 
 ボトムアップのタスク管理（フェーズ1〜3）に加え、プロジェクトのゴールとマイルストーンを
 トップダウンで定義し、現在地を把握できるようにする。
