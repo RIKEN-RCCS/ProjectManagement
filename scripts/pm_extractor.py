@@ -95,8 +95,32 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
         db_path,
         encrypt=not no_encrypt,
         schema=SCHEMA,
-        migrations=["ALTER TABLE action_items ADD COLUMN note TEXT"],
+        migrations=[
+            "ALTER TABLE action_items ADD COLUMN note TEXT",
+            "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
+        ],
     )
+
+
+def fetch_milestones(conn: sqlite3.Connection) -> list[dict]:
+    """pm.db からアクティブなマイルストーン一覧を取得する"""
+    try:
+        rows = conn.execute(
+            "SELECT milestone_id, name, due_date, area FROM milestones WHERE status='active' ORDER BY due_date"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def format_milestones_for_prompt(milestones: list[dict]) -> str:
+    if not milestones:
+        return "（マイルストーン未登録）"
+    lines = ["| ID | マイルストーン名 | 期限 | エリア |",
+             "|----|----------------|------|--------|"]
+    for m in milestones:
+        lines.append(f"| {m['milestone_id']} | {m['name']} | {m.get('due_date') or '未定'} | {m.get('area') or ''} |")
+    return "\n".join(lines)
 
 
 def open_slack_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
@@ -193,6 +217,12 @@ EXTRACT_PROMPT = """
 1. **明示されたものだけ抽出**: 要約に明示されていない内容を推測・補完しないこと
 2. **出力形式**: 必ず以下のJSON形式のみ出力すること（前後の説明テキスト不要）
 3. 決定事項・アクションアイテムがない場合は空配列 `[]` を返すこと
+4. **マイルストーン紐づけ**: 各アクションアイテムについて、下記「マイルストーン一覧」の
+   いずれかに明らかに関連する場合は milestone_id を記入すること。判断できない場合は null。
+
+## マイルストーン一覧
+
+{milestones}
 
 ## プロジェクト文脈
 
@@ -218,7 +248,8 @@ EXTRACT_PROMPT = """
     {{
       "content": "アクションアイテムの内容",
       "assignee": "担当者名（不明な場合は null）",
-      "due_date": "YYYY-MM-DD または null"
+      "due_date": "YYYY-MM-DD または null",
+      "milestone_id": "マイルストーンID（M1等）または null"
     }}
   ]
 }}
@@ -236,12 +267,13 @@ def extract_json(text: str) -> dict:
     raise ValueError(f"JSON not found:\n{text[:300]}")
 
 
-def extract_from_summary(row: dict, context: str) -> dict:
+def extract_from_summary(row: dict, context: str, milestones: list[dict]) -> dict:
     prompt = EXTRACT_PROMPT.format(
         context=context,
         timestamp=row.get("timestamp", "不明"),
         user_name=row.get("user_name", "不明"),
         summary=row["summary"],
+        milestones=format_milestones_for_prompt(milestones),
     )
     raw = call_claude(prompt)
     return extract_json(raw)
@@ -280,10 +312,11 @@ def save_slack_items(
         pm_conn.execute(
             """
             INSERT INTO action_items
-                (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at)
-            VALUES (?, ?, ?, ?, 'open', 'slack', ?, ?)
+                (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at, milestone_id)
+            VALUES (?, ?, ?, ?, 'open', 'slack', ?, ?, ?)
             """,
-            (None, a["content"], a.get("assignee"), a.get("due_date"), source_ref, now),
+            (None, a["content"], a.get("assignee"), a.get("due_date"),
+             source_ref, now, a.get("milestone_id")),
         )
         a_count += 1
 
@@ -325,6 +358,8 @@ def main() -> None:
     slack_conn = open_slack_db(slack_db_path, no_encrypt=args.no_encrypt)
     pm_conn = init_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
     context = load_context_from_claude_md()
+    milestones = fetch_milestones(pm_conn)
+    log(f"[INFO] マイルストーン: {len(milestones)} 件")
 
     summaries = fetch_summaries(slack_conn, channel_id, args.since)
     log(f"[INFO] 対象スレッド: {len(summaries)} 件")
@@ -340,7 +375,7 @@ def main() -> None:
         log(f"\n[{i}/{len(summaries)}] {row.get('user_name')} ({row.get('timestamp', '')[:16]})")
 
         try:
-            extracted = extract_from_summary(row, context)
+            extracted = extract_from_summary(row, context, milestones)
         except Exception as e:
             log(f"  [WARN] 抽出失敗: {e}")
             continue
