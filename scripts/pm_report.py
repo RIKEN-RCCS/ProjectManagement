@@ -351,6 +351,9 @@ def sanitize_for_canvas(text: str) -> str:
     text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
     # インデントされた番号リストをリストに変換
     text = re.sub(r"^(\s+)\d+\.\s+", r"\1- ", text, flags=re.MULTILINE)
+    # ブロッククオート内のリスト項目からブロッククオートを除去
+    # (Slack Canvas は blockquote 内の List ブロックをサポートしない)
+    text = re.sub(r"^> (-|\*|\d+\.)\s+", r"\1 ", text, flags=re.MULTILINE)
 
     # 上記で対処できなかった非ASCII・非日本語の特殊記号を除去
     # 日本語(CJK)・英数字・基本記号・改行・スペースは保持
