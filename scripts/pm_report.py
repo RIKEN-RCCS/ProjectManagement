@@ -124,6 +124,81 @@ def fetch_recent_meetings(conn: sqlite3.Connection, since: str | None) -> list[d
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
+def fetch_milestone_progress(conn: sqlite3.Connection) -> list[dict]:
+    """マイルストーンごとのアクションアイテム完了率を取得する"""
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.milestone_id, m.goal_id, m.name, m.due_date, m.area,
+                   m.status, m.success_criteria,
+                   COUNT(DISTINCT CASE WHEN a.status='open'   THEN a.id END) AS open_count,
+                   COUNT(DISTINCT CASE WHEN a.status='closed' THEN a.id END) AS closed_count
+            FROM milestones m
+            LEFT JOIN action_items a ON a.milestone_id = m.milestone_id
+            WHERE m.status = 'active'
+            GROUP BY m.milestone_id
+            ORDER BY m.due_date ASC NULLS LAST
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def format_milestone_progress(milestones: list[dict], today: str) -> str:
+    """「プロジェクトの現在地」セクションをMarkdown形式で生成する（LLM不使用）"""
+    if not milestones:
+        return "（goals.yaml が未定義です。pm_goals_import.py を実行してください）"
+
+    lines = []
+    for m in milestones:
+        mid      = m["milestone_id"]
+        name     = m["name"]
+        due      = m["due_date"] or "未定"
+        open_c   = m["open_count"]
+        closed_c = m["closed_count"]
+        total    = open_c + closed_c
+
+        # 状況判定
+        if m["status"] == "achieved":
+            status_label = "達成済"
+            icon = "OK"
+        elif not m["due_date"]:
+            status_label = "未着手" if total == 0 else "進行中"
+            icon = "-"
+        elif m["due_date"] < today:
+            status_label = "遅延"
+            icon = "!!"
+        elif total == 0:
+            status_label = "未着手"
+            icon = "-"
+        else:
+            pct = closed_c / total * 100
+            if pct >= 80:
+                status_label = "進行中"
+                icon = "OK"
+            elif m["due_date"] <= (date.today().replace(day=1).isoformat()):
+                status_label = "要注意"
+                icon = "!"
+            else:
+                status_label = "進行中"
+                icon = "-"
+
+        ratio = f"{closed_c}/{total}" if total else "0/0"
+        lines.append(f"- [{icon}] **{mid}: {name}**  期限: {due}  状況: {status_label}  完了: {ratio}")
+
+        # 達成条件
+        try:
+            import json as _json
+            criteria = _json.loads(m.get("success_criteria") or "[]")
+            for c in criteria:
+                lines.append(f"  - {c}")
+        except Exception:
+            pass
+
+    return "\n".join(lines)
+
+
 def detect_risk_items(action_items: list[dict]) -> list[dict]:
     """リスクキーワードを含むアクションアイテムを抽出"""
     risk_items = []
@@ -258,6 +333,7 @@ def generate_report(
     decisions: list[dict],
     meetings: list[dict],
     risk_items: list[dict],
+    milestone_progress: list[dict],
     context: str,
     today: str,
 ) -> str:
@@ -276,9 +352,22 @@ def generate_report(
     llm_output = call_claude(prompt, timeout=300)
     # LLMが生成したMarkdownテーブルを箇条書きに変換（Canvasに2つのテーブルが混在するのを防ぐ）
     llm_output = _table_to_list(llm_output)
+
+    # マイルストーン進捗セクション（DBから直接計算、LLM不使用）
+    milestone_section = ""
+    if milestone_progress:
+        ms_text = format_milestone_progress(milestone_progress, today)
+        milestone_section = f"\n\n## プロジェクトの現在地\n\n{ms_text}"
+
     # アクションアイテム表をLLM出力の末尾に追記
     table = format_action_items(action_items)
-    return llm_output.rstrip() + f"\n\n## 未完了アクションアイテム\n\n{table}"
+    return (
+        f"# 富岳NEXT プロジェクト進捗レポート（{today}）"
+        + milestone_section
+        + "\n\n"
+        + llm_output.lstrip("#").lstrip().lstrip("富岳NEXT プロジェクト進捗レポート").lstrip(f"（{today}）").lstrip("\n")
+        + f"\n\n## 未完了アクションアイテム\n\n{table}"
+    )
 
 
 def _table_to_list(text: str) -> str:
@@ -445,14 +534,16 @@ def main() -> None:
     decisions = fetch_recent_decisions(conn, args.since)
     meetings = fetch_recent_meetings(conn, args.since)
     risk_items = detect_risk_items(action_items)
+    milestone_progress = fetch_milestone_progress(conn)
     conn.close()
 
     log(f"[INFO] アクションアイテム: {len(action_items)}件 (うちリスク: {len(risk_items)}件)")
     log(f"[INFO] 決定事項          : {len(decisions)}件")
     log(f"[INFO] 会議              : {len(meetings)}件")
+    log(f"[INFO] マイルストーン    : {len(milestone_progress)}件")
 
     log("\n[INFO] 進捗レポートを生成中...")
-    report = generate_report(action_items, decisions, meetings, risk_items, context, today)
+    report = generate_report(action_items, decisions, meetings, risk_items, milestone_progress, context, today)
     report = sanitize_for_canvas(report)
     log("\n" + "=" * 60)
     log(report)

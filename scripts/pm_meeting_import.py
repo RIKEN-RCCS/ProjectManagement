@@ -80,9 +80,23 @@ def init_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
         db_path,
         encrypt=not no_encrypt,
         schema=SCHEMA,
-        migrations=["ALTER TABLE action_items ADD COLUMN note TEXT"],
+        migrations=[
+            "ALTER TABLE action_items ADD COLUMN note TEXT",
+            "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
+        ],
     )
     return conn
+
+
+def fetch_milestones(conn: sqlite3.Connection) -> list[dict]:
+    """pm.db からアクティブなマイルストーン一覧を取得する"""
+    try:
+        rows = conn.execute(
+            "SELECT milestone_id, name, due_date, area FROM milestones WHERE status='active' ORDER BY due_date"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +157,14 @@ EXTRACT_PROMPT_TEMPLATE = """
 
 2. **忠実な抽出**: 発言に明示されていない内容を補完・推測しないこと
 
-3. **出力形式**: 必ず以下のJSON形式で出力すること（余分なテキスト不要）
+3. **マイルストーン紐づけ**: 各アクションアイテムについて、下記「マイルストーン一覧」の
+   いずれかに明らかに関連する場合は milestone_id を記入すること。判断できない場合は null。
+
+4. **出力形式**: 必ず以下のJSON形式で出力すること（余分なテキスト不要）
+
+## マイルストーン一覧
+
+{milestones}
 
 ## 出力JSON形式
 
@@ -160,7 +181,8 @@ EXTRACT_PROMPT_TEMPLATE = """
     {{
       "content": "アクションアイテムの内容",
       "assignee": "担当者名（不明な場合は null）",
-      "due_date": "YYYY-MM-DD または null"
+      "due_date": "YYYY-MM-DD または null",
+      "milestone_id": "マイルストーンID（M1等）または null"
     }}
   ]
 }}
@@ -180,7 +202,17 @@ EXTRACT_PROMPT_TEMPLATE = """
 """
 
 
-def build_prompt(transcript: str, held_at: str, claude_md: str) -> str:
+def format_milestones_for_prompt(milestones: list[dict]) -> str:
+    if not milestones:
+        return "（マイルストーン未登録。goals.yaml を定義して pm_goals_import.py を実行してください）"
+    lines = ["| ID | マイルストーン名 | 期限 | エリア |",
+             "|----|----------------|------|--------|"]
+    for m in milestones:
+        lines.append(f"| {m['milestone_id']} | {m['name']} | {m.get('due_date') or '未定'} | {m.get('area') or ''} |")
+    return "\n".join(lines)
+
+
+def build_prompt(transcript: str, held_at: str, claude_md: str, milestones: list[dict]) -> str:
     # CLAUDE.mdは長いので「プロジェクト固有の用語」「ステークホルダー」「主なプロジェクト参加者」セクションのみ抽出
     sections = []
     capture = False
@@ -198,6 +230,7 @@ def build_prompt(transcript: str, held_at: str, claude_md: str) -> str:
         claude_md=context,
         held_at=held_at,
         transcript=transcript,
+        milestones=format_milestones_for_prompt(milestones),
     )
 
 
@@ -259,10 +292,12 @@ def save_to_db(
     for a in extracted.get("action_items", []):
         conn.execute(
             """
-            INSERT INTO action_items (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at)
-            VALUES (?, ?, ?, ?, 'open', 'meeting', ?, ?)
+            INSERT INTO action_items
+                (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at, milestone_id)
+            VALUES (?, ?, ?, ?, 'open', 'meeting', ?, ?, ?)
             """,
-            (meeting_id, a["content"], a.get("assignee"), a.get("due_date"), file_path, now),
+            (meeting_id, a["content"], a.get("assignee"), a.get("due_date"),
+             file_path, now, a.get("milestone_id")),
         )
 
     conn.commit()
@@ -308,10 +343,14 @@ def main():
     transcript = input_path.read_text(encoding="utf-8")
     claude_md = load_claude_md()
 
-    log("[INFO] CLAUDE.mdを読み込みました")
+    # マイルストーン一覧をDBから取得（未登録の場合は空リスト）
+    conn_for_ms = init_db(db_path, no_encrypt=args.no_encrypt)
+    milestones = fetch_milestones(conn_for_ms)
+    conn_for_ms.close()
+    log(f"[INFO] マイルストーン: {len(milestones)} 件")
     log("[INFO] LLMによる抽出を開始...")
 
-    prompt = build_prompt(transcript, held_at, claude_md)
+    prompt = build_prompt(transcript, held_at, claude_md, milestones)
     raw_output = call_claude(prompt)
 
     log("[INFO] LLM出力を解析中...")
