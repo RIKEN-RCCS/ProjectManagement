@@ -651,7 +651,7 @@ python3 scripts/pm_meeting_bulk_import.py --list --since 2026-02-01
 - プロジェクトのゴールと主要マイルストーンを `goals.yaml`（リポジトリ直下）に人手で定義する
   - LLMによる自動抽出ではなく、意思決定者（近藤部門長・青木先生等）が承認した内容を記述
   - git で変更履歴を管理することで、マイルストーン変更の経緯を追跡できる
-- `goals.yaml` のスキーマ（案）:
+- `goals.yaml` のスキーマ:
   ```yaml
   project: 富岳NEXT
   goals:
@@ -668,26 +668,38 @@ python3 scripts/pm_meeting_bulk_import.py --list --since 2026-02-01
       area: 全エリア
   ```
 
-#### 5.2 pm.db へのロード（pm_goals_import.py）
+#### 5.2 pm.db へのロード・完全同期（pm_goals_import.py）
 
-- `goals.yaml` を読み込み `goals` / `milestones` テーブルに保存するスクリプトを作成する
-- 再実行時は差分のみ更新（`goal_id` / `milestone_id` をキーにupsert）
+- `goals.yaml` を読み込み `goals` / `milestones` テーブルに完全同期する
+  - yaml に存在するID → upsert（追加・更新）
+  - yaml から削除されたID → DBからも削除。紐づく `action_items.milestone_id` は NULL にリセット
+- `--dry-run` で追加・更新・削除の予定を確認してからDB操作なしで終了できる
+- `--list` で登録済みゴール・マイルストーンと達成状況（完了率）を一覧表示
+
+```sh
+# goals.yaml を編集・承認後に実行（完全同期）
+python3 scripts/pm_goals_import.py
+
+# 変更内容を確認してから実行
+python3 scripts/pm_goals_import.py --dry-run
+
+# 登録済み一覧・達成状況を確認
+python3 scripts/pm_goals_import.py --list
+```
 
 #### 5.3 アクションアイテムとマイルストーンの紐づけ
 
-- `action_items` テーブルに `milestone_id` 外部キーを追加する
+- `action_items` テーブルに `milestone_id` 列を追加済み
 - `pm_extractor.py` / `pm_meeting_import.py` の抽出時に、マイルストーン一覧をLLMの文脈として
   渡し、各アクションアイテムをどのマイルストーンに紐づけるかを推定させる
-- 誤紐づけは `pm_sync_canvas.py` と同様にCanvas上で人手修正できる仕組みを設ける
 
 #### 5.4 達成状況レポート（pm_report.py 拡張）
 
-- レポートの冒頭に「プロジェクトの現在地」セクションを追加する
-  - 各マイルストーンについて、期限・達成条件・関連アクションアイテムの完了率を表示
-  - 現在日付と期限を照合し、達成済み・進行中・未着手・遅延を自動判定
-  - 遅延・未着手のマイルストーンは「要注意」として強調表示
+- レポートの冒頭に「プロジェクトの現在地」セクションを追加済み
+  - 各マイルストーンについて、期限・達成条件・関連アクションアイテムの完了率をDBから直接計算
+  - 現在日付と期限を照合し、達成済み・進行中・未着手・遅延を自動判定（LLM不使用）
 
-#### 5.5 資料登録（pm_document_import.py、オプション）
+#### 5.5 資料登録（pm_document_import.py、TODO）
 
 - 計画書・スライド・報告書等の資料を `documents` テーブルに登録できるスクリプトを作成する
   - 対象フォーマット: PDF / PowerPoint / Markdown / テキスト等
