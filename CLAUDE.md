@@ -603,7 +603,14 @@ Slack から取得した最新返信 msg_ts  vs  summaries.last_reply_ts
 - 週次/月次進捗レポート
 - リスク検知（「問題」「障害」「遅延」等を含むアイテムへの自動フラグ）
 
-### フェーズ4: 資料登録とマイルストーン管理（TODO）
+### フェーズ4: インポート済み議事録の記録（TODO）
+
+- `pm_meeting_import.py` / `pm_meeting_bulk_import.py` 実行後に、インポート済みファイルの一覧を残す仕組みを作る
+  - 候補1: `data/imported_meetings.log`（1行1ファイルのテキストログ）
+  - 候補2: `pm.db` の `meetings` テーブルに既に `file_path` / `parsed_at` が記録されているため、それをクエリして一覧表示するサブコマンドを追加する
+  - 再インポート・抜け漏れ確認・監査証跡として活用できること
+
+### フェーズ5: 資料登録とマイルストーン管理（TODO）
 
 - 議事録・Slack以外の資料（計画書・スライド・報告書等）を `pm.db` に登録できるインポートスクリプト（`pm_document_import.py`）を作成する
   - 対象フォーマット: PDF / PowerPoint / Markdown / テキスト等
