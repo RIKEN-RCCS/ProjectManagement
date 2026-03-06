@@ -59,16 +59,6 @@ milestones:
       - 主要アプリケーション（GENESIS・SCALE-LETKF等）の動作確認
       - Benchpark による継続的ベンチマーク環境の整備
 
-  - id: M4
-    goal_id: G1
-    name: アプリケーション GPU 化・最適化完了
-    due_date: 2028-03-31
-    area: アプリケーション開発エリア
-    success_criteria:
-      - HPCアプリケーションWG 全 SubWG アプリの GPU 対応完了
-      - 富岳 vs 富岳NEXT 性能比の実測による検証
-      - Benchpark CI/CD 環境での継続的性能監視体制確立
-
   - id: M5
     goal_id: G2
     name: 富岳NEXT 稼働開始
