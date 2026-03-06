@@ -17,15 +17,19 @@ Usage:
     python3 scripts/pm_meeting_bulk_import.py --since 2026-01-01
     python3 scripts/pm_meeting_bulk_import.py --list
     python3 scripts/pm_meeting_bulk_import.py --list --since 2026-02-01
+    python3 scripts/pm_meeting_bulk_import.py --delete 2026-03-02_Leader_Meeting
+    python3 scripts/pm_meeting_bulk_import.py --delete 2026-03-02_Leader_Meeting --dry-run
 
 Options:
     --meetings-dir DIR      議事録ディレクトリ（デフォルト: meetings/）
     --db PATH               pm.db のパス（デフォルト: data/pm.db）
     --since YYYY-MM-DD      この日付以降のファイルのみ対象
-    --force                 既存レコードを上書き
+    --force                 既存レコードを上書き（--delete と組み合わせると確認プロンプトをスキップ）
     --dry-run               pm_meeting_import.py を実行せず対象ファイルを表示のみ
+                            （--delete と組み合わせると削除内容を表示するのみ）
     --no-encrypt            DBを暗号化しない（平文モード）
     --list                  pm.db にインポート済みの議事録一覧を表示して終了
+    --delete MEETING_ID     指定した meeting_id の議事録をDBから削除する
 """
 
 import argparse
@@ -112,16 +116,20 @@ def run_meeting_parser(
     return True
 
 
-def list_imported(db_path: Path, since: str | None, no_encrypt: bool) -> None:
-    """pm.db にインポート済みの議事録一覧を表示する"""
+def _open_db_or_exit(db_path: Path, no_encrypt: bool):
     if not db_path.exists():
         print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
         sys.exit(1)
+    return open_db(db_path, encrypt=not no_encrypt)
 
-    conn = open_db(db_path, encrypt=not no_encrypt)
+
+def list_imported(db_path: Path, since: str | None, no_encrypt: bool) -> None:
+    """pm.db にインポート済みの議事録一覧を表示する"""
+    conn = _open_db_or_exit(db_path, no_encrypt)
 
     query = """
         SELECT
+            m.meeting_id,
             m.held_at,
             m.kind,
             m.file_path,
@@ -145,18 +153,73 @@ def list_imported(db_path: Path, since: str | None, no_encrypt: bool) -> None:
         print("インポート済み議事録はありません。")
         return
 
-    print(f"{'開催日':<12} {'会議種別':<35} {'AI':>3} {'決定':>3}  {'登録日時':<20}  ファイルパス")
-    print("-" * 120)
+    print(f"{'開催日':<12} {'AI':>3} {'決定':>3}  {'登録日時':<20}  {'meeting_id'}")
+    print("-" * 90)
     for r in rows:
-        held_at   = r["held_at"]   or ""
-        kind      = (r["kind"] or "")[:33]
-        parsed_at = (r["parsed_at"] or "")[:19]
-        file_path = r["file_path"] or ""
-        ai_count  = r["action_items"]
-        d_count   = r["decisions"]
-        print(f"{held_at:<12} {kind:<35} {ai_count:>3} {d_count:>3}  {parsed_at:<20}  {file_path}")
+        held_at    = r["held_at"]    or ""
+        parsed_at  = (r["parsed_at"] or "")[:19]
+        meeting_id = r["meeting_id"] or ""
+        ai_count   = r["action_items"]
+        d_count    = r["decisions"]
+        print(f"{held_at:<12} {ai_count:>3} {d_count:>3}  {parsed_at:<20}  {meeting_id}")
 
     print(f"\n合計: {len(rows)} 件")
+    print("\n※ 削除は: python3 scripts/pm_meeting_bulk_import.py --delete <meeting_id>")
+
+
+def delete_meeting(
+    db_path: Path, meeting_id: str, dry_run: bool, force: bool, no_encrypt: bool
+) -> None:
+    """指定した meeting_id の議事録を pm.db から削除する"""
+    conn = _open_db_or_exit(db_path, no_encrypt)
+
+    row = conn.execute(
+        """
+        SELECT m.meeting_id, m.held_at, m.kind, m.file_path,
+               COUNT(DISTINCT a.id) AS ai_count,
+               COUNT(DISTINCT d.id) AS d_count
+        FROM meetings m
+        LEFT JOIN action_items a ON a.meeting_id = m.meeting_id
+        LEFT JOIN decisions d    ON d.meeting_id = m.meeting_id
+        WHERE m.meeting_id = ?
+        GROUP BY m.meeting_id
+        """,
+        (meeting_id,),
+    ).fetchone()
+
+    if not row:
+        print(f"ERROR: meeting_id '{meeting_id}' は pm.db に存在しません。", file=sys.stderr)
+        print("  --list で一覧を確認してください。", file=sys.stderr)
+        conn.close()
+        sys.exit(1)
+
+    print(f"削除対象:")
+    print(f"  meeting_id : {row['meeting_id']}")
+    print(f"  開催日     : {row['held_at']}")
+    print(f"  会議種別   : {row['kind']}")
+    print(f"  ファイル   : {row['file_path']}")
+    print(f"  アクションアイテム: {row['ai_count']} 件")
+    print(f"  決定事項          : {row['d_count']} 件")
+
+    if dry_run:
+        print("\n[INFO] --dry-run のため削除をスキップしました")
+        conn.close()
+        return
+
+    if not force:
+        answer = input("\n本当に削除しますか？ [y/N]: ").strip().lower()
+        if answer != "y":
+            print("削除をキャンセルしました。")
+            conn.close()
+            return
+
+    conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
+    conn.execute("DELETE FROM decisions    WHERE meeting_id = ?", (meeting_id,))
+    conn.execute("DELETE FROM meetings     WHERE meeting_id = ?", (meeting_id,))
+    conn.commit()
+    conn.close()
+
+    print(f"\n✓ meeting_id '{meeting_id}' を削除しました。")
 
 
 def main() -> None:
@@ -170,12 +233,18 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="実行内容を表示するのみ（DB保存なし）")
     parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
     parser.add_argument("--list", action="store_true", help="インポート済み議事録一覧を表示して終了")
+    parser.add_argument("--delete", default=None, metavar="MEETING_ID",
+                        help="指定した meeting_id の議事録をDBから削除する")
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_DB
 
     if args.list:
         list_imported(db_path, args.since, args.no_encrypt)
+        return
+
+    if args.delete:
+        delete_meeting(db_path, args.delete, args.dry_run, args.force, args.no_encrypt)
         return
 
     meetings_dir = Path(args.meetings_dir) if args.meetings_dir else DEFAULT_MEETINGS_DIR
