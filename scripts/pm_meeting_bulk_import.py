@@ -15,6 +15,8 @@ Usage:
     python3 scripts/pm_meeting_bulk_import.py --dry-run
     python3 scripts/pm_meeting_bulk_import.py --force
     python3 scripts/pm_meeting_bulk_import.py --since 2026-01-01
+    python3 scripts/pm_meeting_bulk_import.py --list
+    python3 scripts/pm_meeting_bulk_import.py --list --since 2026-02-01
 
 Options:
     --meetings-dir DIR      議事録ディレクトリ（デフォルト: meetings/）
@@ -23,6 +25,7 @@ Options:
     --force                 既存レコードを上書き
     --dry-run               pm_meeting_import.py を実行せず対象ファイルを表示のみ
     --no-encrypt            DBを暗号化しない（平文モード）
+    --list                  pm.db にインポート済みの議事録一覧を表示して終了
 """
 
 import argparse
@@ -30,6 +33,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db_utils import open_db
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MEETINGS_DIR = REPO_ROOT / "meetings"
@@ -106,6 +112,53 @@ def run_meeting_parser(
     return True
 
 
+def list_imported(db_path: Path, since: str | None, no_encrypt: bool) -> None:
+    """pm.db にインポート済みの議事録一覧を表示する"""
+    if not db_path.exists():
+        print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    conn = open_db(db_path, encrypt=not no_encrypt)
+
+    query = """
+        SELECT
+            m.held_at,
+            m.kind,
+            m.file_path,
+            m.parsed_at,
+            COUNT(DISTINCT a.id) AS action_items,
+            COUNT(DISTINCT d.id) AS decisions
+        FROM meetings m
+        LEFT JOIN action_items a ON a.meeting_id = m.meeting_id
+        LEFT JOIN decisions d    ON d.meeting_id = m.meeting_id
+    """
+    params: list = []
+    if since:
+        query += " WHERE m.held_at >= ?"
+        params.append(since)
+    query += " GROUP BY m.meeting_id ORDER BY m.held_at DESC"
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    if not rows:
+        print("インポート済み議事録はありません。")
+        return
+
+    print(f"{'開催日':<12} {'会議種別':<35} {'AI':>3} {'決定':>3}  {'登録日時':<20}  ファイルパス")
+    print("-" * 120)
+    for r in rows:
+        held_at   = r["held_at"]   or ""
+        kind      = (r["kind"] or "")[:33]
+        parsed_at = (r["parsed_at"] or "")[:19]
+        file_path = r["file_path"] or ""
+        ai_count  = r["action_items"]
+        d_count   = r["decisions"]
+        print(f"{held_at:<12} {kind:<35} {ai_count:>3} {d_count:>3}  {parsed_at:<20}  {file_path}")
+
+    print(f"\n合計: {len(rows)} 件")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="meetings/ の議事録を一括で pm.db に登録する"
@@ -116,10 +169,16 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     parser.add_argument("--dry-run", action="store_true", help="実行内容を表示するのみ（DB保存なし）")
     parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
+    parser.add_argument("--list", action="store_true", help="インポート済み議事録一覧を表示して終了")
     args = parser.parse_args()
 
-    meetings_dir = Path(args.meetings_dir) if args.meetings_dir else DEFAULT_MEETINGS_DIR
     db_path = Path(args.db) if args.db else DEFAULT_DB
+
+    if args.list:
+        list_imported(db_path, args.since, args.no_encrypt)
+        return
+
+    meetings_dir = Path(args.meetings_dir) if args.meetings_dir else DEFAULT_MEETINGS_DIR
 
     if not meetings_dir.exists():
         print(f"ERROR: ディレクトリが見つかりません: {meetings_dir}", file=sys.stderr)
