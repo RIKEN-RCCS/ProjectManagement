@@ -1,15 +1,49 @@
-#!/bin/sh
-#SBATCH -p ai-l40s
+#!/bin/bash
 #SBATCH --nodes=1
-#SBATCH --gpus=1
 #SBATCH --time=24:00:00
 
 # 複数ファイルを1ジョブで順次処理する
-# Usage: sbatch trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS]
+# Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS]
 #
 # --skip SECONDS を付けると全ファイルの冒頭をスキップ
-# 例: sbatch trans.sh a.mp4 b.mp4 c.mp4
-#     sbatch trans.sh a.mp4 b.mp4 --skip 30
+# 例: bash trans.sh a.mp4 b.mp4 c.mp4
+#     bash trans.sh a.mp4 b.mp4 --skip 30
+#
+# パーティション選択: ai-l40s に空きがあれば優先、次に qc-gh200、
+# どちらも混雑していれば ai-l40s に投入する。
+
+# ============================================================
+# 投入モード: SLURM外（ログインノード等）から実行された場合
+# ============================================================
+if [[ -z "${SLURM_JOB_ID}" ]]; then
+
+  # sinfo で idle/mix ノードが存在するか確認
+  has_available_nodes() {
+    sinfo -p "$1" --noheader -o "%t" 2>/dev/null | grep -qE "^(idle|mix)$"
+  }
+
+  if has_available_nodes "ai-l40s"; then
+    PARTITION="ai-l40s"
+    EXTRA_OPTS="--gpus=1"
+    echo "[INFO] ai-l40s に空きあり → ai-l40s に投入します"
+  elif has_available_nodes "qc-gh200"; then
+    PARTITION="qc-gh200"
+    EXTRA_OPTS=""
+    echo "[INFO] ai-l40s は空きなし、qc-gh200 に空きあり → qc-gh200 に投入します"
+  else
+    PARTITION="ai-l40s"
+    EXTRA_OPTS="--gpus=1"
+    echo "[INFO] 両パーティションが混雑 → デフォルトの ai-l40s に投入します"
+  fi
+
+  # shellcheck disable=SC2086
+  sbatch --partition="$PARTITION" $EXTRA_OPTS "$0" "$@"
+  exit $?
+fi
+
+# ============================================================
+# ジョブ実行モード: SLURM ジョブとして実行された場合
+# ============================================================
 
 WHISPER_VAD=/lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/whisper_vad.py
 
@@ -35,7 +69,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
-  echo "Usage: sbatch trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS]"
+  echo "Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS]"
   exit 1
 fi
 
@@ -61,7 +95,7 @@ for INPUT_FILE in "${FILES[@]}"; do
   echo "=============================="
 
   cat << EOF > "$WORKDIR/run.sh"
-export HUGGING_FACE_TOKEN="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"
+export HUGGING_FACE_TOKEN="${HUGGING_FACE_TOKEN:?HUGGING_FACE_TOKEN 環境変数が設定されていません}"
 export HF_HOME="$WORKDIR/hf_cache"
 
 if [ -n "$SKIP_SECONDS" ]; then
