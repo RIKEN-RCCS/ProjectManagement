@@ -267,26 +267,43 @@ def main() -> None:
         print("対象ファイルなし。終了します。")
         return
 
+    # 既にDBに登録済みの meeting_id を取得（DB が存在する場合のみ）
+    imported_ids: set[str] = set()
+    if db_path.exists():
+        try:
+            conn = open_db(db_path, encrypt=not args.no_encrypt)
+            rows = conn.execute("SELECT meeting_id FROM meetings").fetchall()
+            imported_ids = {r["meeting_id"] for r in rows}
+            conn.close()
+        except Exception:
+            pass  # DB が壊れている等の場合は全件処理にフォールバック
+
     success = skipped = failed = 0
 
     for i, file_path in enumerate(files, 1):
         held_at, meeting_name = parse_filename(file_path)
+        meeting_id = file_path.stem
         print(f"[{i}/{len(files)}] {file_path.name}")
         print(f"  held_at      : {held_at}")
         print(f"  meeting_name : {meeting_name}")
+
+        if meeting_id in imported_ids and not args.force:
+            print(f"  [SKIP] 既にDBに登録済み（--force で上書き可能）")
+            skipped += 1
+            print()
+            continue
 
         ok = run_meeting_parser(
             file_path, held_at, meeting_name, db_path,
             force=args.force, dry_run=args.dry_run, no_encrypt=args.no_encrypt,
         )
         if ok:
-            # 既存レコードのスキップ判定（pm_meeting_import.py の出力から判断）
             success += 1
         else:
             failed += 1
         print()
 
-    print(f"完了: 処理={success}件, 失敗={failed}件")
+    print(f"完了: 処理={success}件, スキップ={skipped}件, 失敗={failed}件")
 
 
 if __name__ == "__main__":
