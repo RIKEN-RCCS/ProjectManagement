@@ -28,6 +28,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
 
+
+def normalize_assignee(name: str | None) -> str | None:
+    """日本語を含む担当者名の姓名間スペース（半角・全角）を除去する"""
+    if not name:
+        return name
+    if re.search(r"[\u3040-\u9fff]", name):
+        name = name.replace(" ", "").replace("\u3000", "")
+    return name
+
 # --------------------------------------------------------------------------- #
 # パス解決
 # --------------------------------------------------------------------------- #
@@ -296,7 +305,7 @@ def save_to_db(
                 (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at, milestone_id)
             VALUES (?, ?, ?, ?, 'open', 'meeting', ?, ?, ?)
             """,
-            (meeting_id, a["content"], a.get("assignee"), a.get("due_date"),
+            (meeting_id, a["content"], normalize_assignee(a.get("assignee")), a.get("due_date"),
              file_path, now, a.get("milestone_id")),
         )
 
