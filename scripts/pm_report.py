@@ -125,26 +125,38 @@ def fetch_recent_meetings(conn: sqlite3.Connection, since: str | None) -> list[d
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
+def _normalize_assignee(name: str | None) -> str:
+    """日本語を含む担当者名の姓名間スペース（半角・全角）を除去する"""
+    if not name:
+        return "未定"
+    if re.search(r"[\u3040-\u9fff]", name):
+        name = name.replace(" ", "").replace("\u3000", "")
+    return name
+
+
 def fetch_assignee_workload(conn: sqlite3.Connection, today: str) -> list[dict]:
-    """担当者別の負荷（オープンアイテム数・期限超過数・期限未設定数）を取得する（LLM不使用）"""
+    """担当者別の負荷（オープンアイテム数・期限超過数・期限未設定数）を取得する（LLM不使用）
+    既存データの表記ゆれ（姓名間スペース）もPython側で正規化して集計する。"""
     try:
         rows = conn.execute(
-            """
-            SELECT
-                COALESCE(assignee, '未定') AS assignee,
-                COUNT(*)                                                        AS total_open,
-                COUNT(CASE WHEN due_date IS NOT NULL AND due_date < ? THEN 1 END) AS overdue,
-                COUNT(CASE WHEN due_date IS NULL THEN 1 END)                    AS no_due_date
-            FROM action_items
-            WHERE status = 'open'
-            GROUP BY COALESCE(assignee, '未定')
-            ORDER BY overdue DESC, total_open DESC
-            """,
-            (today,),
+            "SELECT assignee, due_date FROM action_items WHERE status = 'open'"
         ).fetchall()
-        return [dict(r) for r in rows]
     except Exception:
         return []
+
+    counts: dict[str, dict] = {}
+    for row in rows:
+        name = _normalize_assignee(row["assignee"])
+        entry = counts.setdefault(name, {"total_open": 0, "overdue": 0, "no_due_date": 0})
+        entry["total_open"] += 1
+        if row["due_date"] and row["due_date"] < today:
+            entry["overdue"] += 1
+        if not row["due_date"]:
+            entry["no_due_date"] += 1
+
+    result = [{"assignee": k, **v} for k, v in counts.items()]
+    result.sort(key=lambda x: (-x["overdue"], -x["total_open"]))
+    return result
 
 
 def format_assignee_workload(workload: list[dict]) -> str:
