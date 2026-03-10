@@ -20,6 +20,11 @@ CLI サブコマンド:
   --migrate DB [DB ...]   平文DBを SQLCipher 暗号化DBに変換する
   --no-backup             --migrate 時にバックアップを作成しない
   --dry-run               --migrate 時に変換せず確認のみ行う
+  --audit-log             audit_log（変更履歴）を表示する
+  --db PATH               --audit-log 時の pm.db パス（デフォルト: data/pm.db）
+  --limit N               --audit-log 時の表示件数（デフォルト: 30）
+  --source SOURCE         --audit-log 時にソースで絞り込む（canvas_sync / relink）
+  --id ID                 --audit-log 時にアクションアイテムIDで絞り込む
 """
 
 import os
@@ -291,6 +296,12 @@ if __name__ == "__main__":
     parser.add_argument("--migrate", nargs="+", metavar="DB", help="平文DBを SQLCipher 暗号化DBに変換する")
     parser.add_argument("--no-backup", action="store_true", help="--migrate 時にバックアップを作成しない")
     parser.add_argument("--dry-run", action="store_true", help="--migrate 時に変換せず確認のみ")
+    parser.add_argument("--audit-log", action="store_true", help="audit_log を表示する")
+    parser.add_argument("--db", default="data/pm.db", metavar="PATH", help="--audit-log 時の pm.db パス（デフォルト: data/pm.db）")
+    parser.add_argument("--no-encrypt", action="store_true", help="--audit-log 時に平文モードで接続する")
+    parser.add_argument("--limit", type=int, default=30, metavar="N", help="--audit-log 時の表示件数（デフォルト: 30）")
+    parser.add_argument("--source", metavar="SOURCE", help="--audit-log 時にソースで絞り込む（canvas_sync / relink）")
+    parser.add_argument("--id", type=int, metavar="ID", help="--audit-log 時にアクションアイテムIDで絞り込む")
     args = parser.parse_args()
 
     if args.gen_key:
@@ -322,5 +333,45 @@ if __name__ == "__main__":
             else:
                 skipped += 1
         print(f"\n完了: 変換={success}件, スキップ={skipped}件")
+    elif args.audit_log:
+        db_path = Path(args.db)
+        if not db_path.exists():
+            print(f"ERROR: {db_path} が見つかりません", file=sys.stderr)
+            sys.exit(1)
+        conn = open_db(db_path, encrypt=not args.no_encrypt)
+        # テーブルが存在するか確認
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'"
+        ).fetchone()
+        if not exists:
+            print("audit_log テーブルが存在しません。pm_sync_canvas.py または pm_relink.py を実行すると自動作成されます。")
+            conn.close()
+            sys.exit(0)
+        where_clauses = []
+        params: list = []
+        if args.source:
+            where_clauses.append("source = ?")
+            params.append(args.source)
+        if args.id:
+            where_clauses.append("record_id = ?")
+            params.append(str(args.id))
+        where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        params.append(args.limit)
+        rows = conn.execute(
+            f"SELECT changed_at, source, record_id, field, old_value, new_value "
+            f"FROM audit_log {where} ORDER BY changed_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        conn.close()
+        if not rows:
+            print("該当する変更履歴はありません。")
+            sys.exit(0)
+        print(f"{'日時':20s}  {'ソース':12s}  {'ID':4s}  {'フィールド':15s}  {'変更前':20s}  変更後")
+        print("-" * 90)
+        for r in rows:
+            dt = r["changed_at"][:19].replace("T", " ")
+            old = str(r["old_value"]) if r["old_value"] is not None else "NULL"
+            new = str(r["new_value"]) if r["new_value"] is not None else "NULL"
+            print(f"{dt:20s}  {r['source']:12s}  {r['record_id']:4s}  {r['field']:15s}  {old:20s}  {new}")
     else:
         parser.print_help()
