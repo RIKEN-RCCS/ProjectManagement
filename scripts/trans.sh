@@ -8,9 +8,10 @@
 # --skip SECONDS       全ファイルの冒頭をスキップ
 # --meeting-name NAME  指定すると文字起こし後に pm.db へ直接インポートし .md を削除（推奨）
 #                      省略すると従来通り .md ファイルを残す（セキュリティリスクあり）
-# --held-at YYYY-MM-DD --meeting-name と併用。省略時は本日の日付を使用
+# --held-at YYYY-MM-DD --meeting-name と併用。省略時はファイル名の GMT タイムスタンプを JST 変換して使用
 # 例: bash trans.sh a.mp4 b.mp4
-#     bash trans.sh a.mp4 --skip 30 --meeting-name Leader_Meeting --held-at 2026-03-10
+#     bash trans.sh a.mp4 --skip 30 --meeting-name Leader_Meeting
+#     bash trans.sh a.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10  # 日付を明示上書き
 #
 # パーティション選択: ai-l40s に空きがあれば優先、次に qc-gh200、
 # どちらも混雑していれば ai-l40s に投入する。
@@ -130,9 +131,22 @@ EOF
     SUCCESS=$((SUCCESS + 1))
 
     if [[ -n "$MEETING_NAME" ]]; then
-      DATE_TO_USE="${HELD_AT:-$(date +%Y-%m-%d)}"
-      if [[ -z "$HELD_AT" ]]; then
-        echo "[INFO] --held-at 未指定のため本日の日付を使用: $DATE_TO_USE"
+      if [[ -n "$HELD_AT" ]]; then
+        DATE_TO_USE="$HELD_AT"
+      else
+        # ファイル名の GMT タイムスタンプ（例: GMT20260302-032528）を JST に変換
+        GMT_DATE=$(basename "$INPUT_ABS" | grep -oP '(?<=GMT)\d{8}')
+        GMT_TIME=$(basename "$INPUT_ABS" | grep -oP '(?<=GMT\d{8}-)\d{6}')
+        if [[ -n "$GMT_DATE" && -n "$GMT_TIME" ]]; then
+          UTC_STR="${GMT_DATE:0:4}-${GMT_DATE:4:2}-${GMT_DATE:6:2} ${GMT_TIME:0:2}:${GMT_TIME:2:2}:${GMT_TIME:4:2}"
+          DATE_TO_USE=$(date -d "$UTC_STR UTC + 9 hours" +%Y-%m-%d 2>/dev/null)
+        fi
+        if [[ -z "$DATE_TO_USE" ]]; then
+          DATE_TO_USE=$(date +%Y-%m-%d)
+          echo "[INFO] ファイル名から日付を取得できませんでした。本日の日付を使用: $DATE_TO_USE"
+        else
+          echo "[INFO] GMT タイムスタンプを JST に変換: $DATE_TO_USE"
+        fi
       fi
 
       SCRIPT_DIR=$(dirname "$(realpath "$WHISPER_VAD")")
