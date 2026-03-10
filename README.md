@@ -204,9 +204,18 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT
 ### `pm.db` - PM統合データ
 
 - `meetings`: 会議情報（開催日・種別・要約）
-- `action_items`: アクションアイテム（担当者・期限・status・note）
+- `action_items`: アクションアイテム（担当者・期限・status・note・milestone_id）
 - `decisions`: 決定事項
 - `slack_extractions`: 抽出済みスレッド管理（差分処理用）
+- `goals` / `milestones`: goals.yaml から同期したゴール・マイルストーン
+- `audit_log`: action_items の変更履歴（Canvas同期・relink 実行時に記録）
+
+変更履歴の確認:
+```sh
+python3 scripts/db_utils.py --audit-log
+python3 scripts/db_utils.py --audit-log --source canvas_sync --limit 50
+python3 scripts/db_utils.py --audit-log --id 98  # 特定アイテムの履歴
+```
 
 ---
 
