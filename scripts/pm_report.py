@@ -417,15 +417,15 @@ def generate_report(
         wl_text = format_assignee_workload(assignee_workload)
         workload_section = f"\n\n## 担当者別負荷\n\n{wl_text}"
 
-    # アクションアイテム表をLLM出力の末尾に追記
+    # アクションアイテム表・担当者別負荷をLLM出力の末尾に追記
     table = format_action_items(action_items)
     return (
         f"# 富岳NEXT プロジェクト進捗レポート（{today}）"
         + milestone_section
-        + workload_section
         + "\n\n"
         + llm_output.lstrip("#").lstrip().lstrip("富岳NEXT プロジェクト進捗レポート").lstrip(f"（{today}）").lstrip("\n")
         + f"\n\n## 未完了アクションアイテム\n\n{table}"
+        + workload_section
     )
 
 
