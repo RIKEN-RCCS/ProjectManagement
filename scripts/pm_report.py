@@ -125,6 +125,43 @@ def fetch_recent_meetings(conn: sqlite3.Connection, since: str | None) -> list[d
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
+def fetch_assignee_workload(conn: sqlite3.Connection, today: str) -> list[dict]:
+    """担当者別の負荷（オープンアイテム数・期限超過数・期限未設定数）を取得する（LLM不使用）"""
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                COALESCE(assignee, '未定') AS assignee,
+                COUNT(*)                                                        AS total_open,
+                COUNT(CASE WHEN due_date IS NOT NULL AND due_date < ? THEN 1 END) AS overdue,
+                COUNT(CASE WHEN due_date IS NULL THEN 1 END)                    AS no_due_date
+            FROM action_items
+            WHERE status = 'open'
+            GROUP BY COALESCE(assignee, '未定')
+            ORDER BY overdue DESC, total_open DESC
+            """,
+            (today,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def format_assignee_workload(workload: list[dict]) -> str:
+    """「担当者別負荷」セクションをMarkdown表形式で生成する（LLM不使用）"""
+    if not workload:
+        return "（データなし）"
+    header = "| 担当者 | 合計 | 期限超過 | 期限未設定 |"
+    sep    = "|--------|------|----------|------------|"
+    rows = [header, sep]
+    for w in workload:
+        overdue_str = f"**{w['overdue']}**" if w["overdue"] > 0 else "0"
+        rows.append(
+            f"| {w['assignee']} | {w['total_open']} | {overdue_str} | {w['no_due_date']} |"
+        )
+    return "\n".join(rows)
+
+
 def fetch_milestone_progress(conn: sqlite3.Connection) -> list[dict]:
     """マイルストーンごとのアクションアイテム完了率を取得する"""
     try:
@@ -336,6 +373,7 @@ def generate_report(
     meetings: list[dict],
     risk_items: list[dict],
     milestone_progress: list[dict],
+    assignee_workload: list[dict],
     context: str,
     today: str,
 ) -> str:
@@ -361,11 +399,18 @@ def generate_report(
         ms_text = format_milestone_progress(milestone_progress, today)
         milestone_section = f"\n\n## プロジェクトの現在地\n\n{ms_text}"
 
+    # 担当者別負荷セクション（DBから直接計算、LLM不使用）
+    workload_section = ""
+    if assignee_workload:
+        wl_text = format_assignee_workload(assignee_workload)
+        workload_section = f"\n\n## 担当者別負荷\n\n{wl_text}"
+
     # アクションアイテム表をLLM出力の末尾に追記
     table = format_action_items(action_items)
     return (
         f"# 富岳NEXT プロジェクト進捗レポート（{today}）"
         + milestone_section
+        + workload_section
         + "\n\n"
         + llm_output.lstrip("#").lstrip().lstrip("富岳NEXT プロジェクト進捗レポート").lstrip(f"（{today}）").lstrip("\n")
         + f"\n\n## 未完了アクションアイテム\n\n{table}"
@@ -537,15 +582,17 @@ def main() -> None:
     meetings = fetch_recent_meetings(conn, args.since)
     risk_items = detect_risk_items(action_items)
     milestone_progress = fetch_milestone_progress(conn)
+    assignee_workload = fetch_assignee_workload(conn, today)
     conn.close()
 
     log(f"[INFO] アクションアイテム: {len(action_items)}件 (うちリスク: {len(risk_items)}件)")
     log(f"[INFO] 決定事項          : {len(decisions)}件")
     log(f"[INFO] 会議              : {len(meetings)}件")
     log(f"[INFO] マイルストーン    : {len(milestone_progress)}件")
+    log(f"[INFO] 担当者            : {len(assignee_workload)}名")
 
     log("\n[INFO] 進捗レポートを生成中...")
-    report = generate_report(action_items, decisions, meetings, risk_items, milestone_progress, context, today)
+    report = generate_report(action_items, decisions, meetings, risk_items, milestone_progress, assignee_workload, context, today)
     report = sanitize_for_canvas(report)
     log("\n" + "=" * 60)
     log(report)
