@@ -33,3 +33,4 @@ slurm-*.out
 *.tmp
 .work_*/
 *.pptx
+*.csv

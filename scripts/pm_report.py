@@ -85,6 +85,7 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
     query = """
         SELECT a.id, a.content, a.assignee, a.due_date, a.status,
                a.note, a.source, a.source_ref, a.extracted_at, a.meeting_id,
+               a.milestone_id,
                m.kind as meeting_kind, m.held_at as meeting_held_at
         FROM action_items a
         LEFT JOIN meetings m ON a.meeting_id = m.meeting_id
@@ -279,20 +280,21 @@ REPORT_PROMPT = """
 
 
 def format_action_items(items: list[dict]) -> str:
-    """Canvas に貼るアクションアイテム表（ID・対応状況列付き）"""
+    """Canvas に貼るアクションアイテム表（ID・マイルストーン・対応状況列付き）"""
     if not items:
         return "（なし）"
-    header = "| ID | 担当者 | 内容 | 期限 | ソース | 対応状況 |"
-    sep    = "|----|--------|------|------|--------|----------|"
+    header = "| ID | 担当者 | 内容 | 期限 | ソース | マイルストーン | 対応状況 |"
+    sep    = "|----|--------|------|------|--------|----------------|----------|"
     rows = [header, sep]
     for a in items:
-        ai_id    = a.get("id", "")
-        assignee = a.get("assignee") or "未定"
-        content  = a.get("content", "").replace("|", "｜")
-        due      = a.get("due_date") or ""
-        source   = a.get("source") or ""
-        note     = a.get("note") or ""
-        rows.append(f"| {ai_id} | {assignee} | {content} | {due} | {source} | {note} |")
+        ai_id     = a.get("id", "")
+        assignee  = a.get("assignee") or "未定"
+        content   = a.get("content", "").replace("|", "｜")
+        due       = a.get("due_date") or ""
+        source    = a.get("source") or ""
+        milestone = a.get("milestone_id") or ""
+        note      = a.get("note") or ""
+        rows.append(f"| {ai_id} | {assignee} | {content} | {due} | {source} | {milestone} | {note} |")
     return "\n".join(rows)
 
 

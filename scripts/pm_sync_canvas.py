@@ -134,14 +134,15 @@ def parse_action_items_table(content: str) -> list[dict]:
         if "ID" not in headers or "対応状況" not in headers:
             continue
 
-        id_idx       = headers.index("ID")
-        note_idx     = headers.index("対応状況")
-        assignee_idx = headers.index("担当者") if "担当者" in headers else None
-        content_idx  = headers.index("内容")   if "内容"   in headers else None
-        due_idx      = headers.index("期限")   if "期限"   in headers else None
+        id_idx        = headers.index("ID")
+        note_idx      = headers.index("対応状況")
+        assignee_idx  = headers.index("担当者")      if "担当者"      in headers else None
+        content_idx   = headers.index("内容")        if "内容"        in headers else None
+        due_idx       = headers.index("期限")        if "期限"        in headers else None
+        milestone_idx = headers.index("マイルストーン") if "マイルストーン" in headers else None
 
         required_max = max(
-            idx for idx in [id_idx, note_idx, assignee_idx, content_idx, due_idx]
+            idx for idx in [id_idx, note_idx, assignee_idx, content_idx, due_idx, milestone_idx]
             if idx is not None
         )
 
@@ -168,11 +169,12 @@ def parse_action_items_table(content: str) -> list[dict]:
             seen_ids.add(ai_id)
 
             results.append({
-                "id":       ai_id,
-                "assignee": get_cell(cells, assignee_idx),
-                "content":  get_cell(cells, content_idx),
-                "due_date": get_cell(cells, due_idx),
-                "note":     get_cell(cells, note_idx),
+                "id":           ai_id,
+                "assignee":     get_cell(cells, assignee_idx),
+                "content":      get_cell(cells, content_idx),
+                "due_date":     get_cell(cells, due_idx),
+                "milestone_id": get_cell(cells, milestone_idx),
+                "note":         get_cell(cells, note_idx),
             })
 
     return results
@@ -203,6 +205,7 @@ def update_action_item(
     canvas_assignee: str,
     canvas_content: str,
     canvas_due_date: str,
+    canvas_milestone_id: str,
     dry_run: bool,
 ) -> tuple[str, list[str]]:
     """
@@ -215,7 +218,7 @@ def update_action_item(
         changed_fields: 変更されたフィールド名のリスト
     """
     row = conn.execute(
-        "SELECT id, content, assignee, due_date, status FROM action_items WHERE id = ?",
+        "SELECT id, content, assignee, due_date, status, milestone_id FROM action_items WHERE id = ?",
         (ai_id,),
     ).fetchone()
 
@@ -234,7 +237,7 @@ def update_action_item(
     else:
         new_status = row["status"]
 
-    # 担当者・内容・期限 — Canvas値が非空かつDB値と異なる場合のみ更新
+    # 担当者・内容・期限・マイルストーン — Canvas値が非空かつDB値と異なる場合のみ更新
     if canvas_assignee and canvas_assignee != (row["assignee"] or ""):
         updates["assignee"] = canvas_assignee
         changed_fields.append("担当者")
@@ -244,6 +247,9 @@ def update_action_item(
     if canvas_due_date and canvas_due_date != (row["due_date"] or ""):
         updates["due_date"] = canvas_due_date
         changed_fields.append("期限")
+    if canvas_milestone_id and canvas_milestone_id != (row["milestone_id"] or ""):
+        updates["milestone_id"] = canvas_milestone_id
+        changed_fields.append("マイルストーン")
 
     if not updates:
         return "unchanged", []
@@ -310,6 +316,7 @@ def main() -> None:
             canvas_assignee=item["assignee"],
             canvas_content=item["content"],
             canvas_due_date=item["due_date"],
+            canvas_milestone_id=item.get("milestone_id", ""),
             dry_run=args.dry_run,
         )
 
