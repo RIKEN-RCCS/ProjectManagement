@@ -254,9 +254,9 @@ slack/
 │   ├── pm_meeting_bulk_import.py            # meetings/ の議事録を一括で pm.db に登録
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿
-│   ├── pm_sync_canvas.py            # Canvas「対応状況」列 → pm.db 同期
-│   ├── db_utils.py                  # DB接続の一元管理（SQLCipher暗号化対応）
-│   ├── db_migrate.py                # 平文DBを暗号化DBに変換
+│   ├── pm_sync_canvas.py            # Canvas「対応状況」「マイルストーン」列 → pm.db 同期
+│   ├── pm_relink.py                 # アクションアイテムとマイルストーンの紐づけをCSV経由で一括編集（LLM不使用）
+│   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
 │   ├── trans.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト（whisper_vad.pyを呼び出す）
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 └── data/                            # DBと出力ファイル
@@ -429,6 +429,40 @@ python3 scripts/pm_sync_canvas.py --dry-run
 
 それ以外の記入内容は `note` 列に保存（`status` は `open` のまま）
 
+Canvas上で変更可能な列: **担当者・内容・期限・マイルストーン（M1〜M5）・対応状況**（非空かつDB値と異なる場合のみ更新）
+
+### 7. マイルストーン紐づけの一括編集（pm_relink.py）
+
+インポート済みのアクションアイテムとマイルストーンの紐づけをCSV経由で一括編集する。LLMは使用しない。
+
+**仕様**:
+- `milestone_id` 列に `M1`〜`M5` を記入 → その値で上書き
+- `milestone_id` 列を空欄 → `NULL` で上書き（紐づけ解除）
+
+```sh
+# milestone_id が未設定のアイテムをCSVにエクスポート（デフォルト: relink.csv）
+python3 scripts/pm_relink.py --export
+
+# 全件エクスポート
+python3 scripts/pm_relink.py --export --all
+
+# 変更内容を確認（DB更新なし）
+python3 scripts/pm_relink.py --import relink.csv --dry-run
+
+# DBに反映（確認プロンプトあり）
+python3 scripts/pm_relink.py --import relink.csv
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--export` | - | アクションアイテムをCSVにエクスポート |
+| `--import PATH` | - | CSVを読み込んでDBを更新 |
+| `--all` | - | `--export` 時に全件対象（デフォルトは `milestone_id IS NULL` のみ） |
+| `--output PATH` | `relink.csv` | `--export` 時の出力ファイルパス |
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--no-encrypt` | - | 平文モード |
+| `--dry-run` | - | DB更新なし・変更内容を表示のみ |
+
 ---
 
 ## 環境変数
@@ -472,7 +506,7 @@ python3 scripts/db_utils.py --gen-key
 # → ~/.secrets/pm_db_key.txt に 64文字のランダム鍵を生成（chmod 600）
 
 # 2. 既存の平文DBを暗号化DBに変換（初回のみ）
-python3 scripts/db_migrate.py data/pm.db data/C08SXA4M7JT.db data/C0A9KG036CS.db
+python3 scripts/db_utils.py --migrate data/pm.db data/C08SXA4M7JT.db data/C0A9KG036CS.db
 # → 各 .bak にバックアップを作成してから変換・検証
 ```
 
