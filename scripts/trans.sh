@@ -5,11 +5,12 @@
 # 複数ファイルを1ジョブで順次処理する
 # Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME]
 #
-# --skip SECONDS     全ファイルの冒頭をスキップ
+# --skip SECONDS       全ファイルの冒頭をスキップ
 # --meeting-name NAME  指定すると文字起こし後に pm.db へ直接インポートし .md を削除（推奨）
-#                     省略すると従来通り .md ファイルを残す（セキュリティリスクあり）
+#                      省略すると従来通り .md ファイルを残す（セキュリティリスクあり）
+# --held-at YYYY-MM-DD --meeting-name と併用。省略時は本日の日付を使用
 # 例: bash trans.sh a.mp4 b.mp4
-#     bash trans.sh a.mp4 --skip 30 --meeting-name Leader_Meeting
+#     bash trans.sh a.mp4 --skip 30 --meeting-name Leader_Meeting --held-at 2026-03-10
 #
 # パーティション選択: ai-l40s に空きがあれば優先、次に qc-gh200、
 # どちらも混雑していれば ai-l40s に投入する。
@@ -63,17 +64,19 @@ export SINGULARITY_BIND=/lvs0
 # 引数パース: --skip N / --meeting-name NAME を抽出し、残りをファイルリストとする
 SKIP_SECONDS=""
 MEETING_NAME=""
+HELD_AT=""
 FILES=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip)         SKIP_SECONDS="$2"; shift 2 ;;
-    --meeting-name) MEETING_NAME="$2";  shift 2 ;;
+    --meeting-name) MEETING_NAME="$2"; shift 2 ;;
+    --held-at)      HELD_AT="$2";      shift 2 ;;
     *)              FILES+=("$1"); shift ;;
   esac
 done
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
-  echo "Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME]"
+  echo "Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME] [--held-at YYYY-MM-DD]"
   exit 1
 fi
 
@@ -127,11 +130,9 @@ EOF
     SUCCESS=$((SUCCESS + 1))
 
     if [[ -n "$MEETING_NAME" ]]; then
-      # ファイル名から YYYYMMDD を抽出して YYYY-MM-DD に変換（GMT20260302-... パターン）
-      HELD_AT=$(basename "$INPUT_ABS" | grep -oP '(?<=GMT)\d{8}' | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')
+      DATE_TO_USE="${HELD_AT:-$(date +%Y-%m-%d)}"
       if [[ -z "$HELD_AT" ]]; then
-        HELD_AT=$(date +%Y-%m-%d)
-        echo "[INFO] ファイル名から日付を抽出できませんでした。本日の日付を使用: $HELD_AT"
+        echo "[INFO] --held-at 未指定のため本日の日付を使用: $DATE_TO_USE"
       fi
 
       SCRIPT_DIR=$(dirname "$(realpath "$WHISPER_VAD")")
@@ -139,10 +140,10 @@ EOF
       PM_IMPORT="$SCRIPT_DIR/pm_meeting_import.py"
       PM_DB="$SCRIPT_DIR/../data/pm.db"
 
-      echo "[INFO] pm.db へインポート中: $MEETING_NAME ($HELD_AT)"
+      echo "[INFO] pm.db へインポート中: $MEETING_NAME ($DATE_TO_USE)"
       "$VENV_PYTHON" "$PM_IMPORT" "$BASENAME.md" \
         --meeting-name "$MEETING_NAME" \
-        --held-at "$HELD_AT" \
+        --held-at "$DATE_TO_USE" \
         --db "$PM_DB"
 
       if [[ $? -eq 0 ]]; then
