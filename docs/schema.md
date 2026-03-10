@@ -117,3 +117,18 @@ Slack から取得した最新返信 msg_ts  vs  summaries.last_reply_ts
 | `status` | TEXT | `active` / `achieved` |
 | `success_criteria` | TEXT | 達成条件（JSON配列） |
 | `imported_at` | TEXT | 最終同期日時 |
+
+#### audit_log（変更履歴）
+
+Canvas同期（`pm_sync_canvas.py`）およびマイルストーン紐づけ変更（`pm_relink.py`）の際に、上書き前の値を記録する。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `id` | INTEGER | PK |
+| `table_name` | TEXT | 変更対象テーブル名（現在は `action_items` のみ） |
+| `record_id` | TEXT | 変更対象レコードのID |
+| `field` | TEXT | 変更されたカラム名（`assignee`・`status`・`milestone_id` 等） |
+| `old_value` | TEXT | 変更前の値（NULL の場合は NULL） |
+| `new_value` | TEXT | 変更後の値 |
+| `changed_at` | TEXT | 変更日時（UTC ISO8601） |
+| `source` | TEXT | 変更元（`canvas_sync` または `relink`） |

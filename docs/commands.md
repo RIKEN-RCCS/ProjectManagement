@@ -30,18 +30,26 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
 ### 2. 会議録文字起こし（trans.sh + whisper_vad.py）
 
 ```sh
-# Slurmジョブとして投入（ai-l40sパーティション、GPU1枚）
+# 推奨: --meeting-name を指定すると pm.db に直接保存し .md を削除（平文ファイルが残らない）
+sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
+sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
+
+# 日付を明示上書き（省略時はファイル名の GMT タイムスタンプを JST 変換して自動取得）
+sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
+
+# 従来方式: .md ファイルをそのまま残す（セキュリティ警告が出る）
 sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 30   # 冒頭30秒スキップ
 ```
 
-| 引数 | 説明 |
-|---|---|
-| arg1 | 入力動画/音声ファイル（拡張子付き） |
-| arg2 | 冒頭スキップ秒数（省略可） |
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--skip SECONDS` | なし | 全ファイルの冒頭をスキップ |
+| `--meeting-name NAME` | なし | 指定すると文字起こし後に pm.db へ直接インポートし .md を削除 |
+| `--held-at YYYY-MM-DD` | GMT→JST変換 | `--meeting-name` と併用。省略時はファイル名のGMTタイムスタンプをJSTに変換して取得 |
 
 処理フロー: ffmpeg → WAV変換（16kHz, mono） → DeepFilterNetノイズ除去 → SileroVAD → pyannote話者分離 → Whisper large-v3 文字起こし
-出力: 入力と同名の `.md` ファイル（タイムスタンプ・話者ラベル付きMarkdown形式）
+
+`--meeting-name` 指定時の追加フロー: 文字起こし完了 → pm_meeting_import.py で pm.db にインポート → .md 削除
 
 ### 3. 会議議事録の一括登録（pm_meeting_bulk_import.py）
 
