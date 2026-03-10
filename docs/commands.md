@@ -217,7 +217,9 @@ python3 scripts/pm_goals_import.py --dry-run
 python3 scripts/pm_goals_import.py --list
 ```
 
-### 9. DBの暗号化・鍵管理（db_utils.py）
+### 9. DBユーティリティ（db_utils.py）
+
+#### 暗号化・鍵管理
 
 ```sh
 # 鍵を生成（初回のみ）
@@ -235,3 +237,30 @@ python3 scripts/db_utils.py --migrate data/pm.db --dry-run
 **鍵ファイルを紛失すると暗号化済みDBは復元不可能。パスワードマネージャー等に必ずバックアップすること。**
 
 全スクリプトに `--no-encrypt` オプションがあり、平文モードで動作させることができる。
+
+#### 変更履歴の確認（audit_log）
+
+Canvas同期（`pm_sync_canvas.py`）とマイルストーン紐づけ変更（`pm_relink.py`）の変更前後を記録した `audit_log` を参照する。
+
+```sh
+# 直近30件を表示
+python3 scripts/db_utils.py --audit-log
+
+# 件数を指定
+python3 scripts/db_utils.py --audit-log --limit 100
+
+# ソースで絞り込む
+python3 scripts/db_utils.py --audit-log --source canvas_sync
+python3 scripts/db_utils.py --audit-log --source relink
+
+# 特定アクションアイテムの変更履歴
+python3 scripts/db_utils.py --audit-log --id 98
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--limit N` | `30` | 表示件数 |
+| `--source SOURCE` | なし（全件） | `canvas_sync` または `relink` で絞り込む |
+| `--id ID` | なし（全件） | アクションアイテムIDで絞り込む |
+| `--no-encrypt` | - | 平文モード |
