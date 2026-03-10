@@ -32,11 +32,40 @@ import argparse
 import csv
 import io
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # scripts/ ディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import open_db
+
+_AUDIT_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    record_id  TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    changed_at TEXT NOT NULL,
+    source     TEXT
+)"""
+
+
+def write_audit_log(conn, record_id: int, field: str, old_value, new_value, source: str) -> None:
+    """変更前の値を audit_log に記録する（dry_run 時は呼ばない）"""
+    conn.execute(
+        "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
+        " VALUES ('action_items', ?, ?, ?, ?, ?, ?)",
+        (
+            str(record_id),
+            field,
+            str(old_value) if old_value is not None else None,
+            str(new_value) if new_value is not None else None,
+            datetime.now(timezone.utc).isoformat(),
+            source,
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +210,7 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
         return
 
     for new_mid, item_id in changed:
+        write_audit_log(conn, item_id, "milestone_id", current.get(item_id), new_mid, "relink")
         conn.execute(
             "UPDATE action_items SET milestone_id = ? WHERE id = ?",
             (new_mid, item_id),
@@ -207,7 +237,7 @@ def main():
 
     args = parser.parse_args()
 
-    conn = open_db(args.db, encrypt=not args.no_encrypt)
+    conn = open_db(args.db, encrypt=not args.no_encrypt, migrations=[_AUDIT_LOG_DDL])
 
     if args.export:
         cmd_export(conn, args.all, Path(args.output))
