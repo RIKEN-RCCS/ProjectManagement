@@ -151,17 +151,31 @@ CSVの `milestone_id` 列: `M1`〜`M5` を記入 → その値で上書き、空
 
 ## 会議議事録の処理フロー
 
-### 1. 録音を文字起こし（Slurmジョブ）
+### 1. 録音を文字起こし → pm.db へ直接インポート（推奨）
+
+`--meeting-name` を指定すると文字起こし後に pm.db へ直接インポートし、.md ファイルを削除する（平文ファイルがディスクに残らない）。
+
+```sh
+# 推奨: pm.db に直接保存（.md は削除）
+sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
+
+# 日付を明示する場合（省略時はファイル名のGMTタイムスタンプをJSTに自動変換）
+sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
+
+# 冒頭スキップ
+sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
+```
+
+### 1a. 従来方式: .md ファイルを経由する場合
+
+`--meeting-name` を省略すると従来通り .md ファイルを出力する（セキュリティ警告が表示される）。
 
 ```sh
 sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4
+# → GMT20260302-032528_Recording.md が生成される
 ```
 
-出力: `GMT20260302-032528_Recording.md`（タイムスタンプ・話者ラベル付き）
-
-### 2. 議事録を一括でpm.dbに登録
-
-`meetings/` ディレクトリ内の `YYYY-MM-DD_{会議名}.md` ファイルをまとめて登録する。
+.md ファイルを後から pm.db に一括登録する場合:
 
 ```sh
 python3 scripts/pm_meeting_bulk_import.py
