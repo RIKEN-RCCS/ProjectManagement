@@ -3,11 +3,13 @@
 #SBATCH --time=24:00:00
 
 # 複数ファイルを1ジョブで順次処理する
-# Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS]
+# Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME]
 #
-# --skip SECONDS を付けると全ファイルの冒頭をスキップ
-# 例: bash trans.sh a.mp4 b.mp4 c.mp4
-#     bash trans.sh a.mp4 b.mp4 --skip 30
+# --skip SECONDS     全ファイルの冒頭をスキップ
+# --meeting-name NAME  指定すると文字起こし後に pm.db へ直接インポートし .md を削除（推奨）
+#                     省略すると従来通り .md ファイルを残す（セキュリティリスクあり）
+# 例: bash trans.sh a.mp4 b.mp4
+#     bash trans.sh a.mp4 --skip 30 --meeting-name Leader_Meeting
 #
 # パーティション選択: ai-l40s に空きがあれば優先、次に qc-gh200、
 # どちらも混雑していれば ai-l40s に投入する。
@@ -58,19 +60,26 @@ fi
 
 export SINGULARITY_BIND=/lvs0
 
-# 引数パース: --skip N を抽出し、残りをファイルリストとする
+# 引数パース: --skip N / --meeting-name NAME を抽出し、残りをファイルリストとする
 SKIP_SECONDS=""
+MEETING_NAME=""
 FILES=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip) SKIP_SECONDS="$2"; shift 2 ;;
-    *)      FILES+=("$1"); shift ;;
+    --skip)         SKIP_SECONDS="$2"; shift 2 ;;
+    --meeting-name) MEETING_NAME="$2";  shift 2 ;;
+    *)              FILES+=("$1"); shift ;;
   esac
 done
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
-  echo "Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS]"
+  echo "Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME]"
   exit 1
+fi
+
+if [[ -z "$MEETING_NAME" ]]; then
+  echo "[WARN] --meeting-name が未指定です。文字起こし結果が .md ファイルとして平文で残ります。"
+  echo "[WARN]   推奨: --meeting-name Leader_Meeting 等を指定すると pm.db に直接保存し .md を削除します。"
 fi
 
 echo "処理対象: ${#FILES[@]} ファイル"
@@ -116,6 +125,33 @@ EOF
   if [[ $STATUS -eq 0 ]]; then
     echo "完了: $BASENAME.md"
     SUCCESS=$((SUCCESS + 1))
+
+    if [[ -n "$MEETING_NAME" ]]; then
+      # ファイル名から YYYYMMDD を抽出して YYYY-MM-DD に変換（GMT20260302-... パターン）
+      HELD_AT=$(basename "$INPUT_ABS" | grep -oP '(?<=GMT)\d{8}' | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')
+      if [[ -z "$HELD_AT" ]]; then
+        HELD_AT=$(date +%Y-%m-%d)
+        echo "[INFO] ファイル名から日付を抽出できませんでした。本日の日付を使用: $HELD_AT"
+      fi
+
+      SCRIPT_DIR=$(dirname "$(realpath "$WHISPER_VAD")")
+      VENV_PYTHON=~/.venv_x86_64/bin/python3
+      PM_IMPORT="$SCRIPT_DIR/pm_meeting_import.py"
+      PM_DB="$SCRIPT_DIR/../data/pm.db"
+
+      echo "[INFO] pm.db へインポート中: $MEETING_NAME ($HELD_AT)"
+      "$VENV_PYTHON" "$PM_IMPORT" "$BASENAME.md" \
+        --meeting-name "$MEETING_NAME" \
+        --held-at "$HELD_AT" \
+        --db "$PM_DB"
+
+      if [[ $? -eq 0 ]]; then
+        rm -f "$BASENAME.md"
+        echo "[INFO] 文字起こし結果を pm.db に保存し、$BASENAME.md を削除しました"
+      else
+        echo "[WARN] pm.db へのインポートに失敗しました。$BASENAME.md は保持されています"
+      fi
+    fi
   else
     echo "失敗 (exit=$STATUS): $INPUT_ABS"
     FAIL=$((FAIL + 1))

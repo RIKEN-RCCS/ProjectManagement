@@ -35,6 +35,7 @@ import re
 import sqlite3
 import sys
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from slack_bolt import App
@@ -187,6 +188,19 @@ def is_close_keyword(note: str) -> bool:
 # --------------------------------------------------------------------------- #
 # pm.db 更新
 # --------------------------------------------------------------------------- #
+_AUDIT_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    record_id  TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    changed_at TEXT NOT NULL,
+    source     TEXT
+)"""
+
+
 def open_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     if not db_path.exists():
         print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
@@ -194,7 +208,33 @@ def open_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     return open_db(
         db_path,
         encrypt=not no_encrypt,
-        migrations=["ALTER TABLE action_items ADD COLUMN note TEXT"],
+        migrations=[
+            "ALTER TABLE action_items ADD COLUMN note TEXT",
+            _AUDIT_LOG_DDL,
+        ],
+    )
+
+
+def write_audit_log(
+    conn: sqlite3.Connection,
+    record_id: int,
+    field: str,
+    old_value,
+    new_value,
+    source: str,
+) -> None:
+    """変更前の値を audit_log に記録する（dry_run 時は呼ばない）"""
+    conn.execute(
+        "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
+        " VALUES ('action_items', ?, ?, ?, ?, ?, ?)",
+        (
+            str(record_id),
+            field,
+            str(old_value) if old_value is not None else None,
+            str(new_value) if new_value is not None else None,
+            datetime.now(timezone.utc).isoformat(),
+            source,
+        ),
     )
 
 
@@ -255,6 +295,12 @@ def update_action_item(
         return "unchanged", []
 
     if not dry_run:
+        for field, new_val in updates.items():
+            try:
+                old_val = row[field]
+            except (IndexError, KeyError):
+                old_val = None
+            write_audit_log(conn, ai_id, field, old_val, new_val, "canvas_sync")
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [ai_id]
         conn.execute(f"UPDATE action_items SET {set_clause} WHERE id = ?", values)
