@@ -112,7 +112,20 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 - 西田 拓展	Takuhiro Nishida	takuhiro.nishida@riken.jp: 次世代計算基盤部門 マネジメント室
 
 * 富士通株式会社
-- 福本 尚人 Naoto Fukumoto fukumoto.naoto@fujitsu.com: アプリケーションエリア担当技術者
+- 本藤 幹雄 Mikio Hondou hondou@fujitsu.com: マイクロ・ノードアーキテクチャリーダー
+- 草野 義博 Yoshihiro Kusano kusano-y@fujitsu.com
+- 加瀬 将 Masaru Kase kase.masaru@fujitsu.com
+- 三木 淳司 Atsushi Miki miki-atsushi@fujitsu.com
+- 稲垣 貴範 Takanori Inagaki i-takanori@fujitsu.com
+- 福本 尚人 Naoto Fukumoto fukumoto.naoto@fujitsu.com: コデザインリーダー
+- 五味 照義 Teruyoshi Gomi gomi.teruyoshi@fujitsu.com
+- 中村 洸介 Kosuke Nakamura nakamura.kosuke@fujitsu.com
+- 淋 靖英  Yasuhide Sosogi sosogi.yasuhide@fujitsu.com
+- 佐藤 賢太 Sato Kenta sato.kenta@fujitsu.com
+- 安島 雄一郎 Yuichiro Ajima aji@fujitsu.com: システム・ネットワークリーダー
+- 山中 栄次 Eiji Yamanaka e-yamanaka@fujitsu.com
+- 小村 幸浩 Yukihiro Komura y_komura@fujitsu.com
+- 津金 佳祐 Tsugane, Keisuke tsugane.keisuke@fujitsu.com
 
 * NVIDIA
 - 成瀬 彰 Akira Naruse anaruse@nvidia.com: アプリケーションエリア担当技術者
@@ -183,8 +196,6 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 - Block2_Meeting: 不定期、HPCアプリケーションWGのブロック2の打合せ
 - SubWG_Meeting: 不定期、HPCアプリケーションWGのSubWGの打合せ
 - BenchmarkWG_Meeting: 不定期、ベンチマークWGの打合せ
-- Co-design_RF_Syncup_Meeting: 月1回、コデザイン検討会議 3者会議の富士通との準備会議
-- Co-design_RN_Syncup_Meeting: 月1回、コデザイン検討会議 3者会議のNVIDIAとの準備会議
 - Co-design_Review_Meeting: 月1回、コデザイン検討会議本番(3者会議)
 
 ### チャンネルID・Canvas IDの調べ方
