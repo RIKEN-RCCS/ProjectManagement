@@ -54,8 +54,10 @@ WHISPER_VAD=/lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/whis
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
   SIFFILE1=/lvs0/rccs-sdt/hikaru.inoue/cpu_aarch64/singularity/whisper.sif
+  PYTHON3=/home/users/hikaru.inoue/.venv_aarch64/bin/python3
 elif [[ "$ARCH" == "x86_64" ]]; then
   SIFFILE1=/lvs0/rccs-sdt/hikaru.inoue/cpu_amd64/singularity/whisper.sif
+  PYTHON3=/home/users/hikaru.inoue/.venv_x86_64/bin/python3
 else
   echo "Unknown architecture: $ARCH"; exit 1
 fi
@@ -150,12 +152,12 @@ EOF
       fi
 
       SCRIPT_DIR=$(dirname "$(realpath "$WHISPER_VAD")")
-      VENV_PYTHON=~/.venv_x86_64/bin/python3
+#     VENV_PYTHON=~/.venv_x86_64/bin/python3
       PM_IMPORT="$SCRIPT_DIR/pm_meeting_import.py"
       PM_DB="$SCRIPT_DIR/../data/pm.db"
 
       echo "[INFO] pm.db へインポート中: $MEETING_NAME ($DATE_TO_USE)"
-      "$VENV_PYTHON" "$PM_IMPORT" "$BASENAME.md" \
+      "$PYTHON3" "$PM_IMPORT" "$BASENAME.md" \
         --meeting-name "$MEETING_NAME" \
         --held-at "$DATE_TO_USE" \
         --db "$PM_DB"
