@@ -47,6 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import open_db
+from cli_utils import add_no_encrypt_arg, add_dry_run_arg, add_since_arg
 
 # 編集可能なフィールド一覧
 EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status"]
@@ -104,14 +105,21 @@ def milestone_header(milestones: list[dict]) -> str:
     return "# Milestones: " + " / ".join(parts)
 
 
-def fetch_action_items(conn, all_items: bool) -> list[dict]:
-    where = "" if all_items else "WHERE a.milestone_id IS NULL"
+def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[dict]:
+    conds = []
+    params = []
+    if not all_items:
+        conds.append("a.milestone_id IS NULL")
+    if since:
+        conds.append("a.extracted_at >= ?")
+        params.append(since)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
     rows = conn.execute(f"""
         SELECT a.id, a.assignee, a.due_date, a.milestone_id, a.status, a.content
         FROM action_items a
         {where}
         ORDER BY a.due_date IS NULL, a.due_date, a.id
-    """).fetchall()
+    """, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -119,13 +127,14 @@ def fetch_action_items(conn, all_items: bool) -> list[dict]:
 # エクスポート
 # --------------------------------------------------------------------------- #
 
-def cmd_export(conn, all_items: bool, output_path: Path):
+def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = None):
     milestones = fetch_milestones(conn)
-    items = fetch_action_items(conn, all_items)
+    items = fetch_action_items(conn, all_items, since=since)
 
     if not items:
         label = "全件" if all_items else "milestone_id IS NULL"
-        print(f"[INFO] 対象アイテムなし（{label}）")
+        since_msg = f", since={since}" if since else ""
+        print(f"[INFO] 対象アイテムなし（{label}{since_msg}）")
         return
 
     lines = []
@@ -152,7 +161,8 @@ def cmd_export(conn, all_items: bool, output_path: Path):
     output_path.write_text(text, encoding="utf-8")
 
     label = "全件" if all_items else "milestone_id IS NULL のみ"
-    print(f"[INFO] {len(items)} 件をエクスポートしました（{label}）: {output_path}")
+    since_msg = f", since={since}" if since else ""
+    print(f"[INFO] {len(items)} 件をエクスポートしました（{label}{since_msg}）: {output_path}")
     print(f"[INFO] 各列を編集後、--import で反映してください")
 
 
@@ -274,6 +284,30 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
 
 
 # --------------------------------------------------------------------------- #
+# リスト表示
+# --------------------------------------------------------------------------- #
+
+def cmd_list(conn, all_items: bool, since: str | None = None):
+    """アクションアイテムをターミナル向け整形テキストで一覧表示する"""
+    items = fetch_action_items(conn, all_items, since=since)
+    label = "全件" if all_items else "milestone_id IS NULL のみ"
+    since_msg = f"（since={since}）" if since else ""
+    print(f"アクションアイテム一覧（{label}{since_msg}）")
+    print("─" * 80)
+    print(f"{'ID':>4}  {'担当者':<12}  {'期限':<12}  {'MS':<4}  {'状況':<6}  内容")
+    print("-" * 80)
+    for item in items:
+        ai_id    = item["id"]
+        assignee = (item["assignee"] or "(未定)")[:12]
+        due      = (item["due_date"] or "(なし)")[:12]
+        ms       = (item["milestone_id"] or "-")[:4]
+        status   = (item["status"] or "")[:6]
+        content  = (item["content"] or "")[:50]
+        print(f"{ai_id:>4}  {assignee:<12}  {due:<12}  {ms:<4}  {status:<6}  {content}")
+    print(f"\n合計: {len(items)} 件")
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 
@@ -284,22 +318,26 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--export", action="store_true", help="CSVにエクスポート")
     group.add_argument("--import", dest="import_path", metavar="PATH", help="CSVを読み込んでDBを更新")
+    group.add_argument("--list", action="store_true", help="アクションアイテムをターミナルに一覧表示")
 
     parser.add_argument("--all", action="store_true",
-                        help="--export 時に全件対象（デフォルトは milestone_id IS NULL のみ）")
+                        help="--export / --list 時に全件対象（デフォルトは milestone_id IS NULL のみ）")
     parser.add_argument("--output", default="relink.csv", metavar="PATH",
                         help="--export 時の出力ファイルパス（デフォルト: relink.csv）")
     parser.add_argument("--db", default="data/pm.db", metavar="PATH",
                         help="pm.db のパス（デフォルト: data/pm.db）")
-    parser.add_argument("--no-encrypt", action="store_true", help="平文モード（暗号化なし）")
-    parser.add_argument("--dry-run", action="store_true", help="DB更新なし・変更内容を表示のみ")
+    add_no_encrypt_arg(parser)
+    add_dry_run_arg(parser)
+    add_since_arg(parser, "（--export / --list 時のフィルタ）")
 
     args = parser.parse_args()
 
     conn = open_db(args.db, encrypt=not args.no_encrypt, migrations=[_AUDIT_LOG_DDL])
 
     if args.export:
-        cmd_export(conn, args.all, Path(args.output))
+        cmd_export(conn, args.all, Path(args.output), since=args.since)
+    elif args.list:
+        cmd_list(conn, args.all, since=args.since)
     else:
         cmd_import(conn, Path(args.import_path), args.dry_run)
 

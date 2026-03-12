@@ -290,6 +290,9 @@ if __name__ == "__main__":
     import argparse
     import sys
 
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from cli_utils import make_logger
+
     parser = argparse.ArgumentParser(description="db_utils CLI")
     parser.add_argument("--gen-key", action="store_true", help="暗号化鍵を生成して保存する")
     parser.add_argument("--show-key-path", action="store_true", help="鍵ファイルのパスを表示する")
@@ -302,6 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=30, metavar="N", help="--audit-log 時の表示件数（デフォルト: 30）")
     parser.add_argument("--source", metavar="SOURCE", help="--audit-log 時にソースで絞り込む（canvas_sync / relink）")
     parser.add_argument("--id", type=int, metavar="ID", help="--audit-log 時にアクションアイテムIDで絞り込む")
+    parser.add_argument("--output", default=None, metavar="PATH", help="--audit-log 時に出力をファイルにも保存")
     args = parser.parse_args()
 
     if args.gen_key:
@@ -363,15 +367,18 @@ if __name__ == "__main__":
             params,
         ).fetchall()
         conn.close()
+        log, close_log = make_logger(args.output)
         if not rows:
-            print("該当する変更履歴はありません。")
+            log("該当する変更履歴はありません。")
+            close_log()
             sys.exit(0)
-        print(f"{'日時':20s}  {'ソース':12s}  {'ID':4s}  {'フィールド':15s}  {'変更前':20s}  変更後")
-        print("-" * 90)
+        log(f"{'日時':20s}  {'ソース':12s}  {'ID':4s}  {'フィールド':15s}  {'変更前':20s}  変更後")
+        log("-" * 90)
         for r in rows:
             dt = r["changed_at"][:19].replace("T", " ")
             old = str(r["old_value"]) if r["old_value"] is not None else "NULL"
             new = str(r["new_value"]) if r["new_value"] is not None else "NULL"
-            print(f"{dt:20s}  {r['source']:12s}  {r['record_id']:4s}  {r['field']:15s}  {old:20s}  {new}")
+            log(f"{dt:20s}  {r['source']:12s}  {r['record_id']:4s}  {r['field']:15s}  {old:20s}  {new}")
+        close_log()
     else:
         parser.print_help()

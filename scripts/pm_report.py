@@ -36,6 +36,7 @@ from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
 
 # --------------------------------------------------------------------------- #
 # 定数・パス解決
@@ -565,22 +566,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="pm.db → 進捗レポート・アジェンダ生成・Canvas投稿")
     parser.add_argument("--db", default=None, help="pm.db のパス")
     parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="投稿先 Canvas ID")
-    parser.add_argument("--since", default=None, help="この日付以降のデータのみ対象 (YYYY-MM-DD)")
+    add_since_arg(parser)
     parser.add_argument("--skip-canvas", action="store_true", help="Canvas 投稿をスキップ")
-    parser.add_argument("--dry-run", action="store_true", help="Canvas 投稿なし・結果を標準出力のみ")
-    parser.add_argument("--output", default=None, help="出力をファイルにも保存")
-    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
+    add_dry_run_arg(parser)
+    add_output_arg(parser)
+    add_no_encrypt_arg(parser)
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_PM_DB
     today = date.today().isoformat()
 
-    output_file = open(args.output, "w", encoding="utf-8") if args.output else None
-
-    def log(msg: str = "") -> None:
-        print(msg)
-        if output_file:
-            output_file.write(msg + "\n")
+    log, close_log = make_logger(args.output)
 
     log(f"[INFO] pm.db     : {db_path}")
     log(f"[INFO] since     : {args.since or '全期間'}")
@@ -612,14 +608,11 @@ def main() -> None:
 
     if args.dry_run or args.skip_canvas:
         log("[INFO] Canvas 投稿をスキップしました")
-        if output_file:
-            output_file.close()
+        close_log()
         return
 
     post_to_canvas(args.canvas_id, report)
-
-    if output_file:
-        output_file.close()
+    close_log()
 
 
 if __name__ == "__main__":

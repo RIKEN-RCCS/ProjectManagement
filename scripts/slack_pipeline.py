@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
+from cli_utils import add_no_encrypt_arg, make_logger
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -92,8 +93,11 @@ def parse_args():
                         help="全スレッドを強制的に再要約（差分無視）")
     parser.add_argument("--skip-canvas", action="store_true", default=False,
                         help="Canvas 投稿をスキップ")
-    parser.add_argument("--no-encrypt", action="store_true", default=False,
-                        help="DBを暗号化しない（平文モード）")
+    add_no_encrypt_arg(parser)
+    parser.add_argument("--output", default=None, metavar="PATH",
+                        help="全体要約をファイルにも保存")
+    parser.add_argument("--dry-run", action="store_true", default=False,
+                        help="Canvas 投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される）")
     return parser.parse_args()
 
 
@@ -899,24 +903,31 @@ async def main():
     if summarized_count == 0 and not args.force_resummary:
         print("差分なし: 既存サマリーをそのままCanvasに投稿します")
 
-    if args.skip_canvas:
-        print("Canvas 投稿: スキップ")
+    if args.skip_canvas or args.dry_run:
+        print("Canvas 投稿: スキップ" + (" (--dry-run)" if args.dry_run else ""))
     else:
         final_summary = build_overall_summary(conn, channel_id)
 
         # Markdown ファイルとしても保存（デバッグ・履歴用）
         retrieved_at = datetime.now().isoformat()
+        header = (
+            "# Slackチャンネル全体要約\n\n"
+            f"チャンネルID: {channel_id}\n\n"
+            f"生成日時: {retrieved_at}\n\n"
+            f"総スレッド数: {total_summaries}\n\n"
+            "---\n\n"
+            + final_summary + "\n"
+        )
         with open(overall_path, "w", encoding="utf-8") as f:
-            f.write("# Slackチャンネル全体要約\n\n")
-            f.write(f"チャンネルID: {channel_id}\n\n")
-            f.write(f"生成日時: {retrieved_at}\n\n")
-            f.write(f"総スレッド数: {total_summaries}\n\n")
-            f.write("---\n\n")
-            f.write(final_summary + "\n")
+            f.write(header)
         print(f"✓ 全体要約を {overall_path} に保存しました")
 
-        with open(overall_path, "r", encoding="utf-8") as f:
-            markdown_content = f.read()
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(header)
+            print(f"✓ 全体要約を {args.output} にも保存しました")
+
+        markdown_content = header
         post_to_canvas(args.canvas_id, markdown_content)
 
     conn.close()
