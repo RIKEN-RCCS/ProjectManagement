@@ -22,7 +22,7 @@
 
 ### フェーズ4: インポート済み議事録の記録（実装済み）
 
-- `pm_meeting_bulk_import.py --list` で pm.db にインポート済みの議事録一覧を表示できる
+- `pm_meeting_import.py --list` で pm.db にインポート済みの議事録一覧を表示できる
   - `meetings` テーブルの `file_path` / `parsed_at` をクエリして表示
   - 開催日・会議種別・アクションアイテム数・決定事項数・登録日時・ファイルパスを一覧表示
   - `--since YYYY-MM-DD` と組み合わせて期間絞り込みも可能
@@ -30,10 +30,10 @@
 
 ```sh
 # インポート済み議事録の一覧表示
-python3 scripts/pm_meeting_bulk_import.py --list
+python3 scripts/pm_meeting_import.py --list
 
 # 特定日付以降のみ表示
-python3 scripts/pm_meeting_bulk_import.py --list --since 2026-02-01
+python3 scripts/pm_meeting_import.py --list --since 2026-02-01
 ```
 
 ### フェーズ5: ゴール・マイルストーン管理と達成状況トラッキング（実装済み）
