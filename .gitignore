@@ -2,11 +2,8 @@
 data/*.db
 
 # Meeting transcripts and audio (機密性2)
-meetings/*.md
-meetings/*.txt
-meetings/*.m4a
-meetings/*.mp4
-meetings/*.wav
+meetings
+docs/project.md
 
 # Generated summary files
 data/slack_summarize*.md
