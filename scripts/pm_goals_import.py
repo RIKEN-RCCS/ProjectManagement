@@ -37,6 +37,7 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, make_logger
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GOALS_FILE = REPO_ROOT / "goals.yaml"
@@ -80,7 +81,7 @@ def load_goals_yaml(goals_file: Path) -> dict:
         return yaml.safe_load(f)
 
 
-def list_registered(db_path: Path, no_encrypt: bool) -> None:
+def list_registered(db_path: Path, no_encrypt: bool, log=print) -> None:
     """pm.db に登録済みのゴール・マイルストーン一覧を表示する"""
     if not db_path.exists():
         print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
@@ -104,16 +105,16 @@ def list_registered(db_path: Path, no_encrypt: bool) -> None:
     conn.close()
 
     if not goals:
-        print("登録済みゴールはありません。pm_goals_import.py を実行してください。")
+        log("登録済みゴールはありません。pm_goals_import.py を実行してください。")
         return
 
     for g in goals:
-        print(f"\n[{g['goal_id']}] {g['name']}")
+        log(f"\n[{g['goal_id']}] {g['name']}")
         if g["description"]:
-            print(f"     {g['description'][:80].strip()}")
+            log(f"     {g['description'][:80].strip()}")
 
-    print(f"\n{'ID':<4} {'マイルストーン':<30} {'期限':<12} {'状況':<8} {'完了/計':<8}  エリア")
-    print("-" * 90)
+    log(f"\n{'ID':<4} {'マイルストーン':<30} {'期限':<12} {'状況':<8} {'完了/計':<8}  エリア")
+    log("-" * 90)
     for m in milestones:
         mid        = m["milestone_id"]
         name       = (m["name"] or "")[:28]
@@ -135,37 +136,41 @@ def list_registered(db_path: Path, no_encrypt: bool) -> None:
         else:
             mark = "進行中"
 
-        print(f"{mid:<4} {name:<30} {due:<12} {mark:<8} {ratio:<8}  {area}")
+        log(f"{mid:<4} {name:<30} {due:<12} {mark:<8} {ratio:<8}  {area}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="goals.yaml を pm.db に読み込む")
     parser.add_argument("--goals-file", default=None, help="goals.yaml のパス")
     parser.add_argument("--db", default=None, help="pm.db のパス")
-    parser.add_argument("--dry-run", action="store_true", help="DB保存なし・内容表示のみ")
+    add_dry_run_arg(parser)
     parser.add_argument("--list", action="store_true", help="登録済み一覧を表示して終了")
-    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
+    add_no_encrypt_arg(parser)
+    add_output_arg(parser)
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_PM_DB
+    log, close_log = make_logger(args.output)
 
     if args.list:
-        list_registered(db_path, args.no_encrypt)
+        list_registered(db_path, args.no_encrypt, log=log)
+        close_log()
         return
 
     goals_file = Path(args.goals_file) if args.goals_file else DEFAULT_GOALS_FILE
     if not goals_file.exists():
         print(f"ERROR: goals.yaml が見つかりません: {goals_file}", file=sys.stderr)
+        close_log()
         sys.exit(1)
 
     data = load_goals_yaml(goals_file)
     goals = data.get("goals", [])
     milestones = data.get("milestones", [])
 
-    print(f"[INFO] goals.yaml   : {goals_file}")
-    print(f"[INFO] pm.db        : {db_path}")
-    print(f"[INFO] ゴール       : {len(goals)} 件")
-    print(f"[INFO] マイルストーン: {len(milestones)} 件")
+    log(f"[INFO] goals.yaml   : {goals_file}")
+    log(f"[INFO] pm.db        : {db_path}")
+    log(f"[INFO] ゴール       : {len(goals)} 件")
+    log(f"[INFO] マイルストーン: {len(milestones)} 件")
 
     yaml_goal_ids = {g["id"] for g in goals}
     yaml_ms_ids   = {m["id"] for m in milestones}
@@ -179,22 +184,23 @@ def main() -> None:
     obsolete_ms    = db_ms_ids   - yaml_ms_ids
 
     if args.dry_run:
-        print("\n-- ゴール（追加/更新）--")
+        log("\n-- ゴール（追加/更新）--")
         for g in goals:
-            print(f"  [{g['id']}] {g['name']}")
-        print("\n-- マイルストーン（追加/更新）--")
+            log(f"  [{g['id']}] {g['name']}")
+        log("\n-- マイルストーン（追加/更新）--")
         for m in milestones:
-            print(f"  [{m['id']}] {m['name']}  期限: {m.get('due_date', '未定')}  エリア: {m.get('area', '')}")
+            log(f"  [{m['id']}] {m['name']}  期限: {m.get('due_date', '未定')}  エリア: {m.get('area', '')}")
         if obsolete_goals:
-            print("\n-- ゴール（削除予定）--")
+            log("\n-- ゴール（削除予定）--")
             for gid in obsolete_goals:
-                print(f"  [{gid}] DBから削除されます")
+                log(f"  [{gid}] DBから削除されます")
         if obsolete_ms:
-            print("\n-- マイルストーン（削除予定）--")
+            log("\n-- マイルストーン（削除予定）--")
             for mid in obsolete_ms:
-                print(f"  [{mid}] DBから削除されます（紐づいた action_items の milestone_id は NULL になります）")
-        print("\n[INFO] --dry-run のためDB保存をスキップしました")
+                log(f"  [{mid}] DBから削除されます（紐づいた action_items の milestone_id は NULL になります）")
+        log("\n[INFO] --dry-run のためDB保存をスキップしました")
         conn.close()
+        close_log()
         return
 
     now = datetime.now().isoformat()
@@ -207,7 +213,7 @@ def main() -> None:
             """,
             (g["id"], g["name"], g.get("description", ""), now),
         )
-        print(f"  [ゴール] {g['id']}: {g['name']}")
+        log(f"  [ゴール] {g['id']}: {g['name']}")
 
     for m in milestones:
         criteria_json = json.dumps(m.get("success_criteria", []), ensure_ascii=False)
@@ -227,21 +233,22 @@ def main() -> None:
                 now,
             ),
         )
-        print(f"  [MS] {m['id']}: {m['name']}  期限: {m.get('due_date', '未定')}")
+        log(f"  [MS] {m['id']}: {m['name']}  期限: {m.get('due_date', '未定')}")
 
     # yaml にないゴール・マイルストーンをDBから削除（完全同期）
     for gid in obsolete_goals:
         conn.execute("DELETE FROM goals WHERE goal_id = ?", (gid,))
-        print(f"  [削除] ゴール {gid}")
+        log(f"  [削除] ゴール {gid}")
     for mid in obsolete_ms:
         # 紐づいた action_items の milestone_id を NULL に
         conn.execute("UPDATE action_items SET milestone_id = NULL WHERE milestone_id = ?", (mid,))
         conn.execute("DELETE FROM milestones WHERE milestone_id = ?", (mid,))
-        print(f"  [削除] マイルストーン {mid}（紐づき action_items の milestone_id を NULL に更新）")
+        log(f"  [削除] マイルストーン {mid}（紐づき action_items の milestone_id を NULL に更新）")
 
     conn.commit()
     conn.close()
-    print(f"\n✓ pm.db に同期完了: {db_path}")
+    log(f"\n✓ pm.db に同期完了: {db_path}")
+    close_log()
 
 
 if __name__ == "__main__":

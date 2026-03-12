@@ -43,6 +43,7 @@ from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, make_logger
 
 # --------------------------------------------------------------------------- #
 # 定数
@@ -322,31 +323,35 @@ def main() -> None:
     )
     parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="対象 Canvas ID")
     parser.add_argument("--db", default=None, help="pm.db のパス")
-    parser.add_argument("--dry-run", action="store_true", help="DB保存なし・結果を標準出力のみ")
-    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
+    add_dry_run_arg(parser)
+    add_no_encrypt_arg(parser)
+    add_output_arg(parser)
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_PM_DB
+    log, close_log = make_logger(args.output)
 
-    print(f"[INFO] Canvas ID : {args.canvas_id}")
-    print(f"[INFO] pm.db     : {db_path}")
+    log(f"[INFO] Canvas ID : {args.canvas_id}")
+    log(f"[INFO] pm.db     : {db_path}")
     if args.dry_run:
-        print("[INFO] --dry-run モード（DB更新なし）")
+        log("[INFO] --dry-run モード（DB更新なし）")
 
-    print("\n[INFO] Canvas を取得中...")
+    log("\n[INFO] Canvas を取得中...")
     content = fetch_canvas_content(args.canvas_id)
 
     if not content:
         print("ERROR: Canvas の内容を取得できませんでした", file=sys.stderr)
+        close_log()
         sys.exit(1)
 
-    print(f"[INFO] 取得完了 ({len(content)} 文字)")
+    log(f"[INFO] 取得完了 ({len(content)} 文字)")
 
     items = parse_action_items_table(content)
-    print(f"[INFO] テーブルから読み込んだアクションアイテム: {len(items)} 件")
+    log(f"[INFO] テーブルから読み込んだアクションアイテム: {len(items)} 件")
 
     if not items:
-        print("更新対象なし。終了します。")
+        log("更新対象なし。終了します。")
+        close_log()
         return
 
     conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
@@ -367,28 +372,29 @@ def main() -> None:
         )
 
         if result == "closed":
-            print(f"  [完了] ID={ai_id} → status='closed'  note='{item['note']}'  変更={changed}")
+            log(f"  [完了] ID={ai_id} → status='closed'  note='{item['note']}'  変更={changed}")
             closed_count += 1
         elif result == "noted":
-            print(f"  [メモ] ID={ai_id} → note='{item['note']}'  変更={changed}")
+            log(f"  [メモ] ID={ai_id} → note='{item['note']}'  変更={changed}")
             noted_count += 1
         elif result == "updated":
-            print(f"  [更新] ID={ai_id} → 変更={changed}")
+            log(f"  [更新] ID={ai_id} → 変更={changed}")
             updated_count += 1
         elif result == "unchanged":
             unchanged_count += 1
         else:
-            print(f"  [未検出] ID={ai_id} は pm.db に存在しません")
+            log(f"  [未検出] ID={ai_id} は pm.db に存在しません")
             not_found_count += 1
 
     conn.close()
 
-    print(
+    log(
         f"\n完了: 完了マーク={closed_count}件, メモ保存={noted_count}件, "
         f"フィールド更新={updated_count}件, 変更なし={unchanged_count}件, 未検出={not_found_count}件"
     )
     if args.dry_run:
-        print("[INFO] --dry-run のため DB保存をスキップしました")
+        log("[INFO] --dry-run のため DB保存をスキップしました")
+    close_log()
 
 
 if __name__ == "__main__":

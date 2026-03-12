@@ -47,6 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
 
 
 def normalize_assignee(name: str | None) -> str | None:
@@ -587,16 +588,12 @@ def main():
                         help="一括処理モード（meetings/ ディレクトリ内を全て処理）")
     parser.add_argument("--meetings-dir", default=None,
                         help="一括処理時の議事録ディレクトリ（デフォルト: meetings/）")
-    parser.add_argument("--since", default=None,
-                        help="この日付以降のみ対象 YYYY-MM-DD（--bulk / --list 時）")
+    add_since_arg(parser, "（--bulk / --list 時）")
     parser.add_argument("--db", default=None, help="pm.db のパス")
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="DB保存なし・結果を標準出力のみ")
-    parser.add_argument("--output", default=None,
-                        help="出力をファイルにも保存（単一ファイルモードのみ）")
-    parser.add_argument("--no-encrypt", action="store_true",
-                        help="DBを暗号化しない（平文モード）")
+    add_dry_run_arg(parser)
+    add_output_arg(parser)
+    add_no_encrypt_arg(parser)
     parser.add_argument("--list", action="store_true",
                         help="インポート済み議事録一覧を表示して終了")
     parser.add_argument("--delete", default=None, metavar="MEETING_ID",
@@ -672,14 +669,7 @@ def main():
     held_at = args.held_at or infer_date_from_filename(input_path)
     kind = args.meeting_name or "不明"
 
-    output_file = open(args.output, "w", encoding="utf-8") if args.output else None
-
-    if output_file:
-        def log(msg: str = "") -> None:
-            print(msg)
-            output_file.write(msg + "\n")
-    else:
-        log = print
+    log, close_log = make_logger(args.output)
 
     status = process_file(
         input_path, held_at, kind, db_path,
@@ -687,8 +677,7 @@ def main():
         no_encrypt=args.no_encrypt, log=log,
     )
 
-    if output_file:
-        output_file.close()
+    close_log()
 
     if status == "error":
         sys.exit(1)
