@@ -1,6 +1,6 @@
 # ProjectManagement
 
-富岳NEXTプロジェクトのプロジェクトマネジメント支援システム。
+プロジェクトマネジメント支援システム。
 
 ---
 
@@ -82,7 +82,7 @@ source ~/.secrets/slack_tokens.sh
 python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db
 ```
 
-#### 1.2. チャンネルごとのDBからアクションアイテムを抽出しPM.DBへ登録
+#### 1.2. チャンネルごとのDBからアクションアイテムを抽出し pm.db へ登録
 
 ```sh
 source ~/.secrets/slack_tokens.sh
@@ -92,7 +92,7 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT
 python3 scripts/pm_extractor.py -c C08SXA4M7JT --list
 ```
 
-### 2. 会議議事録の処理：録音を文字起こし → pm.db へ直接インポート（推奨）
+### 2. 会議議事録の処理：録音を文字起こし → pm.db へ登録
 
 #### a. 一括処理（推奨方式）
 
@@ -109,7 +109,7 @@ sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_M
 sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
 ```
 
-#### b. 議事録ファイルを pm.db へ個別に登録する
+#### b. 議事録ファイル(Markdown形式)を pm.db へ登録
 
 .md ファイルを後から pm.db に一括登録する場合:
 
@@ -122,7 +122,7 @@ python3 scripts/pm_meeting_import.py --bulk --since 2026-01-01
 
 ### 3. プロジェクトのゴール・マイルストーンの更新
 
-`goals.yaml` を編集・承認したら pm.db に同期する。
+`goals.yaml` を編集・承認したら pm.db に登録
 
 ```sh
 # 変更内容の確認（DB操作なし）
@@ -158,7 +158,7 @@ python3 scripts/pm_report.py --canvas-id F0AAD2494VB
 
 上記以外の記入はメモとして`note`列に保存（statusはopenのまま）。
 
-#### 4.3. 会議後: Canvas上の記入内容を pm.db に反映
+#### 4.3. 会議後: Canvas上の変更内容を pm.db に反映
 
 ```sh
 source ~/.secrets/slack_tokens.sh
