@@ -174,13 +174,19 @@ python3 scripts/pm_sync_canvas.py --dry-run
 
 Canvas上で変更可能な列: **担当者・内容・期限・マイルストーン（M1〜M5）・対応状況**（非空かつDB値と異なる場合のみ更新）
 
-### 7. マイルストーン紐づけの一括編集（pm_relink.py）
+### 7. アクションアイテムの一括編集（pm_relink.py）
 
-インポート済みのアクションアイテムとマイルストーンの紐づけをCSV経由で一括編集する。LLMは使用しない。
+インポート済みのアクションアイテムの各フィールドをCSV経由で一括編集する。LLMは使用しない。
 
-**仕様**:
-- `milestone_id` 列に `M1`〜`M5` を記入 → その値で上書き
-- `milestone_id` 列を空欄 → `NULL` で上書き（紐づけ解除）
+**編集可能なフィールド**:
+
+| フィールド | 空欄の扱い |
+|---|---|
+| `assignee` | NULL（担当者なし） |
+| `due_date` | NULL（期限なし） |
+| `milestone_id` | NULL（紐づけ解除） |
+| `content` | スキップ（変更なし） |
+| `status` | スキップ（変更なし）。`open` / `closed` を推奨 |
 
 ```sh
 # milestone_id が未設定のアイテムをCSVにエクスポート（デフォルト: relink.csv）

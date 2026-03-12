@@ -250,7 +250,7 @@ slack/
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿
 │   ├── pm_sync_canvas.py            # Canvas「対応状況」「マイルストーン」列 → pm.db 同期
-│   ├── pm_relink.py                 # アクションアイテムとマイルストーンの紐づけをCSV経由で一括編集（LLM不使用）
+│   ├── pm_relink.py                 # アクションアイテムの各フィールド（担当者・期限・内容・マイルストーン等）をCSV経由で一括編集（LLM不使用）
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
 │   ├── trans.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト（whisper_vad.pyを呼び出す）

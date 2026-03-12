@@ -2,8 +2,10 @@
 """
 pm_relink.py
 
-アクションアイテムとマイルストーンの紐づけをCSVを介して一括編集する。
+アクションアイテムの各フィールドをCSVを介して一括編集する。
 LLMは使用しない。
+
+編集可能なフィールド: assignee / due_date / milestone_id / content / status
 
 Usage:
     # 未紐づけ（milestone_id IS NULL）のアイテムをCSVにエクスポート
@@ -26,18 +28,30 @@ Options:
     --db PATH           pm.db のパス（デフォルト: data/pm.db）
     --no-encrypt        平文モード（暗号化なし）
     --dry-run           DB更新なし・変更内容を表示のみ
+
+各列のNULL扱い:
+    assignee     空欄 → NULL（担当者なし）
+    due_date     空欄 → NULL（期限なし）
+    milestone_id 空欄 → NULL（紐づけ解除）
+    content      空欄の場合はスキップ（内容を空にはできない）
+    status       空欄の場合はスキップ。'open' または 'closed' を推奨
 """
 
 import argparse
 import csv
 import io
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-# scripts/ ディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import open_db
+
+# 編集可能なフィールド一覧
+EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status"]
+# 空欄をNULLとして扱うフィールド（content/statusは空欄→スキップ）
+NULLABLE_FIELDS = {"assignee", "due_date", "milestone_id"}
 
 _AUDIT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -93,7 +107,7 @@ def milestone_header(milestones: list[dict]) -> str:
 def fetch_action_items(conn, all_items: bool) -> list[dict]:
     where = "" if all_items else "WHERE a.milestone_id IS NULL"
     rows = conn.execute(f"""
-        SELECT a.id, a.assignee, a.due_date, a.milestone_id, a.content
+        SELECT a.id, a.assignee, a.due_date, a.milestone_id, a.status, a.content
         FROM action_items a
         {where}
         ORDER BY a.due_date IS NULL, a.due_date, a.id
@@ -116,16 +130,20 @@ def cmd_export(conn, all_items: bool, output_path: Path):
 
     lines = []
     lines.append(milestone_header(milestones))
+    lines.append("# 編集可能な列: assignee / due_date / milestone_id / content / status")
+    lines.append("# assignee / due_date / milestone_id は空欄 → NULL（解除）")
+    lines.append("# content / status は空欄の場合スキップ（変更なし）")
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(["id", "assignee", "due_date", "milestone_id", "content"])
+    writer.writerow(["id", "assignee", "due_date", "milestone_id", "status", "content"])
     for item in items:
         writer.writerow([
             item["id"],
             item["assignee"] or "",
             item["due_date"] or "",
             item["milestone_id"] or "",
+            item["status"] or "",
             item["content"] or "",
         ])
     lines.append(buf.getvalue().rstrip("\n"))
@@ -135,12 +153,28 @@ def cmd_export(conn, all_items: bool, output_path: Path):
 
     label = "全件" if all_items else "milestone_id IS NULL のみ"
     print(f"[INFO] {len(items)} 件をエクスポートしました（{label}）: {output_path}")
-    print(f"[INFO] milestone_id 列を編集後、--import で反映してください")
+    print(f"[INFO] 各列を編集後、--import で反映してください")
 
 
 # --------------------------------------------------------------------------- #
 # インポート
 # --------------------------------------------------------------------------- #
+
+def parse_row_values(row: dict) -> dict[str, str | None]:
+    """CSVの1行から更新すべきフィールドと値を返す（スキップは含めない）"""
+    result = {}
+    for field in EDITABLE_FIELDS:
+        if field not in row:
+            continue
+        raw = row[field].strip()
+        if field in NULLABLE_FIELDS:
+            result[field] = raw or None  # 空文字 → None
+        else:
+            # content / status: 空欄はスキップ（変更なし）
+            if raw:
+                result[field] = raw
+    return result
+
 
 def cmd_import(conn, csv_path: Path, dry_run: bool):
     if not csv_path.exists():
@@ -152,7 +186,7 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
     data_lines = [l for l in lines if not l.startswith("#")]
     reader = csv.DictReader(data_lines)
 
-    updates: list[tuple[str | None, int]] = []  # (new_milestone_id, id)
+    csv_rows: dict[int, dict[str, str | None]] = {}
     skipped = 0
 
     for row in reader:
@@ -162,61 +196,81 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
             print(f"[WARN] id が不正な行をスキップ: {row}", file=sys.stderr)
             skipped += 1
             continue
+        csv_rows[item_id] = parse_row_values(row)
 
-        new_mid = row.get("milestone_id", "").strip() or None
-        updates.append((new_mid, item_id))
-
-    if not updates:
+    if not csv_rows:
         print("[INFO] 更新対象なし")
         return
 
-    # 現在値を取得して差分を表示
-    placeholders = ",".join("?" * len(updates))
-    ids = [u[1] for u in updates]
-    current = {
-        r["id"]: r["milestone_id"]
+    # 現在値をDBから取得
+    placeholders = ",".join("?" * len(csv_rows))
+    current: dict[int, dict] = {
+        r["id"]: dict(r)
         for r in conn.execute(
-            f"SELECT id, milestone_id FROM action_items WHERE id IN ({placeholders})", ids
+            f"SELECT id, assignee, due_date, milestone_id, content, status"
+            f" FROM action_items WHERE id IN ({placeholders})",
+            list(csv_rows.keys()),
         ).fetchall()
     }
 
-    changed = [(new_mid, item_id) for new_mid, item_id in updates
-               if current.get(item_id) != new_mid]
-    unchanged = len(updates) - len(changed)
+    # 差分を収集: list of (item_id, field, old_value, new_value)
+    changes: list[tuple[int, str, any, any]] = []
+    for item_id, new_values in csv_rows.items():
+        if item_id not in current:
+            print(f"[WARN] ID {item_id} はDBに存在しません。スキップします。", file=sys.stderr)
+            skipped += 1
+            continue
+        cur = current[item_id]
+        for field, new_val in new_values.items():
+            old_val = cur.get(field)
+            if old_val != new_val:
+                changes.append((item_id, field, old_val, new_val))
 
-    if not changed:
-        print(f"[INFO] 変更なし（{unchanged} 件すべて現在値と同一）")
+    if not changes:
+        print(f"[INFO] 変更なし（{len(csv_rows)} 件すべて現在値と同一）")
         return
 
-    print(f"[INFO] 変更: {len(changed)} 件 / 変更なし: {unchanged} 件 / スキップ: {skipped} 件")
+    changed_items = len({item_id for item_id, _, _, _ in changes})
+    skipped_msg = f" / スキップ: {skipped} 件" if skipped else ""
+    print(f"[INFO] 変更: {len(changes)} フィールド / {changed_items} アイテム{skipped_msg}")
     print()
 
-    # 変更内容プレビュー
-    for new_mid, item_id in changed:
-        old = current.get(item_id) or "NULL"
-        new = new_mid or "NULL"
-        print(f"  ID:{item_id:4d}  {old:6s} → {new}")
+    # 変更内容プレビュー（アイテムIDごとにグループ表示）
+    by_item: dict[int, list] = defaultdict(list)
+    for item_id, field, old_val, new_val in changes:
+        by_item[item_id].append((field, old_val, new_val))
+
+    for item_id in sorted(by_item):
+        print(f"  ID:{item_id:4d}")
+        for field, old_val, new_val in by_item[item_id]:
+            old_str = str(old_val) if old_val is not None else "NULL"
+            new_str = str(new_val) if new_val is not None else "NULL"
+            print(f"    {field:<14}: {old_str} → {new_str}")
 
     if dry_run:
         print()
         print("[DRY-RUN] DB は更新されていません")
         return
 
-    # 確認プロンプト
     print()
-    ans = input(f"上記 {len(changed)} 件を更新しますか？ [y/N]: ").strip().lower()
+    ans = input(
+        f"上記 {changed_items} アイテム（{len(changes)} フィールド）を更新しますか？ [y/N]: "
+    ).strip().lower()
     if ans != "y":
         print("[INFO] キャンセルしました")
         return
 
-    for new_mid, item_id in changed:
-        write_audit_log(conn, item_id, "milestone_id", current.get(item_id), new_mid, "relink")
-        conn.execute(
-            "UPDATE action_items SET milestone_id = ? WHERE id = ?",
-            (new_mid, item_id),
-        )
+    # audit_log に記録してからアイテムごとにまとめてUPDATE
+    for item_id, field, old_val, new_val in changes:
+        write_audit_log(conn, item_id, field, old_val, new_val, "relink")
+
+    for item_id, field_changes in by_item.items():
+        set_clause = ", ".join(f"{field} = ?" for field, _, _ in field_changes)
+        values = [new_val for _, _, new_val in field_changes] + [item_id]
+        conn.execute(f"UPDATE action_items SET {set_clause} WHERE id = ?", values)
+
     conn.commit()
-    print(f"[OK] {len(changed)} 件を更新しました")
+    print(f"[OK] {changed_items} アイテム（{len(changes)} フィールド）を更新しました")
 
 
 # --------------------------------------------------------------------------- #
@@ -224,14 +278,19 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
 # --------------------------------------------------------------------------- #
 
 def main():
-    parser = argparse.ArgumentParser(description="アクションアイテムとマイルストーンの紐づけをCSV経由で一括編集する")
+    parser = argparse.ArgumentParser(
+        description="アクションアイテムの各フィールドをCSV経由で一括編集する"
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--export", action="store_true", help="CSVにエクスポート")
     group.add_argument("--import", dest="import_path", metavar="PATH", help="CSVを読み込んでDBを更新")
 
-    parser.add_argument("--all", action="store_true", help="--export 時に全件対象（デフォルトは NULL のみ）")
-    parser.add_argument("--output", default="relink.csv", metavar="PATH", help="--export 時の出力ファイルパス（デフォルト: relink.csv）")
-    parser.add_argument("--db", default="data/pm.db", metavar="PATH", help="pm.db のパス（デフォルト: data/pm.db）")
+    parser.add_argument("--all", action="store_true",
+                        help="--export 時に全件対象（デフォルトは milestone_id IS NULL のみ）")
+    parser.add_argument("--output", default="relink.csv", metavar="PATH",
+                        help="--export 時の出力ファイルパス（デフォルト: relink.csv）")
+    parser.add_argument("--db", default="data/pm.db", metavar="PATH",
+                        help="pm.db のパス（デフォルト: data/pm.db）")
     parser.add_argument("--no-encrypt", action="store_true", help="平文モード（暗号化なし）")
     parser.add_argument("--dry-run", action="store_true", help="DB更新なし・変更内容を表示のみ")
 
