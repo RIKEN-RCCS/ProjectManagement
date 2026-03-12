@@ -3,16 +3,36 @@
 pm_meeting_import.py
 
 会議文字起こし（Whisper出力Markdown）を解析し、pm.db に保存する。
+単一ファイルモードと一括処理モード（--bulk）に対応。
 
 Usage:
-    python3 scripts/pm_meeting_import.py meetings/GMT20260302-032528_Recording.txt [options]
+    # 単一ファイル
+    python3 scripts/pm_meeting_import.py meetings/2026-03-10_Leader_Meeting.md \\
+        [--meeting-name NAME] [--held-at DATE]
+
+    # 一括処理（meetings/ ディレクトリ内のファイルを全て処理）
+    python3 scripts/pm_meeting_import.py --bulk [--meetings-dir DIR] [--since DATE]
+
+    # インポート済み一覧表示
+    python3 scripts/pm_meeting_import.py --list [--since YYYY-MM-DD]
+
+    # 議事録削除
+    python3 scripts/pm_meeting_import.py --delete MEETING_ID [--dry-run]
 
 Options:
-    --meeting-name NAME     会議種別名（CLAUDE.md の「会議の種類」参照）
-    --held-at DATE          開催日（YYYY-MM-DD）。省略時はファイル名から推定
+    input_file              文字起こしファイル（.txt / .md）（単一ファイルモード）
+    --meeting-name NAME     会議種別名（単一ファイルモード、省略時は "不明"）
+    --held-at DATE          開催日（YYYY-MM-DD）。省略時はファイル名から推定（単一ファイルモード）
+    --bulk                  一括処理モード（meetings/ ディレクトリ内を全て処理）
+    --meetings-dir DIR      一括処理時の議事録ディレクトリ（デフォルト: meetings/）
+    --since YYYY-MM-DD      一括処理・--list 時に対象を絞る
     --db PATH               pm.db のパス（デフォルト: data/pm.db）
     --force                 既存レコードを上書き
-    --dry-run               DB保存せず結果を標準出力のみ
+    --dry-run               DB保存なし・結果を標準出力のみ
+    --output PATH           出力をファイルにも保存（単一ファイルモードのみ）
+    --no-encrypt            DBを暗号化しない（平文モード）
+    --list                  pm.db にインポート済みの議事録一覧を表示して終了
+    --delete MEETING_ID     指定した meeting_id の議事録をDBから削除する
 """
 
 import argparse
@@ -37,12 +57,14 @@ def normalize_assignee(name: str | None) -> str | None:
         name = name.replace(" ", "").replace("\u3000", "")
     return name
 
+
 # --------------------------------------------------------------------------- #
 # パス解決
 # --------------------------------------------------------------------------- #
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 DEFAULT_DB = REPO_ROOT / "data" / "pm.db"
+DEFAULT_MEETINGS_DIR = REPO_ROOT / "meetings"
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +157,7 @@ def call_claude(prompt: str, timeout: int = 300) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# ファイル名から開催日を推定
+# ファイル名ユーティリティ
 # --------------------------------------------------------------------------- #
 def infer_date_from_filename(file_path: Path) -> str:
     """GMT20260302-032528_Recording.txt → 2026-03-02"""
@@ -147,6 +169,35 @@ def infer_date_from_filename(file_path: Path) -> str:
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def parse_filename(path: Path) -> tuple[str, str] | None:
+    """
+    YYYY-MM-DD_{会議名}.md → (held_at, meeting_name)
+    パースできない場合は None を返す。
+    """
+    name = path.stem
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})_(.+)$", name)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def collect_files(meetings_dir: Path, since: str | None) -> list[Path]:
+    """対象ファイルを収集してソートして返す"""
+    files = []
+    for p in sorted(meetings_dir.glob("*.md")):
+        if p.name.endswith("_parsed.md"):
+            continue
+        parsed = parse_filename(p)
+        if parsed is None:
+            print(f"[SKIP] ファイル名の形式が不正: {p.name}")
+            continue
+        held_at, _ = parsed
+        if since and held_at < since:
+            continue
+        files.append(p)
+    return files
 
 
 # --------------------------------------------------------------------------- #
@@ -248,11 +299,9 @@ def build_prompt(transcript: str, held_at: str, claude_md: str, milestones: list
 # --------------------------------------------------------------------------- #
 def extract_json(text: str) -> dict:
     """LLM出力からJSONブロックを抽出してパース"""
-    # ```json ... ``` ブロックを優先
     m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
     if m:
         return json.loads(m.group(1))
-    # { ... } 全体を探す
     m = re.search(r"\{[\s\S]+\}", text)
     if m:
         return json.loads(m.group(0))
@@ -273,7 +322,6 @@ def save_to_db(
 ) -> None:
     now = datetime.now().isoformat()
 
-    # meetings
     if force:
         conn.execute("DELETE FROM meetings WHERE meeting_id = ?", (meeting_id,))
         conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
@@ -287,7 +335,6 @@ def save_to_db(
         (meeting_id, held_at, kind, file_path, extracted.get("summary", ""), now),
     )
 
-    # decisions
     for d in extracted.get("decisions", []):
         conn.execute(
             """
@@ -297,7 +344,6 @@ def save_to_db(
             (meeting_id, d["content"], d.get("decided_at"), file_path, now),
         )
 
-    # action_items
     for a in extracted.get("action_items", []):
         conn.execute(
             """
@@ -313,36 +359,132 @@ def save_to_db(
 
 
 # --------------------------------------------------------------------------- #
-# メイン
+# 一覧表示 / 削除
 # --------------------------------------------------------------------------- #
-def main():
-    parser = argparse.ArgumentParser(description="会議文字起こし → pm.db への解析・保存")
-    parser.add_argument("input_file", help="文字起こしファイル（.txt / .md）")
-    parser.add_argument("--meeting-name", default=None, help="会議種別名")
-    parser.add_argument("--held-at", default=None, help="開催日 YYYY-MM-DD")
-    parser.add_argument("--db", default=None, help="pm.db のパス")
-    parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
-    parser.add_argument("--dry-run", action="store_true", help="DB保存なし・結果を標準出力のみ")
-    parser.add_argument("--output", default=None, help="標準出力の内容を保存するファイルパス")
-    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
-    args = parser.parse_args()
+def _open_db_or_exit(db_path: Path, no_encrypt: bool) -> sqlite3.Connection:
+    if not db_path.exists():
+        print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
+        sys.exit(1)
+    return open_db(db_path, encrypt=not no_encrypt)
 
-    input_path = Path(args.input_file).resolve()
-    if not input_path.exists():
-        print(f"ERROR: ファイルが見つかりません: {input_path}", file=sys.stderr)
+
+def list_imported(db_path: Path, since: str | None, no_encrypt: bool) -> None:
+    """pm.db にインポート済みの議事録一覧を表示する"""
+    conn = _open_db_or_exit(db_path, no_encrypt)
+
+    query = """
+        SELECT
+            m.meeting_id,
+            m.held_at,
+            m.kind,
+            m.file_path,
+            m.parsed_at,
+            COUNT(DISTINCT a.id) AS action_items,
+            COUNT(DISTINCT d.id) AS decisions
+        FROM meetings m
+        LEFT JOIN action_items a ON a.meeting_id = m.meeting_id
+        LEFT JOIN decisions d    ON d.meeting_id = m.meeting_id
+    """
+    params: list = []
+    if since:
+        query += " WHERE m.held_at >= ?"
+        params.append(since)
+    query += " GROUP BY m.meeting_id ORDER BY m.held_at DESC"
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    if not rows:
+        print("インポート済み議事録はありません。")
+        return
+
+    print(f"{'開催日':<12} {'AI':>3} {'決定':>3}  {'登録日時':<20}  {'meeting_id'}")
+    print("-" * 90)
+    for r in rows:
+        held_at    = r["held_at"]    or ""
+        parsed_at  = (r["parsed_at"] or "")[:19]
+        meeting_id = r["meeting_id"] or ""
+        ai_count   = r["action_items"]
+        d_count    = r["decisions"]
+        print(f"{held_at:<12} {ai_count:>3} {d_count:>3}  {parsed_at:<20}  {meeting_id}")
+
+    print(f"\n合計: {len(rows)} 件")
+    print("\n※ 削除は: python3 scripts/pm_meeting_import.py --delete <meeting_id>")
+
+
+def delete_meeting(
+    db_path: Path, meeting_id: str, dry_run: bool, force: bool, no_encrypt: bool
+) -> None:
+    """指定した meeting_id の議事録を pm.db から削除する"""
+    conn = _open_db_or_exit(db_path, no_encrypt)
+
+    row = conn.execute(
+        """
+        SELECT m.meeting_id, m.held_at, m.kind, m.file_path,
+               COUNT(DISTINCT a.id) AS ai_count,
+               COUNT(DISTINCT d.id) AS d_count
+        FROM meetings m
+        LEFT JOIN action_items a ON a.meeting_id = m.meeting_id
+        LEFT JOIN decisions d    ON d.meeting_id = m.meeting_id
+        WHERE m.meeting_id = ?
+        GROUP BY m.meeting_id
+        """,
+        (meeting_id,),
+    ).fetchone()
+
+    if not row:
+        print(f"ERROR: meeting_id '{meeting_id}' は pm.db に存在しません。", file=sys.stderr)
+        print("  --list で一覧を確認してください。", file=sys.stderr)
+        conn.close()
         sys.exit(1)
 
-    db_path = Path(args.db) if args.db else DEFAULT_DB
-    held_at = args.held_at or infer_date_from_filename(input_path)
-    meeting_id = input_path.stem  # ファイル名（拡張子なし）をIDとして使用
-    kind = args.meeting_name or "不明"
+    print(f"削除対象:")
+    print(f"  meeting_id : {row['meeting_id']}")
+    print(f"  開催日     : {row['held_at']}")
+    print(f"  会議種別   : {row['kind']}")
+    print(f"  ファイル   : {row['file_path']}")
+    print(f"  アクションアイテム: {row['ai_count']} 件")
+    print(f"  決定事項          : {row['d_count']} 件")
 
-    output_file = open(args.output, "w", encoding="utf-8") if args.output else None
+    if dry_run:
+        print("\n[INFO] --dry-run のため削除をスキップしました")
+        conn.close()
+        return
 
-    def log(msg: str = "") -> None:
-        print(msg)
-        if output_file:
-            output_file.write(msg + "\n")
+    if not force:
+        answer = input("\n本当に削除しますか？ [y/N]: ").strip().lower()
+        if answer != "y":
+            print("削除をキャンセルしました。")
+            conn.close()
+            return
+
+    conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
+    conn.execute("DELETE FROM decisions    WHERE meeting_id = ?", (meeting_id,))
+    conn.execute("DELETE FROM meetings     WHERE meeting_id = ?", (meeting_id,))
+    conn.commit()
+    conn.close()
+
+    print(f"\n✓ meeting_id '{meeting_id}' を削除しました。")
+
+
+# --------------------------------------------------------------------------- #
+# 単一ファイル処理（コア）
+# --------------------------------------------------------------------------- #
+def process_file(
+    input_path: Path,
+    held_at: str,
+    kind: str,
+    db_path: Path,
+    force: bool,
+    dry_run: bool,
+    no_encrypt: bool,
+    log=print,
+) -> str:
+    """
+    単一ファイルを処理する。
+    Returns: "ok" | "skipped" | "error"
+    """
+    meeting_id = input_path.stem
 
     log(f"[INFO] 入力ファイル : {input_path}")
     log(f"[INFO] 開催日       : {held_at}")
@@ -352,26 +494,35 @@ def main():
     transcript = input_path.read_text(encoding="utf-8")
     claude_md = load_claude_md()
 
-    # マイルストーン一覧をDBから取得（未登録の場合は空リスト）
-    conn_for_ms = init_db(db_path, no_encrypt=args.no_encrypt)
+    # マイルストーン取得 + インポート済みチェック（LLM呼び出し前）
+    conn_for_ms = init_db(db_path, no_encrypt=no_encrypt)
     milestones = fetch_milestones(conn_for_ms)
+    if not dry_run:
+        existing = conn_for_ms.execute(
+            "SELECT meeting_id FROM meetings WHERE meeting_id = ?", (meeting_id,)
+        ).fetchone()
+        if existing and not force:
+            conn_for_ms.close()
+            log(f"[SKIP] meeting_id '{meeting_id}' は既にDBに存在します。--force で上書き可能")
+            return "skipped"
     conn_for_ms.close()
+
     log(f"[INFO] マイルストーン: {len(milestones)} 件")
     log("[INFO] LLMによる抽出を開始...")
 
     prompt = build_prompt(transcript, held_at, claude_md, milestones)
-    raw_output = call_claude(prompt)
+    try:
+        raw_output = call_claude(prompt)
+    except Exception as e:
+        log(f"[ERROR] LLM呼び出し失敗: {e}")
+        return "error"
 
     log("[INFO] LLM出力を解析中...")
     try:
         extracted = extract_json(raw_output)
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"ERROR: JSON解析に失敗しました: {e}", file=sys.stderr)
-        print("--- LLM raw output ---", file=sys.stderr)
-        print(raw_output, file=sys.stderr)
-        if output_file:
-            output_file.close()
-        sys.exit(1)
+        log(f"[ERROR] JSON解析に失敗: {e}")
+        return "error"
 
     # 結果表示
     log("\n" + "=" * 60)
@@ -390,33 +541,157 @@ def main():
         log(f"  {i}. [{assignee}] {a['content']}{due}")
     log("=" * 60)
 
-    if args.dry_run:
+    if dry_run:
         log("\n[INFO] --dry-run のため DB保存をスキップしました")
-        if output_file:
-            output_file.close()
-        return
+        return "ok"
 
-    conn = init_db(db_path, no_encrypt=args.no_encrypt)
-
-    existing = conn.execute(
-        "SELECT meeting_id FROM meetings WHERE meeting_id = ?", (meeting_id,)
-    ).fetchone()
-    if existing and not args.force:
-        log(f"\n[WARN] meeting_id '{meeting_id}' は既にDBに存在します。上書きする場合は --force を指定してください。")
-        conn.close()
-        if output_file:
-            output_file.close()
-        return
-
-    save_to_db(conn, meeting_id, held_at, kind, str(input_path), extracted, args.force)
+    conn = init_db(db_path, no_encrypt=no_encrypt)
+    save_to_db(conn, meeting_id, held_at, kind, str(input_path), extracted, force)
     conn.close()
 
     log(f"\n[INFO] pm.db に保存完了: {db_path}")
     log(f"  - decisions   : {len(extracted.get('decisions', []))} 件")
     log(f"  - action_items: {len(extracted.get('action_items', []))} 件")
+    return "ok"
+
+
+# --------------------------------------------------------------------------- #
+# メイン
+# --------------------------------------------------------------------------- #
+def main():
+    parser = argparse.ArgumentParser(
+        description="会議文字起こし → pm.db への解析・保存（単一ファイル / 一括処理）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用例:
+  # 単一ファイル
+  python3 scripts/pm_meeting_import.py meetings/2026-03-10_Leader_Meeting.md \\
+      --meeting-name Leader_Meeting --held-at 2026-03-10
+
+  # 一括処理
+  python3 scripts/pm_meeting_import.py --bulk
+  python3 scripts/pm_meeting_import.py --bulk --since 2026-01-01 --force
+
+  # 一覧 / 削除
+  python3 scripts/pm_meeting_import.py --list
+  python3 scripts/pm_meeting_import.py --delete 2026-03-10_Leader_Meeting
+""",
+    )
+    parser.add_argument("input_file", nargs="?",
+                        help="文字起こしファイル（.txt / .md）（単一ファイルモード）")
+    parser.add_argument("--meeting-name", default=None,
+                        help="会議種別名（単一ファイルモード）")
+    parser.add_argument("--held-at", default=None,
+                        help="開催日 YYYY-MM-DD（単一ファイルモード、省略時はファイル名から推定）")
+    parser.add_argument("--bulk", action="store_true",
+                        help="一括処理モード（meetings/ ディレクトリ内を全て処理）")
+    parser.add_argument("--meetings-dir", default=None,
+                        help="一括処理時の議事録ディレクトリ（デフォルト: meetings/）")
+    parser.add_argument("--since", default=None,
+                        help="この日付以降のみ対象 YYYY-MM-DD（--bulk / --list 時）")
+    parser.add_argument("--db", default=None, help="pm.db のパス")
+    parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="DB保存なし・結果を標準出力のみ")
+    parser.add_argument("--output", default=None,
+                        help="出力をファイルにも保存（単一ファイルモードのみ）")
+    parser.add_argument("--no-encrypt", action="store_true",
+                        help="DBを暗号化しない（平文モード）")
+    parser.add_argument("--list", action="store_true",
+                        help="インポート済み議事録一覧を表示して終了")
+    parser.add_argument("--delete", default=None, metavar="MEETING_ID",
+                        help="指定した meeting_id の議事録を削除する")
+    args = parser.parse_args()
+
+    db_path = Path(args.db) if args.db else DEFAULT_DB
+
+    # --- list ---
+    if args.list:
+        list_imported(db_path, args.since, args.no_encrypt)
+        return
+
+    # --- delete ---
+    if args.delete:
+        delete_meeting(db_path, args.delete, args.dry_run, args.force, args.no_encrypt)
+        return
+
+    # --- bulk ---
+    if args.bulk:
+        meetings_dir = Path(args.meetings_dir) if args.meetings_dir else DEFAULT_MEETINGS_DIR
+        if not meetings_dir.exists():
+            print(f"ERROR: ディレクトリが見つかりません: {meetings_dir}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"[INFO] 議事録ディレクトリ: {meetings_dir}")
+        print(f"[INFO] pm.db            : {db_path}")
+        if args.since:
+            print(f"[INFO] since            : {args.since}")
+        if args.dry_run:
+            print("[INFO] --dry-run モード（DB保存なし）")
+
+        files = collect_files(meetings_dir, args.since)
+        print(f"[INFO] 対象ファイル     : {len(files)} 件\n")
+
+        if not files:
+            print("対象ファイルなし。終了します。")
+            return
+
+        ok = skipped = failed = 0
+        for i, file_path in enumerate(files, 1):
+            parsed = parse_filename(file_path)
+            if parsed is None:
+                continue
+            held_at, meeting_name = parsed
+            print(f"[{i}/{len(files)}] {file_path.name}")
+            status = process_file(
+                file_path, held_at, meeting_name, db_path,
+                force=args.force, dry_run=args.dry_run,
+                no_encrypt=args.no_encrypt,
+            )
+            if status == "ok":
+                ok += 1
+            elif status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+            print()
+
+        print(f"完了: 処理={ok}件, スキップ={skipped}件, 失敗={failed}件")
+        return
+
+    # --- single file ---
+    if not args.input_file:
+        parser.print_help()
+        sys.exit(1)
+
+    input_path = Path(args.input_file).resolve()
+    if not input_path.exists():
+        print(f"ERROR: ファイルが見つかりません: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    held_at = args.held_at or infer_date_from_filename(input_path)
+    kind = args.meeting_name or "不明"
+
+    output_file = open(args.output, "w", encoding="utf-8") if args.output else None
+
+    if output_file:
+        def log(msg: str = "") -> None:
+            print(msg)
+            output_file.write(msg + "\n")
+    else:
+        log = print
+
+    status = process_file(
+        input_path, held_at, kind, db_path,
+        force=args.force, dry_run=args.dry_run,
+        no_encrypt=args.no_encrypt, log=log,
+    )
 
     if output_file:
         output_file.close()
+
+    if status == "error":
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -246,8 +246,7 @@ slack/
 │   └── YYYY-MM-DD_会議名.md
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）
-│   ├── pm_meeting_import.py         # 議事録 → pm.db（1ファイル単位）
-│   ├── pm_meeting_bulk_import.py    # meetings/ の議事録を一括で pm.db に登録
+│   ├── pm_meeting_import.py         # 議事録 → pm.db（単一ファイル / 一括処理・一覧・削除）
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿
 │   ├── pm_sync_canvas.py            # Canvas「対応状況」「マイルストーン」列 → pm.db 同期
