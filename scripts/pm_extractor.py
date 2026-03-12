@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
 
 
 def normalize_assignee(name: str | None) -> str | None:
@@ -334,6 +335,40 @@ def save_slack_items(
 
 
 # --------------------------------------------------------------------------- #
+# 抽出済みスレッド一覧
+# --------------------------------------------------------------------------- #
+def cmd_list_extractions(
+    slack_conn: sqlite3.Connection,
+    pm_conn: sqlite3.Connection,
+    channel_id: str,
+    since: str | None,
+    log=print,
+) -> None:
+    """抽出済みスレッドを一覧表示する"""
+    query = """
+        SELECT se.thread_ts, se.extracted_at, m.timestamp
+        FROM slack_extractions se
+        LEFT JOIN messages m ON se.thread_ts = m.thread_ts AND m.channel_id = se.channel_id
+        WHERE se.channel_id = ?
+    """
+    params: list = [channel_id]
+    if since:
+        query += " AND se.extracted_at >= ?"
+        params.append(since)
+    query += " ORDER BY m.timestamp ASC"
+
+    rows = pm_conn.execute(query, params).fetchall()
+
+    log(f"抽出済みスレッド一覧（チャンネル: {channel_id}）")
+    log("─" * 50)
+    for i, row in enumerate(rows, 1):
+        ts = (row["timestamp"] or "")[:19]
+        extracted = (row["extracted_at"] or "")[:19]
+        log(f"[{i:3d}] {ts}  抽出: {extracted}")
+    log(f"合計: {len(rows)} 件")
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 def main() -> None:
@@ -341,23 +376,29 @@ def main() -> None:
     parser.add_argument("-c", "--channel", default=DEFAULT_CHANNEL, help="対象チャンネルID")
     parser.add_argument("--db-slack", default=None, help="{channel_id}.db のパス")
     parser.add_argument("--db-pm", default=None, help="pm.db のパス")
-    parser.add_argument("--since", default=None, help="この日付以降の要約のみ対象 (YYYY-MM-DD)")
+    add_since_arg(parser, "（要約のみ対象）")
     parser.add_argument("--force-reextract", action="store_true", help="抽出済みスレッドも再処理")
-    parser.add_argument("--dry-run", action="store_true", help="DB保存なし・結果を標準出力のみ")
-    parser.add_argument("--output", default=None, help="標準出力の内容をファイルにも保存")
-    parser.add_argument("--no-encrypt", action="store_true", help="DBを暗号化しない（平文モード）")
+    add_dry_run_arg(parser)
+    add_output_arg(parser)
+    add_no_encrypt_arg(parser)
+    parser.add_argument("--list", action="store_true", help="抽出済みスレッドの一覧を表示して終了")
     args = parser.parse_args()
 
     channel_id = args.channel
     slack_db_path = Path(args.db_slack) if args.db_slack else REPO_ROOT / "data" / f"{channel_id}.db"
     pm_db_path = Path(args.db_pm) if args.db_pm else DEFAULT_PM_DB
 
-    output_file = open(args.output, "w", encoding="utf-8") if args.output else None
+    log, close_log = make_logger(args.output)
 
-    def log(msg: str = "") -> None:
-        print(msg)
-        if output_file:
-            output_file.write(msg + "\n")
+    # --list モード
+    if args.list:
+        slack_conn = open_slack_db(slack_db_path, no_encrypt=args.no_encrypt)
+        pm_conn = init_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
+        cmd_list_extractions(slack_conn, pm_conn, channel_id, args.since, log=log)
+        slack_conn.close()
+        pm_conn.close()
+        close_log()
+        return
 
     log(f"[INFO] チャンネル  : {channel_id}")
     log(f"[INFO] Slack DB    : {slack_db_path}")
@@ -418,13 +459,12 @@ def main() -> None:
 
     slack_conn.close()
     pm_conn.close()
-    if output_file:
-        output_file.close()
 
     log("\n" + "=" * 60)
     log(f"完了: decisions={total_d}件, action_items={total_a}件, スキップ={skipped}件")
     if args.dry_run:
         log("[INFO] --dry-run のため DB保存をスキップしました")
+    close_log()
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
 | `--skip-canvas` | - | Canvas投稿・全体要約生成をスキップ |
 | `--no-permalink` | - | パーマリンク取得を無効化 |
 | `--canvas-id ID` | `F0AAD2494VB` | 投稿先CanvasID |
+| `--output PATH` | - | 生成した全体要約テキストをファイルにも保存 |
+| `--dry-run` | - | Canvas投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される） |
 
 ### 2. 会議録文字起こし（trans.sh + whisper_vad.py）
 
@@ -107,6 +109,10 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT
 
 # 確認用（DB保存なし）
 python3 scripts/pm_extractor.py -c C08SXA4M7JT --dry-run --output result.txt
+
+# 抽出済みスレッドの一覧表示
+python3 scripts/pm_extractor.py -c C08SXA4M7JT --list
+python3 scripts/pm_extractor.py -c C08SXA4M7JT --list --since 2026-02-01
 ```
 
 | オプション | デフォルト | 説明 |
@@ -118,6 +124,7 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --dry-run --output result.txt
 | `--force-reextract` | - | 抽出済みスレッドも再処理 |
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
 | `--output PATH` | - | 標準出力の内容をファイルにも保存 |
+| `--list` | - | 抽出済みスレッドの一覧を表示して終了（`--since` 併用可） |
 
 ### 5. PMレポート生成・Canvas投稿（pm_report.py）
 
@@ -160,6 +167,9 @@ python3 scripts/pm_sync_canvas.py
 
 # 確認用（DB更新なし）
 python3 scripts/pm_sync_canvas.py --dry-run
+
+# 結果をファイルにも保存
+python3 scripts/pm_sync_canvas.py --output sync_result.txt
 ```
 
 | オプション | デフォルト | 説明 |
@@ -167,6 +177,7 @@ python3 scripts/pm_sync_canvas.py --dry-run
 | `--canvas-id ID` | `F0AAD2494VB` | 対象 Canvas ID |
 | `--db PATH` | `data/pm.db` | pm.db のパス |
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
+| `--output PATH` | - | 結果をファイルにも保存 |
 
 **完了判定キーワード**（`status='closed'` に更新）: `完了` `done` `済` `対応済` `解決` `closed` `finish` `finished`
 
@@ -195,18 +206,28 @@ python3 scripts/pm_relink.py --export
 # 全件エクスポート
 python3 scripts/pm_relink.py --export --all
 
+# 日付フィルタを付けてエクスポート
+python3 scripts/pm_relink.py --export --since 2026-02-01
+
 # 変更内容を確認（DB更新なし）
 python3 scripts/pm_relink.py --import relink.csv --dry-run
 
 # DBに反映（確認プロンプトあり）
 python3 scripts/pm_relink.py --import relink.csv
+
+# アクションアイテムをターミナルに一覧表示
+python3 scripts/pm_relink.py --list
+python3 scripts/pm_relink.py --list --all
+python3 scripts/pm_relink.py --list --since 2026-02-01
 ```
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--export` | - | アクションアイテムをCSVにエクスポート |
 | `--import PATH` | - | CSVを読み込んでDBを更新 |
-| `--all` | - | `--export` 時に全件対象（デフォルトは `milestone_id IS NULL` のみ） |
+| `--list` | - | アクションアイテムをターミナルに一覧表示して終了 |
+| `--all` | - | `--export` / `--list` 時に全件対象（デフォルトは `milestone_id IS NULL` のみ） |
+| `--since YYYY-MM-DD` | - | `--export` / `--list` 時に抽出日でフィルタ |
 | `--output PATH` | `relink.csv` | `--export` 時の出力ファイルパス |
 | `--db PATH` | `data/pm.db` | pm.db のパス |
 | `--no-encrypt` | - | 平文モード |
@@ -225,7 +246,19 @@ python3 scripts/pm_goals_import.py --dry-run
 
 # 登録済み一覧・達成状況を確認
 python3 scripts/pm_goals_import.py --list
+
+# 一覧をファイルにも保存
+python3 scripts/pm_goals_import.py --list --output goals_status.txt
 ```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--goals-file PATH` | `goals.yaml` | goals.yaml のパス |
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--dry-run` | - | DB保存なし・内容を表示のみ |
+| `--list` | - | 登録済みゴール・マイルストーン一覧と達成状況を表示して終了 |
+| `--no-encrypt` | - | DBを暗号化しない（平文モード） |
+| `--output PATH` | - | 出力をファイルにも保存（`--list` / 通常インポート時の標準出力を保存） |
 
 ### 9. DBユーティリティ（db_utils.py）
 
@@ -265,6 +298,9 @@ python3 scripts/db_utils.py --audit-log --source relink
 
 # 特定アクションアイテムの変更履歴
 python3 scripts/db_utils.py --audit-log --id 98
+
+# ファイルにも保存
+python3 scripts/db_utils.py --audit-log --output audit.txt
 ```
 
 | オプション | デフォルト | 説明 |
@@ -274,3 +310,4 @@ python3 scripts/db_utils.py --audit-log --id 98
 | `--source SOURCE` | なし（全件） | `canvas_sync` または `relink` で絞り込む |
 | `--id ID` | なし（全件） | アクションアイテムIDで絞り込む |
 | `--no-encrypt` | - | 平文モード |
+| `--output PATH` | - | 結果をファイルにも保存 |
