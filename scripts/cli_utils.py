@@ -7,6 +7,7 @@ argparse ヘルパー関数・make_logger() を提供する。
 """
 
 import argparse
+import re
 from pathlib import Path
 
 
@@ -76,6 +77,43 @@ def make_logger(output_path: str | None):
             output_file.close()
 
     return log, close
+
+
+# --------------------------------------------------------------------------- #
+# CLAUDE.md ローダー
+# --------------------------------------------------------------------------- #
+
+def load_claude_md(claude_md_path: Path) -> str:
+    """
+    CLAUDE.md を読み込み、`@path` 参照を再帰的に展開して返す。
+
+    Claude Code は `@docs/project.md` のような行を自動的に展開するが、
+    スクリプトがファイルを直接読む場合は展開されない。
+    本関数はその差異を吸収し、参照先ファイルの内容をインラインに結合する。
+    """
+    if not claude_md_path.exists():
+        return ""
+    base_dir = claude_md_path.parent
+    return _expand_at_refs(claude_md_path.read_text(encoding="utf-8"), base_dir, depth=0)
+
+
+def _expand_at_refs(text: str, base_dir: Path, depth: int) -> str:
+    if depth > 5:  # 循環参照ガード
+        return text
+    lines = []
+    for line in text.splitlines():
+        m = re.match(r"^@(.+)$", line.strip())
+        if m:
+            ref_path = base_dir / m.group(1).strip()
+            if ref_path.exists():
+                included = _expand_at_refs(
+                    ref_path.read_text(encoding="utf-8"), ref_path.parent, depth + 1
+                )
+                lines.append(included)
+            # 参照先が存在しない場合はその行をスキップ
+        else:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #

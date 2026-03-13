@@ -62,7 +62,8 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 ```
 slack/
 ├── meetings/                        # 議事録の一次着地点（Markdown形式）
-│   └── YYYY-MM-DD_会議名.md
+│   ├── YYYY-MM-DD_会議名.md
+│   └── YYYY-MM-DD_会議名_parsed.md  # LLM抽出結果（要旨・決定事項・AI）。pm_meeting_import.py が自動生成
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）
 │   ├── pm_meeting_import.py         # 議事録 → pm.db（単一ファイル / 一括処理・一覧・削除）
@@ -72,7 +73,7 @@ slack/
 │   ├── pm_relink.py                 # アクションアイテムの各フィールド（担当者・期限・内容・マイルストーン等）をCSV経由で一括編集（LLM不使用）
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
-│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger）
+│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md）
 │   ├── trans.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト（whisper_vad.pyを呼び出す）
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 └── data/                            # DBと出力ファイル
