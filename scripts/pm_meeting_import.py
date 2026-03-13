@@ -2,8 +2,13 @@
 """
 pm_meeting_import.py
 
-会議文字起こし（Whisper出力Markdown）を解析し、pm.db に保存する。
+会議文字起こし（Whisper出力Markdown）を解析し、pm.db および議事録DB に保存する。
 単一ファイルモードと一括処理モード（--bulk）に対応。
+
+【議事録DB】
+会議名ごとに独立した SQLite DB を data/minutes/{会議名}.db に作成する。
+pm.db（アクションアイテム・決定事項の統合管理）とは別に、詳細な議事内容・
+決定経緯・アクションアイテム発生経緯を保存する。
 
 Usage:
     # 単一ファイル
@@ -27,6 +32,8 @@ Options:
     --meetings-dir DIR      一括処理時の議事録ディレクトリ（デフォルト: meetings/）
     --since YYYY-MM-DD      一括処理・--list 時に対象を絞る
     --db PATH               pm.db のパス（デフォルト: data/pm.db）
+    --minutes-dir DIR       議事録DB の保存先ディレクトリ（デフォルト: data/minutes/）
+    --skip-minutes-db       議事録DB への保存をスキップする
     --force                 既存レコードを上書き
     --dry-run               DB保存なし・結果を標準出力のみ
     --output PATH           出力をファイルにも保存（単一ファイルモードのみ）
@@ -67,6 +74,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 DEFAULT_DB = REPO_ROOT / "data" / "pm.db"
 DEFAULT_MEETINGS_DIR = REPO_ROOT / "meetings"
+DEFAULT_MINUTES_DIR = REPO_ROOT / "data" / "minutes"
 
 
 # --------------------------------------------------------------------------- #
@@ -216,6 +224,17 @@ EXTRACT_PROMPT_TEMPLATE = """
 
 4. **出力形式**: 必ず以下のJSON形式で出力すること（余分なテキスト不要）
 
+5. **議事内容（minutes）の記述粒度**:
+   - 議題ごとにセクションを分け、議論の流れを詳細に記述すること
+   - 誰が何を発言・提案・質問したかを含めること（発言者名が文字起こしにある場合）
+   - 決定事項やアクションアイテムが生じた文脈（何が課題で、どう議論されたか）が
+     後から読んでわかる粒度にすること
+   - Markdown形式で出力すること
+
+6. **background フィールド**:
+   - decisions の background: その決定に至った議論・前提条件・却下された代替案等
+   - action_items の background: そのタスクが発生した経緯・課題・誰が提起したか等
+
 ## マイルストーン一覧
 
 {milestones}
@@ -225,10 +244,12 @@ EXTRACT_PROMPT_TEMPLATE = """
 ```json
 {{
   "summary": "会議全体の要点を3〜7行で記述（誰が何を話し合ったか）",
+  "minutes": "議題ごとのセクションに分けた詳細な議事内容（Markdown形式）",
   "decisions": [
     {{
       "content": "決定事項の内容（明示的に決まったこと、合意に至ったこと）",
-      "decided_at": "YYYY-MM-DD または null"
+      "decided_at": "YYYY-MM-DD または null",
+      "background": "この決定に至った議論・経緯・前提条件（1〜3文）"
     }}
   ],
   "action_items": [
@@ -236,7 +257,8 @@ EXTRACT_PROMPT_TEMPLATE = """
       "content": "アクションアイテムの内容",
       "assignee": "担当者名（不明な場合は null）",
       "due_date": "YYYY-MM-DD または null",
-      "milestone_id": "マイルストーンID（M1等）または null"
+      "milestone_id": "マイルストーンID（M1等）または null",
+      "background": "このタスクが発生した経緯・課題・提起者（1〜3文）"
     }}
   ]
 }}
@@ -313,23 +335,136 @@ def save_parsed_md(input_path: Path, held_at: str, kind: str, extracted: dict) -
         "## 会議要旨",
         "",
         extracted.get("summary", "(なし)"),
-        "",
-        "## 決定事項",
-        "",
     ]
+
+    # 詳細議事内容
+    if extracted.get("minutes"):
+        lines += ["", "## 議事内容", "", extracted["minutes"]]
+
+    # 決定事項（経緯付き）
+    lines += ["", "## 決定事項", ""]
     for i, d in enumerate(extracted.get("decisions", []), 1):
         date_str = f" [{d.get('decided_at')}]" if d.get("decided_at") else ""
         lines.append(f"{i}. {d['content']}{date_str}")
+        if d.get("background"):
+            lines.append(f"   > 経緯: {d['background']}")
+
+    # アクションアイテム（経緯付き）
     lines += ["", "## アクションアイテム", ""]
     for i, a in enumerate(extracted.get("action_items", []), 1):
         assignee = a.get("assignee") or "未定"
         due = f" (期限: {a['due_date']})" if a.get("due_date") else ""
         ms = f" [MS: {a['milestone_id']}]" if a.get("milestone_id") else ""
         lines.append(f"{i}. [{assignee}] {a['content']}{due}{ms}")
+        if a.get("background"):
+            lines.append(f"   > 経緯: {a['background']}")
 
     out_path = input_path.parent / f"{input_path.stem}_parsed.md"
     out_path.write_text("\n".join(lines), encoding="utf-8")
     return out_path
+
+
+# --------------------------------------------------------------------------- #
+# 議事録DB（会議名ごとに独立）
+# --------------------------------------------------------------------------- #
+MINUTES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS instances (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    held_at     TEXT NOT NULL,
+    source_file TEXT,
+    imported_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS minutes_content (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL REFERENCES instances(id),
+    content     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL REFERENCES instances(id),
+    content     TEXT NOT NULL,
+    decided_at  TEXT,
+    background  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS action_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL REFERENCES instances(id),
+    content     TEXT NOT NULL,
+    assignee    TEXT,
+    due_date    TEXT,
+    status      TEXT DEFAULT 'open',
+    milestone_id TEXT,
+    background  TEXT
+);
+"""
+
+
+def init_minutes_db(minutes_dir: Path, kind: str, no_encrypt: bool = False) -> sqlite3.Connection:
+    """会議名に対応する議事録DBを開く（なければ作成）"""
+    minutes_dir.mkdir(parents=True, exist_ok=True)
+    db_path = minutes_dir / f"{kind}.db"
+    return open_db(db_path, encrypt=not no_encrypt, schema=MINUTES_SCHEMA)
+
+
+def save_to_minutes_db(
+    conn: sqlite3.Connection,
+    held_at: str,
+    source_file: str,
+    extracted: dict,
+    force: bool,
+) -> None:
+    now = datetime.now().isoformat()
+
+    # 同じ開催日のインスタンスが既にある場合の処理
+    existing = conn.execute(
+        "SELECT id FROM instances WHERE held_at = ?", (held_at,)
+    ).fetchone()
+
+    if existing:
+        if not force:
+            return  # スキップ（呼び出し元でログ出力済み）
+        instance_id = existing["id"]
+        conn.execute("DELETE FROM minutes_content WHERE instance_id = ?", (instance_id,))
+        conn.execute("DELETE FROM decisions       WHERE instance_id = ?", (instance_id,))
+        conn.execute("DELETE FROM action_items    WHERE instance_id = ?", (instance_id,))
+        conn.execute("UPDATE instances SET source_file=?, imported_at=? WHERE id=?",
+                     (source_file, now, instance_id))
+    else:
+        cur = conn.execute(
+            "INSERT INTO instances (held_at, source_file, imported_at) VALUES (?, ?, ?)",
+            (held_at, source_file, now),
+        )
+        instance_id = cur.lastrowid
+
+    if extracted.get("minutes"):
+        conn.execute(
+            "INSERT INTO minutes_content (instance_id, content) VALUES (?, ?)",
+            (instance_id, extracted["minutes"]),
+        )
+
+    for d in extracted.get("decisions", []):
+        conn.execute(
+            "INSERT INTO decisions (instance_id, content, decided_at, background) VALUES (?, ?, ?, ?)",
+            (instance_id, d["content"], d.get("decided_at"), d.get("background")),
+        )
+
+    for a in extracted.get("action_items", []):
+        conn.execute(
+            """
+            INSERT INTO action_items
+                (instance_id, content, assignee, due_date, milestone_id, background)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                instance_id, a["content"], normalize_assignee(a.get("assignee")),
+                a.get("due_date"), a.get("milestone_id"), a.get("background"),
+            ),
+        )
+
+    conn.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -503,6 +638,7 @@ def process_file(
     dry_run: bool,
     no_encrypt: bool,
     save_parsed: bool = True,
+    minutes_dir: Path | None = None,
     log=print,
 ) -> str:
     """
@@ -562,26 +698,46 @@ def process_file(
     log("\n## 決定事項")
     for i, d in enumerate(extracted.get("decisions", []), 1):
         date_str = f" [{d.get('decided_at')}]" if d.get("decided_at") else ""
-        log(f"  {i}. {d['content']}{date_str}")
+        bg = f"\n     経緯: {d['background']}" if d.get("background") else ""
+        log(f"  {i}. {d['content']}{date_str}{bg}")
 
     log("\n## アクションアイテム")
     for i, a in enumerate(extracted.get("action_items", []), 1):
         assignee = a.get("assignee") or "未定"
         due = f" (期限: {a['due_date']})" if a.get("due_date") else ""
-        log(f"  {i}. [{assignee}] {a['content']}{due}")
+        bg = f"\n     経緯: {a['background']}" if a.get("background") else ""
+        log(f"  {i}. [{assignee}] {a['content']}{due}{bg}")
     log("=" * 60)
 
     if dry_run:
         log("\n[INFO] --dry-run のため DB保存をスキップしました")
         return "ok"
 
+    # pm.db に保存
     conn = init_db(db_path, no_encrypt=no_encrypt)
     save_to_db(conn, meeting_id, held_at, kind, str(input_path), extracted, force)
     conn.close()
-
     log(f"\n[INFO] pm.db に保存完了: {db_path}")
     log(f"  - decisions   : {len(extracted.get('decisions', []))} 件")
     log(f"  - action_items: {len(extracted.get('action_items', []))} 件")
+
+    # 議事録DB に保存
+    if minutes_dir is not None:
+        mconn = init_minutes_db(minutes_dir, kind, no_encrypt=no_encrypt)
+        existing = mconn.execute(
+            "SELECT id FROM instances WHERE held_at = ?", (held_at,)
+        ).fetchone()
+        if existing and not force:
+            log(f"[SKIP] 議事録DB: {kind}.db に {held_at} の記録が既に存在します。--force で上書き可能")
+        else:
+            save_to_minutes_db(mconn, held_at, str(input_path), extracted, force)
+            minutes_db_path = minutes_dir / f"{kind}.db"
+            log(f"[INFO] 議事録DB に保存完了: {minutes_db_path}")
+            log(f"  - minutes     : {'あり' if extracted.get('minutes') else 'なし'}")
+            log(f"  - decisions   : {len(extracted.get('decisions', []))} 件")
+            log(f"  - action_items: {len(extracted.get('action_items', []))} 件")
+        mconn.close()
+
     return "ok"
 
 
@@ -619,6 +775,10 @@ def main():
                         help="一括処理時の議事録ディレクトリ（デフォルト: meetings/）")
     add_since_arg(parser, "（--bulk / --list 時）")
     parser.add_argument("--db", default=None, help="pm.db のパス")
+    parser.add_argument("--minutes-dir", default=None,
+                        help="議事録DB の保存先ディレクトリ（デフォルト: data/minutes/）")
+    parser.add_argument("--skip-minutes-db", action="store_true",
+                        help="議事録DB への保存をスキップする")
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     add_dry_run_arg(parser)
     add_output_arg(parser)
@@ -632,6 +792,9 @@ def main():
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_DB
+    minutes_dir = None if args.skip_minutes_db else (
+        Path(args.minutes_dir) if args.minutes_dir else DEFAULT_MINUTES_DIR
+    )
 
     # --- list ---
     if args.list:
@@ -652,6 +815,8 @@ def main():
 
         print(f"[INFO] 議事録ディレクトリ: {meetings_dir}")
         print(f"[INFO] pm.db            : {db_path}")
+        if minutes_dir:
+            print(f"[INFO] 議事録DB保存先   : {minutes_dir}")
         if args.since:
             print(f"[INFO] since            : {args.since}")
         if args.dry_run:
@@ -676,6 +841,7 @@ def main():
                 force=args.force, dry_run=args.dry_run,
                 no_encrypt=args.no_encrypt,
                 save_parsed=not args.skip_parsed,
+                minutes_dir=minutes_dir,
             )
             if status == "ok":
                 ok += 1
@@ -708,6 +874,7 @@ def main():
         force=args.force, dry_run=args.dry_run,
         no_encrypt=args.no_encrypt,
         save_parsed=not args.skip_parsed,
+        minutes_dir=minutes_dir,
         log=log,
     )
 
