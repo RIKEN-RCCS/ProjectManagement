@@ -43,17 +43,21 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 [Slack] ─── slack_pipeline.py ───→ {channel_id}.db
                                           ↓
 [会議議事録] ── pm_meeting_import.py ──→ pm.db ←─ pm_extractor.py
-  meetings/*.md                    (決定事項・               ↑
-                                 アクションアイテム)   {channel_id}.db
-                                          ↓
-                                    pm_report.py
-                                          ↓
-                                   Slack Canvas / レポート
+  meetings/*.md        │          (決定事項・               ↑
+                       │        アクションアイテム)   {channel_id}.db
+                       │                  ↓
+                       │            pm_report.py
+                       │                  ↓
+                       │           Slack Canvas / レポート
+                       │
+                       └─ pm_minutes_import.py ──→ data/minutes/{kind}.db
+                                              （詳細議事録・決定背景・AI背景）
 ```
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
 - `pm.db` — PM情報専用。複数チャンネル・複数会議を横断して統合。
+- `data/minutes/{kind}.db` — 議事録詳細専用。会議名ごとに独立。決定・AIの背景を含む。
 
 ---
 
@@ -67,6 +71,7 @@ slack/
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）
 │   ├── pm_meeting_import.py         # 議事録 → pm.db（単一ファイル / 一括処理・一覧・削除）
+│   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・決定背景・AI背景）
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿
 │   ├── pm_sync_canvas.py            # Canvas「対応状況」「マイルストーン」列 → pm.db 同期
@@ -79,6 +84,8 @@ slack/
 └── data/                            # DBと出力ファイル
     ├── {channel_id}.db              # Slackデータ（例: C0A9KG036CS.db）
     ├── pm.db                        # PM統合データ
+    ├── minutes/                     # 詳細議事録DB（会議名ごとに独立）
+    │   └── {kind}.db                # 例: Leader_Meeting.db
     └── slack_summarize_*.md         # 全体要約（デバッグ・履歴用）
 ```
 
