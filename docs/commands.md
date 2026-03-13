@@ -104,6 +104,48 @@ python3 scripts/pm_meeting_import.py --delete 2026-03-02_Leader_Meeting --dry-ru
 | `--list` | - | インポート済み議事録一覧を表示して終了 |
 | `--delete MEETING_ID` | - | 指定した meeting_id の議事録をDBから削除する |
 
+### 3b. 会議議事録 → 詳細議事録DB（pm_minutes_import.py）
+
+`pm_meeting_import.py` とは別に、詳細な議事内容・決定の背景・AIの発生経緯を
+`data/minutes/{meeting_name}.db` に保存する。会議名ごとに独立したDBファイルを作成する。
+
+```sh
+# 単一ファイル
+python3 scripts/pm_minutes_import.py meetings/2026-03-10_Leader_Meeting.md \
+    --meeting-name Leader_Meeting --held-at 2026-03-10
+
+# 一括処理
+python3 scripts/pm_minutes_import.py --bulk
+python3 scripts/pm_minutes_import.py --bulk --since 2026-01-01 --force
+
+# 議事録DB内容を一覧表示（全会議名）
+python3 scripts/pm_minutes_import.py --list
+
+# 特定会議名の一覧
+python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `input_file` | - | 文字起こしファイル（.txt / .md）（単一ファイルモード） |
+| `--meeting-name NAME` | ファイル名から推定 | 会議種別名（DBファイル名に使用） |
+| `--held-at YYYY-MM-DD` | ファイル名から推定 | 開催日 |
+| `--bulk` | - | 一括処理モード |
+| `--meetings-dir DIR` | `meetings/` | 一括処理時の議事録ディレクトリ |
+| `--minutes-dir DIR` | `data/minutes/` | 議事録DBの保存ディレクトリ |
+| `--since YYYY-MM-DD` | - | `--bulk` / `--list` 時のフィルタ |
+| `--model MODEL` | CLI デフォルト | 使用する Claude モデル |
+| `--force` | - | 既存レコードを上書き |
+| `--dry-run` | - | DB保存なし・結果を標準出力のみ |
+| `--output PATH` | - | 出力をファイルにも保存（単一ファイルモードのみ） |
+| `--no-encrypt` | - | 平文モード |
+| `--list` | - | 議事録DBの内容を表示して終了 |
+
+**格納内容**:
+- `minutes_content`: 議題ごとの詳細議事内容（Markdown形式）
+- `decisions`: 決定事項 + `background`（決定に至った経緯・理由）
+- `action_items`: アクションアイテム + `background`（発生した理由・目的）
+
 ### 4. Slack要約 → pm.db（pm_extractor.py）
 
 ```sh
