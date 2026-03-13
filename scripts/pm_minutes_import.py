@@ -8,13 +8,13 @@ data/minutes/{meeting_name}.db に保存される。
 
 pm_meeting_import.py との違い:
   - pm_meeting_import.py → pm.db に決定事項・アクションアイテムを保存（PM管理用）
-  - pm_minutes_import.py → 議事録専用DBに詳細な議事内容・背景を保存（アーカイブ用）
+  - pm_minutes_import.py → 議事録専用DBに詳細な議事内容を保存（アーカイブ用）
 
 各テーブル:
   instances      : 会議開催記録（開催日・ファイルパス等）
-  minutes_content: 議題ごとの詳細議事内容（Markdown）
-  decisions      : 決定事項 + 決定に至った背景
-  action_items   : アクションアイテム + 発生した背景
+  minutes_content: 議事内容（Markdown）
+  decisions      : 決定事項
+  action_items   : アクションアイテム
 
 Usage:
     # 単一ファイル
@@ -47,7 +47,6 @@ Options:
 """
 
 import argparse
-import json
 import os
 import re
 import subprocess
@@ -59,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
 from cli_utils import (
     add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    make_logger, load_claude_md, prepare_transcript,
+    make_logger, prepare_transcript,
 )
 
 
@@ -67,7 +66,6 @@ from cli_utils import (
 # パス解決
 # --------------------------------------------------------------------------- #
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 DEFAULT_MEETINGS_DIR = REPO_ROOT / "meetings"
 DEFAULT_MINUTES_DIR = REPO_ROOT / "data" / "minutes"
 
@@ -93,18 +91,13 @@ CREATE TABLE IF NOT EXISTS minutes_content (
 CREATE TABLE IF NOT EXISTS decisions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     meeting_id   TEXT NOT NULL REFERENCES instances(meeting_id),
-    content      TEXT NOT NULL,
-    decided_at   TEXT,
-    background   TEXT
+    content      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS action_items (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     meeting_id   TEXT NOT NULL REFERENCES instances(meeting_id),
-    content      TEXT NOT NULL,
-    assignee     TEXT,
-    due_date     TEXT,
-    background   TEXT
+    content      TEXT NOT NULL
 );
 """
 
@@ -112,6 +105,43 @@ CREATE TABLE IF NOT EXISTS action_items (
 def init_minutes_db(db_path: Path, no_encrypt: bool = False):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return open_db(db_path, encrypt=not no_encrypt, schema=MINUTES_SCHEMA)
+
+
+# --------------------------------------------------------------------------- #
+# プロンプト
+# --------------------------------------------------------------------------- #
+PROMPT_TEMPLATE = """\
+以下の会議の文字起こしテキストから、構造化された議事録を作成してください。
+
+## 議事録作成ルール
+
+- 文字起こしテキストの内容に忠実に従い、推測を含めない
+- Whisperの書き起こし誤認識による不自然な表現は自然な日本語に修正してよいが、事実は変えない
+- プロジェクト固有の用語はCLAUDE.mdの用語集を参照して正しく表記する
+- 必ず以下のフォーマットのみで出力すること。フォーマット外の説明・コメントは不要
+
+## 出力フォーマット
+
+# 議事録
+
+## 決定事項
+
+- （会議で確定した事項を箇条書きで記載。なければ「（なし）」）
+
+## アクションアイテム
+
+- （担当者・内容を明記したタスクを箇条書きで記載。なければ「（なし）」）
+
+## 議事内容
+
+（議論の流れを要旨としてまとめて記載）
+
+---
+
+## 文字起こしテキスト
+
+{transcript}
+"""
 
 
 # --------------------------------------------------------------------------- #
@@ -131,10 +161,47 @@ def call_claude(prompt: str, timeout: int = 300, model: str | None = None) -> st
 
 
 # --------------------------------------------------------------------------- #
+# Markdown パース
+# --------------------------------------------------------------------------- #
+def _extract_section(text: str, heading: str) -> str:
+    """## heading 以降の次の ## までのテキストを返す"""
+    pattern = re.compile(
+        rf"^##\s+{re.escape(heading)}\s*\n(.*?)(?=\n##\s|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1).strip() if m else ""
+
+
+def _parse_bullets(section_text: str) -> list[str]:
+    """箇条書き行（- または * で始まる）を抽出してリストで返す"""
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip()
+        if re.match(r"^[-*]\s+", line):
+            content = re.sub(r"^[-*]\s+", "", line).strip()
+            if content and content not in ("（なし）", "(なし)"):
+                items.append(content)
+    return items
+
+
+def parse_minutes_output(text: str) -> dict:
+    """LLM が出力した Markdown 議事録をパースして辞書で返す"""
+    decisions_text   = _extract_section(text, "決定事項")
+    action_items_text = _extract_section(text, "アクションアイテム")
+    minutes_text     = _extract_section(text, "議事内容")
+
+    return {
+        "minutes":      minutes_text,
+        "decisions":    _parse_bullets(decisions_text),
+        "action_items": _parse_bullets(action_items_text),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # ファイル名ユーティリティ
 # --------------------------------------------------------------------------- #
 def infer_date_from_filename(file_path: Path) -> str:
-    """GMT20260302-032528_Recording.txt → 2026-03-02"""
     name = file_path.stem
     m = re.search(r"GMT(\d{4})(\d{2})(\d{2})", name)
     if m:
@@ -146,7 +213,6 @@ def infer_date_from_filename(file_path: Path) -> str:
 
 
 def parse_filename(path: Path) -> tuple[str, str] | None:
-    """YYYY-MM-DD_{会議名}.md → (held_at, meeting_name)"""
     name = path.stem
     m = re.match(r"^(\d{4}-\d{2}-\d{2})_(.+)$", name)
     if not m:
@@ -170,115 +236,16 @@ def collect_files(meetings_dir: Path, since: str | None) -> list[Path]:
     return files
 
 
-def meeting_id_from_path(file_path: Path) -> str:
-    return file_path.stem
-
-
 def db_path_for_kind(minutes_dir: Path, kind: str) -> Path:
     safe_name = re.sub(r"[^\w\-]", "_", kind)
     return minutes_dir / f"{safe_name}.db"
 
 
 # --------------------------------------------------------------------------- #
-# プロンプト構築
-# --------------------------------------------------------------------------- #
-MINUTES_PROMPT_TEMPLATE = """
-あなたは富岳NEXTプロジェクトのプロジェクトマネージャーです。
-以下に示す「プロジェクト文脈」と「会議の文字起こし」を読み、詳細な議事録を作成してください。
-
-## 重要な指示
-
-1. **文字起こしの誤認識補正**: 音声認識（Whisper）の誤認識が含まれています。
-   - 「プロジェクト文脈」に記載された固有名詞・用語・人名を優先して正しく解釈してください
-   - 例: 「不学ネクスト」→「富岳NEXT」、「フガクネクスト」→「富岳NEXT」、
-         「HBCI」→「HPCI」、「ジェニシス」→「GENESIS」、「エンビディア」→「NVIDIA」等
-   - ただし**推測は含めないこと**。文字起こしに書かれた内容のみを根拠にすること
-
-2. **忠実な記録**: 発言に明示されていない内容を補完・推測しないこと
-
-3. **背景の記録**: 決定事項・アクションアイテムについては、それが発生した議論の経緯・背景を
-   `background` フィールドに記録すること。後から「なぜこの決定をしたか」が分かるように
-
-4. **議事内容**: 議題ごとの議論の流れを `minutes` フィールドに詳細な Markdown で記録すること
-
-5. **出力形式**: 必ず以下のJSON形式で出力すること（余分なテキスト不要）
-
-## 出力JSON形式
-
-```json
-{{
-  "minutes": "# 議事内容\\n\\n議題ごとの議論の流れを詳細に記述（Markdown形式）。\\n発言者・発言内容・議論の経緯を含め、後から全体像が把握できるレベルで記録する。",
-  "decisions": [
-    {{
-      "content": "決定事項の内容（明示的に決まったこと、合意に至ったこと）",
-      "decided_at": "YYYY-MM-DD または null",
-      "background": "この決定に至った議論の経緯・理由・前提条件"
-    }}
-  ],
-  "action_items": [
-    {{
-      "content": "アクションアイテムの内容",
-      "assignee": "担当者名（不明な場合は null）",
-      "due_date": "YYYY-MM-DD または null",
-      "background": "このアクションアイテムが発生した理由・経緯・目的"
-    }}
-  ]
-}}
-```
-
----
-
-## プロジェクト文脈
-
-{claude_md}
-
----
-
-## 会議の文字起こし（開催日: {held_at}）
-
-{transcript}
-"""
-
-
-def build_prompt(transcript: str, held_at: str, claude_md: str) -> str:
-    # CLAUDE.md の関連セクションのみ抽出
-    sections = []
-    capture = False
-    for line in claude_md.splitlines():
-        if re.match(r"^###\s+(ステークホルダー|主なプロジェクト参加者|プロジェクト固有の用語|会議の種類)", line):
-            capture = True
-        elif re.match(r"^---", line) and capture:
-            capture = False
-        if capture:
-            sections.append(line)
-
-    context = "\n".join(sections) if sections else claude_md[:3000]
-
-    return MINUTES_PROMPT_TEMPLATE.format(
-        claude_md=context,
-        held_at=held_at,
-        transcript=transcript,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# JSON 抽出
-# --------------------------------------------------------------------------- #
-def extract_json(text: str) -> dict:
-    m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
-    if m:
-        return json.loads(m.group(1))
-    m = re.search(r"\{[\s\S]+\}", text)
-    if m:
-        return json.loads(m.group(0))
-    raise ValueError(f"JSON not found in LLM output:\n{text[:500]}")
-
-
-# --------------------------------------------------------------------------- #
 # DB 保存
 # --------------------------------------------------------------------------- #
 def save_to_minutes_db(conn, meeting_id: str, held_at: str, kind: str,
-                       file_path: str, extracted: dict, force: bool) -> None:
+                       file_path: str, parsed: dict, force: bool) -> None:
     now = datetime.now().isoformat()
 
     if force:
@@ -293,25 +260,22 @@ def save_to_minutes_db(conn, meeting_id: str, held_at: str, kind: str,
         (meeting_id, held_at, kind, file_path, now),
     )
 
-    minutes_text = extracted.get("minutes", "")
-    if minutes_text:
+    if parsed["minutes"]:
         conn.execute(
             "INSERT INTO minutes_content (meeting_id, content) VALUES (?, ?)",
-            (meeting_id, minutes_text),
+            (meeting_id, parsed["minutes"]),
         )
 
-    for d in extracted.get("decisions", []):
+    for content in parsed["decisions"]:
         conn.execute(
-            "INSERT INTO decisions (meeting_id, content, decided_at, background)"
-            " VALUES (?, ?, ?, ?)",
-            (meeting_id, d["content"], d.get("decided_at"), d.get("background")),
+            "INSERT INTO decisions (meeting_id, content) VALUES (?, ?)",
+            (meeting_id, content),
         )
 
-    for a in extracted.get("action_items", []):
+    for content in parsed["action_items"]:
         conn.execute(
-            "INSERT INTO action_items (meeting_id, content, assignee, due_date, background)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (meeting_id, a["content"], a.get("assignee"), a.get("due_date"), a.get("background")),
+            "INSERT INTO action_items (meeting_id, content) VALUES (?, ?)",
+            (meeting_id, content),
         )
 
     conn.commit()
@@ -339,9 +303,8 @@ def list_minutes(minutes_dir: Path, kind_filter: str | None,
             return
 
     for db_file in db_files:
-        kind_name = db_file.stem
         print(f"\n{'='*70}")
-        print(f"  会議名: {kind_name}")
+        print(f"  会議名: {db_file.stem}")
         print(f"  DB    : {db_file}")
         print(f"{'='*70}")
 
@@ -354,8 +317,7 @@ def list_minutes(minutes_dir: Path, kind_filter: str | None,
         query = """
             SELECT i.meeting_id, i.held_at, i.imported_at,
                    COUNT(DISTINCT d.id) AS d_count,
-                   COUNT(DISTINCT a.id) AS ai_count,
-                   (SELECT COUNT(*) FROM minutes_content mc WHERE mc.meeting_id = i.meeting_id) AS mc_count
+                   COUNT(DISTINCT a.id) AS ai_count
             FROM instances i
             LEFT JOIN decisions d ON d.meeting_id = i.meeting_id
             LEFT JOIN action_items a ON a.meeting_id = i.meeting_id
@@ -395,10 +357,7 @@ def process_file(
     model: str | None = None,
     log=print,
 ) -> str:
-    """
-    単一ファイルを処理する。
-    Returns: "ok" | "skipped" | "error"
-    """
+    """Returns: "ok" | "skipped" | "error" """
     meeting_id = input_path.stem
     db_path = db_path_for_kind(minutes_dir, kind)
 
@@ -423,41 +382,20 @@ def process_file(
             log(f"[SKIP] meeting_id '{meeting_id}' は既にDBに存在します。--force で上書き可能")
             return "skipped"
 
-    claude_md = load_claude_md(CLAUDE_MD)
     log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
 
-    prompt = build_prompt(transcript, held_at, claude_md)
+    prompt = PROMPT_TEMPLATE.format(transcript=transcript)
     try:
-        raw_output = call_claude(prompt, model=model)
+        minutes_text = call_claude(prompt, model=model)
     except Exception as e:
         log(f"[ERROR] LLM呼び出し失敗: {e}")
         return "error"
 
-    log("[INFO] LLM出力を解析中...")
-    try:
-        extracted = extract_json(raw_output)
-    except (json.JSONDecodeError, ValueError) as e:
-        log(f"[ERROR] JSON解析に失敗: {e}")
-        return "error"
+    parsed = parse_minutes_output(minutes_text)
 
     # 結果表示
     log("\n" + "=" * 60)
-    log("## 議事内容（冒頭200文字）")
-    minutes_preview = (extracted.get("minutes") or "（なし）")[:200]
-    log(minutes_preview + ("..." if len(extracted.get("minutes", "")) > 200 else ""))
-
-    log("\n## 決定事項")
-    for i, d in enumerate(extracted.get("decisions", []), 1):
-        date_str = f" [{d.get('decided_at')}]" if d.get("decided_at") else ""
-        bg = f"\n     背景: {d['background']}" if d.get("background") else ""
-        log(f"  {i}. {d['content']}{date_str}{bg}")
-
-    log("\n## アクションアイテム")
-    for i, a in enumerate(extracted.get("action_items", []), 1):
-        assignee = a.get("assignee") or "未定"
-        due = f" (期限: {a['due_date']})" if a.get("due_date") else ""
-        bg = f"\n     背景: {a['background']}" if a.get("background") else ""
-        log(f"  {i}. [{assignee}] {a['content']}{due}{bg}")
+    log(minutes_text)
     log("=" * 60)
 
     if dry_run:
@@ -465,12 +403,12 @@ def process_file(
         return "ok"
 
     conn = init_minutes_db(db_path, no_encrypt=no_encrypt)
-    save_to_minutes_db(conn, meeting_id, held_at, kind, str(input_path), extracted, force)
+    save_to_minutes_db(conn, meeting_id, held_at, kind, str(input_path), parsed, force)
     conn.close()
 
     log(f"\n[INFO] 議事録DB に保存完了: {db_path}")
-    log(f"  - decisions   : {len(extracted.get('decisions', []))} 件")
-    log(f"  - action_items: {len(extracted.get('action_items', []))} 件")
+    log(f"  - decisions   : {len(parsed['decisions'])} 件")
+    log(f"  - action_items: {len(parsed['action_items'])} 件")
     return "ok"
 
 
