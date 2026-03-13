@@ -144,10 +144,13 @@ def fetch_milestones(conn: sqlite3.Connection) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # claude CLI 呼び出し
 # --------------------------------------------------------------------------- #
-def call_claude(prompt: str, timeout: int = 300) -> str:
+def call_claude(prompt: str, timeout: int = 300, model: str | None = None) -> str:
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    cmd = ["claude", "-p", prompt]
+    if model:
+        cmd += ["--model", model]
     result = subprocess.run(
-        ["claude", "-p", prompt],
+        cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -200,6 +203,67 @@ def collect_files(meetings_dir: Path, since: str | None) -> list[Path]:
             continue
         files.append(p)
     return files
+
+
+# --------------------------------------------------------------------------- #
+# Whisper 出力パース・整形
+# --------------------------------------------------------------------------- #
+_WHISPER_SEGMENT_RE = re.compile(
+    r"####\s*\[([0-9:]+)\s*-\s*([0-9:]+)\]\s+(SPEAKER_\d+)\n(.*?)(?=\n####|\Z)",
+    re.DOTALL,
+)
+
+
+def _parse_timestamp(time_str: str) -> int:
+    """HH:MM:SS → 秒数"""
+    parts = time_str.strip().split(":")
+    if len(parts) == 3:
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + int(s)
+    return 0
+
+
+def parse_whisper_transcript(text: str) -> list[dict]:
+    """
+    Whisper/whisper_vad.py 出力の `#### [HH:MM:SS - HH:MM:SS] SPEAKER_N` 形式を
+    セグメントリストに変換する。形式に合わない場合は空リストを返す。
+    """
+    segments = []
+    for m in _WHISPER_SEGMENT_RE.finditer(text):
+        start_str, end_str, speaker, seg_text = m.groups()
+        seg_text = seg_text.strip()
+        if not seg_text or seg_text in ("...", "…"):
+            continue
+        segments.append({
+            "speaker": speaker,
+            "start": _parse_timestamp(start_str),
+            "end": _parse_timestamp(end_str),
+            "text": seg_text,
+        })
+    return segments
+
+
+def format_whisper_transcript(segments: list[dict]) -> str:
+    """セグメントリストを `[HH:MM:SS] SPEAKER_N: text` 形式に整形する"""
+    lines = []
+    for seg in segments:
+        h, rem = divmod(seg["start"], 3600)
+        m, s = divmod(rem, 60)
+        ts = f"{h:02d}:{m:02d}:{s:02d}"
+        lines.append(f"[{ts}] {seg['speaker']}: {seg['text']}")
+    return "\n\n".join(lines)
+
+
+def prepare_transcript(raw_text: str) -> tuple[str, bool]:
+    """
+    文字起こしテキストを LLM 入力用に整形する。
+    Whisper形式を検出できた場合は整形済みテキストを返す。
+    Returns: (transcript_text, is_whisper_format)
+    """
+    segments = parse_whisper_transcript(raw_text)
+    if segments:
+        return format_whisper_transcript(segments), True
+    return raw_text, False
 
 
 # --------------------------------------------------------------------------- #
@@ -639,6 +703,7 @@ def process_file(
     no_encrypt: bool,
     save_parsed: bool = True,
     minutes_dir: Path | None = None,
+    model: str | None = None,
     log=print,
 ) -> str:
     """
@@ -652,7 +717,12 @@ def process_file(
     log(f"[INFO] 会議種別     : {kind}")
     log(f"[INFO] meeting_id   : {meeting_id}")
 
-    transcript = input_path.read_text(encoding="utf-8")
+    raw_transcript = input_path.read_text(encoding="utf-8")
+
+    # Whisper形式を検出して整形。平文の場合はそのまま使用
+    transcript, is_whisper = prepare_transcript(raw_transcript)
+    log(f"[INFO] 文字起こし形式: {'Whisper (話者・タイムスタンプ付き)' if is_whisper else '平文テキスト'}")
+
     claude_md = load_claude_md(CLAUDE_MD)
 
     # マイルストーン取得 + インポート済みチェック（LLM呼び出し前）
@@ -669,11 +739,11 @@ def process_file(
     conn_for_ms.close()
 
     log(f"[INFO] マイルストーン: {len(milestones)} 件")
-    log("[INFO] LLMによる抽出を開始...")
+    log(f"[INFO] LLMによる抽出を開始... (model: {model or 'default'})")
 
     prompt = build_prompt(transcript, held_at, claude_md, milestones)
     try:
-        raw_output = call_claude(prompt)
+        raw_output = call_claude(prompt, model=model)
     except Exception as e:
         log(f"[ERROR] LLM呼び出し失敗: {e}")
         return "error"
@@ -779,6 +849,8 @@ def main():
                         help="議事録DB の保存先ディレクトリ（デフォルト: data/minutes/）")
     parser.add_argument("--skip-minutes-db", action="store_true",
                         help="議事録DB への保存をスキップする")
+    parser.add_argument("--model", default=None, metavar="MODEL",
+                        help="使用する Claude モデル（例: claude-haiku-4-5-20251001）。省略時は CLI デフォルト")
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     add_dry_run_arg(parser)
     add_output_arg(parser)
@@ -842,6 +914,7 @@ def main():
                 no_encrypt=args.no_encrypt,
                 save_parsed=not args.skip_parsed,
                 minutes_dir=minutes_dir,
+                model=args.model,
             )
             if status == "ok":
                 ok += 1
@@ -875,6 +948,7 @@ def main():
         no_encrypt=args.no_encrypt,
         save_parsed=not args.skip_parsed,
         minutes_dir=minutes_dir,
+        model=args.model,
         log=log,
     )
 
