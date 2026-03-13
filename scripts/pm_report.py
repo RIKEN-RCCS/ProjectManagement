@@ -327,19 +327,30 @@ REPORT_PROMPT = """
 """
 
 
+def _format_source(a: dict) -> str:
+    """アクションアイテムの出典を人が読める形式に変換する"""
+    if a.get("source") == "meeting":
+        kind = a.get("meeting_kind") or ""
+        held = a.get("meeting_held_at") or ""
+        return f"{kind} ({held})" if held else kind
+    # Slack の場合は source_ref にパーマリンクが入っている
+    ref = a.get("source_ref") or ""
+    return ref if ref else "Slack"
+
+
 def format_action_items(items: list[dict]) -> str:
     """Canvas に貼るアクションアイテム表（ID・マイルストーン・対応状況列付き）"""
     if not items:
         return "（なし）"
-    header = "| ID | 担当者 | 内容 | 期限 | ソース | マイルストーン | 対応状況 |"
-    sep    = "|----|--------|------|------|--------|----------------|----------|"
+    header = "| ID | 担当者 | 内容 | 期限 | 出典 | マイルストーン | 対応状況 |"
+    sep    = "|----|--------|------|------|------|----------------|----------|"
     rows = [header, sep]
     for a in items:
         ai_id     = a.get("id", "")
         assignee  = a.get("assignee") or "未定"
         content   = a.get("content", "").replace("|", "｜")
         due       = a.get("due_date") or ""
-        source    = a.get("source") or ""
+        source    = _format_source(a)
         milestone = a.get("milestone_id") or ""
         note      = a.get("note") or ""
         rows.append(f"| {ai_id} | {assignee} | {content} | {due} | {source} | {milestone} | {note} |")
@@ -354,7 +365,8 @@ def format_action_items_text(items: list[dict]) -> str:
     for a in items:
         assignee = a.get("assignee") or "未定"
         due = f" 期限:{a['due_date']}" if a.get("due_date") else ""
-        lines.append(f"- [ID:{a.get('id','')}][{assignee}]{due} {a['content']}")
+        source = f" 出典:{_format_source(a)}" if _format_source(a) else ""
+        lines.append(f"- [ID:{a.get('id','')}][{assignee}]{due}{source} {a['content']}")
     return "\n".join(lines)
 
 
