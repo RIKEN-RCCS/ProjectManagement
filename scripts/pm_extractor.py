@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md
 
 
 def normalize_assignee(name: str | None) -> str | None:
@@ -145,9 +145,7 @@ def open_slack_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection
 # CLAUDE.md 読み込み（コンテキスト用）
 # --------------------------------------------------------------------------- #
 def load_context_from_claude_md() -> str:
-    if not CLAUDE_MD.exists():
-        return ""
-    text = CLAUDE_MD.read_text(encoding="utf-8")
+    text = load_claude_md(CLAUDE_MD)
     sections = []
     capture = False
     for line in text.splitlines():

@@ -30,6 +30,7 @@ Options:
     --force                 既存レコードを上書き
     --dry-run               DB保存なし・結果を標準出力のみ
     --output PATH           出力をファイルにも保存（単一ファイルモードのみ）
+    --skip-parsed           LLM抽出結果の *_parsed.md 保存をスキップする
     --no-encrypt            DBを暗号化しない（平文モード）
     --list                  pm.db にインポート済みの議事録一覧を表示して終了
     --delete MEETING_ID     指定した meeting_id の議事録をDBから削除する
@@ -47,7 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md
 
 
 def normalize_assignee(name: str | None) -> str | None:
@@ -130,14 +131,6 @@ def fetch_milestones(conn: sqlite3.Connection) -> list[dict]:
     except Exception:
         return []
 
-
-# --------------------------------------------------------------------------- #
-# CLAUDE.md 読み込み
-# --------------------------------------------------------------------------- #
-def load_claude_md() -> str:
-    if CLAUDE_MD.exists():
-        return CLAUDE_MD.read_text(encoding="utf-8")
-    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -310,6 +303,36 @@ def extract_json(text: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# _parsed.md 保存
+# --------------------------------------------------------------------------- #
+def save_parsed_md(input_path: Path, held_at: str, kind: str, extracted: dict) -> Path:
+    """LLM抽出結果を {stem}_parsed.md として入力ファイルと同じディレクトリに保存する"""
+    lines = [
+        f"# {kind} ({held_at})",
+        "",
+        "## 会議要旨",
+        "",
+        extracted.get("summary", "(なし)"),
+        "",
+        "## 決定事項",
+        "",
+    ]
+    for i, d in enumerate(extracted.get("decisions", []), 1):
+        date_str = f" [{d.get('decided_at')}]" if d.get("decided_at") else ""
+        lines.append(f"{i}. {d['content']}{date_str}")
+    lines += ["", "## アクションアイテム", ""]
+    for i, a in enumerate(extracted.get("action_items", []), 1):
+        assignee = a.get("assignee") or "未定"
+        due = f" (期限: {a['due_date']})" if a.get("due_date") else ""
+        ms = f" [MS: {a['milestone_id']}]" if a.get("milestone_id") else ""
+        lines.append(f"{i}. [{assignee}] {a['content']}{due}{ms}")
+
+    out_path = input_path.parent / f"{input_path.stem}_parsed.md"
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
+# --------------------------------------------------------------------------- #
 # DB 保存
 # --------------------------------------------------------------------------- #
 def save_to_db(
@@ -479,6 +502,7 @@ def process_file(
     force: bool,
     dry_run: bool,
     no_encrypt: bool,
+    save_parsed: bool = True,
     log=print,
 ) -> str:
     """
@@ -493,7 +517,7 @@ def process_file(
     log(f"[INFO] meeting_id   : {meeting_id}")
 
     transcript = input_path.read_text(encoding="utf-8")
-    claude_md = load_claude_md()
+    claude_md = load_claude_md(CLAUDE_MD)
 
     # マイルストーン取得 + インポート済みチェック（LLM呼び出し前）
     conn_for_ms = init_db(db_path, no_encrypt=no_encrypt)
@@ -524,6 +548,11 @@ def process_file(
     except (json.JSONDecodeError, ValueError) as e:
         log(f"[ERROR] JSON解析に失敗: {e}")
         return "error"
+
+    # _parsed.md 保存
+    if save_parsed:
+        parsed_path = save_parsed_md(input_path, held_at, kind, extracted)
+        log(f"[INFO] 抽出結果を保存: {parsed_path}")
 
     # 結果表示
     log("\n" + "=" * 60)
@@ -593,6 +622,8 @@ def main():
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     add_dry_run_arg(parser)
     add_output_arg(parser)
+    parser.add_argument("--skip-parsed", action="store_true",
+                        help="LLM抽出結果の *_parsed.md 保存をスキップする")
     add_no_encrypt_arg(parser)
     parser.add_argument("--list", action="store_true",
                         help="インポート済み議事録一覧を表示して終了")
@@ -644,6 +675,7 @@ def main():
                 file_path, held_at, meeting_name, db_path,
                 force=args.force, dry_run=args.dry_run,
                 no_encrypt=args.no_encrypt,
+                save_parsed=not args.skip_parsed,
             )
             if status == "ok":
                 ok += 1
@@ -674,7 +706,9 @@ def main():
     status = process_file(
         input_path, held_at, kind, db_path,
         force=args.force, dry_run=args.dry_run,
-        no_encrypt=args.no_encrypt, log=log,
+        no_encrypt=args.no_encrypt,
+        save_parsed=not args.skip_parsed,
+        log=log,
     )
 
     close_log()

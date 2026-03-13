@@ -57,15 +57,17 @@ sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4
 
 単一ファイルモードと一括処理モード（`--bulk`）に対応。`_parsed.md` で終わるファイルは対象外。インポート済みのファイルは `--force` なしでスキップ（LLM呼び出しなし）。
 
+LLM抽出結果（要旨・決定事項・アクションアイテム）は **デフォルトで `{元ファイル名}_parsed.md` として同じディレクトリに保存**される（単一・bulk 共通）。保存をやめる場合は `--skip-parsed` を付ける。
+
 ```sh
-# 単一ファイル
+# 単一ファイル（→ meetings/GMT20260302-032528_Recording_parsed.md が自動生成される）
 python3 scripts/pm_meeting_import.py meetings/GMT20260302-032528_Recording.md \
     --meeting-name "アプリ-ベンチマークリーダー会議" --held-at 2026-03-02
 
-# 単一ファイル（出力をファイルにも保存）
+# 単一ファイル（標準出力もファイルに保存）
 python3 scripts/pm_meeting_import.py meetings/GMT20260302-032528_Recording.md \
     --meeting-name Leader_Meeting --held-at 2026-03-02 \
-    --output meetings/GMT20260302-032528_Recording_parsed.txt
+    --output meetings/GMT20260302-032528_Recording_log.txt
 
 # 一括処理（meetings/ ディレクトリ内を全て処理）
 python3 scripts/pm_meeting_import.py --bulk
@@ -97,6 +99,7 @@ python3 scripts/pm_meeting_import.py --delete 2026-03-02_Leader_Meeting --dry-ru
 | `--force` | - | 既存レコードを上書き |
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
 | `--output PATH` | - | 標準出力の内容をファイルにも保存（単一ファイルモードのみ） |
+| `--skip-parsed` | - | LLM抽出結果の `*_parsed.md` 保存をスキップする |
 | `--no-encrypt` | - | DBを暗号化しない（平文モード） |
 | `--list` | - | インポート済み議事録一覧を表示して終了 |
 | `--delete MEETING_ID` | - | 指定した meeting_id の議事録をDBから削除する |

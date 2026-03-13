@@ -36,7 +36,7 @@ from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md
 
 # --------------------------------------------------------------------------- #
 # 定数・パス解決
@@ -57,9 +57,7 @@ RISK_KEYWORDS = [
 # CLAUDE.md 読み込み（コンテキスト用）
 # --------------------------------------------------------------------------- #
 def load_context() -> str:
-    if not CLAUDE_MD.exists():
-        return ""
-    text = CLAUDE_MD.read_text(encoding="utf-8")
+    text = load_claude_md(CLAUDE_MD)
     sections = []
     capture = False
     for line in text.splitlines():
