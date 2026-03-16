@@ -598,15 +598,15 @@ def process_file(
     transcript, is_whisper = prepare_transcript(raw_transcript)
     log(f"[INFO] 文字起こし形式: {'Whisper (話者・タイムスタンプ付き)' if is_whisper else '平文テキスト'}")
 
-    # インポート済みチェック（LLM呼び出し前）
-    if not dry_run:
+    # インポート済みチェック（LLM呼び出し前）: 同じ開催日・会議名が議事録DBに存在するか確認
+    if not dry_run and not force:
         conn_check = init_minutes_db(db_path, no_encrypt=no_encrypt)
         existing = conn_check.execute(
-            "SELECT meeting_id FROM instances WHERE meeting_id = ?", (meeting_id,)
+            "SELECT meeting_id FROM instances WHERE held_at = ? AND kind = ?", (held_at, kind)
         ).fetchone()
         conn_check.close()
-        if existing and not force:
-            log(f"[SKIP] meeting_id '{meeting_id}' は既にDBに存在します。--force で上書き可能")
+        if existing:
+            log(f"[SKIP] {held_at}/{kind} は既に議事録DBに存在します。--force で上書き可能")
             return "skipped"
 
     if dry_run:
