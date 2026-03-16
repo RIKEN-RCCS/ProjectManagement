@@ -101,13 +101,13 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --list
 
 ```sh
 # 推奨: 議事録DBとpm.dbの両方に保存（.md は削除）
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
+sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
 
 # 日付を明示する場合（省略時はファイル名のGMTタイムスタンプをJSTに自動変換）
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
+sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
 
 # 冒頭スキップ
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
+sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
 ```
 
 インポート後の確認・削除:

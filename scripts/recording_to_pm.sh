@@ -3,15 +3,15 @@
 #SBATCH --time=24:00:00
 
 # 複数ファイルを1ジョブで順次処理する
-# Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME]
+# Usage: bash recording_to_pm.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME]
 #
 # --skip SECONDS       全ファイルの冒頭をスキップ
 # --meeting-name NAME  指定すると文字起こし後に pm.db へ直接インポートし .md を削除（推奨）
 #                      省略すると従来通り .md ファイルを残す（セキュリティリスクあり）
 # --held-at YYYY-MM-DD --meeting-name と併用。省略時はファイル名の GMT タイムスタンプを JST 変換して使用
-# 例: bash trans.sh a.mp4 b.mp4
-#     bash trans.sh a.mp4 --skip 30 --meeting-name Leader_Meeting
-#     bash trans.sh a.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10  # 日付を明示上書き
+# 例: bash recording_to_pm.sh a.mp4 b.mp4
+#     bash recording_to_pm.sh a.mp4 --skip 30 --meeting-name Leader_Meeting
+#     bash recording_to_pm.sh a.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10  # 日付を明示上書き
 #
 # パーティション選択: ai-l40s に空きがあれば優先、次に qc-gh200、
 # どちらも混雑していれば ai-l40s に投入する。
@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
-  echo "Usage: bash trans.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME] [--held-at YYYY-MM-DD]"
+  echo "Usage: bash recording_to_pm.sh file1.mp4 [file2.mp4 ...] [--skip SECONDS] [--meeting-name NAME] [--held-at YYYY-MM-DD]"
   exit 1
 fi
 

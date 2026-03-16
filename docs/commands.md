@@ -1,18 +1,14 @@
 ## 主なコマンド
 
-### 1. Slack取得・要約・Canvas投稿（slack_pipeline.py）
+### 1. Slack取得・要約（slack_pipeline.py）
 
 ```sh
-# 通常運用: 差分のみ取得・要約してCanvas投稿
+# 通常運用: 差分のみ取得・要約
 python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db
 
 # 初回・過去分の取り込み（oldest をAPIに渡してページネーション全件取得）
 python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
     --since 2025-04-01
-
-# Canvas投稿せず取得・要約のみ（全体要約生成もスキップ）
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
-    --skip-canvas
 ```
 
 | オプション | デフォルト | 説明 |
@@ -23,26 +19,50 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
 | `-l N` | `100` | 1ページあたりの取得件数上限（最大999） |
 | `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用） |
 | `--force-resummary` | - | 全スレッドを強制再要約 |
-| `--skip-canvas` | - | Canvas投稿・全体要約生成をスキップ |
-| `--skip-llm` | - | LLM呼び出し（スレッド要約・全体要約）をスキップ（取得・DB保存は実行される） |
+| `--skip-llm` | - | LLM呼び出しをスキップ（取得・DB保存は実行される） |
 | `--list` | - | DB内のスレッド要約一覧を表示して終了（`--since` 併用可） |
 | `--no-permalink` | - | パーマリンク取得を無効化 |
-| `--canvas-id ID` | `F0AAD2494VB` | 投稿先CanvasID |
-| `--output PATH` | - | 生成した全体要約テキストをファイルにも保存 |
-| `--dry-run` | - | LLM呼び出し・Canvas投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される） |
+| `--dry-run` | - | LLM呼び出しをスキップ（Slack API・DB書き込みは実行される） |
 
-### 2. 会議録文字起こし（trans.sh + whisper_vad.py）
+### 1b. Slack取得・要約→pm.db抽出 一括実行（slack_to_pm.sh）
+
+`slack_pipeline.py`（取得・要約）→ `pm_extractor.py`（pm.db抽出）を連続実行する。
+
+```sh
+# 通常運用
+bash scripts/slack_to_pm.sh -c C08SXA4M7JT
+
+# 日付フィルタ付き
+bash scripts/slack_to_pm.sh -c C08SXA4M7JT --since 2026-01-01
+
+# 確認用（DB保存なし）
+bash scripts/slack_to_pm.sh -c C08SXA4M7JT --dry-run
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `-c CHANNEL_ID` | `C0A9KG036CS` | 対象チャンネルID（両スクリプトに渡す） |
+| `--since YYYY-MM-DD` | なし | この日付以降のみ対象（両スクリプトに渡す） |
+| `--dry-run` | - | DB保存なし・確認のみ（両スクリプトに渡す） |
+| `--no-encrypt` | - | 平文モード（両スクリプトに渡す） |
+| `--db-slack PATH` | `data/{channel_id}.db` | Slack DBパス |
+| `--db-pm PATH` | `data/pm.db` | pm.db パス |
+| `--skip-fetch` | - | Slack API取得をスキップ（`slack_pipeline.py` のみ） |
+| `--force-resummary` | - | 全スレッドを強制再要約（`slack_pipeline.py` のみ） |
+| `--force-reextract` | - | 抽出済みスレッドも再処理（`pm_extractor.py` のみ） |
+
+### 2. 会議録文字起こし（recording_to_pm.sh + whisper_vad.py）
 
 ```sh
 # 推奨: --meeting-name を指定すると pm.db に直接保存し .md を削除（平文ファイルが残らない）
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
+sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
+sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
 
 # 日付を明示上書き（省略時はファイル名の GMT タイムスタンプを JST 変換して自動取得）
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
+sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
 
 # 従来方式: .md ファイルをそのまま残す（セキュリティ警告が出る）
-sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4
+sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4
 ```
 
 | オプション | デフォルト | 説明 |

@@ -9,7 +9,6 @@ Slack要約パイプライン（Phase 1: DB差分処理版）
      - 変化のないスレッドはスキップ（API呼び出しなし）
   2. 新規・更新スレッドのみ Claude CLI で要約しDBに蓄積
      - 変化のないスレッドはDBの要約をそのまま利用（LLM呼び出しなし）
-  3. DB内の全要約から全体要約を生成しSlack Canvasに投稿
 """
 
 import asyncio
@@ -34,13 +33,10 @@ from cli_utils import add_no_encrypt_arg, make_logger
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from slack_bolt import App
-from slack_sdk.errors import SlackApiError
 
 # ------------------------------------------------------------------ 定数
 JST = timezone(timedelta(hours=9))
 DEFAULT_CHANNEL = "C0A9KG036CS"
-DEFAULT_CANVAS_ID = "F0AA24YH2F9"
 DEFAULT_DB = None  # デフォルトは {channel_id}.db
 
 # ------------------------------------------------------------------ メモリキャッシュ
@@ -64,15 +60,14 @@ def parse_date_arg(date_str: str) -> datetime:
 def parse_args():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Slack チャンネル履歴の差分取得・要約・Canvas投稿を一括実行",
+        description="Slack チャンネル履歴の差分取得・要約を一括実行",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
-  %(prog)s                              # 差分のみ取得・要約してCanvas投稿
+  %(prog)s                              # 差分のみ取得・要約
   %(prog)s --since 2026-01-01 -l 200   # 初回: 範囲を絞って全件取得
-  %(prog)s --skip-fetch                 # DBの既存データから要約・投稿のみ
+  %(prog)s --skip-fetch                 # DBの既存データから要約のみ
   %(prog)s --force-resummary            # 全スレッドを強制的に再要約
-  %(prog)s --skip-canvas                # 取得・要約のみ（投稿しない）
   %(prog)s --skip-llm                   # 取得・DB保存のみ（LLM呼び出しなし）
         """,
     )
@@ -82,8 +77,6 @@ def parse_args():
                         help="取得するメッセージ数の上限 (デフォルト: 100)")
     parser.add_argument("--since", type=parse_date_arg,
                         help="この日付以降のメッセージのみ対象 (YYYY-MM-DD, JST)")
-    parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID,
-                        help=f"投稿先 Canvas ID (デフォルト: {DEFAULT_CANVAS_ID})")
     parser.add_argument("--db", default=None,
                         help="SQLite DB ファイルパス (デフォルト: {channel_id}.db)")
     parser.add_argument("--no-permalink", action="store_true", default=False,
@@ -92,17 +85,13 @@ def parse_args():
                         help="Slack API 取得をスキップ（DB のみ使用）")
     parser.add_argument("--force-resummary", action="store_true", default=False,
                         help="全スレッドを強制的に再要約（差分無視）")
-    parser.add_argument("--skip-canvas", action="store_true", default=False,
-                        help="Canvas 投稿をスキップ")
     parser.add_argument("--skip-llm", action="store_true", default=False,
                         help="LLM呼び出し（スレッド要約・全体要約）をスキップ")
     parser.add_argument("--list", action="store_true", default=False,
                         help="DB内のスレッド要約一覧を表示して終了（--since 併用可）")
     add_no_encrypt_arg(parser)
-    parser.add_argument("--output", default=None, metavar="PATH",
-                        help="全体要約をファイルにも保存")
     parser.add_argument("--dry-run", action="store_true", default=False,
-                        help="LLM呼び出し・Canvas投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される）")
+                        help="LLM呼び出しをスキップ（Slack API・DB書き込みは実行される）")
     return parser.parse_args()
 
 
@@ -207,20 +196,6 @@ def db_get_summary(conn: sqlite3.Connection, channel_id: str,
         (thread_ts, channel_id),
     ).fetchone()
     return dict(row) if row else None
-
-
-def db_get_all_summaries(conn: sqlite3.Connection, channel_id: str) -> list[dict]:
-    """全スレッドの要約をthread_ts昇順（古い→新しい）で返す"""
-    rows = conn.execute(
-        """SELECT s.thread_ts, s.summary, s.last_reply_ts,
-                  m.user_name, m.timestamp, m.permalink
-           FROM summaries s
-           JOIN messages m ON s.thread_ts = m.thread_ts AND s.channel_id = m.channel_id
-           WHERE s.channel_id = ?
-           ORDER BY s.thread_ts ASC""",
-        (channel_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
 
 
 def db_get_thread(conn: sqlite3.Connection, channel_id: str, thread_ts: str) -> dict:
@@ -691,21 +666,6 @@ def remove_thinking_tags(text: str) -> str:
     return text.strip()
 
 
-def sanitize_markdown_for_canvas(text: str) -> str:
-    for old, new in {
-        "～": " - ", "〜": " - ", "–": " - ", "—": " - ",
-        "−": " - ", "‑": "-", "（": "(", "）": ")",
-    }.items():
-        text = text.replace(old, new)
-    text = re.sub(r"(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})", r"\1 - \2", text)
-    text = re.sub(r"^(\s+)\d+\.\s+", r"\1- ", text, flags=re.MULTILINE)
-    text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
-    url_pattern = r"(?<!\[)(?<!\()(?<!\<)https?://[^\s\)>]+(?!\))(?!\>)"
-    text = re.sub(url_pattern,
-                  lambda m: f"<{m.group(0).rstrip('.,;:!?、。')}>", text)
-    return text
-
-
 def call_claude(prompt: str, timeout: int) -> str:
     # CLAUDECODE 環境変数が設定されているとネストセッション判定でエラーになるため除外する
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -785,71 +745,6 @@ def summarize_updated_threads(
 
 
 # ==================================================================
-# ステップ3: 全体要約生成 & Canvas投稿
-# ==================================================================
-
-def build_overall_summary(conn: sqlite3.Connection, channel_id: str) -> str:
-    """DBの全サマリーからClaudeで全体要約を生成する"""
-    all_summaries = db_get_all_summaries(conn, channel_id)
-    if not all_summaries:
-        return "（要約データがありません）"
-
-    items = []
-    for s in all_summaries:
-        item = f"- {s['summary']}"
-        if s.get("permalink"):
-            item += f"\n  (元投稿: {s['permalink']})"
-        items.append(item)
-
-    system_prompt = (
-        "以下はSlackチャンネルの個別メッセージ・スレッドごとの要約です。"
-        "これらを統合して、チャンネル全体の活動を俯瞰できる総合要約を作成してください。"
-        "主要なトピック、重要な決定事項、アクションアイテム、共有されたリソース（URL含む）を"
-        "整理して記載してください。"
-        "アクションアイテムは箇条書きで出力してください。"
-        "URLは共有されたリソースにまとめてください。URLが含まれる場合は完全な形で記載してください。"
-        "極力、表形式は使わずに文章で表現してください。"
-        "推測を含めず、要約に基づいた内容のみを記載してください。"
-        "\n\n【重要】各要約には元のSlack投稿のpermalinkが付記されています。"
-        "全体要約の各トピックや要点の末尾に、参照元の投稿permalinkのURLのみを記載してください。"
-        "「permalink:」等のラベルは付けないでください。言語は日本語としてください。"
-    )
-
-    print(f"\n全体要約を生成中... ({len(all_summaries)}スレッドから)")
-    try:
-        summary = call_claude(
-            f"{system_prompt}\n\n" + "\n\n".join(items), timeout=600
-        )
-        return sanitize_markdown_for_canvas(summary)
-    except subprocess.TimeoutExpired:
-        return "[全体要約失敗: タイムアウト]"
-    except Exception as e:
-        return f"[全体要約失敗: {e}]"
-
-
-def post_to_canvas(canvas_id: str, markdown_content: str) -> None:
-    token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_MCP_XOXB_TOKEN")
-    if not token:
-        print("エラー: SLACK_BOT_TOKEN または SLACK_MCP_XOXB_TOKEN を設定してください",
-              file=sys.stderr)
-        sys.exit(1)
-
-    app = App(token=token)
-    try:
-        app.client.canvases_edit(
-            canvas_id=canvas_id,
-            changes=[{
-                "operation": "replace",
-                "document_content": {"type": "markdown", "markdown": markdown_content},
-            }],
-        )
-        print(f"✓ Canvas 更新成功: {canvas_id}")
-    except SlackApiError as e:
-        print(f"Slack API エラー: {e.response['error']}", file=sys.stderr)
-        sys.exit(1)
-
-
-# ==================================================================
 # --list: DB内スレッド要約一覧
 # ==================================================================
 
@@ -897,7 +792,6 @@ async def main():
     channel_id = args.channel
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     db_path = args.db or os.path.join(repo_root, "data", f"{channel_id}.db")
-    overall_path = os.path.join(repo_root, "data", f"slack_summarize_{channel_id}_overall.md")
 
     print(f"DB: {db_path}")
     conn = init_db(db_path, no_encrypt=args.no_encrypt)
@@ -941,51 +835,13 @@ async def main():
     if args.dry_run or args.skip_llm:
         reason = "--dry-run" if args.dry_run else "--skip-llm"
         print(f"[INFO] {reason} のため LLM呼び出し・DB保存をスキップしました（対象: {len(needs_summarize)}スレッド）")
-        summarized_count = 0
     else:
-        summarized_count = summarize_updated_threads(conn, channel_id, needs_summarize)
+        summarize_updated_threads(conn, channel_id, needs_summarize)
 
-    # ---- ステップ3: 全体要約生成 & Canvas投稿 ----
     total_summaries = conn.execute(
         "SELECT COUNT(*) FROM summaries WHERE channel_id=?", (channel_id,)
     ).fetchone()[0]
     print(f"\nDB内サマリー総数: {total_summaries}スレッド")
-
-    print(f"\n{'='*60}")
-    print("ステップ3: 全体要約生成 & Canvas 投稿")
-    print(f"{'='*60}")
-
-    if summarized_count == 0 and not args.force_resummary:
-        print("差分なし: 既存サマリーをそのままCanvasに投稿します")
-
-    if args.skip_canvas or args.skip_llm or args.dry_run:
-        reasons = [f"--{r}" for r in ("skip-canvas", "skip-llm", "dry-run")
-                   if getattr(args, r.replace("-", "_"))]
-        print("Canvas 投稿・全体要約: スキップ (" + ", ".join(reasons) + ")")
-    else:
-        final_summary = build_overall_summary(conn, channel_id)
-
-        # Markdown ファイルとしても保存（デバッグ・履歴用）
-        retrieved_at = datetime.now().isoformat()
-        header = (
-            "# Slackチャンネル全体要約\n\n"
-            f"チャンネルID: {channel_id}\n\n"
-            f"生成日時: {retrieved_at}\n\n"
-            f"総スレッド数: {total_summaries}\n\n"
-            "---\n\n"
-            + final_summary + "\n"
-        )
-        with open(overall_path, "w", encoding="utf-8") as f:
-            f.write(header)
-        print(f"✓ 全体要約を {overall_path} に保存しました")
-
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                f.write(header)
-            print(f"✓ 全体要約を {args.output} にも保存しました")
-
-        markdown_content = header
-        post_to_canvas(args.canvas_id, markdown_content)
 
     conn.close()
     print("\n✓ パイプライン完了")
