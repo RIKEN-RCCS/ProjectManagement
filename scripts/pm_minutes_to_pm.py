@@ -68,11 +68,11 @@ def transfer_meeting(
 ) -> str:
     """Returns: "ok" | "skipped" """
     existing = pm_conn.execute(
-        "SELECT meeting_id FROM meetings WHERE meeting_id = ?", (meeting_id,)
+        "SELECT meeting_id FROM meetings WHERE held_at = ? AND kind = ?", (held_at, kind)
     ).fetchone()
 
     if existing and not force:
-        log(f"  [SKIP] {meeting_id} は既に pm.db に存在します（--force で上書き可能）")
+        log(f"  [SKIP] {held_at}/{kind} は既に pm.db に存在します（--force で上書き可能）")
         return "skipped"
 
     # minutes_content の先頭500文字をsummaryに使用

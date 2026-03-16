@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# auto_recording_import.sh
+#
+# meetings/ ディレクトリの m4a ファイルを検出し、recording_to_pm.sh に自動投入する。
+# cron で定期実行することを想定（1時間に1回など）。
+#
+# ファイル名形式: YYYY-MM-DD_{meeting-name}.m4a
+#   - YYYY-MM-DD  → --held-at に渡す（開催日）
+#   - {meeting-name} → --meeting-name に渡す。docs/project.md「会議の種類と頻度」の
+#                      いずれかに一致しない場合はスキップ
+#
+# 有効な全ファイルを1つの sbatch ジョブにまとめて投入する。
+# 投入済みファイルは meetings/processing/ に移動して再投入を防ぐ。
+# ログは data/auto_recording_import.log に追記する。
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement
+MEETINGS_DIR="$REPO_ROOT/data"
+PROCESSING_DIR="$MEETINGS_DIR/processing"
+LOG_FILE="$REPO_ROOT/data/auto_recording_import.log"
+
+# --------------------------------------------------------------------------- #
+# 有効な会議名（docs/project.md「会議の種類と頻度」に基づく）
+# SubWG_Meeting は SubWG1_Meeting / SubWG3_Meeting 等の番号付きも許容する
+# --------------------------------------------------------------------------- #
+is_valid_meeting_name() {
+    local name="$1"
+    case "$name" in
+        Leader_Meeting|Block1_Meeting|Block2_Meeting|SubWG_Meeting|\
+        BenchmarkWG_Meeting|Co-design_Review_Meeting)
+            return 0 ;;
+        SubWG[0-9]*_Meeting)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+# --------------------------------------------------------------------------- #
+# ログ出力
+# --------------------------------------------------------------------------- #
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# --------------------------------------------------------------------------- #
+# メイン
+# --------------------------------------------------------------------------- #
+mkdir -p "$PROCESSING_DIR"
+
+log "=== auto_recording_import 開始 ==="
+
+shopt -s nullglob
+m4a_files=("$MEETINGS_DIR"/*.m4a)
+shopt -u nullglob
+
+if [[ ${#m4a_files[@]} -eq 0 ]]; then
+    log "対象ファイルなし（meetings/*.m4a が存在しません）"
+    log "=== 完了 ==="
+    exit 0
+fi
+
+# --------------------------------------------------------------------------- #
+# ファイルを検証し投入リストを構築
+# --------------------------------------------------------------------------- #
+declare -a BATCH_FILES=()
+declare -a BATCH_HELD_AT=()
+declare -a BATCH_NAMES=()
+skipped=0
+
+for m4a_file in "${m4a_files[@]}"; do
+    filename=$(basename "$m4a_file")
+    name="${filename%.m4a}"
+
+    # 形式チェック: YYYY-MM-DD_{meeting-name}
+    if [[ ! "$name" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})_(.+)$ ]]; then
+        log "[SKIP] 形式不一致（YYYY-MM-DD_{meeting-name}.m4a ではない）: $filename"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    held_at="${BASH_REMATCH[1]}"
+    meeting_name="${BASH_REMATCH[2]}"
+
+    # 会議名の有効性チェック
+    if ! is_valid_meeting_name "$meeting_name"; then
+        log "[SKIP] 未知の会議名: '$meeting_name': $filename"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    # processing/ に移動（再投入防止）
+    dest="$PROCESSING_DIR/$filename"
+    mv "$m4a_file" "$dest"
+    log "[QUEUE] $filename → held_at=$held_at, meeting_name=$meeting_name"
+
+    BATCH_FILES+=("$dest")
+    BATCH_HELD_AT+=("$held_at")
+    BATCH_NAMES+=("$meeting_name")
+done
+
+if [[ ${#BATCH_FILES[@]} -eq 0 ]]; then
+    log "投入対象なし（スキップ=$skipped 件）"
+    log "=== 完了 ==="
+    exit 0
+fi
+
+# --------------------------------------------------------------------------- #
+# 一時バッチスクリプトを生成（全ファイルを1ジョブで順次処理）
+# SLURM_JOB_ID が設定された環境で recording_to_pm.sh を呼ぶと処理モードに入る
+# --------------------------------------------------------------------------- #
+BATCH_SCRIPT=$(mktemp /tmp/auto_batch_XXXXXX.sh)
+{
+    echo "#!/bin/bash"
+    echo "#SBATCH --nodes=1"
+    echo "#SBATCH --time=24:00:00"
+    echo ""
+    for i in "${!BATCH_FILES[@]}"; do
+        printf "bash '%s/recording_to_pm.sh' '%s' --held-at '%s' --meeting-name '%s'\n" \
+            "$SCRIPT_DIR" "${BATCH_FILES[$i]}" "${BATCH_HELD_AT[$i]}" "${BATCH_NAMES[$i]}"
+    done
+} > "$BATCH_SCRIPT"
+
+# --------------------------------------------------------------------------- #
+# パーティション選択（recording_to_pm.sh と同じロジック）
+# --------------------------------------------------------------------------- #
+has_available_nodes() {
+    sinfo -p "$1" --noheader -o "%t" 2>/dev/null | grep -qE "^(idle|mix)$"
+}
+
+if has_available_nodes "ai-l40s"; then
+    PARTITION="ai-l40s"
+    EXTRA_OPTS="--gpus=1"
+    log "[INFO] ai-l40s に空きあり → ai-l40s に投入"
+elif has_available_nodes "qc-gh200"; then
+    PARTITION="qc-gh200"
+    EXTRA_OPTS=""
+    log "[INFO] qc-gh200 に空きあり → qc-gh200 に投入"
+else
+    PARTITION="ai-l40s"
+    EXTRA_OPTS="--gpus=1"
+    log "[INFO] 両パーティション混雑 → デフォルト ai-l40s に投入"
+fi
+
+# --------------------------------------------------------------------------- #
+# sbatch 投入
+# --------------------------------------------------------------------------- #
+file_list=$(printf "'%s' " "${BATCH_FILES[@]}")
+log "[SUBMIT] ${#BATCH_FILES[@]} 件を1ジョブで投入: $file_list"
+
+# shellcheck disable=SC2086
+JOB_OUTPUT=$(sbatch --partition="$PARTITION" $EXTRA_OPTS "$BATCH_SCRIPT" 2>&1)
+log "$JOB_OUTPUT"
+
+rm -f "$BATCH_SCRIPT"
+
+log "=== 完了: 投入=${#BATCH_FILES[@]} 件, スキップ=$skipped 件 ==="
