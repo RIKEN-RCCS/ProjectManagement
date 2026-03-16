@@ -42,18 +42,26 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 ```
 [Slack] ─── slack_pipeline.py ───→ {channel_id}.db
                                           ↓
-[会議議事録] ── pm_meeting_import.py ──→ pm.db ←─ pm_extractor.py
-  meetings/*.md                    (決定事項・               ↑
-                                 アクションアイテム)   {channel_id}.db
-                                          ↓
-                                    pm_report.py
-                                          ↓
-                                   Slack Canvas / レポート
+[会議議事録]                        pm.db ←─ pm_extractor.py
+  meetings/*.md        │          (決定事項・               ↑
+                       │        アクションアイテム)   {channel_id}.db
+                       │                  ↓
+                       │            pm_report.py
+                       │                  ↓
+                       │           Slack Canvas / レポート
+                       │
+                       └─ pm_minutes_import.py ──→ data/minutes/{kind}.db
+                                    ↓          （詳細議事録・担当者・期限）
+                         pm_minutes_to_pm.py ──→ pm.db
+                              （LLM不使用）      （担当者・期限を直接転記）
 ```
+
+`trans.sh --meeting-name` は `pm_minutes_import.py` → `pm_minutes_to_pm.py` の順で呼び出す（`pm_meeting_import.py` は手動インポート用として残置）。
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
 - `pm.db` — PM情報専用。複数チャンネル・複数会議を横断して統合。
+- `data/minutes/{kind}.db` — 議事録詳細専用。会議名ごとに独立。決定・AIの背景を含む。
 
 ---
 
@@ -65,20 +73,24 @@ slack/
 │   ├── YYYY-MM-DD_会議名.md
 │   └── YYYY-MM-DD_会議名_parsed.md  # LLM抽出結果（要旨・決定事項・AI）。pm_meeting_import.py が自動生成
 ├── scripts/                         # スクリプト一式
-│   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）
-│   ├── pm_meeting_import.py         # 議事録 → pm.db（単一ファイル / 一括処理・一覧・削除）
-│   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db
-│   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿
-│   ├── pm_sync_canvas.py            # Canvas「対応状況」「マイルストーン」列 → pm.db 同期
-│   ├── pm_relink.py                 # アクションアイテムの各フィールド（担当者・期限・内容・マイルストーン等）をCSV経由で一括編集（LLM不使用）
+│   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）。--skip-llm でLLMスキップ、--list でスレッド一覧表示
+│   ├── pm_meeting_import.py         # 議事録 → pm.db（手動インポート用。単一ファイル / 一括処理・一覧・削除）
+│   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存。--delete で削除）
+│   ├── pm_minutes_to_pm.py          # data/minutes/{kind}.db → pm.db 転記（LLM不使用。--delete で削除）
+│   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
+│   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿（SlackリンクはクリッカブルURL形式）
+│   ├── pm_sync_canvas.py            # Canvas → pm.db 同期（担当者・期限・マイルストーン・状況・内容・対応状況）。open/close判定は「状況」列のみ
+│   ├── pm_relink.py                 # アクションアイテムの各フィールド（担当者・期限・内容・マイルストーン等）をCSV経由で一括編集（LLM不使用）。note列は参照用として出力
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md）
-│   ├── trans.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト（whisper_vad.pyを呼び出す）
+│   ├── trans.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 └── data/                            # DBと出力ファイル
     ├── {channel_id}.db              # Slackデータ（例: C0A9KG036CS.db）
     ├── pm.db                        # PM統合データ
+    ├── minutes/                     # 詳細議事録DB（会議名ごとに独立）
+    │   └── {kind}.db                # 例: Leader_Meeting.db
     └── slack_summarize_*.md         # 全体要約（デバッグ・履歴用）
 ```
 

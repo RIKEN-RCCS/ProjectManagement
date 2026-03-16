@@ -27,6 +27,7 @@ Options:
     --meetings-dir DIR      一括処理時の議事録ディレクトリ（デフォルト: meetings/）
     --since YYYY-MM-DD      一括処理・--list 時に対象を絞る
     --db PATH               pm.db のパス（デフォルト: data/pm.db）
+    --model MODEL           使用する Claude モデル。省略時は CLI デフォルト
     --force                 既存レコードを上書き
     --dry-run               DB保存なし・結果を標準出力のみ
     --output PATH           出力をファイルにも保存（単一ファイルモードのみ）
@@ -48,7 +49,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md
+from cli_utils import (
+    add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
+    make_logger, load_claude_md, prepare_transcript,
+)
 
 
 def normalize_assignee(name: str | None) -> str | None:
@@ -116,6 +120,7 @@ def init_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
         migrations=[
             "ALTER TABLE action_items ADD COLUMN note TEXT",
             "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
+            "ALTER TABLE decisions ADD COLUMN source_context TEXT",
         ],
     )
     return conn
@@ -132,14 +137,16 @@ def fetch_milestones(conn: sqlite3.Connection) -> list[dict]:
         return []
 
 
-
 # --------------------------------------------------------------------------- #
 # claude CLI 呼び出し
 # --------------------------------------------------------------------------- #
-def call_claude(prompt: str, timeout: int = 300) -> str:
+def call_claude(prompt: str, timeout: int = 300, model: str | None = None) -> str:
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    cmd = ["claude", "-p", prompt]
+    if model:
+        cmd += ["--model", model]
     result = subprocess.run(
-        ["claude", "-p", prompt],
+        cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -267,7 +274,7 @@ def format_milestones_for_prompt(milestones: list[dict]) -> str:
 
 
 def build_prompt(transcript: str, held_at: str, claude_md: str, milestones: list[dict]) -> str:
-    # CLAUDE.mdは長いので「プロジェクト固有の用語」「ステークホルダー」「主なプロジェクト参加者」セクションのみ抽出
+    # CLAUDE.mdは長いので関連セクションのみ抽出
     sections = []
     capture = False
     for line in claude_md.splitlines():
@@ -503,6 +510,7 @@ def process_file(
     dry_run: bool,
     no_encrypt: bool,
     save_parsed: bool = True,
+    model: str | None = None,
     log=print,
 ) -> str:
     """
@@ -516,7 +524,10 @@ def process_file(
     log(f"[INFO] 会議種別     : {kind}")
     log(f"[INFO] meeting_id   : {meeting_id}")
 
-    transcript = input_path.read_text(encoding="utf-8")
+    raw_transcript = input_path.read_text(encoding="utf-8")
+    transcript, is_whisper = prepare_transcript(raw_transcript)
+    log(f"[INFO] 文字起こし形式: {'Whisper (話者・タイムスタンプ付き)' if is_whisper else '平文テキスト'}")
+
     claude_md = load_claude_md(CLAUDE_MD)
 
     # マイルストーン取得 + インポート済みチェック（LLM呼び出し前）
@@ -533,11 +544,11 @@ def process_file(
     conn_for_ms.close()
 
     log(f"[INFO] マイルストーン: {len(milestones)} 件")
-    log("[INFO] LLMによる抽出を開始...")
+    log(f"[INFO] LLMによる抽出を開始... (model: {model or 'default'})")
 
     prompt = build_prompt(transcript, held_at, claude_md, milestones)
     try:
-        raw_output = call_claude(prompt)
+        raw_output = call_claude(prompt, model=model)
     except Exception as e:
         log(f"[ERROR] LLM呼び出し失敗: {e}")
         return "error"
@@ -619,6 +630,8 @@ def main():
                         help="一括処理時の議事録ディレクトリ（デフォルト: meetings/）")
     add_since_arg(parser, "（--bulk / --list 時）")
     parser.add_argument("--db", default=None, help="pm.db のパス")
+    parser.add_argument("--model", default=None, metavar="MODEL",
+                        help="使用する Claude モデル（例: claude-haiku-4-5-20251001）。省略時は CLI デフォルト")
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     add_dry_run_arg(parser)
     add_output_arg(parser)
@@ -676,6 +689,7 @@ def main():
                 force=args.force, dry_run=args.dry_run,
                 no_encrypt=args.no_encrypt,
                 save_parsed=not args.skip_parsed,
+                model=args.model,
             )
             if status == "ok":
                 ok += 1
@@ -708,6 +722,7 @@ def main():
         force=args.force, dry_run=args.dry_run,
         no_encrypt=args.no_encrypt,
         save_parsed=not args.skip_parsed,
+        model=args.model,
         log=log,
     )
 

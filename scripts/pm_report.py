@@ -26,9 +26,8 @@ import argparse
 import os
 import re
 import sqlite3
-import subprocess
 import sys
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 
 from slack_bolt import App
@@ -36,13 +35,12 @@ from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
 
 # --------------------------------------------------------------------------- #
 # 定数・パス解決
 # --------------------------------------------------------------------------- #
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 DEFAULT_PM_DB = REPO_ROOT / "data" / "pm.db"
 DEFAULT_CANVAS_ID = "F0AAD2494VB"  # 20_1_リーダ会議メンバ Canvas
 
@@ -51,23 +49,6 @@ RISK_KEYWORDS = [
     "ブロック", "懸念", "リスク", "未解決", "未定", "不明",
     "issue", "blocker", "delay", "risk", "concern",
 ]
-
-
-# --------------------------------------------------------------------------- #
-# CLAUDE.md 読み込み（コンテキスト用）
-# --------------------------------------------------------------------------- #
-def load_context() -> str:
-    text = load_claude_md(CLAUDE_MD)
-    sections = []
-    capture = False
-    for line in text.splitlines():
-        if re.match(r"^###\s+(ステークホルダー|主なプロジェクト参加者|プロジェクト固有の用語|会議の種類)", line):
-            capture = True
-        elif re.match(r"^---", line) and capture:
-            capture = False
-        if capture:
-            sections.append(line)
-    return "\n".join(sections) if sections else text[:3000]
 
 
 # --------------------------------------------------------------------------- #
@@ -92,7 +73,7 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
     """
     params: list = []
     if since:
-        query += " AND a.extracted_at >= ?"
+        query += " AND COALESCE(m.held_at, a.extracted_at) >= ?"
         params.append(since)
     query += " ORDER BY a.due_date ASC NULLS LAST, a.extracted_at ASC"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
@@ -101,7 +82,7 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
 def fetch_recent_decisions(conn: sqlite3.Connection, since: str | None) -> list[dict]:
     query = """
         SELECT d.id, d.content, d.decided_at, d.source, d.source_ref,
-               d.meeting_id, m.kind as meeting_kind
+               d.meeting_id, m.kind as meeting_kind, m.held_at as meeting_held_at
         FROM decisions d
         LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
         WHERE 1=1
@@ -113,15 +94,6 @@ def fetch_recent_decisions(conn: sqlite3.Connection, since: str | None) -> list[
     query += " ORDER BY d.decided_at DESC"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
-
-def fetch_recent_meetings(conn: sqlite3.Connection, since: str | None) -> list[dict]:
-    query = "SELECT * FROM meetings WHERE 1=1"
-    params: list = []
-    if since:
-        query += " AND held_at >= ?"
-        params.append(since)
-    query += " ORDER BY held_at DESC LIMIT 10"
-    return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
 def _normalize_assignee(name: str | None) -> str:
@@ -258,73 +230,6 @@ def detect_risk_items(action_items: list[dict]) -> list[dict]:
     return risk_items
 
 
-# --------------------------------------------------------------------------- #
-# claude CLI 呼び出し
-# --------------------------------------------------------------------------- #
-def call_claude(prompt: str, timeout: int = 300) -> str:
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    result = subprocess.run(
-        ["claude", "-p", prompt],
-        capture_output=True, text=True, timeout=timeout, env=env,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"claude failed: {result.stderr[:500]}")
-    # <thinking>タグを除去
-    output = re.sub(r"<thinking>[\s\S]*?</thinking>", "", result.stdout).strip()
-    return output
-
-
-# --------------------------------------------------------------------------- #
-# レポート生成
-# --------------------------------------------------------------------------- #
-REPORT_PROMPT = """
-あなたは富岳NEXTプロジェクトのプロジェクトマネージャーです。
-以下のプロジェクト情報をもとに、週次進捗レポートを生成してください。
-
-## 指示
-
-1. **簡潔かつ実用的に**: マネージャーが5分で読めるレポートにすること
-2. **事実のみ記載**: 推測や補完は含めないこと
-3. **リスク・懸念事項を強調**: 「要注意」として目立つように記載すること
-4. **Markdown形式で出力**: Slack Canvas での表示を想定
-
-## プロジェクト文脈
-
-{context}
-
-## データ（生成日: {today}）
-
-### 未完了アクションアイテム（{ai_count}件）
-
-{action_items}
-
-### 直近の決定事項（{d_count}件）
-
-{decisions}
-
-### 直近の会議（{m_count}件）
-
-{meetings}
-
-### リスク検知アイテム（{risk_count}件）
-
-{risk_items}
-
-## 出力形式
-
-以下の3セクションのみMarkdownで出力してください。アクションアイテムの表は別途追加するため出力不要です。
-
-# 富岳NEXT プロジェクト進捗レポート（{today}）
-
-## サマリー
-（3〜5行で全体状況を要約）
-
-## 直近の決定事項
-（箇条書き、ソース参照付き）
-
-## 要注意事項
-（リスク・懸念・遅延の可能性があるもの。なければ「特になし」と記載）
-"""
 
 
 def _format_source(a: dict) -> str:
@@ -335,25 +240,28 @@ def _format_source(a: dict) -> str:
         return f"{kind} ({held})" if held else kind
     # Slack の場合は source_ref にパーマリンクが入っている
     ref = a.get("source_ref") or ""
+    if ref.startswith("http"):
+        return f"[Slack]({ref})"
     return ref if ref else "Slack"
 
 
 def format_action_items(items: list[dict]) -> str:
-    """Canvas に貼るアクションアイテム表（ID・マイルストーン・対応状況列付き）"""
+    """Canvas に貼るアクションアイテム表（pm_relink.py --export と列・順序を統一）"""
     if not items:
         return "（なし）"
-    header = "| ID | 担当者 | 内容 | 期限 | 出典 | マイルストーン | 対応状況 |"
-    sep    = "|----|--------|------|------|------|----------------|----------|"
+    header = "| ID | 担当者 | 期限 | マイルストーン | 状況 | 内容 | 出典 | 対応状況 |"
+    sep    = "|----|--------|------|----------------|------|------|------|----------|"
     rows = [header, sep]
     for a in items:
         ai_id     = a.get("id", "")
         assignee  = a.get("assignee") or "未定"
-        content   = a.get("content", "").replace("|", "｜")
         due       = a.get("due_date") or ""
-        source    = _format_source(a)
         milestone = a.get("milestone_id") or ""
-        note      = a.get("note") or ""
-        rows.append(f"| {ai_id} | {assignee} | {content} | {due} | {source} | {milestone} | {note} |")
+        status    = a.get("status") or ""
+        content   = a.get("content", "").replace("|", "｜").replace("\n", " ").replace("\r", "")
+        source    = _format_source(a)
+        note      = (a.get("note") or "").replace("\n", " ").replace("\r", "")
+        rows.append(f"| {ai_id} | {assignee} | {due} | {milestone} | {status} | {content} | {source} | {note} |")
     return "\n".join(rows)
 
 
@@ -375,95 +283,38 @@ def format_decisions(items: list[dict]) -> str:
         return "（なし）"
     lines = []
     for d in items:
-        date_str = f" ({d['decided_at']})" if d.get("decided_at") else ""
-        ref = f" {d.get('source_ref', '')}" if d.get("source_ref") else ""
-        lines.append(f"- {d['content']}{date_str}{ref}")
+        source = _format_source(d)
+        source_str = f" （{source}）" if source else ""
+        lines.append(f"- {d['content']}{source_str}")
     return "\n".join(lines)
 
 
-def format_meetings(items: list[dict]) -> str:
-    if not items:
-        return "（なし）"
-    lines = []
-    for m in items:
-        lines.append(f"- {m.get('held_at', '?')} {m.get('kind', '?')}: {m.get('summary', '')[:100]}")
-    return "\n".join(lines)
-
-
-def generate_report(
+def build_report(
     action_items: list[dict],
     decisions: list[dict],
-    meetings: list[dict],
     risk_items: list[dict],
     milestone_progress: list[dict],
     assignee_workload: list[dict],
-    context: str,
     today: str,
 ) -> str:
-    prompt = REPORT_PROMPT.format(
-        context=context,
-        today=today,
-        ai_count=len(action_items),
-        action_items=format_action_items_text(action_items),
-        d_count=len(decisions),
-        decisions=format_decisions(decisions),
-        m_count=len(meetings),
-        meetings=format_meetings(meetings),
-        risk_count=len(risk_items),
-        risk_items=format_action_items_text(risk_items),
-    )
-    llm_output = call_claude(prompt, timeout=300)
-    # LLMが生成したMarkdownテーブルを箇条書きに変換（Canvasに2つのテーブルが混在するのを防ぐ）
-    llm_output = _table_to_list(llm_output)
+    sections = [f"# 富岳NEXT プロジェクト進捗レポート（{today}）"]
 
-    # マイルストーン進捗セクション（DBから直接計算、LLM不使用）
-    milestone_section = ""
     if milestone_progress:
         ms_text = format_milestone_progress(milestone_progress, today)
-        milestone_section = f"\n\n## プロジェクトの現在地\n\n{ms_text}"
+        sections.append(f"## プロジェクトの現在地\n\n{ms_text}")
 
-    # 担当者別負荷セクション（DBから直接計算、LLM不使用）
-    workload_section = ""
+    risk_text = format_action_items_text(risk_items) if risk_items else "特になし"
+    sections.append(f"## 要注意事項\n\n{risk_text}")
+
+    sections.append(f"## 直近の決定事項\n\n{format_decisions(decisions)}")
+
+    sections.append(f"## 未完了アクションアイテム\n\n{format_action_items(action_items)}")
+
     if assignee_workload:
         wl_text = format_assignee_workload(assignee_workload)
-        workload_section = f"\n\n## 担当者別負荷\n\n{wl_text}"
+        sections.append(f"## 担当者別負荷\n\n{wl_text}")
 
-    # アクションアイテム表・担当者別負荷をLLM出力の末尾に追記
-    table = format_action_items(action_items)
-    return (
-        f"# 富岳NEXT プロジェクト進捗レポート（{today}）"
-        + milestone_section
-        + "\n\n"
-        + llm_output.lstrip("#").lstrip().lstrip("富岳NEXT プロジェクト進捗レポート").lstrip(f"（{today}）").lstrip("\n")
-        + f"\n\n## 未完了アクションアイテム\n\n{table}"
-        + workload_section
-    )
-
-
-def _table_to_list(text: str) -> str:
-    """LLM出力内のMarkdownテーブルを箇条書きに変換する"""
-    lines = text.splitlines()
-    result = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        # テーブルヘッダー行を検出
-        if re.match(r"^\s*\|.+\|", line):
-            headers = [c.strip() for c in line.strip().strip("|").split("|")]
-            i += 1
-            # セパレーター行をスキップ
-            if i < len(lines) and re.match(r"^\s*\|[-| :]+\|", lines[i]):
-                i += 1
-            # データ行を箇条書きに変換
-            while i < len(lines) and re.match(r"^\s*\|.+\|", lines[i]):
-                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
-                parts = [f"{h}: {c}" for h, c in zip(headers, cells) if c]
-                result.append("- " + ", ".join(parts))
-                i += 1
-        else:
-            result.append(line)
-            i += 1
-    return "\n".join(result)
+    return "\n\n".join(sections)
 
 
 
@@ -593,11 +444,8 @@ def main() -> None:
     log(f"[INFO] 生成日    : {today}")
 
     conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
-    context = load_context()
-
     action_items = fetch_open_action_items(conn, args.since)
     decisions = fetch_recent_decisions(conn, args.since)
-    meetings = fetch_recent_meetings(conn, args.since)
     risk_items = detect_risk_items(action_items)
     milestone_progress = fetch_milestone_progress(conn)
     assignee_workload = fetch_assignee_workload(conn, today)
@@ -605,12 +453,10 @@ def main() -> None:
 
     log(f"[INFO] アクションアイテム: {len(action_items)}件 (うちリスク: {len(risk_items)}件)")
     log(f"[INFO] 決定事項          : {len(decisions)}件")
-    log(f"[INFO] 会議              : {len(meetings)}件")
     log(f"[INFO] マイルストーン    : {len(milestone_progress)}件")
     log(f"[INFO] 担当者            : {len(assignee_workload)}名")
 
-    log("\n[INFO] 進捗レポートを生成中...")
-    report = generate_report(action_items, decisions, meetings, risk_items, milestone_progress, assignee_workload, context, today)
+    report = build_report(action_items, decisions, risk_items, milestone_progress, assignee_workload, today)
     report = sanitize_for_canvas(report)
     log("\n" + "=" * 60)
     log(report)
