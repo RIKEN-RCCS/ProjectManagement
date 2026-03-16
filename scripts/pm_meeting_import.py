@@ -120,6 +120,7 @@ def init_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
         migrations=[
             "ALTER TABLE action_items ADD COLUMN note TEXT",
             "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
+            "ALTER TABLE decisions ADD COLUMN source_context TEXT",
         ],
     )
     return conn

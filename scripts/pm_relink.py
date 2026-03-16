@@ -88,6 +88,11 @@ def write_audit_log(conn, record_id: int, field: str, old_value, new_value, sour
 # --------------------------------------------------------------------------- #
 
 def fetch_milestones(conn) -> list[dict]:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='milestones'"
+    ).fetchone()
+    if not exists:
+        return []
     rows = conn.execute(
         "SELECT milestone_id, name, due_date FROM milestones ORDER BY due_date"
     ).fetchall()
@@ -126,7 +131,7 @@ def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     rows = conn.execute(f"""
         SELECT a.id, a.assignee, a.due_date, a.milestone_id, a.status, a.content,
-               a.source, a.source_ref, m.kind AS meeting_kind, m.held_at AS meeting_held_at
+               a.note, a.source, a.source_ref, m.kind AS meeting_kind, m.held_at AS meeting_held_at
         FROM action_items a
         LEFT JOIN meetings m ON a.meeting_id = m.meeting_id
         {where}
@@ -154,11 +159,12 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
     lines.append("# 編集可能な列: assignee / due_date / milestone_id / content / status")
     lines.append("# assignee / due_date / milestone_id は空欄 → NULL（解除）")
     lines.append("# content / status は空欄の場合スキップ（変更なし）")
-    lines.append("# source は参照用（読み取り専用・--import 時は無視される）")
+    lines.append("# source / note は参照用（読み取り専用・--import 時は無視される）")
+    lines.append("# note はCanvasの対応状況列（pm_sync_canvas.py実行後に反映）")
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(["id", "assignee", "due_date", "milestone_id", "status", "content", "source"])
+    writer.writerow(["id", "assignee", "due_date", "milestone_id", "status", "content", "source", "note"])
     for item in items:
         writer.writerow([
             item["id"],
@@ -168,6 +174,7 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
             item["status"] or "",
             item["content"] or "",
             format_source(item),
+            item["note"] or "",
         ])
     lines.append(buf.getvalue().rstrip("\n"))
 
@@ -308,8 +315,8 @@ def cmd_list(conn, all_items: bool, since: str | None = None):
     since_msg = f"（since={since}）" if since else ""
     print(f"アクションアイテム一覧（{label}{since_msg}）")
     print("─" * 100)
-    print(f"{'ID':>4}  {'担当者':<12}  {'期限':<12}  {'MS':<4}  {'状況':<6}  {'出典':<28}  内容")
-    print("-" * 100)
+    print(f"{'ID':>4}  {'担当者':<12}  {'期限':<12}  {'MS':<4}  {'状況':<6}  {'出典':<28}  {'内容':<40}  対応状況")
+    print("-" * 120)
     for item in items:
         ai_id    = item["id"]
         assignee = (item["assignee"] or "(未定)")[:12]
@@ -318,7 +325,8 @@ def cmd_list(conn, all_items: bool, since: str | None = None):
         status   = (item["status"] or "")[:6]
         source   = format_source(item)[:28]
         content  = (item["content"] or "")[:40]
-        print(f"{ai_id:>4}  {assignee:<12}  {due:<12}  {ms:<4}  {status:<6}  {source:<28}  {content}")
+        note     = (item["note"] or "")[:20]
+        print(f"{ai_id:>4}  {assignee:<12}  {due:<12}  {ms:<4}  {status:<6}  {source:<28}  {content:<40}  {note}")
     print(f"\n合計: {len(items)} 件")
 
 

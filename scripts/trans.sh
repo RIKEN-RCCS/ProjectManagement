@@ -97,6 +97,8 @@ mkdir -p "$WORKDIR"
 SUCCESS=0
 FAIL=0
 
+. ~/.secrets/hf_tokens.sh
+
 for INPUT_FILE in "${FILES[@]}"; do
   INPUT_ABS=$(realpath "$INPUT_FILE")
   EXT=${INPUT_ABS##*.}
@@ -153,20 +155,28 @@ EOF
 
       SCRIPT_DIR=$(dirname "$(realpath "$WHISPER_VAD")")
 #     VENV_PYTHON=~/.venv_x86_64/bin/python3
-      PM_IMPORT="$SCRIPT_DIR/pm_meeting_import.py"
-      PM_DB="$SCRIPT_DIR/../data/pm.db"
+      PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
+      PM_MINUTES_TO_PM="$SCRIPT_DIR/pm_minutes_to_pm.py"
 
-      echo "[INFO] pm.db へインポート中: $MEETING_NAME ($DATE_TO_USE)"
-      "$PYTHON3" "$PM_IMPORT" "$BASENAME.md" \
+      echo "[INFO] 議事録DBへインポート中: $MEETING_NAME ($DATE_TO_USE)"
+      "$PYTHON3" "$PM_MINUTES_IMPORT" "$BASENAME.md" \
         --meeting-name "$MEETING_NAME" \
-        --held-at "$DATE_TO_USE" \
-        --db "$PM_DB"
+        --held-at "$DATE_TO_USE"
 
       if [[ $? -eq 0 ]]; then
-        rm -f "$BASENAME.md"
-        echo "[INFO] 文字起こし結果を pm.db に保存し、$BASENAME.md を削除しました"
+        echo "[INFO] pm.db へ転記中: $MEETING_NAME ($DATE_TO_USE)"
+        "$PYTHON3" "$PM_MINUTES_TO_PM" \
+          --meeting-name "$MEETING_NAME" \
+          --since "$DATE_TO_USE"
+
+        if [[ $? -eq 0 ]]; then
+          rm -f "$BASENAME.md"
+          echo "[INFO] 文字起こし結果を議事録DB・pm.db に保存し、$BASENAME.md を削除しました"
+        else
+          echo "[WARN] pm.db への転記に失敗しました。$BASENAME.md は保持されています"
+        fi
       else
-        echo "[WARN] pm.db へのインポートに失敗しました。$BASENAME.md は保持されています"
+        echo "[WARN] 議事録DBへのインポートに失敗しました。$BASENAME.md は保持されています"
       fi
     fi
   else
