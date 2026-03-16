@@ -8,7 +8,7 @@
 
 ### フェーズ2: 会議議事録との統合（実装済み）
 
-- `meetings/*.md` をLLMで解析し `pm.db` に構造化保存（`pm_meeting_import.py`）
+- `meetings/*.md` をLLMで解析し `data/minutes/{kind}.db` に詳細保存（`pm_minutes_import.py`）、その後 `pm_minutes_to_pm.py` で `pm.db` に転記
 - Slack要約から決定事項・アクションアイテムを抽出し `pm.db` に保存（`pm_extractor.py`）
 - `source_ref` により背景（会議議事録 or Slackスレッド）に常に遡れる設計
 - 差分処理: `slack_extractions` テーブルで抽出済みスレッドを管理、変化なしはLLM呼び出しゼロ
@@ -22,18 +22,18 @@
 
 ### フェーズ4: インポート済み議事録の記録（実装済み）
 
-- `pm_meeting_import.py --list` で pm.db にインポート済みの議事録一覧を表示できる
-  - `meetings` テーブルの `file_path` / `parsed_at` をクエリして表示
-  - 開催日・会議種別・アクションアイテム数・決定事項数・登録日時・ファイルパスを一覧表示
+- `pm_minutes_import.py --list` で議事録DBにインポート済みの一覧を表示できる
+- `pm_minutes_to_pm.py --list` で pm.db に転記済みの会議一覧を表示できる
+  - 開催日・決定数・AI数・登録日時・meeting_id を一覧表示
   - `--since YYYY-MM-DD` と組み合わせて期間絞り込みも可能
   - 再インポート・抜け漏れ確認・監査証跡として活用できる
 
 ```sh
-# インポート済み議事録の一覧表示
-python3 scripts/pm_meeting_import.py --list
+# 議事録DBの一覧表示
+python3 scripts/pm_minutes_import.py --list
 
-# 特定日付以降のみ表示
-python3 scripts/pm_meeting_import.py --list --since 2026-02-01
+# pm.db 転記済み一覧
+python3 scripts/pm_minutes_to_pm.py --list --since 2026-02-01
 ```
 
 ### フェーズ5: ゴール・マイルストーン管理と達成状況トラッキング（実装済み）
@@ -74,7 +74,7 @@ python3 scripts/pm_meeting_import.py --list --since 2026-02-01
 #### 5.3 アクションアイテムとマイルストーンの紐づけ
 
 - `action_items` テーブルに `milestone_id` 列を追加済み
-- `pm_extractor.py` / `pm_meeting_import.py` の抽出時に、マイルストーン一覧をLLMの文脈として
+- `pm_extractor.py` / `pm_minutes_import.py` の抽出時に、マイルストーン一覧をLLMの文脈として
   渡し、各アクションアイテムをどのマイルストーンに紐づけるかを推定させる
 - インポート済みアイテムの紐づけ修正は `pm_relink.py` でCSV経由で一括編集できる
 

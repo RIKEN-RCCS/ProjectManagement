@@ -56,7 +56,7 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
                               （LLM不使用）      （担当者・期限を直接転記）
 ```
 
-`trans.sh --meeting-name` は `pm_minutes_import.py` → `pm_minutes_to_pm.py` の順で呼び出す（`pm_meeting_import.py` は手動インポート用として残置）。
+`trans.sh --meeting-name` は `pm_minutes_import.py` → `pm_minutes_to_pm.py` の順で呼び出す。
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
@@ -71,10 +71,8 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 slack/
 ├── meetings/                        # 議事録の一次着地点（Markdown形式）
 │   ├── YYYY-MM-DD_会議名.md
-│   └── YYYY-MM-DD_会議名_parsed.md  # LLM抽出結果（要旨・決定事項・AI）。pm_meeting_import.py が自動生成
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）。--skip-llm でLLMスキップ、--list でスレッド一覧表示
-│   ├── pm_meeting_import.py         # 議事録 → pm.db（手動インポート用。単一ファイル / 一括処理・一覧・削除）
 │   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存。--delete で削除）
 │   ├── pm_minutes_to_pm.py          # data/minutes/{kind}.db → pm.db 転記（LLM不使用。--delete で削除）
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
