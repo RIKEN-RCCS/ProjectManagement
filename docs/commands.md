@@ -53,63 +53,11 @@ sbatch scripts/trans.sh GMT20260302-032528_Recording.mp4
 
 処理フロー: ffmpeg → WAV変換（16kHz, mono） → DeepFilterNetノイズ除去 → SileroVAD → pyannote話者分離 → Whisper large-v3 文字起こし
 
-`--meeting-name` 指定時の追加フロー: 文字起こし完了 → pm_meeting_import.py で pm.db にインポート → .md 削除
+`--meeting-name` 指定時の追加フロー: 文字起こし完了 → `pm_minutes_import.py` で議事録DBに保存 → `pm_minutes_to_pm.py` で pm.db に転記 → .md 削除
 
-### 3. 会議議事録 → pm.db（pm_meeting_import.py）
+### 3. 会議議事録 → 詳細議事録DB（pm_minutes_import.py）
 
-単一ファイルモードと一括処理モード（`--bulk`）に対応。`_parsed.md` で終わるファイルは対象外。インポート済みのファイルは `--force` なしでスキップ（LLM呼び出しなし）。
-
-LLM抽出結果（要旨・決定事項・アクションアイテム）は **デフォルトで `{元ファイル名}_parsed.md` として同じディレクトリに保存**される（単一・bulk 共通）。保存をやめる場合は `--skip-parsed` を付ける。
-
-```sh
-# 単一ファイル（→ meetings/GMT20260302-032528_Recording_parsed.md が自動生成される）
-python3 scripts/pm_meeting_import.py meetings/GMT20260302-032528_Recording.md \
-    --meeting-name "アプリ-ベンチマークリーダー会議" --held-at 2026-03-02
-
-# 単一ファイル（標準出力もファイルに保存）
-python3 scripts/pm_meeting_import.py meetings/GMT20260302-032528_Recording.md \
-    --meeting-name Leader_Meeting --held-at 2026-03-02 \
-    --output meetings/GMT20260302-032528_Recording_log.txt
-
-# 一括処理（meetings/ ディレクトリ内を全て処理）
-python3 scripts/pm_meeting_import.py --bulk
-
-# 一括処理（特定日付以降のみ）
-python3 scripts/pm_meeting_import.py --bulk --since 2026-01-01
-
-# 一括処理（既存レコードを上書き）
-python3 scripts/pm_meeting_import.py --bulk --force
-
-# インポート済み議事録の一覧表示
-python3 scripts/pm_meeting_import.py --list
-python3 scripts/pm_meeting_import.py --list --since 2026-02-01
-
-# 議事録の削除
-python3 scripts/pm_meeting_import.py --delete 2026-03-02_Leader_Meeting
-python3 scripts/pm_meeting_import.py --delete 2026-03-02_Leader_Meeting --dry-run
-```
-
-| オプション | デフォルト | 説明 |
-|---|---|---|
-| `input_file` | - | 文字起こしファイル（.txt / .md）（単一ファイルモード） |
-| `--meeting-name NAME` | `"不明"` | 会議種別名（「会議の種類と頻度」参照）（単一ファイルモード） |
-| `--held-at YYYY-MM-DD` | ファイル名から推定 | 開催日（単一ファイルモード） |
-| `--bulk` | - | 一括処理モード（meetings/ ディレクトリ内を全て処理） |
-| `--meetings-dir DIR` | `meetings/` | 一括処理時の議事録ディレクトリ |
-| `--since YYYY-MM-DD` | なし（全件） | この日付以降のファイルのみ対象（`--bulk` / `--list` 時） |
-| `--db PATH` | `data/pm.db` | pm.db のパス |
-| `--force` | - | 既存レコードを上書き |
-| `--dry-run` | - | DB保存なし・結果を標準出力のみ |
-| `--output PATH` | - | 標準出力の内容をファイルにも保存（単一ファイルモードのみ） |
-| `--skip-parsed` | - | LLM抽出結果の `*_parsed.md` 保存をスキップする |
-| `--no-encrypt` | - | DBを暗号化しない（平文モード） |
-| `--list` | - | インポート済み議事録一覧を表示して終了 |
-| `--delete MEETING_ID` | - | 指定した meeting_id の議事録をDBから削除する |
-
-### 3b. 会議議事録 → 詳細議事録DB（pm_minutes_import.py）
-
-`pm_meeting_import.py` とは別に、詳細な議事内容・決定の背景・AIの発生経緯を
-`data/minutes/{meeting_name}.db` に保存する。会議名ごとに独立したDBファイルを作成する。
+詳細な議事内容・決定の背景・AIの発生経緯を `data/minutes/{meeting_name}.db` に保存する。会議名ごとに独立したDBファイルを作成する。
 
 ```sh
 # 単一ファイル
@@ -153,7 +101,7 @@ python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meetin
 - `decisions`: 決定事項
 - `action_items`: アクションアイテム + `assignee`（担当者）+ `due_date`（期限）
 
-### 3c. 議事録DB → pm.db 転記（pm_minutes_to_pm.py）
+### 3b. 議事録DB → pm.db 転記（pm_minutes_to_pm.py）
 
 `pm_minutes_import.py` で作成した議事録DBの内容を **LLM不使用** で pm.db に転記する。
 担当者・期限は議事録DBから直接コピーされる。milestone_id のみ Canvas または `pm_relink.py` で補完する。

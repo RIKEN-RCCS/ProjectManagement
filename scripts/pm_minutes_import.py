@@ -6,9 +6,7 @@ pm_minutes_import.py
 DBは会議名（--meeting-name）ごとに独立した SQLite ファイルとして
 data/minutes/{meeting_name}.db に保存される。
 
-pm_meeting_import.py との違い:
-  - pm_meeting_import.py → pm.db に決定事項・アクションアイテムを保存（PM管理用）
-  - pm_minutes_import.py → 議事録専用DBに詳細な議事内容を保存（アーカイブ用）
+処理後は pm_minutes_to_pm.py で pm.db に転記する（LLM不使用）。
 
 各テーブル:
   instances      : 会議開催記録（開催日・ファイルパス等）

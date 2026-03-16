@@ -39,9 +39,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db_utils import open_db
+from db_utils import open_db, init_pm_db as init_db, normalize_assignee
 from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg
-from pm_meeting_import import init_db, normalize_assignee
 from pm_minutes_import import db_path_for_kind, init_minutes_db
 
 

@@ -149,6 +149,70 @@ def open_db_plain(db_path: Path | str, *, row_factory: bool = True) -> _sqlite3.
 
 
 # --------------------------------------------------------------------------- #
+# pm.db 初期化
+# --------------------------------------------------------------------------- #
+import re as _re  # noqa: E402 (ローカルimport)
+
+_PM_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meetings (
+    meeting_id   TEXT PRIMARY KEY,
+    held_at      TEXT,
+    kind         TEXT,
+    file_path    TEXT,
+    summary      TEXT,
+    parsed_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS action_items (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id   TEXT,
+    content      TEXT,
+    assignee     TEXT,
+    due_date     TEXT,
+    status       TEXT DEFAULT 'open',
+    note         TEXT,
+    source       TEXT DEFAULT 'meeting',
+    source_ref   TEXT,
+    extracted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id   TEXT,
+    content      TEXT,
+    decided_at   TEXT,
+    source       TEXT DEFAULT 'meeting',
+    source_ref   TEXT,
+    extracted_at TEXT
+);
+"""
+
+
+def init_pm_db(db_path: Path, no_encrypt: bool = False):
+    """pm.db を初期化して接続を返す。スキーマ作成・マイグレーションを自動適用する。"""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        schema=_PM_SCHEMA,
+        migrations=[
+            "ALTER TABLE action_items ADD COLUMN note TEXT",
+            "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
+            "ALTER TABLE decisions ADD COLUMN source_context TEXT",
+        ],
+    )
+
+
+def normalize_assignee(name: str | None) -> str | None:
+    """日本語を含む担当者名の姓名間スペース（半角・全角）を除去する"""
+    if not name:
+        return name
+    if _re.search(r"[\u3040-\u9fff]", name):
+        name = name.replace(" ", "").replace("\u3000", "")
+    return name
+
+
+# --------------------------------------------------------------------------- #
 # 平文DB → 暗号化DB 変換
 # --------------------------------------------------------------------------- #
 def is_encrypted(db_path: Path) -> bool:
