@@ -30,6 +30,10 @@ Usage:
     # 全会議名の概要一覧
     python3 scripts/pm_minutes_import.py --list
 
+    # 議事録DBから削除
+    python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
+    python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
+
 Options:
     input_file              文字起こしファイル（.txt / .md）（単一ファイルモード）
     --meeting-name NAME     会議種別名（DBファイル名に使用。省略時はファイル名から推定）
@@ -44,6 +48,7 @@ Options:
     --output PATH           出力をファイルにも保存（単一ファイルモードのみ）
     --no-encrypt            DBを暗号化しない（平文モード）
     --list                  議事録DBの内容を表示して終了
+    --delete MEETING_ID     指定した meeting_id を議事録DBから削除して終了
 """
 
 import argparse
@@ -89,22 +94,32 @@ CREATE TABLE IF NOT EXISTS minutes_content (
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    meeting_id   TEXT NOT NULL REFERENCES instances(meeting_id),
-    content      TEXT NOT NULL
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id     TEXT NOT NULL REFERENCES instances(meeting_id),
+    content        TEXT NOT NULL,
+    source_context TEXT
 );
 
 CREATE TABLE IF NOT EXISTS action_items (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     meeting_id   TEXT NOT NULL REFERENCES instances(meeting_id),
-    content      TEXT NOT NULL
+    content      TEXT NOT NULL,
+    assignee     TEXT,
+    due_date     TEXT
 );
 """
+
+_MINUTES_MIGRATIONS = [
+    "ALTER TABLE action_items ADD COLUMN assignee TEXT",
+    "ALTER TABLE action_items ADD COLUMN due_date TEXT",
+    "ALTER TABLE decisions ADD COLUMN source_context TEXT",
+]
 
 
 def init_minutes_db(db_path: Path, no_encrypt: bool = False):
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    return open_db(db_path, encrypt=not no_encrypt, schema=MINUTES_SCHEMA)
+    return open_db(db_path, encrypt=not no_encrypt, schema=MINUTES_SCHEMA,
+                   migrations=_MINUTES_MIGRATIONS)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,11 +141,25 @@ PROMPT_TEMPLATE = """\
 
 ## 決定事項
 
-- （会議で確定した事項を箇条書きで記載。なければ「（なし）」）
+- 決定事項の内容 [出典: 根拠となった議論・発言の要約（1〜2文）]
+
+※ 決定事項の形式の例:
+  - NVLinkアプリ性能測定を今年度キャンセルする [出典: NVIDIAから今年度実施困難との連絡があり、リーダー会議で対応を協議した]
+  - FFBをGitHubの公開リポジトリでOSS公開する [出典: 安藤から、開発者との議論でOSS化が決定したと報告があった]
+※ 根拠・背景が不明な場合は [出典: なし] とする
+※ 決定事項がなければ「（なし）」
 
 ## アクションアイテム
 
-- （担当者・内容を明記したタスクを箇条書きで記載。なければ「（なし）」）
+- [担当者名|未定] 内容 (期限: YYYY-MM-DD|なし)
+
+※ アクションアイテムの形式の例:
+  - [井上] AI for Scienceの対応資料を作成する (期限: 2026-03-18)
+  - [未定] NVIDIAへの回答を検討する (期限: なし)
+  - [佐野・上野] アーキテクチャ仕様書を更新する (期限: 2026-03-31)
+※ 担当者が不明な場合は「未定」を記入すること
+※ 期限が「3月18日」等の形式の場合は開催日（{held_at}）を参考に YYYY-MM-DD に変換すること
+※ アクションアイテムがなければ「（なし）」
 
 ## 議事内容
 
@@ -138,7 +167,7 @@ PROMPT_TEMPLATE = """\
 
 ---
 
-## 文字起こしテキスト
+## 文字起こしテキスト（開催日: {held_at}）
 
 {transcript}
 """
@@ -185,16 +214,76 @@ def _parse_bullets(section_text: str) -> list[str]:
     return items
 
 
+# 決定事項: 内容 [出典: 出典テキスト]
+_DECISION_RE = re.compile(r"^(.+?)\s+\[出典:\s*(.+?)\]$")
+
+# [担当者] 内容 (期限: YYYY-MM-DD) または [担当者] 内容 (期限: なし)
+_AI_RE = re.compile(
+    r"^\[([^\]]+)\]\s+(.+?)(?:\s+\(期限:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}|なし)\))?$"
+)
+
+
+def _parse_decisions(section_text: str) -> list[dict]:
+    """
+    決定事項箇条書きを構造化して返す。
+    各要素: {"content": str, "source_context": str|None}
+    フォーマット: - 内容 [出典: 出典テキスト]
+    """
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip()
+        if not re.match(r"^[-*]\s+", line):
+            continue
+        text = re.sub(r"^[-*]\s+", "", line).strip()
+        if not text or text in ("（なし）", "(なし)"):
+            continue
+        m = _DECISION_RE.match(text)
+        if m:
+            content = m.group(1).strip()
+            raw_ctx = m.group(2).strip()
+            source_context = None if raw_ctx in ("なし", "") else raw_ctx
+            items.append({"content": content, "source_context": source_context})
+        else:
+            items.append({"content": text, "source_context": None})
+    return items
+
+
+def _parse_action_items(section_text: str) -> list[dict]:
+    """
+    アクションアイテム箇条書きを構造化して返す。
+    各要素: {"content": str, "assignee": str|None, "due_date": str|None}
+    フォーマット外の行はフォールバックとして content のみ設定する。
+    """
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip()
+        if not re.match(r"^[-*]\s+", line):
+            continue
+        text = re.sub(r"^[-*]\s+", "", line).strip()
+        if not text or text in ("（なし）", "(なし)"):
+            continue
+        m = _AI_RE.match(text)
+        if m:
+            raw_assignee, content, raw_due = m.group(1), m.group(2).strip(), m.group(3)
+            assignee = None if raw_assignee.strip() in ("未定", "") else raw_assignee.strip()
+            due_date = None if (not raw_due or raw_due == "なし") else raw_due
+            items.append({"content": content, "assignee": assignee, "due_date": due_date})
+        else:
+            # フォールバック: フォーマット外
+            items.append({"content": text, "assignee": None, "due_date": None})
+    return items
+
+
 def parse_minutes_output(text: str) -> dict:
     """LLM が出力した Markdown 議事録をパースして辞書で返す"""
-    decisions_text   = _extract_section(text, "決定事項")
+    decisions_text    = _extract_section(text, "決定事項")
     action_items_text = _extract_section(text, "アクションアイテム")
-    minutes_text     = _extract_section(text, "議事内容")
+    minutes_text      = _extract_section(text, "議事内容")
 
     return {
         "minutes":      minutes_text,
-        "decisions":    _parse_bullets(decisions_text),
-        "action_items": _parse_bullets(action_items_text),
+        "decisions":    _parse_decisions(decisions_text),
+        "action_items": _parse_action_items(action_items_text),
     }
 
 
@@ -266,16 +355,16 @@ def save_to_minutes_db(conn, meeting_id: str, held_at: str, kind: str,
             (meeting_id, parsed["minutes"]),
         )
 
-    for content in parsed["decisions"]:
+    for d in parsed["decisions"]:
         conn.execute(
-            "INSERT INTO decisions (meeting_id, content) VALUES (?, ?)",
-            (meeting_id, content),
+            "INSERT INTO decisions (meeting_id, content, source_context) VALUES (?, ?, ?)",
+            (meeting_id, d["content"], d.get("source_context")),
         )
 
-    for content in parsed["action_items"]:
+    for a in parsed["action_items"]:
         conn.execute(
-            "INSERT INTO action_items (meeting_id, content) VALUES (?, ?)",
-            (meeting_id, content),
+            "INSERT INTO action_items (meeting_id, content, assignee, due_date) VALUES (?, ?, ?, ?)",
+            (meeting_id, a["content"], a.get("assignee"), a.get("due_date")),
         )
 
     conn.commit()
@@ -344,6 +433,146 @@ def list_minutes(minutes_dir: Path, kind_filter: str | None,
 
 
 # --------------------------------------------------------------------------- #
+# 詳細表示
+# --------------------------------------------------------------------------- #
+def show_meeting(minutes_dir: Path, meeting_id: str,
+                 kind_filter: str | None, no_encrypt: bool) -> None:
+    """指定 meeting_id の議事録詳細を表示する"""
+    if not minutes_dir.exists():
+        print(f"[ERROR] 議事録DBディレクトリが存在しません: {minutes_dir}", file=sys.stderr)
+        return
+
+    db_files = sorted(minutes_dir.glob("*.db"))
+    if kind_filter:
+        safe = re.sub(r"[^\w\-]", "_", kind_filter)
+        db_files = [f for f in db_files if f.stem == safe]
+
+    found = False
+    for db_file in db_files:
+        try:
+            conn = open_db(db_file, encrypt=not no_encrypt)
+        except Exception as e:
+            print(f"[ERROR] DB接続失敗: {db_file}: {e}", file=sys.stderr)
+            continue
+
+        inst = conn.execute(
+            "SELECT meeting_id, held_at, kind, file_path, imported_at"
+            " FROM instances WHERE meeting_id = ?",
+            (meeting_id,),
+        ).fetchone()
+
+        if not inst:
+            conn.close()
+            continue
+
+        found = True
+        print(f"\n{'='*70}")
+        print(f"  meeting_id : {inst['meeting_id']}")
+        print(f"  開催日     : {inst['held_at']}")
+        print(f"  会議種別   : {inst['kind']}")
+        print(f"  ファイル   : {inst['file_path'] or '(なし)'}")
+        print(f"  登録日時   : {(inst['imported_at'] or '')[:19]}")
+        print(f"{'='*70}")
+
+        decisions = conn.execute(
+            "SELECT content, source_context FROM decisions WHERE meeting_id = ? ORDER BY id",
+            (meeting_id,),
+        ).fetchall()
+        print(f"\n## 決定事項 ({len(decisions)} 件)")
+        if decisions:
+            for i, d in enumerate(decisions, 1):
+                print(f"  {i}. {d['content']}")
+                if d["source_context"]:
+                    print(f"     [出典: {d['source_context']}]")
+        else:
+            print("  （なし）")
+
+        action_items = conn.execute(
+            "SELECT content, assignee, due_date FROM action_items"
+            " WHERE meeting_id = ? ORDER BY id",
+            (meeting_id,),
+        ).fetchall()
+        print(f"\n## アクションアイテム ({len(action_items)} 件)")
+        if action_items:
+            for i, a in enumerate(action_items, 1):
+                assignee = a["assignee"] or "未定"
+                due = f" (期限: {a['due_date']})" if a["due_date"] else ""
+                print(f"  {i}. [{assignee}] {a['content']}{due}")
+        else:
+            print("  （なし）")
+
+        mc = conn.execute(
+            "SELECT content FROM minutes_content WHERE meeting_id = ? LIMIT 1",
+            (meeting_id,),
+        ).fetchone()
+        print("\n## 議事内容")
+        if mc:
+            print(mc["content"])
+        else:
+            print("  （なし）")
+
+        conn.close()
+        break
+
+    if not found:
+        scope = f"'{kind_filter}'" if kind_filter else "全DB"
+        print(f"[ERROR] meeting_id '{meeting_id}' が {scope} に見つかりません。"
+              f" --list で一覧を確認してください。", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# 削除
+# --------------------------------------------------------------------------- #
+def delete_meeting(minutes_dir: Path, meeting_id: str,
+                   kind_filter: str | None, no_encrypt: bool,
+                   dry_run: bool) -> None:
+    """指定 meeting_id を議事録DBから削除する"""
+    if not minutes_dir.exists():
+        print(f"[ERROR] 議事録DBディレクトリが存在しません: {minutes_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    db_files = sorted(minutes_dir.glob("*.db"))
+    if kind_filter:
+        safe = re.sub(r"[^\w\-]", "_", kind_filter)
+        db_files = [f for f in db_files if f.stem == safe]
+
+    for db_file in db_files:
+        try:
+            conn = init_minutes_db(db_file, no_encrypt=no_encrypt)
+        except Exception as e:
+            print(f"[ERROR] DB接続失敗: {db_file}: {e}", file=sys.stderr)
+            continue
+
+        inst = conn.execute(
+            "SELECT meeting_id, held_at FROM instances WHERE meeting_id = ?",
+            (meeting_id,),
+        ).fetchone()
+
+        if not inst:
+            conn.close()
+            continue
+
+        print(f"[INFO] 削除対象: {meeting_id} ({inst['held_at']}) @ {db_file}")
+        if dry_run:
+            print("[INFO] --dry-run のため削除をスキップしました")
+            conn.close()
+            return
+
+        conn.execute("DELETE FROM minutes_content WHERE meeting_id = ?", (meeting_id,))
+        conn.execute("DELETE FROM decisions WHERE meeting_id = ?", (meeting_id,))
+        conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
+        conn.execute("DELETE FROM instances WHERE meeting_id = ?", (meeting_id,))
+        conn.commit()
+        conn.close()
+        print(f"[INFO] {meeting_id} を {db_file} から削除しました")
+        return
+
+    scope = f"'{kind_filter}'" if kind_filter else "全DB"
+    print(f"[ERROR] meeting_id '{meeting_id}' が {scope} に見つかりません", file=sys.stderr)
+    sys.exit(1)
+
+
+# --------------------------------------------------------------------------- #
 # 単一ファイル処理（コア）
 # --------------------------------------------------------------------------- #
 def process_file(
@@ -382,9 +611,13 @@ def process_file(
             log(f"[SKIP] meeting_id '{meeting_id}' は既にDBに存在します。--force で上書き可能")
             return "skipped"
 
+    if dry_run:
+        log("[INFO] --dry-run のため LLM呼び出し・DB保存をスキップしました")
+        return "ok"
+
     log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
 
-    prompt = PROMPT_TEMPLATE.format(transcript=transcript)
+    prompt = PROMPT_TEMPLATE.format(transcript=transcript, held_at=held_at)
     try:
         minutes_text = call_claude(prompt, model=model)
     except Exception as e:
@@ -398,10 +631,6 @@ def process_file(
     log(minutes_text)
     log("=" * 60)
 
-    if dry_run:
-        log("\n[INFO] --dry-run のため DB保存をスキップしました")
-        return "ok"
-
     conn = init_minutes_db(db_path, no_encrypt=no_encrypt)
     save_to_minutes_db(conn, meeting_id, held_at, kind, str(input_path), parsed, force)
     conn.close()
@@ -409,6 +638,9 @@ def process_file(
     log(f"\n[INFO] 議事録DB に保存完了: {db_path}")
     log(f"  - decisions   : {len(parsed['decisions'])} 件")
     log(f"  - action_items: {len(parsed['action_items'])} 件")
+    assigned = sum(1 for a in parsed['action_items'] if a.get('assignee'))
+    dated    = sum(1 for a in parsed['action_items'] if a.get('due_date'))
+    log(f"    (担当者あり: {assigned}件, 期限あり: {dated}件)")
     return "ok"
 
 
@@ -432,6 +664,14 @@ def main():
   # 一覧表示
   python3 scripts/pm_minutes_import.py --list
   python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
+
+  # 詳細表示
+  python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
+  python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
+
+  # 削除
+  python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
+  python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
 """,
     )
     parser.add_argument("input_file", nargs="?",
@@ -455,9 +695,24 @@ def main():
     add_no_encrypt_arg(parser)
     parser.add_argument("--list", action="store_true",
                         help="議事録DBの内容を表示して終了")
+    parser.add_argument("--show", default=None, metavar="MEETING_ID",
+                        help="指定した meeting_id の詳細（決定事項・AI・議事内容）を表示して終了")
+    parser.add_argument("--delete", default=None, metavar="MEETING_ID",
+                        help="指定した meeting_id を議事録DBから削除して終了")
     args = parser.parse_args()
 
     minutes_dir = Path(args.minutes_dir) if args.minutes_dir else DEFAULT_MINUTES_DIR
+
+    # --- delete ---
+    if args.delete:
+        delete_meeting(minutes_dir, args.delete, args.meeting_name,
+                       args.no_encrypt, args.dry_run)
+        return
+
+    # --- show ---
+    if args.show:
+        show_meeting(minutes_dir, args.show, args.meeting_name, args.no_encrypt)
+        return
 
     # --- list ---
     if args.list:

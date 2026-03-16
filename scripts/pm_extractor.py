@@ -300,19 +300,19 @@ def save_slack_items(
     extracted: dict,
 ) -> tuple[int, int]:
     now = datetime.now().isoformat()
-    # decided_at の推定（要約投稿日をフォールバック）
-    date_fallback = timestamp[:10] if timestamp else None
+    # Slack投稿日（フィルタ・表示用）。タイムスタンプ "2026-01-20 19:43:23" の日付部分を使用
+    post_date = timestamp[:10] if timestamp else now[:10]
     source_ref = permalink or f"slack://{channel_id}/{thread_ts}"
 
     d_count = 0
     for d in extracted.get("decisions", []):
-        decided_at = d.get("decided_at") or date_fallback
+        decided_at = d.get("decided_at") or post_date
         pm_conn.execute(
             """
             INSERT INTO decisions (meeting_id, content, decided_at, source, source_ref, extracted_at)
             VALUES (?, ?, ?, 'slack', ?, ?)
             """,
-            (None, d["content"], decided_at, source_ref, now),
+            (None, d["content"], decided_at, source_ref, post_date),
         )
         d_count += 1
 
@@ -325,7 +325,7 @@ def save_slack_items(
             VALUES (?, ?, ?, ?, 'open', 'slack', ?, ?, ?)
             """,
             (None, a["content"], normalize_assignee(a.get("assignee")), a.get("due_date"),
-             source_ref, now, a.get("milestone_id")),
+             source_ref, post_date, a.get("milestone_id")),
         )
         a_count += 1
 
@@ -343,27 +343,36 @@ def cmd_list_extractions(
     log=print,
 ) -> None:
     """抽出済みスレッドを一覧表示する"""
-    query = """
-        SELECT se.thread_ts, se.extracted_at, m.timestamp
-        FROM slack_extractions se
-        LEFT JOIN messages m ON se.thread_ts = m.thread_ts AND m.channel_id = se.channel_id
-        WHERE se.channel_id = ?
-    """
-    params: list = [channel_id]
+    # slack_extractions は pm.db、messages は Slack DB（別接続）のため JOIN 不可
+    # → それぞれ取得してPython側で結合する
+    se_query = "SELECT thread_ts, extracted_at FROM slack_extractions WHERE channel_id = ?"
+    se_params: list = [channel_id]
     if since:
-        query += " AND se.extracted_at >= ?"
-        params.append(since)
-    query += " ORDER BY m.timestamp ASC"
+        se_query += " AND extracted_at >= ?"
+        se_params.append(since)
 
-    rows = pm_conn.execute(query, params).fetchall()
+    se_rows = pm_conn.execute(se_query, se_params).fetchall()
+
+    # Slack DB から投稿日時を取得（thread_ts → timestamp）
+    ts_map: dict[str, str] = {}
+    if se_rows:
+        placeholders = ",".join("?" * len(se_rows))
+        ts_rows = slack_conn.execute(
+            f"SELECT thread_ts, timestamp FROM messages WHERE channel_id = ? AND thread_ts IN ({placeholders})",
+            [channel_id] + [r["thread_ts"] for r in se_rows],
+        ).fetchall()
+        ts_map = {r["thread_ts"]: r["timestamp"] for r in ts_rows}
+
+    # 投稿日時でソート
+    sorted_rows = sorted(se_rows, key=lambda r: ts_map.get(r["thread_ts"], r["extracted_at"]))
 
     log(f"抽出済みスレッド一覧（チャンネル: {channel_id}）")
     log("─" * 50)
-    for i, row in enumerate(rows, 1):
-        ts = (row["timestamp"] or "")[:19]
+    for i, row in enumerate(sorted_rows, 1):
+        ts = (ts_map.get(row["thread_ts"]) or "")[:19]
         extracted = (row["extracted_at"] or "")[:19]
         log(f"[{i:3d}] {ts}  抽出: {extracted}")
-    log(f"合計: {len(rows)} 件")
+    log(f"合計: {len(sorted_rows)} 件")
 
 
 # --------------------------------------------------------------------------- #
@@ -422,6 +431,11 @@ def main() -> None:
             continue
 
         log(f"\n[{i}/{len(summaries)}] {row.get('user_name')} ({row.get('timestamp', '')[:16]})")
+
+        if args.dry_run:
+            log("  [INFO] --dry-run のため LLM呼び出し・DB保存をスキップしました")
+            skipped += 1
+            continue
 
         try:
             extracted = extract_from_summary(row, context, milestones)

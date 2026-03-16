@@ -24,10 +24,12 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
 | `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用） |
 | `--force-resummary` | - | 全スレッドを強制再要約 |
 | `--skip-canvas` | - | Canvas投稿・全体要約生成をスキップ |
+| `--skip-llm` | - | LLM呼び出し（スレッド要約・全体要約）をスキップ（取得・DB保存は実行される） |
+| `--list` | - | DB内のスレッド要約一覧を表示して終了（`--since` 併用可） |
 | `--no-permalink` | - | パーマリンク取得を無効化 |
 | `--canvas-id ID` | `F0AAD2494VB` | 投稿先CanvasID |
 | `--output PATH` | - | 生成した全体要約テキストをファイルにも保存 |
-| `--dry-run` | - | Canvas投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される） |
+| `--dry-run` | - | LLM呼び出し・Canvas投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される） |
 
 ### 2. 会議録文字起こし（trans.sh + whisper_vad.py）
 
@@ -123,6 +125,10 @@ python3 scripts/pm_minutes_import.py --list
 
 # 特定会議名の一覧
 python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
+
+# 議事録DBから削除
+python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
+python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
 ```
 
 | オプション | デフォルト | 説明 |
@@ -140,11 +146,48 @@ python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
 | `--output PATH` | - | 出力をファイルにも保存（単一ファイルモードのみ） |
 | `--no-encrypt` | - | 平文モード |
 | `--list` | - | 議事録DBの内容を表示して終了 |
+| `--delete MEETING_ID` | - | 指定した meeting_id を議事録DBから削除して終了（`--meeting-name` で対象DB絞り込み可） |
 
 **格納内容**:
 - `minutes_content`: 議題ごとの詳細議事内容（Markdown形式）
-- `decisions`: 決定事項 + `background`（決定に至った経緯・理由）
-- `action_items`: アクションアイテム + `background`（発生した理由・目的）
+- `decisions`: 決定事項
+- `action_items`: アクションアイテム + `assignee`（担当者）+ `due_date`（期限）
+
+### 3c. 議事録DB → pm.db 転記（pm_minutes_to_pm.py）
+
+`pm_minutes_import.py` で作成した議事録DBの内容を **LLM不使用** で pm.db に転記する。
+担当者・期限は議事録DBから直接コピーされる。milestone_id のみ Canvas または `pm_relink.py` で補完する。
+
+```sh
+# 全会議名の議事録DBを pm.db に転記
+python3 scripts/pm_minutes_to_pm.py
+
+# 特定会議名のみ転記
+python3 scripts/pm_minutes_to_pm.py --meeting-name Leader_Meeting
+
+# 日付フィルタを付けて転記
+python3 scripts/pm_minutes_to_pm.py --since 2026-01-01
+
+# 確認用（DB保存なし）
+python3 scripts/pm_minutes_to_pm.py --dry-run
+
+# 既存レコードを上書き
+python3 scripts/pm_minutes_to_pm.py --meeting-name Leader_Meeting --force
+
+# pm.db から削除
+python3 scripts/pm_minutes_to_pm.py --delete 2026-03-10_Leader_Meeting
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--meeting-name NAME` | 全DBを対象 | 特定の会議名のみ処理 |
+| `--minutes-dir DIR` | `data/minutes/` | 議事録DBのディレクトリ |
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--since YYYY-MM-DD` | なし | この日付以降の会議のみ転記 |
+| `--force` | - | 既存レコードを上書き |
+| `--dry-run` | - | DB保存なし・転記内容を表示のみ |
+| `--no-encrypt` | - | 平文モード |
+| `--delete MEETING_ID` | - | 指定した meeting_id を pm.db から削除して終了 |
 
 ### 4. Slack要約 → pm.db（pm_extractor.py）
 
@@ -175,7 +218,7 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --list --since 2026-02-01
 
 レポート構成: **サマリー → 直近の決定事項 → 要注意事項 → 未完了アクションアイテム（表形式）**
 
-未完了アクションアイテム表には ID・担当者・内容・期限・ソース・マイルストーン・対応状況 の列があり、会議中にCanvas上で直接記入できる。
+未完了アクションアイテム表には ID・担当者・期限・マイルストーン・状況・内容・出典・対応状況 の列があり（pm_relink.py --export と列・順序を統一）、会議中にCanvas上で直接記入できる。
 
 ```sh
 # 週次進捗レポートを生成してCanvas投稿
@@ -224,11 +267,13 @@ python3 scripts/pm_sync_canvas.py --output sync_result.txt
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
 | `--output PATH` | - | 結果をファイルにも保存 |
 
-**完了判定キーワード**（`status='closed'` に更新）: `完了` `done` `済` `対応済` `解決` `closed` `finish` `finished`
+**完了判定**: `状況` 列のみで判断（`対応状況` 列はclose判定に使わない）
 
-それ以外の記入内容は `note` 列に保存（`status` は `open` のまま）
+`状況` 列の完了キーワード（`status='closed'` に更新）: `完了` `done` `済` `対応済` `解決` `close` `closed` `finish` `finished`（大文字小文字を区別しない）
 
-Canvas上で変更可能な列: **担当者・内容・期限・マイルストーン（M1〜M5）・対応状況**（非空かつDB値と異なる場合のみ更新）
+`対応状況` 列は内容をそのまま `note` 列に保存（`status` には影響しない）
+
+Canvas上で変更可能な列: **担当者・期限・マイルストーン・状況・内容・対応状況**（非空かつDB値と異なる場合のみ更新）
 
 ### 7. アクションアイテムの一括編集（pm_relink.py）
 

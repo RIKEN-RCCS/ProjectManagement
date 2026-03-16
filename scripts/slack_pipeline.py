@@ -73,6 +73,7 @@ def parse_args():
   %(prog)s --skip-fetch                 # DBの既存データから要約・投稿のみ
   %(prog)s --force-resummary            # 全スレッドを強制的に再要約
   %(prog)s --skip-canvas                # 取得・要約のみ（投稿しない）
+  %(prog)s --skip-llm                   # 取得・DB保存のみ（LLM呼び出しなし）
         """,
     )
     parser.add_argument("-c", "--channel", default=DEFAULT_CHANNEL,
@@ -93,11 +94,15 @@ def parse_args():
                         help="全スレッドを強制的に再要約（差分無視）")
     parser.add_argument("--skip-canvas", action="store_true", default=False,
                         help="Canvas 投稿をスキップ")
+    parser.add_argument("--skip-llm", action="store_true", default=False,
+                        help="LLM呼び出し（スレッド要約・全体要約）をスキップ")
+    parser.add_argument("--list", action="store_true", default=False,
+                        help="DB内のスレッド要約一覧を表示して終了（--since 併用可）")
     add_no_encrypt_arg(parser)
     parser.add_argument("--output", default=None, metavar="PATH",
                         help="全体要約をファイルにも保存")
     parser.add_argument("--dry-run", action="store_true", default=False,
-                        help="Canvas 投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される）")
+                        help="LLM呼び出し・Canvas投稿・全体要約ファイル保存をスキップ（Slack API・DB書き込みは実行される）")
     return parser.parse_args()
 
 
@@ -845,6 +850,45 @@ def post_to_canvas(canvas_id: str, markdown_content: str) -> None:
 
 
 # ==================================================================
+# --list: DB内スレッド要約一覧
+# ==================================================================
+
+def cmd_list(conn: sqlite3.Connection, channel_id: str, since: datetime | None) -> None:
+    query = """
+        SELECT m.thread_ts, m.timestamp, m.user_name, m.permalink,
+               s.summarized_at, s.last_reply_ts, s.summary
+        FROM messages m
+        LEFT JOIN summaries s ON m.thread_ts = s.thread_ts AND s.channel_id = m.channel_id
+        WHERE m.channel_id = ?
+    """
+    params: list = [channel_id]
+    if since:
+        query += " AND m.timestamp >= ?"
+        params.append(since.strftime("%Y-%m-%d"))
+    query += " ORDER BY m.timestamp ASC"
+
+    rows = conn.execute(query, params).fetchall()
+
+    print(f"スレッド一覧（チャンネル: {channel_id}）")
+    if since:
+        print(f"（{since.strftime('%Y-%m-%d')} 以降）")
+    print("─" * 80)
+    summarized = unsummarized = 0
+    for i, row in enumerate(rows, 1):
+        ts = (row["timestamp"] or "")[:16]
+        user = (row["user_name"] or "")[:12]
+        if row["summarized_at"]:
+            summarized += 1
+            summary_head = (row["summary"] or "").replace("\n", " ")[:60]
+            has_replies = "↩" if row["last_reply_ts"] else " "
+            print(f"[{i:4d}] {ts}  {user:<12}  {has_replies}  要約:{row['summarized_at'][:10]}  {summary_head}…")
+        else:
+            unsummarized += 1
+            print(f"[{i:4d}] {ts}  {user:<12}     （未要約）")
+    print(f"\n合計: {len(rows)} 件（要約済み: {summarized}, 未要約: {unsummarized}）")
+
+
+# ==================================================================
 # メイン
 # ==================================================================
 
@@ -857,6 +901,12 @@ async def main():
 
     print(f"DB: {db_path}")
     conn = init_db(db_path, no_encrypt=args.no_encrypt)
+
+    # ---- --list モード ----
+    if args.list:
+        cmd_list(conn, channel_id, args.since)
+        conn.close()
+        return
 
     # ---- ステップ1: 差分取得 & DB保存 ----
     if not args.skip_fetch:
@@ -888,7 +938,12 @@ async def main():
     print(f"\n{'='*60}")
     print("ステップ2: 差分要約")
     print(f"{'='*60}")
-    summarized_count = summarize_updated_threads(conn, channel_id, needs_summarize)
+    if args.dry_run or args.skip_llm:
+        reason = "--dry-run" if args.dry_run else "--skip-llm"
+        print(f"[INFO] {reason} のため LLM呼び出し・DB保存をスキップしました（対象: {len(needs_summarize)}スレッド）")
+        summarized_count = 0
+    else:
+        summarized_count = summarize_updated_threads(conn, channel_id, needs_summarize)
 
     # ---- ステップ3: 全体要約生成 & Canvas投稿 ----
     total_summaries = conn.execute(
@@ -903,8 +958,10 @@ async def main():
     if summarized_count == 0 and not args.force_resummary:
         print("差分なし: 既存サマリーをそのままCanvasに投稿します")
 
-    if args.skip_canvas or args.dry_run:
-        print("Canvas 投稿: スキップ" + (" (--dry-run)" if args.dry_run else ""))
+    if args.skip_canvas or args.skip_llm or args.dry_run:
+        reasons = [f"--{r}" for r in ("skip-canvas", "skip-llm", "dry-run")
+                   if getattr(args, r.replace("-", "_"))]
+        print("Canvas 投稿・全体要約: スキップ (" + ", ".join(reasons) + ")")
     else:
         final_summary = build_overall_summary(conn, channel_id)
 

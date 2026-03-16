@@ -52,7 +52,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PM_DB = REPO_ROOT / "data" / "pm.db"
 DEFAULT_CANVAS_ID = "F0AAD2494VB"
 
-CLOSE_KEYWORDS = {"完了", "done", "済", "対応済", "解決", "closed", "finish", "finished"}
+CLOSE_KEYWORDS = {"完了", "done", "済", "対応済", "解決", "close", "closed", "finish", "finished"}
 
 
 # --------------------------------------------------------------------------- #
@@ -142,9 +142,10 @@ def parse_action_items_table(content: str) -> list[dict]:
         content_idx   = headers.index("内容")        if "内容"        in headers else None
         due_idx       = headers.index("期限")        if "期限"        in headers else None
         milestone_idx = headers.index("マイルストーン") if "マイルストーン" in headers else None
+        status_idx    = headers.index("状況")        if "状況"        in headers else None
 
         required_max = max(
-            idx for idx in [id_idx, note_idx, assignee_idx, content_idx, due_idx, milestone_idx]
+            idx for idx in [id_idx, note_idx, assignee_idx, content_idx, due_idx, milestone_idx, status_idx]
             if idx is not None
         )
 
@@ -176,6 +177,7 @@ def parse_action_items_table(content: str) -> list[dict]:
                 "content":      get_cell(cells, content_idx),
                 "due_date":     get_cell(cells, due_idx),
                 "milestone_id": get_cell(cells, milestone_idx),
+                "status_val":   get_cell(cells, status_idx),
                 "note":         get_cell(cells, note_idx),
             })
 
@@ -211,6 +213,7 @@ def open_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
         encrypt=not no_encrypt,
         migrations=[
             "ALTER TABLE action_items ADD COLUMN note TEXT",
+            "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
             _AUDIT_LOG_DDL,
         ],
     )
@@ -247,6 +250,7 @@ def update_action_item(
     canvas_content: str,
     canvas_due_date: str,
     canvas_milestone_id: str,
+    canvas_status_val: str,
     dry_run: bool,
 ) -> tuple[str, list[str]]:
     """
@@ -269,14 +273,20 @@ def update_action_item(
     updates: dict[str, object] = {}
     changed_fields: list[str] = []
 
-    # 対応状況（note / status）
+    # 対応状況（note）: 内容をそのまま保存するのみ（close判定には使わない）
+    new_status = row["status"]
     if note:
-        new_status = "closed" if is_close_keyword(note) else row["status"]
-        updates["status"] = new_status
         updates["note"] = note
         changed_fields.append("対応状況")
-    else:
-        new_status = row["status"]
+    # 状況（status_val）のみでclose/open判定
+    if canvas_status_val and canvas_status_val.lower() != (row["status"] or "").lower():
+        if is_close_keyword(canvas_status_val):
+            new_status = "closed"
+        elif canvas_status_val.lower() == "open":
+            new_status = "open"
+        changed_fields.append("状況")
+    if new_status != row["status"]:
+        updates["status"] = new_status
 
     # 担当者・内容・期限・マイルストーン — Canvas値が非空かつDB値と異なる場合のみ更新
     if canvas_assignee and canvas_assignee != (row["assignee"] or ""):
@@ -368,6 +378,7 @@ def main() -> None:
             canvas_content=item["content"],
             canvas_due_date=item["due_date"],
             canvas_milestone_id=item.get("milestone_id", ""),
+            canvas_status_val=item.get("status_val", ""),
             dry_run=args.dry_run,
         )
 
