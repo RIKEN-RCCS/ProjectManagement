@@ -15,11 +15,14 @@
 
 set -euo pipefail
 
+. ~/.secrets/hf_tokens.sh
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT=/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement
 MEETINGS_DIR="$REPO_ROOT/data"
 PROCESSING_DIR="$MEETINGS_DIR/processing"
 LOG_FILE="$REPO_ROOT/data/auto_recording_import.log"
+VENV_PYTHON="$HOME/.venv_x86_64/bin/python3"
 
 # --------------------------------------------------------------------------- #
 # 有効な会議名（docs/project.md「会議の種類と頻度」に基づく）
@@ -43,6 +46,36 @@ is_valid_meeting_name() {
 # --------------------------------------------------------------------------- #
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# --------------------------------------------------------------------------- #
+# 議事録DBへのインポート済みチェック
+# 戻り値: 0=インポート済み（スキップ対象）, 1=未インポート（処理対象）
+# --------------------------------------------------------------------------- #
+is_already_imported() {
+    local held_at="$1"
+    local meeting_name="$2"
+    local db="$REPO_ROOT/data/minutes/${meeting_name}.db"
+
+    # DBファイルが存在しなければ未インポート
+    [[ ! -f "$db" ]] && return 1
+
+    CHECK_DB="$db" CHECK_HELD_AT="$held_at" CHECK_SCRIPTS="$SCRIPT_DIR" \
+    "$VENV_PYTHON" -c "
+import os, sys
+sys.path.insert(0, os.environ['CHECK_SCRIPTS'])
+from db_utils import open_db, is_encrypted
+db      = os.environ['CHECK_DB']
+held_at = os.environ['CHECK_HELD_AT']
+try:
+    conn = open_db(db, encrypt=is_encrypted(db))
+    row  = conn.execute('SELECT 1 FROM instances WHERE held_at=?', (held_at,)).fetchone()
+    conn.close()
+    sys.exit(0 if row else 1)
+except Exception as e:
+    print(f'[WARN] DB確認中にエラー: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>>"$LOG_FILE"
 }
 
 # --------------------------------------------------------------------------- #
@@ -87,6 +120,13 @@ for m4a_file in "${m4a_files[@]}"; do
     # 会議名の有効性チェック
     if ! is_valid_meeting_name "$meeting_name"; then
         log "[SKIP] 未知の会議名: '$meeting_name': $filename"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    # 議事録DBへのインポート済みチェック
+    if is_already_imported "$held_at" "$meeting_name"; then
+        log "[SKIP] 議事録DBにインポート済み（held_at=${held_at}, meeting=${meeting_name}）: $filename"
         skipped=$((skipped + 1))
         continue
     fi
