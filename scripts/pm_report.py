@@ -232,12 +232,54 @@ def detect_risk_items(action_items: list[dict]) -> list[dict]:
 
 
 
-def _format_source(a: dict) -> str:
-    """アクションアイテムの出典を人が読める形式に変換する"""
+def _build_permalink_map(rows: list[dict], minutes_dir: Path) -> dict[str, str]:
+    """
+    meeting_id → slack_file_permalink の辞書を返す。
+    source == "meeting" の行を kind ごとにグループ化し、
+    data/minutes/{kind}.db の instances テーブルから一括取得する。
+    DB が存在しない・開けない場合は該当 kind をスキップする（エラーなし）。
+    """
+    kind_to_ids: dict[str, list[str]] = {}
+    for r in rows:
+        if r.get("source") != "meeting":
+            continue
+        kind = r.get("meeting_kind") or ""
+        mid  = r.get("meeting_id") or ""
+        if kind and mid:
+            kind_to_ids.setdefault(kind, []).append(mid)
+
+    permalink_map: dict[str, str] = {}
+    for kind, meeting_ids in kind_to_ids.items():
+        safe     = re.sub(r"[^\w\-]", "_", kind)
+        db_path  = minutes_dir / f"{safe}.db"
+        if not db_path.exists():
+            continue
+        try:
+            conn_m = open_db(db_path)  # 暗号化はデフォルト（pm_report は --no-encrypt なし想定）
+            placeholders = ",".join("?" * len(meeting_ids))
+            for r in conn_m.execute(
+                f"SELECT meeting_id, slack_file_permalink FROM instances"
+                f" WHERE meeting_id IN ({placeholders})"
+                f"   AND slack_file_permalink IS NOT NULL",
+                meeting_ids,
+            ).fetchall():
+                permalink_map[r["meeting_id"]] = r["slack_file_permalink"]
+            conn_m.close()
+        except Exception:
+            pass  # DB が開けない場合は無視
+
+    return permalink_map
+
+
+def _format_source(a: dict, permalink_map: dict[str, str] | None = None) -> str:
+    """アクションアイテム・決定事項の出典を人が読める形式に変換する"""
     if a.get("source") == "meeting":
-        kind = a.get("meeting_kind") or ""
-        held = a.get("meeting_held_at") or ""
-        return f"{kind} ({held})" if held else kind
+        kind  = a.get("meeting_kind") or ""
+        held  = a.get("meeting_held_at") or ""
+        label = f"{kind} ({held})" if held else kind
+        mid   = a.get("meeting_id") or ""
+        url   = (permalink_map or {}).get(mid)
+        return f"[{label}]({url})" if url else label
     # Slack の場合は source_ref にパーマリンクが入っている
     ref = a.get("source_ref") or ""
     if ref.startswith("http"):
@@ -245,12 +287,13 @@ def _format_source(a: dict) -> str:
     return ref if ref else "Slack"
 
 
-def format_action_items(items: list[dict]) -> str:
+def format_action_items(items: list[dict],
+                        permalink_map: dict[str, str] | None = None) -> str:
     """Canvas に貼るアクションアイテム表（pm_relink.py --export と列・順序を統一）"""
     if not items:
         return "（なし）"
-    header = "| ID | 担当者 | 期限 | マイルストーン | 状況 | 内容 | 出典 | 対応状況 |"
-    sep    = "|----|--------|------|----------------|------|------|------|----------|"
+    header = "| ID | 担当者 | 期限 | マイルストーン | 状況 | 内容 | 対応状況 | 出典 |"
+    sep    = "|----|--------|------|----------------|------|------|----------|------|"
     rows = [header, sep]
     for a in items:
         ai_id     = a.get("id", "")
@@ -259,13 +302,14 @@ def format_action_items(items: list[dict]) -> str:
         milestone = a.get("milestone_id") or ""
         status    = a.get("status") or ""
         content   = a.get("content", "").replace("|", "｜").replace("\n", " ").replace("\r", "")
-        source    = _format_source(a)
+        source    = _format_source(a, permalink_map)
         note      = (a.get("note") or "").replace("\n", " ").replace("\r", "")
-        rows.append(f"| {ai_id} | {assignee} | {due} | {milestone} | {status} | {content} | {source} | {note} |")
+        rows.append(f"| {ai_id} | {assignee} | {due} | {milestone} | {status} | {content} | {note} | {source} |")
     return "\n".join(rows)
 
 
-def format_action_items_text(items: list[dict]) -> str:
+def format_action_items_text(items: list[dict],
+                             permalink_map: dict[str, str] | None = None) -> str:
     """LLMプロンプト用テキスト形式（表ではなく箇条書き）"""
     if not items:
         return "（なし）"
@@ -273,17 +317,19 @@ def format_action_items_text(items: list[dict]) -> str:
     for a in items:
         assignee = a.get("assignee") or "未定"
         due = f" 期限:{a['due_date']}" if a.get("due_date") else ""
-        source = f" 出典:{_format_source(a)}" if _format_source(a) else ""
+        src = _format_source(a, permalink_map)
+        source = f" 出典:{src}" if src else ""
         lines.append(f"- [ID:{a.get('id','')}][{assignee}]{due}{source} {a['content']}")
     return "\n".join(lines)
 
 
-def format_decisions(items: list[dict]) -> str:
+def format_decisions(items: list[dict],
+                     permalink_map: dict[str, str] | None = None) -> str:
     if not items:
         return "（なし）"
     lines = []
     for d in items:
-        source = _format_source(d)
+        source = _format_source(d, permalink_map)
         source_str = f" （{source}）" if source else ""
         lines.append(f"- {d['content']}{source_str}")
     return "\n".join(lines)
@@ -296,19 +342,22 @@ def build_report(
     milestone_progress: list[dict],
     assignee_workload: list[dict],
     today: str,
+    permalink_map: dict[str, str] | None = None,
+    since: str | None = None,
 ) -> str:
-    sections = [f"# 富岳NEXT プロジェクト進捗レポート（{today}）"]
+    since_note = f"（{since} 以降）" if since else "（全期間）"
+    sections = [f"# 富岳NEXT プロジェクト進捗レポート（{today}）\n\n集計範囲: {since_note}"]
 
     if milestone_progress:
         ms_text = format_milestone_progress(milestone_progress, today)
         sections.append(f"## プロジェクトの現在地\n\n{ms_text}")
 
-    risk_text = format_action_items_text(risk_items) if risk_items else "特になし"
+    risk_text = format_action_items_text(risk_items, permalink_map) if risk_items else "特になし"
     sections.append(f"## 要注意事項\n\n{risk_text}")
 
-    sections.append(f"## 直近の決定事項\n\n{format_decisions(decisions)}")
+    sections.append(f"## 直近の決定事項\n\n{format_decisions(decisions, permalink_map)}")
 
-    sections.append(f"## 未完了アクションアイテム\n\n{format_action_items(action_items)}")
+    sections.append(f"## 未完了アクションアイテム\n\n{format_action_items(action_items, permalink_map)}")
 
     if assignee_workload:
         wl_text = format_assignee_workload(assignee_workload)
@@ -397,9 +446,9 @@ def sanitize_for_canvas(text: str) -> str:
 
 
 def post_to_canvas(canvas_id: str, content: str) -> None:
-    token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_MCP_XOXB_TOKEN")
+    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
     if not token:
-        print("ERROR: SLACK_BOT_TOKEN または SLACK_MCP_XOXB_TOKEN を設定してください",
+        print("ERROR: SLACK_MCP_XOXB_TOKEN を設定してください",
               file=sys.stderr)
         sys.exit(1)
     print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
@@ -451,12 +500,18 @@ def main() -> None:
     assignee_workload = fetch_assignee_workload(conn, today)
     conn.close()
 
+    minutes_dir = db_path.parent / "minutes"
+    permalink_map = _build_permalink_map(action_items + decisions, minutes_dir)
+    linked = sum(1 for mid in permalink_map)
+
     log(f"[INFO] アクションアイテム: {len(action_items)}件 (うちリスク: {len(risk_items)}件)")
     log(f"[INFO] 決定事項          : {len(decisions)}件")
     log(f"[INFO] マイルストーン    : {len(milestone_progress)}件")
     log(f"[INFO] 担当者            : {len(assignee_workload)}名")
+    log(f"[INFO] Slackリンク対応   : {linked}件の会議がクリッカブルリンク化")
 
-    report = build_report(action_items, decisions, risk_items, milestone_progress, assignee_workload, today)
+    report = build_report(action_items, decisions, risk_items, milestone_progress,
+                          assignee_workload, today, permalink_map, since=args.since)
     report = sanitize_for_canvas(report)
     log("\n" + "=" * 60)
     log(report)
