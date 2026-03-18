@@ -73,7 +73,7 @@ slack/
 │   ├── YYYY-MM-DD_会議名.md
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）。--skip-llm でLLMスキップ、--list でスレッド一覧表示
-│   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存。--delete で削除）
+│   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存。--post-to-slack でSlack投稿。--delete で削除）
 │   ├── pm_minutes_to_pm.py          # data/minutes/{kind}.db → pm.db 転記（LLM不使用。--delete で削除）
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿（SlackリンクはクリッカブルURL形式）
@@ -102,8 +102,8 @@ slack/
 # 1. トークンファイルを作成（初回のみ）
 mkdir -p ~/.secrets && chmod 700 ~/.secrets
 cat > ~/.secrets/slack_tokens.sh << 'EOF'
-export SLACK_BOT_TOKEN="xoxb-..."
-export SLACK_MCP_XOXB_TOKEN="xoxb-..."
+export SLACK_MCP_XOXB_TOKEN="xoxp-..."   # 全スクリプト共通（xoxp- / xoxb- どちらでも可）
+export SLACK_USER_TOKEN="xoxp-..."        # pm_minutes_import.py --post-to-slack 用（ユーザーとして投稿・本人が削除可能）
 EOF
 chmod 600 ~/.secrets/slack_tokens.sh
 

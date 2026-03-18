@@ -60,9 +60,9 @@ CLOSE_KEYWORDS = {"完了", "done", "済", "対応済", "解決", "close", "clos
 # --------------------------------------------------------------------------- #
 def fetch_canvas_content(canvas_id: str) -> str:
     """Slack Canvas の全テキスト内容を取得して返す"""
-    token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_MCP_XOXB_TOKEN")
+    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
     if not token:
-        print("ERROR: SLACK_BOT_TOKEN または SLACK_MCP_XOXB_TOKEN を設定してください",
+        print("ERROR: SLACK_MCP_XOXB_TOKEN を設定してください",
               file=sys.stderr)
         sys.exit(1)
 
