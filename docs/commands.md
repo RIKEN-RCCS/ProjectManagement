@@ -223,8 +223,15 @@ python3 scripts/pm_report.py --dry-run --output report.md
 | `--canvas-id ID` | `F0AAD2494VB` | 投稿先 Canvas ID |
 | `--since YYYY-MM-DD` | なし（全期間） | この日付以降のデータのみ対象 |
 | `--skip-canvas` | - | Canvas 投稿をスキップ |
+| `--show-acknowledged` | - | 確認済み決定事項も表示する（デフォルトは非表示） |
 | `--dry-run` | - | Canvas 投稿なし・結果を標準出力のみ |
 | `--output PATH` | - | 出力をファイルにも保存 |
+
+**直近の決定事項の確認済み管理**:
+- Canvas 上の決定事項セクションにチェックボックスが表示される
+- チェックを入れると `pm_sync_canvas.py` 実行時に `acknowledged_at` が記録される
+- デフォルトでは確認済み（チェック済み）の決定事項はレポートに表示されない
+- `--show-acknowledged` を指定すると確認済みも含めて表示（未確認→確認済みの順）
 
 ### 6. Canvas対応状況 → pm.db 同期（pm_sync_canvas.py）
 
@@ -233,7 +240,8 @@ python3 scripts/pm_report.py --dry-run --output report.md
 **運用フロー**:
 1. `pm_report.py` でアクションアイテム表をCanvas投稿（対応状況列は空）
 2. 会議中にメンバーがCanvas上の各列を記入・編集
-3. 会議後に本スクリプトを実行してpm.dbを更新
+3. 決定事項を確認したらCanvas上のチェックボックスにチェック
+4. 会議後に本スクリプトを実行してpm.dbを更新
 
 ```sh
 # 通常運用
@@ -260,6 +268,12 @@ python3 scripts/pm_sync_canvas.py --output sync_result.txt
 `対応状況` 列は内容をそのまま `note` 列に保存（`status` には影響しない）
 
 Canvas上で変更可能な列: **担当者・期限・マイルストーン・状況・内容・対応状況**（非空かつDB値と異なる場合のみ更新）
+
+**決定事項の確認（acknowledgement）同期**:
+- Canvas の決定事項セクションのチェックボックス状態を読み取り、`decisions.acknowledged_at` を更新する
+- チェックあり → `acknowledged_at` に現在日時を記録
+- チェックなし（外した場合） → `acknowledged_at` を NULL にリセット（確認取り消し）
+- `--debug-canvas` オプションでCanvas生データをダンプしてトラブルシュートできる
 
 ### 7. アクションアイテムの一括編集（pm_relink.py）
 
