@@ -278,6 +278,9 @@ def parse_decision_checkboxes(content: str) -> tuple[list[str], list[str]]:
     return checked, unchecked
 
 
+_D_ID_PATTERN = re.compile(r"^\[D:(\d+)\]\s*")
+
+
 def sync_decision_acknowledgements(
     conn: sqlite3.Connection,
     checked_texts: list[str],
@@ -290,18 +293,30 @@ def sync_decision_acknowledgements(
     - checked_texts  → acknowledged_at をセット（未セットの場合のみ）
     - unchecked_texts → acknowledged_at をクリア（セット済みの場合のみ）
     戻り値: (acknowledged_count, reverted_count, not_found_count)
+
+    テキスト先頭の [D:id] があれば ID ルックアップを優先する。
+    なければテキストマッチ（前方一致）にフォールバックする。
     """
     now = datetime.now(timezone.utc).isoformat()
-    all_decisions = {
+    rows = conn.execute("SELECT id, content, acknowledged_at FROM decisions").fetchall()
+    by_id: dict[int, dict] = {
+        d["id"]: {"id": d["id"], "acknowledged_at": d["acknowledged_at"]}
+        for d in rows
+    }
+    by_content: dict[str, dict] = {
         (d["content"] or "").strip(): {"id": d["id"], "acknowledged_at": d["acknowledged_at"]}
-        for d in conn.execute("SELECT id, content, acknowledged_at FROM decisions").fetchall()
+        for d in rows
     }
 
     def find_decision(text: str):
-        if text in all_decisions:
-            return all_decisions[text]
-        # 前方一致フォールバック
-        for content, d in all_decisions.items():
+        # [D:id] プレフィックスがあれば ID で直接ルックアップ
+        m = _D_ID_PATTERN.match(text)
+        if m:
+            return by_id.get(int(m.group(1)))
+        # テキストマッチフォールバック（前方一致）
+        if text in by_content:
+            return by_content[text]
+        for content, d in by_content.items():
             if content.startswith(text) or text.startswith(content):
                 return d
         return None
@@ -311,7 +326,7 @@ def sync_decision_acknowledgements(
     for text in checked_texts:
         d = find_decision(text)
         if d is None:
-            log(f"  [未検出] '{text[:50]}' は pm.db に見つかりません")
+            log(f"  [未検出] '{text[:60]}' は pm.db に見つかりません")
             not_found += 1
             continue
         if d["acknowledged_at"]:
