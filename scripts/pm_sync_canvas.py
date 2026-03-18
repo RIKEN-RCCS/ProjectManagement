@@ -68,14 +68,22 @@ def fetch_canvas_content(canvas_id: str) -> str:
 
     app = App(token=token)
 
-    # 1. canvases_sections_lookup（テーブル行を含むセクション）
+    # 1. canvases_sections_lookup（テーブル行 + チェックボックスセクション）
     try:
-        sections_resp = app.client.canvases_sections_lookup(
-            canvas_id=canvas_id,
-            criteria={"contains_text": "|"},
-        )
-        sections = sections_resp.get("sections", [])
-        content = "\n".join(sec.get("content", "") for sec in sections)
+        all_sections: list[str] = []
+        for criteria_text in ["|", "checked"]:
+            try:
+                sections_resp = app.client.canvases_sections_lookup(
+                    canvas_id=canvas_id,
+                    criteria={"contains_text": criteria_text},
+                )
+                for sec in sections_resp.get("sections", []):
+                    c = sec.get("content", "")
+                    if c and c not in all_sections:
+                        all_sections.append(c)
+            except SlackApiError:
+                pass
+        content = "\n".join(all_sections)
         if content.strip():
             return content
     except SlackApiError as e:
@@ -212,23 +220,45 @@ def fetch_canvas_markdown(canvas_id: str) -> str:
     return ""
 
 
-def parse_acknowledged_decisions(markdown: str) -> list[str]:
+def parse_acknowledged_decisions(content: str) -> list[str]:
     """
-    Canvas マークダウンの「直近の決定事項」セクションから
-    チェック済み（- [x]）の決定事項テキストを抽出して返す。
+    Canvas HTML からチェック済み（class='checked'）の決定事項テキストを抽出する。
+    Slack Canvas は <li class='checked'> 形式で返す。
+    マークダウン形式（- [x]）にもフォールバック対応。
     """
-    m = re.search(r"##\s*直近の決定事項\s*\n(.*?)(?=\n##|\Z)", markdown, re.DOTALL)
-    if not m:
-        return []
     results = []
-    for line in m.group(1).splitlines():
-        checked = re.match(r"^-\s+\[[xX]\]\s+(.+)$", line.strip())
-        if checked:
-            text = checked.group(1)
-            # 末尾の （source） を除去
-            text = re.sub(r"\s+（[^）]*）\s*$", "", text).strip()
-            if text:
-                results.append(text)
+
+    # --- HTML形式: <li class='checked'> ---
+    for li_match in re.finditer(
+        r"<li[^>]*class=['\"][^'\"]*\bchecked\b[^'\"]*['\"][^>]*>(.*?)</li>",
+        content, re.DOTALL,
+    ):
+        inner = li_match.group(1)
+        span_m = re.search(r"<span[^>]*>(.*?)</span>", inner, re.DOTALL)
+        text = span_m.group(1) if span_m else inner
+        # (<a href="...">source</a>) を除去
+        text = re.sub(r"\s*\(<a[^>]*>.*?</a>\)\s*$", "", text, flags=re.DOTALL)
+        # 全角括弧 source を除去
+        text = re.sub(r"\s*（[^）]*）\s*$", "", text)
+        # 残HTMLタグを除去
+        text = re.sub(r"<[^>]+>", "", text).strip()
+        if text and text not in results:
+            results.append(text)
+
+    if results:
+        return results
+
+    # --- マークダウン形式フォールバック: - [x] ---
+    m = re.search(r"##\s*直近の決定事項\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
+    if m:
+        for line in m.group(1).splitlines():
+            checked = re.match(r"^-\s+\[[xX]\]\s+(.+)$", line.strip())
+            if checked:
+                text = checked.group(1)
+                text = re.sub(r"\s+（[^）]*）\s*$", "", text).strip()
+                if text and text not in results:
+                    results.append(text)
+
     return results
 
 
@@ -461,7 +491,9 @@ def main() -> None:
     items = parse_action_items_table(content)
     log(f"[INFO] テーブルから読み込んだアクションアイテム: {len(items)} 件")
 
-    checked_decisions = parse_acknowledged_decisions(markdown) if markdown else []
+    # content（テーブルHTML）と markdown（url_private）の両方を検索
+    combined = content + "\n" + (markdown or "")
+    checked_decisions = parse_acknowledged_decisions(combined)
     log(f"[INFO] チェック済み決定事項: {len(checked_decisions)} 件")
 
     if not items and not checked_decisions:
