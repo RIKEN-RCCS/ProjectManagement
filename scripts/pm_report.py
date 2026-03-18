@@ -58,7 +58,11 @@ def open_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
     if not db_path.exists():
         print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
         sys.exit(1)
-    return open_db(db_path, encrypt=not no_encrypt)
+    return open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        migrations=["ALTER TABLE decisions ADD COLUMN acknowledged_at TEXT"],
+    )
 
 
 def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list[dict]:
@@ -85,7 +89,7 @@ def fetch_recent_decisions(conn: sqlite3.Connection, since: str | None) -> list[
                d.meeting_id, m.kind as meeting_kind, m.held_at as meeting_held_at
         FROM decisions d
         LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
-        WHERE 1=1
+        WHERE d.acknowledged_at IS NULL
     """
     params: list = []
     if since:
@@ -331,7 +335,7 @@ def format_decisions(items: list[dict],
     for d in items:
         source = _format_source(d, permalink_map)
         source_str = f" （{source}）" if source else ""
-        lines.append(f"- {d['content']}{source_str}")
+        lines.append(f"- [ ] {d['content']}{source_str}")
     return "\n".join(lines)
 
 
