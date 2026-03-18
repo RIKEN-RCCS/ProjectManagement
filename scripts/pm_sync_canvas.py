@@ -528,9 +528,29 @@ def main() -> None:
     markdown = fetch_canvas_markdown(args.canvas_id)
 
     if args.debug_canvas:
-        log("\n===== Canvas 生コンテンツ (table/HTML) =====")
+        log("\n===== Canvas セクションオブジェクト全体 (canvases_sections_lookup) =====")
+        token = os.getenv("SLACK_MCP_XOXB_TOKEN", "")
+        if token:
+            from slack_bolt import App as _App
+            _app = _App(token=token)
+            for criteria_text in ["|", "[D:"]:
+                try:
+                    resp = _app.client.canvases_sections_lookup(
+                        canvas_id=args.canvas_id,
+                        criteria={"contains_text": criteria_text},
+                    )
+                    secs = resp.get("sections", [])
+                    log(f"\n--- contains_text='{criteria_text}' → {len(secs)} sections ---")
+                    for i, sec in enumerate(secs[:5]):
+                        log(f"  section[{i}] keys={list(sec.keys())}")
+                        for k, v in sec.items():
+                            v_str = str(v)[:200]
+                            log(f"    {k}: {v_str}")
+                except Exception as ex:
+                    log(f"  [ERROR] {ex}")
+        log("\n===== Canvas 生コンテンツ (table/HTML from fetch_canvas_content) =====")
         log(content[:3000])
-        log("\n===== Canvas 生コンテンツ (markdown/url_private) =====")
+        log("\n===== Canvas 生コンテンツ (url_private) =====")
         log(markdown[:3000] if markdown else "（取得できませんでした）")
         close_log()
         return
