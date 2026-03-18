@@ -61,14 +61,13 @@ log() {
 
 # --------------------------------------------------------------------------- #
 # 議事録DBへのインポート済みチェック
-# 戻り値: 0=インポート済み（スキップ対象）, 1=未インポート（処理対象）
+# 戻り値: 0=インポート済み, 1=未インポート
 # --------------------------------------------------------------------------- #
 is_already_imported() {
     local held_at="$1"
     local meeting_name="$2"
     local db="$REPO_ROOT/data/minutes/${meeting_name}.db"
 
-    # DBファイルが存在しなければ未インポート
     [[ ! -f "$db" ]] && return 1
 
     CHECK_DB="$db" CHECK_HELD_AT="$held_at" CHECK_SCRIPTS="$SCRIPT_DIR" \
@@ -81,6 +80,37 @@ held_at = os.environ['CHECK_HELD_AT']
 try:
     conn = open_db(db, encrypt=is_encrypted(db))
     row  = conn.execute('SELECT 1 FROM instances WHERE held_at=?', (held_at,)).fetchone()
+    conn.close()
+    sys.exit(0 if row else 1)
+except Exception as e:
+    print(f'[WARN] DB確認中にエラー: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>>"$LOG_FILE"
+}
+
+# --------------------------------------------------------------------------- #
+# Slack投稿済みチェック（slack_file_permalink が存在するか）
+# 戻り値: 0=投稿済み, 1=未投稿
+# --------------------------------------------------------------------------- #
+is_already_posted_to_slack() {
+    local held_at="$1"
+    local meeting_name="$2"
+    local db="$REPO_ROOT/data/minutes/${meeting_name}.db"
+
+    [[ ! -f "$db" ]] && return 1
+
+    CHECK_DB="$db" CHECK_HELD_AT="$held_at" CHECK_SCRIPTS="$SCRIPT_DIR" \
+    "$VENV_PYTHON" -c "
+import os, sys
+sys.path.insert(0, os.environ['CHECK_SCRIPTS'])
+from db_utils import open_db, is_encrypted
+db      = os.environ['CHECK_DB']
+held_at = os.environ['CHECK_HELD_AT']
+try:
+    conn = open_db(db, encrypt=is_encrypted(db))
+    row  = conn.execute(
+        'SELECT 1 FROM instances WHERE held_at=? AND slack_file_permalink IS NOT NULL',
+        (held_at,)).fetchone()
     conn.close()
     sys.exit(0 if row else 1)
 except Exception as e:
@@ -137,7 +167,18 @@ for m4a_file in "${m4a_files[@]}"; do
 
     # 議事録DBへのインポート済みチェック
     if is_already_imported "$held_at" "$meeting_name"; then
-        log "[SKIP] 議事録DBにインポート済み（held_at=${held_at}, meeting=${meeting_name}）: $filename"
+        # Slackへの投稿が必要か確認
+        if [[ -n "$SLACK_CHANNEL" ]] && ! is_already_posted_to_slack "$held_at" "$meeting_name"; then
+            log "[SLACK] 議事録DBインポート済み・Slack未投稿 → 直接投稿: $filename"
+            # GPU不要のため sbatch を介さず直接実行
+            # shellcheck disable=SC1090
+            source ~/.secrets/slack_tokens.sh 2>>"$LOG_FILE" || true
+            "$VENV_PYTHON" "$SCRIPT_DIR/pm_minutes_import.py" \
+                --post-to-slack --meeting-name "$meeting_name" --held-at "$held_at" \
+                -c "$SLACK_CHANNEL" >> "$LOG_FILE" 2>&1
+        else
+            log "[SKIP] 議事録DBにインポート済み（held_at=${held_at}, meeting=${meeting_name}）: $filename"
+        fi
         skipped=$((skipped + 1))
         continue
     fi
