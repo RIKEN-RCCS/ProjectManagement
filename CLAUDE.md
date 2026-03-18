@@ -82,7 +82,8 @@ slack/
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md）
-│   ├── recording_to_pm.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
+│   ├── auto_recording_import.sh     # data/*.m4a を検出して recording_to_pm.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
+│   ├── recording_to_pm.sh           # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 └── data/                            # DBと出力ファイル
     ├── {channel_id}.db              # Slackデータ（例: C0A9KG036CS.db）

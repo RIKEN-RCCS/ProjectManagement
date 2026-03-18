@@ -121,7 +121,11 @@ bash auto_recording_import.sh -c C08SXA4M7JT
 - 録音データは `data` に配置すること
 - 録音データのファイル名は `YYYY-MM-DD_{meeting-name}.m4a` の書式とし、 `YYYY-MM-DD` は会議開催日、`meeting-name` は `project.md` の「会議の種類と頻度」に書かれた名前であること
 - 一連の処理は R-CCS Cloud のGPUサーバ (L40S, GH200) へバッチジョブとして投入、実行される
-- `-c CHANNEL_ID` を指定した場合、文字起こし成功後に `pm_minutes_import.py --post-to-slack` を自動実行して議事録をSlackにアップロードする（`~/.secrets/slack_tokens.sh` が読み込まれる）
+- `-c CHANNEL_ID` を指定した場合の Slack 投稿の挙動:
+  - 未インポートファイル: 文字起こし成功後に `--post-to-slack` を自動実行
+  - 議事録DBにインポート済み・Slack未投稿: GPU不要のため sbatch を介さず直接投稿
+  - 議事録DBにインポート済み・Slack投稿済み: スキップ（再投稿するには手動で `--force`）
+  - `~/.secrets/slack_tokens.sh` が自動的に読み込まれる
 
 #### 2.2. 個別のスクリプトで実行する場合 ※通常は2.2.の手順で実施する
 
