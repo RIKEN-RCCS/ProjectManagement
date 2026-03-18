@@ -89,28 +89,30 @@ except Exception as e:
 }
 
 # --------------------------------------------------------------------------- #
-# Slack投稿済みチェック（slack_file_permalink が存在するか）
+# Slack投稿済みチェック（指定チャンネルへの投稿が存在するか）
 # 戻り値: 0=投稿済み, 1=未投稿
 # --------------------------------------------------------------------------- #
 is_already_posted_to_slack() {
     local held_at="$1"
     local meeting_name="$2"
+    local channel_id="$3"
     local db="$REPO_ROOT/data/minutes/${meeting_name}.db"
 
     [[ ! -f "$db" ]] && return 1
 
-    CHECK_DB="$db" CHECK_HELD_AT="$held_at" CHECK_SCRIPTS="$SCRIPT_DIR" \
+    CHECK_DB="$db" CHECK_HELD_AT="$held_at" CHECK_CHANNEL="$channel_id" CHECK_SCRIPTS="$SCRIPT_DIR" \
     "$VENV_PYTHON" -c "
 import os, sys
 sys.path.insert(0, os.environ['CHECK_SCRIPTS'])
 from db_utils import open_db, is_encrypted
-db      = os.environ['CHECK_DB']
-held_at = os.environ['CHECK_HELD_AT']
+db         = os.environ['CHECK_DB']
+held_at    = os.environ['CHECK_HELD_AT']
+channel_id = os.environ['CHECK_CHANNEL']
 try:
     conn = open_db(db, encrypt=is_encrypted(db))
     row  = conn.execute(
-        'SELECT 1 FROM instances WHERE held_at=? AND slack_file_permalink IS NOT NULL',
-        (held_at,)).fetchone()
+        'SELECT 1 FROM instances WHERE held_at=? AND slack_channel_id=? AND slack_file_permalink IS NOT NULL',
+        (held_at, channel_id)).fetchone()
     conn.close()
     sys.exit(0 if row else 1)
 except Exception as e:
@@ -168,7 +170,7 @@ for m4a_file in "${m4a_files[@]}"; do
     # 議事録DBへのインポート済みチェック
     if is_already_imported "$held_at" "$meeting_name"; then
         # Slackへの投稿が必要か確認
-        if [[ -n "$SLACK_CHANNEL" ]] && ! is_already_posted_to_slack "$held_at" "$meeting_name"; then
+        if [[ -n "$SLACK_CHANNEL" ]] && ! is_already_posted_to_slack "$held_at" "$meeting_name" "$SLACK_CHANNEL"; then
             log "[SLACK] 議事録DBインポート済み・Slack未投稿 → 直接投稿: $filename"
             # GPU不要のため sbatch を介さず直接実行
             # shellcheck disable=SC1090
