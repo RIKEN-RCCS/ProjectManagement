@@ -223,13 +223,13 @@ python3 scripts/pm_report.py --canvas-id F0ALP1XQJHL --show-acknowledged
 2. サマリー（LLM生成）
 3. 直近の決定事項（確認済みはデフォルト非表示）
 4. 要注意事項
-5. 未完了アクションアイテム（表形式: ID・担当者・内容・期限・ソース・対応状況）
+5. 未完了アクションアイテム（表形式: ID・担当者・期限・マイルストーン・状況・内容・対応状況・出典）
 
 #### 4.2. 会議中: Canvas上でアクションアイテムの各列を編集
 
 Canvas上で編集可能な列: **担当者・内容・期限・マイルストーン・状況・対応状況**
 
-- **状況** 列: open/close の判定に使用。完了キーワード（`完了` `done` `済` `対応済` `解決` `close` `closed` `finish` `finished`）を入力すると `status='closed'`に更新。`open` で再開。
+- **状況** 列: open/close の判定に使用。Canvas上のチェックボックス（`- [ ]`）にチェックを入れると `[x]` として検出され `status='closed'` に更新される。テキストで完了キーワード（`完了` `done` `済` `対応済` `解決` `close` `closed` `finish` `finished` `[x]`）を入力しても同様。`open` で再開。
 - **対応状況** 列: メモとして `note` 列に保存（`status` の変更には影響しない）。
 - **決定事項のチェックボックス**: Canvas上の決定事項にチェックを入れると、`pm_sync_canvas.py` 実行時に「確認済み」として記録される。次回レポートからデフォルトで非表示になる。チェックを外すと確認取り消し。チェック直後は Slack の更新遅延があるため、数分待ってから `pm_sync_canvas.py` を実行すること。
 
@@ -391,5 +391,5 @@ python3 scripts/db_utils.py --migrate data/pm.db --no-backup
 
 - `claude -p` はClaude Codeセッション内からは実行不可。`pm_minutes_import.py`, `pm_extractor.py`, `pm_report.py` は**Claude Codeの外のターミナル**から実行すること。
 - Slack Canvasは表示できない文字（特殊Unicode）を含むとAPIエラーになる。スクリプト内で`sanitize_for_canvas()`による除去処理を実施済み。
-- pm_report.pyは上書き投稿のみ対応。初回実行前にCanvasの内容を手動で削除しておくこと。
+- `pm_report.py` は実行のたびにCanvasを全置換する（既存セクションを全削除→新規挿入）。手動削除は不要。
 - Slack DBはチャンネルごとに独立（`data/{channel_id}.db`）。pm.dbは複数チャンネル・複数会議を横断して統合する。
