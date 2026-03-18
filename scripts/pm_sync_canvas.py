@@ -220,89 +220,121 @@ def fetch_canvas_markdown(canvas_id: str) -> str:
     return ""
 
 
-def parse_acknowledged_decisions(content: str) -> list[str]:
+def _extract_li_text(inner_html: str) -> str:
+    """<li> の内側 HTML から表示テキスト（source除く）を抽出する"""
+    span_m = re.search(r"<span[^>]*>(.*?)</span>", inner_html, re.DOTALL)
+    text = span_m.group(1) if span_m else inner_html
+    text = re.sub(r"\s*\(<a[^>]*>.*?</a>\)\s*$", "", text, flags=re.DOTALL)
+    text = re.sub(r"\s*（[^）]*）\s*$", "", text)
+    text = re.sub(r"<[^>]+>", "", text).strip()
+    return text
+
+
+def parse_decision_checkboxes(content: str) -> tuple[list[str], list[str]]:
     """
-    Canvas HTML からチェック済み（class='checked'）の決定事項テキストを抽出する。
-    Slack Canvas は <li class='checked'> 形式で返す。
-    マークダウン形式（- [x]）にもフォールバック対応。
+    Canvas HTML から決定事項チェックボックスの状態を取得する。
+    戻り値: (checked_texts, unchecked_texts)
+    Slack Canvas は <li class='checked'> / <li class=''> 形式で返す。
+    マークダウン形式（- [x] / - [ ]）にもフォールバック対応。
     """
-    results = []
+    checked: list[str] = []
+    unchecked: list[str] = []
 
-    # --- HTML形式: <li class='checked'> ---
-    for li_match in re.finditer(
-        r"<li[^>]*class=['\"][^'\"]*\bchecked\b[^'\"]*['\"][^>]*>(.*?)</li>",
-        content, re.DOTALL,
-    ):
-        inner = li_match.group(1)
-        span_m = re.search(r"<span[^>]*>(.*?)</span>", inner, re.DOTALL)
-        text = span_m.group(1) if span_m else inner
-        # (<a href="...">source</a>) を除去
-        text = re.sub(r"\s*\(<a[^>]*>.*?</a>\)\s*$", "", text, flags=re.DOTALL)
-        # 全角括弧 source を除去
-        text = re.sub(r"\s*（[^）]*）\s*$", "", text)
-        # 残HTMLタグを除去
-        text = re.sub(r"<[^>]+>", "", text).strip()
-        if text and text not in results:
-            results.append(text)
+    # --- HTML形式: <li> 要素を全件取得 ---
+    li_pattern = re.compile(r"<li([^>]*)>(.*?)</li>", re.DOTALL)
+    found_any = False
+    for m in li_pattern.finditer(content):
+        attrs, inner = m.group(1), m.group(2)
+        text = _extract_li_text(inner)
+        if not text:
+            continue
+        found_any = True
+        if re.search(r"\bchecked\b", attrs):
+            if text not in checked:
+                checked.append(text)
+        else:
+            if text not in unchecked:
+                unchecked.append(text)
 
-    if results:
-        return results
+    if found_any:
+        return checked, unchecked
 
-    # --- マークダウン形式フォールバック: - [x] ---
-    m = re.search(r"##\s*直近の決定事項\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
-    if m:
-        for line in m.group(1).splitlines():
-            checked = re.match(r"^-\s+\[[xX]\]\s+(.+)$", line.strip())
-            if checked:
-                text = checked.group(1)
+    # --- マークダウン形式フォールバック ---
+    sec_m = re.search(r"##\s*直近の決定事項\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
+    if sec_m:
+        for line in sec_m.group(1).splitlines():
+            line = line.strip()
+            if re.match(r"^-\s+\[[xX]\]", line):
+                text = re.sub(r"^-\s+\[[xX]\]\s+", "", line)
                 text = re.sub(r"\s+（[^）]*）\s*$", "", text).strip()
-                if text and text not in results:
-                    results.append(text)
+                if text and text not in checked:
+                    checked.append(text)
+            elif re.match(r"^-\s+\[ \]", line):
+                text = re.sub(r"^-\s+\[ \]\s+", "", line)
+                text = re.sub(r"\s+（[^）]*）\s*$", "", text).strip()
+                if text and text not in unchecked:
+                    unchecked.append(text)
 
-    return results
+    return checked, unchecked
 
 
-def acknowledge_decisions(
+def sync_decision_acknowledgements(
     conn: sqlite3.Connection,
     checked_texts: list[str],
+    unchecked_texts: list[str],
     dry_run: bool,
     log,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """
-    チェック済み決定事項テキストに対応する decisions の acknowledged_at を更新する。
-    content の完全一致でマッチング。
-    戻り値: (acknowledged_count, not_found_count)
+    Canvas のチェックボックス状態を decisions.acknowledged_at に同期する。
+    - checked_texts  → acknowledged_at をセット（未セットの場合のみ）
+    - unchecked_texts → acknowledged_at をクリア（セット済みの場合のみ）
+    戻り値: (acknowledged_count, reverted_count, not_found_count)
     """
     now = datetime.now(timezone.utc).isoformat()
-    decisions = {
-        (d["content"] or "").strip(): d["id"]
-        for d in conn.execute(
-            "SELECT id, content FROM decisions WHERE acknowledged_at IS NULL"
-        ).fetchall()
+    all_decisions = {
+        (d["content"] or "").strip(): {"id": d["id"], "acknowledged_at": d["acknowledged_at"]}
+        for d in conn.execute("SELECT id, content, acknowledged_at FROM decisions").fetchall()
     }
-    acknowledged = not_found = 0
+
+    def find_decision(text: str):
+        if text in all_decisions:
+            return all_decisions[text]
+        # 前方一致フォールバック
+        for content, d in all_decisions.items():
+            if content.startswith(text) or text.startswith(content):
+                return d
+        return None
+
+    acknowledged = reverted = not_found = 0
+
     for text in checked_texts:
-        did = decisions.get(text)
-        if did is None:
-            # 前方一致フォールバック（Canvas 上でテキストが切れている場合）
-            for content, cid in decisions.items():
-                if content.startswith(text) or text.startswith(content):
-                    did = cid
-                    break
-        if did is not None:
-            log(f"  [確認済] D={did} → acknowledged_at を記録")
-            if not dry_run:
-                conn.execute(
-                    "UPDATE decisions SET acknowledged_at = ? WHERE id = ?",
-                    (now, did),
-                )
-            acknowledged += 1
-        else:
+        d = find_decision(text)
+        if d is None:
             log(f"  [未検出] '{text[:50]}' は pm.db に見つかりません")
             not_found += 1
-    if not dry_run and acknowledged:
+            continue
+        if d["acknowledged_at"]:
+            continue  # 既に確認済み
+        log(f"  [確認済] D={d['id']} → acknowledged_at をセット")
+        if not dry_run:
+            conn.execute("UPDATE decisions SET acknowledged_at = ? WHERE id = ?", (now, d["id"]))
+        acknowledged += 1
+
+    for text in unchecked_texts:
+        d = find_decision(text)
+        if d is None:
+            continue  # Canvas にある未チェック項目が DB になくても問題なし
+        if not d["acknowledged_at"]:
+            continue  # 既に未確認
+        log(f"  [取消] D={d['id']} → acknowledged_at をクリア")
+        if not dry_run:
+            conn.execute("UPDATE decisions SET acknowledged_at = NULL WHERE id = ?", (d["id"],))
+        reverted += 1
+
+    if not dry_run and (acknowledged or reverted):
         conn.commit()
-    return acknowledged, not_found
+    return acknowledged, reverted, not_found
 
 
 # --------------------------------------------------------------------------- #
@@ -491,12 +523,11 @@ def main() -> None:
     items = parse_action_items_table(content)
     log(f"[INFO] テーブルから読み込んだアクションアイテム: {len(items)} 件")
 
-    # content（テーブルHTML）と markdown（url_private）の両方を検索
     combined = content + "\n" + (markdown or "")
-    checked_decisions = parse_acknowledged_decisions(combined)
-    log(f"[INFO] チェック済み決定事項: {len(checked_decisions)} 件")
+    checked_decisions, unchecked_decisions = parse_decision_checkboxes(combined)
+    log(f"[INFO] チェック済み決定事項: {len(checked_decisions)} 件, 未チェック: {len(unchecked_decisions)} 件")
 
-    if not items and not checked_decisions:
+    if not items and not checked_decisions and not unchecked_decisions:
         log("更新対象なし。終了します。")
         close_log()
         return
@@ -534,13 +565,11 @@ def main() -> None:
             log(f"  [未検出] ID={ai_id} は pm.db に存在しません")
             not_found_count += 1
 
-    # 決定事項のチェックボックス確認をDBに反映
-    ack_count = ack_not_found = 0
-    if checked_decisions:
-        log(f"\n[INFO] チェック済み決定事項を pm.db に反映中...")
-        ack_count, ack_not_found = acknowledge_decisions(
-            conn, checked_decisions, args.dry_run, log
-        )
+    # 決定事項チェックボックス状態を同期
+    log(f"\n[INFO] 決定事項チェックボックスを pm.db に同期中...")
+    ack_count, rev_count, ack_not_found = sync_decision_acknowledgements(
+        conn, checked_decisions, unchecked_decisions, args.dry_run, log
+    )
 
     conn.close()
 
@@ -548,8 +577,7 @@ def main() -> None:
         f"\n完了: 完了マーク={closed_count}件, メモ保存={noted_count}件, "
         f"フィールド更新={updated_count}件, 変更なし={unchanged_count}件, 未検出={not_found_count}件"
     )
-    if checked_decisions:
-        log(f"決定事項確認済み={ack_count}件, 未検出={ack_not_found}件")
+    log(f"決定事項: 確認済み={ack_count}件, 取消={rev_count}件, 未検出={ack_not_found}件")
     if args.dry_run:
         log("[INFO] --dry-run のため DB保存をスキップしました")
     close_log()
