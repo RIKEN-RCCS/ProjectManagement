@@ -86,16 +86,18 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
 def fetch_recent_decisions(conn: sqlite3.Connection, since: str | None) -> list[dict]:
     query = """
         SELECT d.id, d.content, d.decided_at, d.source, d.source_ref,
-               d.meeting_id, m.kind as meeting_kind, m.held_at as meeting_held_at
+               d.meeting_id, d.acknowledged_at,
+               m.kind as meeting_kind, m.held_at as meeting_held_at
         FROM decisions d
         LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
-        WHERE d.acknowledged_at IS NULL
+        WHERE 1=1
     """
     params: list = []
     if since:
         query += " AND d.decided_at >= ?"
         params.append(since)
-    query += " ORDER BY d.decided_at DESC"
+    # 未確認を先に、確認済みを後に表示
+    query += " ORDER BY (d.acknowledged_at IS NOT NULL), d.decided_at DESC"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
@@ -335,7 +337,8 @@ def format_decisions(items: list[dict],
     for d in items:
         source = _format_source(d, permalink_map)
         source_str = f" （{source}）" if source else ""
-        lines.append(f"- [ ] {d['content']}{source_str}")
+        check = "x" if d.get("acknowledged_at") else " "
+        lines.append(f"- [{check}] {d['content']}{source_str}")
     return "\n".join(lines)
 
 
