@@ -500,6 +500,11 @@ def main() -> None:
     parser.add_argument("--db", default=None, help="pm.db のパス")
     parser.add_argument("--debug-canvas", action="store_true",
                         help="Canvas から取得した生コンテンツを表示して終了（デバッグ用）")
+    parser.add_argument("--acknowledge", nargs="+", metavar="ID", type=int,
+                        help="指定した決定事項 ID を確認済み（acknowledged_at）にする。"
+                             "Canvas同期を行わずに直接更新する。")
+    parser.add_argument("--unacknowledge", nargs="+", metavar="ID", type=int,
+                        help="指定した決定事項 ID の確認済み状態を取り消す。")
     add_dry_run_arg(parser)
     add_no_encrypt_arg(parser)
     add_output_arg(parser)
@@ -507,6 +512,40 @@ def main() -> None:
 
     db_path = Path(args.db) if args.db else DEFAULT_PM_DB
     log, close_log = make_logger(args.output)
+
+    # --acknowledge / --unacknowledge: Canvas同期なしで直接更新
+    if args.acknowledge or args.unacknowledge:
+        now = datetime.now(timezone.utc).isoformat()
+        conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
+        for did in (args.acknowledge or []):
+            row = conn.execute("SELECT id, content, acknowledged_at FROM decisions WHERE id=?", (did,)).fetchone()
+            if row is None:
+                log(f"  [未検出] D={did} は pm.db に存在しません")
+                continue
+            if row["acknowledged_at"]:
+                log(f"  [スキップ] D={did} は既に確認済み")
+                continue
+            log(f"  [確認済] D={did} → acknowledged_at をセット")
+            if not args.dry_run:
+                conn.execute("UPDATE decisions SET acknowledged_at=? WHERE id=?", (now, did))
+        for did in (args.unacknowledge or []):
+            row = conn.execute("SELECT id, content, acknowledged_at FROM decisions WHERE id=?", (did,)).fetchone()
+            if row is None:
+                log(f"  [未検出] D={did} は pm.db に存在しません")
+                continue
+            if not row["acknowledged_at"]:
+                log(f"  [スキップ] D={did} は既に未確認")
+                continue
+            log(f"  [取消] D={did} → acknowledged_at をクリア")
+            if not args.dry_run:
+                conn.execute("UPDATE decisions SET acknowledged_at=NULL WHERE id=?", (did,))
+        if not args.dry_run:
+            conn.commit()
+        conn.close()
+        if args.dry_run:
+            log("[INFO] --dry-run のため DB保存をスキップしました")
+        close_log()
+        return
 
     log(f"[INFO] Canvas ID : {args.canvas_id}")
     log(f"[INFO] pm.db     : {db_path}")
@@ -561,6 +600,10 @@ def main() -> None:
     combined = content + "\n" + (markdown or "")
     checked_decisions, unchecked_decisions = parse_decision_checkboxes(combined)
     log(f"[INFO] チェック済み決定事項: {len(checked_decisions)} 件, 未チェック: {len(unchecked_decisions)} 件")
+    if len(checked_decisions) == 0 and len(unchecked_decisions) > 0:
+        log("[INFO] ヒント: Canvas チェックボックスの状態は API 経由で取得できません。")
+        log("[INFO]        決定事項を確認済みにするには --acknowledge ID... を使用してください。")
+        log("[INFO]        例: python3 scripts/pm_sync_canvas.py --acknowledge 98 99 106")
 
     if not items and not checked_decisions and not unchecked_decisions:
         log("更新対象なし。終了します。")
