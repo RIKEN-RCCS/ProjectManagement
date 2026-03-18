@@ -109,7 +109,11 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --list
 #### 2.1. `auto_recording_import.sh` を使い会議録音データ(m4aフォーマット)から文字起こしを行い、議事録を作成し pm.db へ登録
 
 ```sh
+# 文字起こし → 議事録DB → pm.db 転記まで自動実行
 bash auto_recording_import.sh
+
+# Slackへのファイル投稿も自動化する場合（-c でチャンネルIDを指定）
+bash auto_recording_import.sh -c C08SXA4M7JT
 ```
 
 注意事項:
@@ -117,6 +121,7 @@ bash auto_recording_import.sh
 - 録音データは `data` に配置すること
 - 録音データのファイル名は `YYYY-MM-DD_{meeting-name}.m4a` の書式とし、 `YYYY-MM-DD` は会議開催日、`meeting-name` は `project.md` の「会議の種類と頻度」に書かれた名前であること
 - 一連の処理は R-CCS Cloud のGPUサーバ (L40S, GH200) へバッチジョブとして投入、実行される
+- `-c CHANNEL_ID` を指定した場合、文字起こし成功後に `pm_minutes_import.py --post-to-slack` を自動実行して議事録をSlackにアップロードする（`~/.secrets/slack_tokens.sh` が読み込まれる）
 
 #### 2.2. 個別のスクリプトで実行する場合 ※通常は2.2.の手順で実施する
 
