@@ -347,7 +347,7 @@ def format_decisions(items: list[dict],
         source = _format_source(d, permalink_map)
         source_str = f" （{source}）" if source else ""
         check = "x" if d.get("acknowledged_at") else " "
-        lines.append(f"- [{check}] {d['content']}{source_str}")
+        lines.append(f"- [{check}] [D:{d['id']}] {d['content']}{source_str}")
     return "\n".join(lines)
 
 
