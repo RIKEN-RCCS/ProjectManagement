@@ -94,9 +94,21 @@ python3 scripts/pm_minutes_import.py --list
 # 特定会議名の一覧
 python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
 
+# 詳細表示（Slack 投稿済み状況も含む）
+python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
+
 # 議事録DBから削除
 python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
 python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
+
+# Slack にアップロード（Files タブに表示）
+python3 scripts/pm_minutes_import.py \
+    --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c C08SXA4M7JT
+
+# 特定スレッドにアップロード（スレッドに集約、Files タブには表示されない）
+python3 scripts/pm_minutes_import.py \
+    --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \
+    -c C08SXA4M7JT --thread-ts 1741234567.123456
 ```
 
 | オプション | デフォルト | 説明 |
@@ -105,16 +117,22 @@ python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meetin
 | `--meeting-name NAME` | ファイル名から推定 | 会議種別名（DBファイル名に使用） |
 | `--held-at YYYY-MM-DD` | ファイル名から推定 | 開催日 |
 | `--bulk` | - | 一括処理モード |
-| `--meetings-dir DIR` | `meetings/` | 一括処理時の議事録ディレクトリ |
+| `--meetings-dir DIR` | `meetings/` | 議事録 .md ファイルの検索ディレクトリ |
 | `--minutes-dir DIR` | `data/minutes/` | 議事録DBの保存ディレクトリ |
 | `--since YYYY-MM-DD` | - | `--bulk` / `--list` 時のフィルタ |
 | `--model MODEL` | CLI デフォルト | 使用する Claude モデル |
-| `--force` | - | 既存レコードを上書き |
-| `--dry-run` | - | DB保存なし・結果を標準出力のみ |
+| `--force` | - | 既存レコードを上書き（`--post-to-slack` 時は再アップロードを許可） |
+| `--dry-run` | - | DB保存・Slack API呼び出しなし・結果を標準出力のみ |
 | `--output PATH` | - | 出力をファイルにも保存（単一ファイルモードのみ） |
 | `--no-encrypt` | - | 平文モード |
 | `--list` | - | 議事録DBの内容を表示して終了 |
+| `--show MEETING_ID` | - | 指定した meeting_id の詳細（Slack投稿状況含む）を表示して終了 |
 | `--delete MEETING_ID` | - | 指定した meeting_id を議事録DBから削除して終了（`--meeting-name` で対象DB絞り込み可） |
+| `--post-to-slack` | - | 議事録ファイルを Slack チャンネルにアップロード |
+| `-c / --channel ID` | - | アップロード先チャンネルID（`--post-to-slack` 時に必須） |
+| `--thread-ts TS` | - | 投稿先スレッドTS（省略: チャンネル直接投稿で Files タブに表示 / 指定: スレッド集約） |
+
+**Slack トークン**: `SLACK_USER_TOKEN`（xoxp-）を優先使用。未設定の場合は `SLACK_BOT_TOKEN` / `SLACK_MCP_XOXB_TOKEN` を使用。
 
 **格納内容**:
 - `minutes_content`: 議題ごとの詳細議事内容（Markdown形式）

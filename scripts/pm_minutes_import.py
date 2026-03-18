@@ -28,6 +28,18 @@ Usage:
     # 全会議名の概要一覧
     python3 scripts/pm_minutes_import.py --list
 
+    # 詳細表示
+    python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
+
+    # Slack にアップロード（Files タブに表示）
+    python3 scripts/pm_minutes_import.py \\
+        --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c C08SXA4M7JT
+
+    # 特定スレッドにアップロード（スレッドに集約、Files タブには表示されない）
+    python3 scripts/pm_minutes_import.py \\
+        --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
+        -c C08SXA4M7JT --thread-ts 1741234567.123456
+
     # 議事録DBから削除
     python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
     python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
@@ -37,7 +49,7 @@ Options:
     --meeting-name NAME     会議種別名（DBファイル名に使用。省略時はファイル名から推定）
     --held-at DATE          開催日（YYYY-MM-DD）。省略時はファイル名から推定
     --bulk                  一括処理モード（meetings/ ディレクトリ内を全て処理）
-    --meetings-dir DIR      一括処理時の議事録ディレクトリ（デフォルト: meetings/）
+    --meetings-dir DIR      議事録 .md ファイルの検索ディレクトリ（デフォルト: meetings/）
     --minutes-dir DIR       議事録DBの保存ディレクトリ（デフォルト: data/minutes/）
     --since YYYY-MM-DD      一括処理・--list 時に対象を絞る
     --model MODEL           使用する Claude モデル。省略時は CLI デフォルト
@@ -46,7 +58,11 @@ Options:
     --output PATH           出力をファイルにも保存（単一ファイルモードのみ）
     --no-encrypt            DBを暗号化しない（平文モード）
     --list                  議事録DBの内容を表示して終了
+    --show MEETING_ID       指定した meeting_id の詳細を表示して終了
     --delete MEETING_ID     指定した meeting_id を議事録DBから削除して終了
+    --post-to-slack         議事録ファイルを Slack チャンネルにアップロード
+    -c / --channel ID       アップロード先チャンネルID（--post-to-slack 時に必須）
+    --thread-ts TS          投稿先スレッドTS（省略時: チャンネル直接投稿 / 指定時: スレッド集約）
 """
 
 import argparse
@@ -54,6 +70,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -111,6 +128,11 @@ _MINUTES_MIGRATIONS = [
     "ALTER TABLE action_items ADD COLUMN assignee TEXT",
     "ALTER TABLE action_items ADD COLUMN due_date TEXT",
     "ALTER TABLE decisions ADD COLUMN source_context TEXT",
+    "ALTER TABLE instances ADD COLUMN posted_to_slack_at TEXT",
+    "ALTER TABLE instances ADD COLUMN slack_thread_ts TEXT",
+    "ALTER TABLE instances ADD COLUMN slack_channel_id TEXT",
+    "ALTER TABLE instances ADD COLUMN slack_decisions_thread_ts TEXT",
+    "ALTER TABLE instances ADD COLUMN slack_file_permalink TEXT",
 ]
 
 
@@ -448,13 +470,14 @@ def show_meeting(minutes_dir: Path, meeting_id: str,
     found = False
     for db_file in db_files:
         try:
-            conn = open_db(db_file, encrypt=not no_encrypt)
+            conn = init_minutes_db(db_file, no_encrypt=no_encrypt)
         except Exception as e:
             print(f"[ERROR] DB接続失敗: {db_file}: {e}", file=sys.stderr)
             continue
 
         inst = conn.execute(
-            "SELECT meeting_id, held_at, kind, file_path, imported_at"
+            "SELECT meeting_id, held_at, kind, file_path, imported_at,"
+            "       posted_to_slack_at, slack_channel_id, slack_thread_ts, slack_file_permalink"
             " FROM instances WHERE meeting_id = ?",
             (meeting_id,),
         ).fetchone()
@@ -470,6 +493,14 @@ def show_meeting(minutes_dir: Path, meeting_id: str,
         print(f"  会議種別   : {inst['kind']}")
         print(f"  ファイル   : {inst['file_path'] or '(なし)'}")
         print(f"  登録日時   : {(inst['imported_at'] or '')[:19]}")
+        if inst['posted_to_slack_at']:
+            print(f"  Slack投稿  : {inst['posted_to_slack_at'][:19]}"
+                  f"  チャンネル: {inst['slack_channel_id'] or '-'}"
+                  f"  スレッドTS: {inst['slack_thread_ts'] or '(チャンネル直接)'}")
+            if inst['slack_file_permalink']:
+                print(f"  ファイルURL: {inst['slack_file_permalink']}")
+        else:
+            print(f"  Slack投稿  : 未投稿")
         print(f"{'='*70}")
 
         decisions = conn.execute(
@@ -663,13 +694,32 @@ def main():
   python3 scripts/pm_minutes_import.py --list
   python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
 
-  # 詳細表示
+  # 詳細表示（Slack 投稿済み状況も含む）
   python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
   python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
 
   # 削除
   python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
   python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
+
+  # Slack にアップロード（Files タブに表示）
+  python3 scripts/pm_minutes_import.py \\
+      --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c C08SXA4M7JT
+
+  # 特定スレッドにアップロード（スレッドに集約、Files タブには表示されない）
+  python3 scripts/pm_minutes_import.py \\
+      --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
+      -c C08SXA4M7JT --thread-ts 1741234567.123456
+
+  # 確認のみ（Slack API 呼び出しなし）
+  python3 scripts/pm_minutes_import.py \\
+      --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
+      -c C08SXA4M7JT --dry-run
+
+  # 再アップロード（投稿済みフラグを無視）
+  python3 scripts/pm_minutes_import.py \\
+      --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
+      -c C08SXA4M7JT --force
 """,
     )
     parser.add_argument("input_file", nargs="?",
@@ -697,6 +747,14 @@ def main():
                         help="指定した meeting_id の詳細（決定事項・AI・議事内容）を表示して終了")
     parser.add_argument("--delete", default=None, metavar="MEETING_ID",
                         help="指定した meeting_id を議事録DBから削除して終了")
+    parser.add_argument("--post-to-slack", action="store_true",
+                        help="議事録ファイルを Slack チャンネルにアップロード"
+                             "（--meeting-name・--held-at・-c が必須）")
+    parser.add_argument("-c", "--channel", default=None, metavar="CHANNEL_ID",
+                        help="アップロード先チャンネルID（--post-to-slack 時に必須）")
+    parser.add_argument("--thread-ts", default=None, metavar="TS",
+                        help="投稿先スレッドTS（省略時: チャンネル直接投稿で Files タブに表示 / "
+                             "指定時: スレッドにリプライ投稿で Files タブには表示されない）")
     args = parser.parse_args()
 
     minutes_dir = Path(args.minutes_dir) if args.minutes_dir else DEFAULT_MINUTES_DIR
@@ -715,6 +773,21 @@ def main():
     # --- list ---
     if args.list:
         list_minutes(minutes_dir, args.meeting_name, args.since, args.no_encrypt)
+        return
+
+    # --- post-to-slack ---
+    if args.post_to_slack:
+        if not args.meeting_name or not args.held_at:
+            parser.error("--post-to-slack には --meeting-name と --held-at が必須です")
+        if not args.channel:
+            parser.error("--post-to-slack には -c CHANNEL_ID が必須です")
+        meetings_dir = Path(args.meetings_dir) if args.meetings_dir else DEFAULT_MEETINGS_DIR
+        log, close_log = make_logger(args.output)
+        log(f"[INFO] 会議種別  : {args.meeting_name}")
+        log(f"[INFO] 開催日    : {args.held_at}")
+        log(f"[INFO] 議事録DB  : {minutes_dir}")
+        cmd_post_to_slack(args, minutes_dir, meetings_dir, log)
+        close_log()
         return
 
     # --- bulk ---
@@ -788,6 +861,237 @@ def main():
 
     if status == "error":
         sys.exit(1)
+
+
+# --------------------------------------------------------------------------- #
+# Slack アップロード
+# --------------------------------------------------------------------------- #
+def _get_slack_token() -> tuple[str, str]:
+    """
+    トークンの優先順位:
+      1. SLACK_USER_TOKEN (xoxp-) → ユーザーとして投稿・本人が削除可能
+      2. SLACK_MCP_XOXB_TOKEN → フォールバック
+    Returns: (token, kind_label)
+    """
+    token = (os.getenv("SLACK_USER_TOKEN")
+             or os.getenv("SLACK_MCP_XOXB_TOKEN"))
+    if not token:
+        print("[ERROR] SLACK_USER_TOKEN / SLACK_MCP_XOXB_TOKEN "
+              "のいずれかを設定してください", file=sys.stderr)
+        sys.exit(1)
+    kind_label = "ユーザートークン (xoxp-)" if token.startswith("xoxp-") else "ボットトークン (xoxb-)"
+    return token, kind_label
+
+
+def _reconstruct_minutes_md(held_at: str, kind: str, data: dict) -> str:
+    """
+    DB から取得した decisions・action_items・minutes_content を Markdown に再構築する。
+    元の .md ファイルが削除済みの場合のフォールバック用。
+    """
+    lines = [f"# {held_at} {kind} 議事録", ""]
+
+    lines.append("## 決定事項")
+    lines.append("")
+    if data["decisions"]:
+        for d in data["decisions"]:
+            ctx = f" [出典: {d['source_context']}]" if d.get("source_context") else ""
+            lines.append(f"- {d['content']}{ctx}")
+    else:
+        lines.append("（なし）")
+    lines.append("")
+
+    lines.append("## アクションアイテム")
+    lines.append("")
+    if data["action_items"]:
+        for a in data["action_items"]:
+            assignee = a.get("assignee") or "未定"
+            due = f" (期限: {a['due_date']})" if a.get("due_date") else " (期限: なし)"
+            lines.append(f"- [{assignee}] {a['content']}{due}")
+    else:
+        lines.append("（なし）")
+    lines.append("")
+
+    if data.get("minutes_content"):
+        lines.append("## 議事内容")
+        lines.append("")
+        lines.append(data["minutes_content"])
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _upload_md_file(app, channel_id: str, md_path: Path | None,
+                    held_at: str, kind: str, log,
+                    fallback_content: str | None = None,
+                    thread_ts: str | None = None) -> str | None:
+    """
+    .md ファイルを Slack にアップロードする。
+    thread_ts 指定時  → スレッドにリプライ投稿（Files タブには表示されない）
+    thread_ts 省略時  → チャンネルに直接投稿（Files タブに表示される）
+    md_path が存在しない場合は fallback_content を tempfile に書き出してアップロード。
+    Returns: ファイルの permalink（str）、スキップ時は None。
+    """
+    from slack_sdk.errors import SlackApiError
+
+    title = f"{held_at} {kind} 議事録"
+
+    if md_path and md_path.exists():
+        upload_path = md_path
+        filename = md_path.name
+        tmp_to_delete = None
+    elif fallback_content:
+        log("[INFO] 議事録 .md ファイルが見つかりません。DBから議事録を再構築してアップロードします")
+        tf = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", encoding="utf-8", delete=False
+        )
+        tf.write(fallback_content)
+        tf.close()
+        upload_path = Path(tf.name)
+        filename = f"{held_at}_{kind}.md"
+        tmp_to_delete = upload_path
+    else:
+        log("[WARN] 議事録 .md ファイルも再構築コンテンツもありません。アップロードをスキップします")
+        return None
+
+    dest = f"スレッド {thread_ts}" if thread_ts else f"チャンネル #{channel_id}"
+    log(f"[INFO] ファイルをアップロード: {filename} → {dest}")
+    kwargs = dict(channel=channel_id, file=str(upload_path), filename=filename, title=title)
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    try:
+        resp = app.client.files_upload_v2(**kwargs)
+        # レスポンスから permalink を取得（"file" キーが dict またはリストの場合に対応）
+        file_obj = resp.get("file") or (resp.get("files") or [None])[0]
+        permalink = file_obj.get("permalink") if file_obj else None
+    except SlackApiError as e:
+        print(f"[ERROR] ファイルアップロード失敗: {e.response['error']}", file=sys.stderr)
+        if tmp_to_delete:
+            tmp_to_delete.unlink(missing_ok=True)
+        sys.exit(1)
+    finally:
+        if tmp_to_delete:
+            tmp_to_delete.unlink(missing_ok=True)
+    return permalink
+
+
+def cmd_post_to_slack(args, minutes_dir: Path, meetings_dir: Path, log) -> None:
+    """議事録ファイルを Slack チャンネルにアップロードする"""
+    from slack_bolt import App
+
+    db_path = db_path_for_kind(minutes_dir, args.meeting_name)
+    if not db_path.exists():
+        print(f"[ERROR] 議事録DBが見つかりません: {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    conn = init_minutes_db(db_path, no_encrypt=args.no_encrypt)
+    inst = conn.execute(
+        "SELECT meeting_id, held_at, kind, file_path,"
+        "       posted_to_slack_at, slack_thread_ts, slack_channel_id"
+        " FROM instances WHERE held_at = ? AND kind = ?",
+        (args.held_at, args.meeting_name),
+    ).fetchone()
+
+    if not inst:
+        conn.close()
+        print(f"[ERROR] {args.held_at} / {args.meeting_name} のレコードが議事録DBに見つかりません。"
+              f" pm_minutes_import.py でインポートされているか確認してください。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    inst = dict(inst)
+
+    # 投稿済みチェック
+    if inst.get("posted_to_slack_at") and not args.force:
+        thread_info = (f"\n  スレッド TS      : {inst['slack_thread_ts']}"
+                       if inst.get("slack_thread_ts") else "")
+        print(
+            f"[ERROR] {args.held_at} / {args.meeting_name} は既にアップロード済みです。\n"
+            f"  アップロード日時 : {inst['posted_to_slack_at']}\n"
+            f"  チャンネル       : {inst['slack_channel_id']}"
+            f"{thread_info}\n"
+            f"再アップロードするには --force を指定してください。",
+            file=sys.stderr,
+        )
+        conn.close()
+        sys.exit(1)
+
+    # DB から決定事項・AI・議事内容を取得
+    meeting_id = inst["meeting_id"]
+    mc_row = conn.execute(
+        "SELECT content FROM minutes_content WHERE meeting_id = ? LIMIT 1",
+        (meeting_id,),
+    ).fetchone()
+    data = {
+        "decisions": [dict(r) for r in conn.execute(
+            "SELECT content, source_context FROM decisions WHERE meeting_id = ? ORDER BY id",
+            (meeting_id,),
+        ).fetchall()],
+        "action_items": [dict(r) for r in conn.execute(
+            "SELECT content, assignee, due_date FROM action_items WHERE meeting_id = ? ORDER BY id",
+            (meeting_id,),
+        ).fetchall()],
+        "minutes_content": mc_row["content"] if mc_row else None,
+    }
+
+    # 議事録 .md ファイルのパスを解決
+    md_path: Path | None = None
+    candidate = meetings_dir / f"{inst['held_at']}_{inst['kind']}.md"
+    if candidate.exists():
+        md_path = candidate
+    elif inst.get("file_path"):
+        stored = Path(inst["file_path"])
+        if not stored.is_absolute():
+            stored = REPO_ROOT / stored
+        if stored.suffix == ".md" and stored.exists():
+            md_path = stored
+        else:
+            alt = meetings_dir / (stored.stem + ".md")
+            if alt.exists():
+                md_path = alt
+
+    if md_path:
+        log(f"[INFO] 議事録ファイル: {md_path}")
+    else:
+        log("[INFO] 議事録ファイルが見つかりません。DBから再構築します")
+
+    thread_ts = getattr(args, "thread_ts", None)
+
+    if args.dry_run:
+        fallback = _reconstruct_minutes_md(args.held_at, args.meeting_name, data) if not md_path else None
+        dest = f"スレッド {thread_ts}" if thread_ts else f"チャンネル #{args.channel}"
+        log("\n" + "=" * 60)
+        log(f"[dry-run] アップロード先: {dest}")
+        log(f"[dry-run] ファイル名    : {md_path.name if md_path else f'{args.held_at}_{args.meeting_name}.md'}")
+        if fallback:
+            log(f"[dry-run] 再構築コンテンツ先頭:\n{fallback[:400]}...")
+        log("=" * 60)
+        log("[INFO] --dry-run のため Slack アップロードをスキップしました")
+        conn.close()
+        return
+
+    token, token_kind = _get_slack_token()
+    log(f"[INFO] トークン種別: {token_kind}")
+    app = App(token=token)
+
+    fallback = _reconstruct_minutes_md(args.held_at, args.meeting_name, data) if not md_path else None
+    permalink = _upload_md_file(app, args.channel, md_path, args.held_at, args.meeting_name, log,
+                                fallback_content=fallback, thread_ts=thread_ts)
+
+    if permalink:
+        log(f"[INFO] ファイルパーマリンク: {permalink}")
+    else:
+        log("[WARN] パーマリンクを取得できませんでした")
+
+    now = datetime.now().isoformat()
+    conn.execute(
+        "UPDATE instances SET posted_to_slack_at = ?, slack_channel_id = ?,"
+        "  slack_thread_ts = ?, slack_file_permalink = ?"
+        " WHERE meeting_id = ?",
+        (now, args.channel, thread_ts, permalink, meeting_id),
+    )
+    conn.commit()
+    log(f"[INFO] instances テーブルを更新しました (meeting_id: {meeting_id})")
+    conn.close()
 
 
 if __name__ == "__main__":

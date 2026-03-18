@@ -73,7 +73,7 @@ slack/
 │   ├── YYYY-MM-DD_会議名.md
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）。--skip-llm でLLMスキップ、--list でスレッド一覧表示
-│   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存。--delete で削除）
+│   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存。--post-to-slack でSlack投稿。--delete で削除）
 │   ├── pm_minutes_to_pm.py          # data/minutes/{kind}.db → pm.db 転記（LLM不使用。--delete で削除）
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿（SlackリンクはクリッカブルURL形式）
@@ -82,7 +82,8 @@ slack/
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md）
-│   ├── recording_to_pm.sh                     # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
+│   ├── auto_recording_import.sh     # data/*.m4a を検出して recording_to_pm.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
+│   ├── recording_to_pm.sh           # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 └── data/                            # DBと出力ファイル
     ├── {channel_id}.db              # Slackデータ（例: C0A9KG036CS.db）
@@ -102,8 +103,8 @@ slack/
 # 1. トークンファイルを作成（初回のみ）
 mkdir -p ~/.secrets && chmod 700 ~/.secrets
 cat > ~/.secrets/slack_tokens.sh << 'EOF'
-export SLACK_BOT_TOKEN="xoxb-..."
-export SLACK_MCP_XOXB_TOKEN="xoxb-..."
+export SLACK_MCP_XOXB_TOKEN="xoxp-..."   # 全スクリプト共通（xoxp- / xoxb- どちらでも可）
+export SLACK_USER_TOKEN="xoxp-..."        # pm_minutes_import.py --post-to-slack 用（ユーザーとして投稿・本人が削除可能）
 EOF
 chmod 600 ~/.secrets/slack_tokens.sh
 
