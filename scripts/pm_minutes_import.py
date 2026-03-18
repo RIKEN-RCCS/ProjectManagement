@@ -1033,37 +1033,19 @@ def cmd_post_to_slack(args, minutes_dir: Path, meetings_dir: Path, log) -> None:
         "minutes_content": mc_row["content"] if mc_row else None,
     }
 
-    # 議事録 .md ファイルのパスを解決
+    # 常に DB から再構築する（.md ファイルは生の文字起こしの可能性があるため使用しない）
     md_path: Path | None = None
-    candidate = meetings_dir / f"{inst['held_at']}_{inst['kind']}.md"
-    if candidate.exists():
-        md_path = candidate
-    elif inst.get("file_path"):
-        stored = Path(inst["file_path"])
-        if not stored.is_absolute():
-            stored = REPO_ROOT / stored
-        if stored.suffix == ".md" and stored.exists():
-            md_path = stored
-        else:
-            alt = meetings_dir / (stored.stem + ".md")
-            if alt.exists():
-                md_path = alt
-
-    if md_path:
-        log(f"[INFO] 議事録ファイル: {md_path}")
-    else:
-        log("[INFO] 議事録ファイルが見つかりません。DBから再構築します")
+    log("[INFO] 議事録ファイルが見つかりません。DBから再構築します")
 
     thread_ts = getattr(args, "thread_ts", None)
 
     if args.dry_run:
-        fallback = _reconstruct_minutes_md(args.held_at, args.meeting_name, data) if not md_path else None
+        fallback = _reconstruct_minutes_md(args.held_at, args.meeting_name, data)
         dest = f"スレッド {thread_ts}" if thread_ts else f"チャンネル #{args.channel}"
         log("\n" + "=" * 60)
         log(f"[dry-run] アップロード先: {dest}")
-        log(f"[dry-run] ファイル名    : {md_path.name if md_path else f'{args.held_at}_{args.meeting_name}.md'}")
-        if fallback:
-            log(f"[dry-run] 再構築コンテンツ先頭:\n{fallback[:400]}...")
+        log(f"[dry-run] ファイル名    : {args.held_at}_{args.meeting_name}.md")
+        log(f"[dry-run] 再構築コンテンツ先頭:\n{fallback[:400]}...")
         log("=" * 60)
         log("[INFO] --dry-run のため Slack アップロードをスキップしました")
         conn.close()
