@@ -83,7 +83,11 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
-def fetch_recent_decisions(conn: sqlite3.Connection, since: str | None) -> list[dict]:
+def fetch_recent_decisions(
+    conn: sqlite3.Connection,
+    since: str | None,
+    show_acknowledged: bool = False,
+) -> list[dict]:
     query = """
         SELECT d.id, d.content, d.decided_at, d.source, d.source_ref,
                d.meeting_id, d.acknowledged_at,
@@ -93,11 +97,16 @@ def fetch_recent_decisions(conn: sqlite3.Connection, since: str | None) -> list[
         WHERE 1=1
     """
     params: list = []
+    if not show_acknowledged:
+        query += " AND d.acknowledged_at IS NULL"
     if since:
         query += " AND d.decided_at >= ?"
         params.append(since)
-    # 未確認を先に、確認済みを後に表示
-    query += " ORDER BY (d.acknowledged_at IS NOT NULL), d.decided_at DESC"
+    if show_acknowledged:
+        # 未確認を先に、確認済みを後に
+        query += " ORDER BY (d.acknowledged_at IS NOT NULL), d.decided_at DESC"
+    else:
+        query += " ORDER BY d.decided_at DESC"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
@@ -485,6 +494,8 @@ def main() -> None:
     parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="投稿先 Canvas ID")
     add_since_arg(parser)
     parser.add_argument("--skip-canvas", action="store_true", help="Canvas 投稿をスキップ")
+    parser.add_argument("--show-acknowledged", action="store_true",
+                        help="確認済み決定事項も表示する（デフォルトは非表示）")
     add_dry_run_arg(parser)
     add_output_arg(parser)
     add_no_encrypt_arg(parser)
@@ -501,7 +512,7 @@ def main() -> None:
 
     conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
     action_items = fetch_open_action_items(conn, args.since)
-    decisions = fetch_recent_decisions(conn, args.since)
+    decisions = fetch_recent_decisions(conn, args.since, show_acknowledged=args.show_acknowledged)
     risk_items = detect_risk_items(action_items)
     milestone_progress = fetch_milestone_progress(conn)
     assignee_workload = fetch_assignee_workload(conn, today)
