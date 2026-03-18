@@ -263,7 +263,7 @@ python3 scripts/pm_sync_canvas.py --output sync_result.txt
 
 **完了判定**: `状況` 列のみで判断（`対応状況` 列はclose判定に使わない）
 
-`状況` 列の完了キーワード（`status='closed'` に更新）: `完了` `done` `済` `対応済` `解決` `close` `closed` `finish` `finished`（大文字小文字を区別しない）
+`状況` 列の完了キーワード（`status='closed'` に更新）: `完了` `done` `済` `対応済` `解決` `close` `closed` `finish` `finished` `[x]`（大文字小文字を区別しない）。Canvas上のチェックボックスにチェックを入れた場合も `[x]` として検出され完了扱いになる。
 
 `対応状況` 列は内容をそのまま `note` 列に保存（`status` には影響しない）
 
