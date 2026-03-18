@@ -601,9 +601,8 @@ def main() -> None:
     checked_decisions, unchecked_decisions = parse_decision_checkboxes(combined)
     log(f"[INFO] チェック済み決定事項: {len(checked_decisions)} 件, 未チェック: {len(unchecked_decisions)} 件")
     if len(checked_decisions) == 0 and len(unchecked_decisions) > 0:
-        log("[INFO] ヒント: Canvas チェックボックスの状態は API 経由で取得できません。")
-        log("[INFO]        決定事項を確認済みにするには --acknowledge ID... を使用してください。")
-        log("[INFO]        例: python3 scripts/pm_sync_canvas.py --acknowledge 98 99 106")
+        log("[INFO] ヒント: チェック直後は Slack の更新が遅延することがあります。")
+        log("[INFO]        数分待ってから再実行するか、--acknowledge ID... で直接指定してください。")
 
     if not items and not checked_decisions and not unchecked_decisions:
         log("更新対象なし。終了します。")
