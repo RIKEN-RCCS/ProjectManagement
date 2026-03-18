@@ -25,6 +25,17 @@ LOG_FILE="$REPO_ROOT/data/auto_recording_import.log"
 VENV_PYTHON="$HOME/.venv_x86_64/bin/python3"
 
 # --------------------------------------------------------------------------- #
+# 引数解析
+# --------------------------------------------------------------------------- #
+SLACK_CHANNEL=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--channel) SLACK_CHANNEL="$2"; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+# --------------------------------------------------------------------------- #
 # 有効な会議名（docs/project.md「会議の種類と頻度」に基づく）
 # SubWG_Meeting は SubWG1_Meeting / SubWG3_Meeting 等の番号付きも許容する
 # --------------------------------------------------------------------------- #
@@ -157,9 +168,20 @@ BATCH_SCRIPT=$(mktemp /tmp/auto_batch_XXXXXX.sh)
     echo "#SBATCH --nodes=1"
     echo "#SBATCH --time=24:00:00"
     echo ""
+    if [[ -n "$SLACK_CHANNEL" ]]; then
+        echo ". ~/.secrets/slack_tokens.sh"
+        echo ""
+    fi
     for i in "${!BATCH_FILES[@]}"; do
         printf "bash '%s/recording_to_pm.sh' '%s' --held-at '%s' --meeting-name '%s'\n" \
             "$SCRIPT_DIR" "${BATCH_FILES[$i]}" "${BATCH_HELD_AT[$i]}" "${BATCH_NAMES[$i]}"
+        if [[ -n "$SLACK_CHANNEL" ]]; then
+            printf "if [[ \$? -eq 0 ]]; then\n"
+            printf "  '%s' '%s/pm_minutes_import.py' --post-to-slack --meeting-name '%s' --held-at '%s' -c '%s'\n" \
+                "$VENV_PYTHON" "$SCRIPT_DIR" "${BATCH_NAMES[$i]}" "${BATCH_HELD_AT[$i]}" "$SLACK_CHANNEL"
+            printf "fi\n"
+        fi
+        echo ""
     done
 } > "$BATCH_SCRIPT"
 
