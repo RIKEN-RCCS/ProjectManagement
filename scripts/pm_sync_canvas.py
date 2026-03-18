@@ -421,6 +421,8 @@ def main() -> None:
     )
     parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="対象 Canvas ID")
     parser.add_argument("--db", default=None, help="pm.db のパス")
+    parser.add_argument("--debug-canvas", action="store_true",
+                        help="Canvas から取得した生コンテンツを表示して終了（デバッグ用）")
     add_dry_run_arg(parser)
     add_no_encrypt_arg(parser)
     add_output_arg(parser)
@@ -444,12 +446,21 @@ def main() -> None:
 
     log(f"[INFO] 取得完了 ({len(content)} 文字)")
 
+    # 決定事項チェックボックス確認（url_private 経由で全文取得）
+    log("[INFO] Canvas 全文を取得中（決定事項チェックボックス確認）...")
+    markdown = fetch_canvas_markdown(args.canvas_id)
+
+    if args.debug_canvas:
+        log("\n===== Canvas 生コンテンツ (table/HTML) =====")
+        log(content[:3000])
+        log("\n===== Canvas 生コンテンツ (markdown/url_private) =====")
+        log(markdown[:3000] if markdown else "（取得できませんでした）")
+        close_log()
+        return
+
     items = parse_action_items_table(content)
     log(f"[INFO] テーブルから読み込んだアクションアイテム: {len(items)} 件")
 
-    # 決定事項チェックボックス確認（url_private 経由で全文取得）
-    log("\n[INFO] Canvas 全文を取得中（決定事項チェックボックス確認）...")
-    markdown = fetch_canvas_markdown(args.canvas_id)
     checked_decisions = parse_acknowledged_decisions(markdown) if markdown else []
     log(f"[INFO] チェック済み決定事項: {len(checked_decisions)} 件")
 
