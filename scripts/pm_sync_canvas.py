@@ -150,10 +150,9 @@ def parse_action_items_table(content: str) -> list[dict]:
         content_idx   = headers.index("内容")        if "内容"        in headers else None
         due_idx       = headers.index("期限")        if "期限"        in headers else None
         milestone_idx = headers.index("マイルストーン") if "マイルストーン" in headers else None
-        status_idx    = headers.index("状況")        if "状況"        in headers else None
 
         required_max = max(
-            idx for idx in [id_idx, note_idx, assignee_idx, content_idx, due_idx, milestone_idx, status_idx]
+            idx for idx in [id_idx, note_idx, assignee_idx, content_idx, due_idx, milestone_idx]
             if idx is not None
         )
 
@@ -185,7 +184,6 @@ def parse_action_items_table(content: str) -> list[dict]:
                 "content":      get_cell(cells, content_idx),
                 "due_date":     get_cell(cells, due_idx),
                 "milestone_id": get_cell(cells, milestone_idx),
-                "status_val":   get_cell(cells, status_idx),
                 "note":         get_cell(cells, note_idx),
             })
 
@@ -279,6 +277,50 @@ def parse_decision_checkboxes(content: str) -> tuple[list[str], list[str]]:
 
 
 _D_ID_PATTERN = re.compile(r"^\[D:(\d+)\]\s*")
+_AI_ID_PATTERN = re.compile(r"^\[ID:(\d+)\]\s*")
+
+
+def parse_action_item_checkboxes(content: str) -> tuple[list[int], list[int]]:
+    """
+    Canvas HTML からアクションアイテムチェックボックスの状態を取得する。
+    [ID:n] プレフィックスのある <li> 要素を探す。
+    戻り値: (closed_ids, open_ids)
+    """
+    closed_ids: list[int] = []
+    open_ids:   list[int] = []
+
+    li_pattern = re.compile(r"<li([^>]*)>(.*?)</li>", re.DOTALL)
+    found_any = False
+    for m in li_pattern.finditer(content):
+        attrs, inner = m.group(1), m.group(2)
+        text = _extract_li_text(inner)
+        if not text:
+            continue
+        m2 = _AI_ID_PATTERN.match(text)
+        if not m2:
+            continue
+        found_any = True
+        ai_id = int(m2.group(1))
+        if re.search(r"\bchecked\b", attrs):
+            closed_ids.append(ai_id)
+        else:
+            open_ids.append(ai_id)
+
+    if not found_any:
+        # マークダウンフォールバック
+        sec_m = re.search(r"##\s*未完了アクションアイテム\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
+        if sec_m:
+            for line in sec_m.group(1).splitlines():
+                line = line.strip()
+                m2 = re.match(r"^-\s+\[[xX]\]\s+\[ID:(\d+)\]", line)
+                if m2:
+                    closed_ids.append(int(m2.group(1)))
+                else:
+                    m3 = re.match(r"^-\s+\[ \]\s+\[ID:(\d+)\]", line)
+                    if m3:
+                        open_ids.append(int(m3.group(1)))
+
+    return closed_ids, open_ids
 
 
 def sync_decision_acknowledgements(
@@ -415,16 +457,15 @@ def update_action_item(
     canvas_content: str,
     canvas_due_date: str,
     canvas_milestone_id: str,
-    canvas_status_val: str,
     dry_run: bool,
 ) -> tuple[str, list[str]]:
     """
     アクションアイテムを更新する。
-    - note: 対応状況（完了キーワードなら status='closed'）
-    - canvas_assignee/content/due_date: Canvas上で変更があれば上書き（空欄は無視）
+    - note: 対応状況（内容をそのまま保存）
+    - canvas_assignee/content/due_date/milestone_id: Canvas上で変更があれば上書き（空欄は無視）
 
     戻り値: (result_str, changed_fields)
-        result_str   : 'closed' / 'noted' / 'unchanged' / 'not_found'
+        result_str   : 'noted' / 'updated' / 'unchanged' / 'not_found'
         changed_fields: 変更されたフィールド名のリスト
     """
     row = conn.execute(
@@ -439,19 +480,9 @@ def update_action_item(
     changed_fields: list[str] = []
 
     # 対応状況（note）: 内容をそのまま保存するのみ（close判定には使わない）
-    new_status = row["status"]
     if note:
         updates["note"] = note
         changed_fields.append("対応状況")
-    # 状況（status_val）のみでclose/open判定
-    if canvas_status_val and canvas_status_val.lower() != (row["status"] or "").lower():
-        if is_close_keyword(canvas_status_val):
-            new_status = "closed"
-        elif canvas_status_val.lower() == "open":
-            new_status = "open"
-        changed_fields.append("状況")
-    if new_status != row["status"]:
-        updates["status"] = new_status
 
     # 担当者・内容・期限・マイルストーン — Canvas値が非空かつDB値と異なる場合のみ更新
     if canvas_assignee and canvas_assignee != (row["assignee"] or ""):
@@ -482,8 +513,6 @@ def update_action_item(
         conn.execute(f"UPDATE action_items SET {set_clause} WHERE id = ?", values)
         conn.commit()
 
-    if new_status == "closed":
-        return "closed", changed_fields
     if note:
         return "noted", changed_fields
     return "updated", changed_fields
@@ -611,7 +640,7 @@ def main() -> None:
 
     conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
 
-    closed_count = noted_count = updated_count = not_found_count = unchanged_count = 0
+    noted_count = updated_count = not_found_count = unchanged_count = 0
 
     for item in items:
         ai_id = item["id"]
@@ -623,14 +652,10 @@ def main() -> None:
             canvas_content=item["content"],
             canvas_due_date=item["due_date"],
             canvas_milestone_id=item.get("milestone_id", ""),
-            canvas_status_val=item.get("status_val", ""),
             dry_run=args.dry_run,
         )
 
-        if result == "closed":
-            log(f"  [完了] ID={ai_id} → status='closed'  note='{item['note']}'  変更={changed}")
-            closed_count += 1
-        elif result == "noted":
+        if result == "noted":
             log(f"  [メモ] ID={ai_id} → note='{item['note']}'  変更={changed}")
             noted_count += 1
         elif result == "updated":
@@ -648,10 +673,30 @@ def main() -> None:
         conn, checked_decisions, unchecked_decisions, args.dry_run, log
     )
 
+    # アクションアイテムのチェックボックスで status 更新
+    log("\n[INFO] アクションアイテム チェックボックスを pm.db に同期中...")
+    closed_ids, _ = parse_action_item_checkboxes(combined)
+    log(f"[INFO] チェック済み（完了）: {len(closed_ids)} 件")
+    ai_closed_count = 0
+    for ai_id in closed_ids:
+        row = conn.execute("SELECT id, status FROM action_items WHERE id=?", (ai_id,)).fetchone()
+        if row is None:
+            log(f"  [未検出] ID={ai_id} は pm.db に存在しません")
+            continue
+        if row["status"] == "closed":
+            continue  # 既に完了済み
+        log(f"  [完了] ID={ai_id} → status='closed'")
+        if not args.dry_run:
+            write_audit_log(conn, ai_id, "status", row["status"], "closed", "canvas_sync")
+            conn.execute("UPDATE action_items SET status='closed' WHERE id=?", (ai_id,))
+        ai_closed_count += 1
+    if not args.dry_run and ai_closed_count:
+        conn.commit()
+
     conn.close()
 
     log(
-        f"\n完了: 完了マーク={closed_count}件, メモ保存={noted_count}件, "
+        f"\n完了: チェックボックス完了={ai_closed_count}件, メモ保存={noted_count}件, "
         f"フィールド更新={updated_count}件, 変更なし={unchanged_count}件, 未検出={not_found_count}件"
     )
     log(f"決定事項: 確認済み={ack_count}件, 取消={rev_count}件, 未検出={ack_not_found}件")

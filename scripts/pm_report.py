@@ -302,24 +302,37 @@ def _format_source(a: dict, permalink_map: dict[str, str] | None = None) -> str:
     return ref if ref else "Slack"
 
 
+def format_action_items_checkboxes(items: list[dict]) -> str:
+    """チェックボックス形式でアクションアイテムを列挙（チェック=完了）"""
+    if not items:
+        return "（なし）"
+    lines = []
+    for a in items:
+        ai_id    = a.get("id", "")
+        assignee = a.get("assignee") or "未定"
+        due      = f" 期限:{a['due_date']}" if a.get("due_date") else ""
+        content  = a.get("content", "").replace("\n", " ").replace("\r", "")
+        lines.append(f"- [ ] [ID:{ai_id}] [{assignee}]{due} {content}")
+    return "\n".join(lines)
+
+
 def format_action_items(items: list[dict],
                         permalink_map: dict[str, str] | None = None) -> str:
     """Canvas に貼るアクションアイテム表（pm_relink.py --export と列・順序を統一）"""
     if not items:
         return "（なし）"
-    header = "| ID | 担当者 | 期限 | マイルストーン | 状況 | 内容 | 対応状況 | 出典 |"
-    sep    = "|----|--------|------|----------------|------|------|----------|------|"
+    header = "| ID | 担当者 | 期限 | マイルストーン | 内容 | 対応状況 | 出典 |"
+    sep    = "|----|--------|------|----------------|------|----------|------|"
     rows = [header, sep]
     for a in items:
         ai_id     = a.get("id", "")
         assignee  = a.get("assignee") or "未定"
         due       = a.get("due_date") or ""
         milestone = a.get("milestone_id") or ""
-        status    = a.get("status") or ""
         content   = a.get("content", "").replace("|", "｜").replace("\n", " ").replace("\r", "")
         source    = _format_source(a, permalink_map)
         note      = (a.get("note") or "").replace("\n", " ").replace("\r", "")
-        rows.append(f"| {ai_id} | {assignee} | {due} | {milestone} | {status} | {content} | {note} | {source} |")
+        rows.append(f"| {ai_id} | {assignee} | {due} | {milestone} | {content} | {note} | {source} |")
     return "\n".join(rows)
 
 
@@ -373,7 +386,9 @@ def build_report(
 
     sections.append(f"## 直近の決定事項\n\n{format_decisions(decisions, permalink_map)}")
 
-    sections.append(f"## 未完了アクションアイテム\n\n{format_action_items(action_items, permalink_map)}")
+    ai_checkboxes = format_action_items_checkboxes(action_items)
+    ai_table = format_action_items(action_items, permalink_map)
+    sections.append(f"## 未完了アクションアイテム\n\nチェックを付けると完了にします（数分後に pm_sync_canvas.py を実行）:\n\n{ai_checkboxes}\n\n---\n\n詳細（担当者・期限・マイルストーン・対応状況を編集できます）:\n\n{ai_table}")
 
     if assignee_workload:
         wl_text = format_assignee_workload(assignee_workload)
