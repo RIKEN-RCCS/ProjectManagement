@@ -44,6 +44,14 @@ Usage:
     python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
     python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
 
+    # DB内容をMarkdownにエクスポート（人間が修正するための叩き台を出力）
+    python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting \\
+        --meeting-name Leader_Meeting --output corrected.md
+
+    # 人間が修正したMarkdownをLLM不使用でインポート（--force で上書き）
+    python3 scripts/pm_minutes_import.py corrected.md \\
+        --meeting-name Leader_Meeting --held-at 2026-03-10 --no-llm --force
+
 Options:
     input_file              文字起こしファイル（.txt / .md）（単一ファイルモード）
     --meeting-name NAME     会議種別名（DBファイル名に使用。省略時はファイル名から推定）
@@ -57,8 +65,10 @@ Options:
     --dry-run               DB保存なし・結果を標準出力のみ
     --output PATH           出力をファイルにも保存（単一ファイルモードのみ）
     --no-encrypt            DBを暗号化しない（平文モード）
+    --no-llm                LLMを呼ばず入力ファイルを構造化Markdownとして直接解析（人間修正版インポート用）
     --list                  議事録DBの内容を表示して終了
     --show MEETING_ID       指定した meeting_id の詳細を表示して終了
+    --export MEETING_ID     DB内容を構造化Markdownでエクスポート（人間による修正の叩き台として出力）
     --delete MEETING_ID     指定した meeting_id を議事録DBから削除して終了
     --post-to-slack         議事録ファイルを Slack チャンネルにアップロード
     -c / --channel ID       アップロード先チャンネルID（--post-to-slack 時に必須）
@@ -550,6 +560,75 @@ def show_meeting(minutes_dir: Path, meeting_id: str,
 
 
 # --------------------------------------------------------------------------- #
+# エクスポート（人間修正用）
+# --------------------------------------------------------------------------- #
+def cmd_export(minutes_dir: Path, meeting_id: str, kind_filter: str | None,
+               no_encrypt: bool, output_path: str | None) -> None:
+    """DB内容を構造化Markdownでエクスポートする（人間による修正の叩き台）"""
+    if not minutes_dir.exists():
+        print(f"[ERROR] 議事録DBディレクトリが存在しません: {minutes_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    db_files = sorted(minutes_dir.glob("*.db"))
+    if kind_filter:
+        safe = re.sub(r"[^\w\-]", "_", kind_filter)
+        db_files = [f for f in db_files if f.stem == safe]
+
+    for db_file in db_files:
+        try:
+            conn = init_minutes_db(db_file, no_encrypt=no_encrypt)
+        except Exception as e:
+            print(f"[ERROR] DB接続失敗: {db_file}: {e}", file=sys.stderr)
+            continue
+
+        inst = conn.execute(
+            "SELECT meeting_id, held_at, kind FROM instances WHERE meeting_id = ?",
+            (meeting_id,),
+        ).fetchone()
+
+        if not inst:
+            conn.close()
+            continue
+
+        held_at = inst["held_at"]
+        kind = inst["kind"]
+
+        mc_row = conn.execute(
+            "SELECT content FROM minutes_content WHERE meeting_id = ? LIMIT 1",
+            (meeting_id,),
+        ).fetchone()
+        data = {
+            "decisions": [dict(r) for r in conn.execute(
+                "SELECT content, source_context FROM decisions WHERE meeting_id = ? ORDER BY id",
+                (meeting_id,),
+            ).fetchall()],
+            "action_items": [dict(r) for r in conn.execute(
+                "SELECT content, assignee, due_date FROM action_items WHERE meeting_id = ? ORDER BY id",
+                (meeting_id,),
+            ).fetchall()],
+            "minutes_content": mc_row["content"] if mc_row else None,
+        }
+        conn.close()
+
+        md = _reconstruct_minutes_md(held_at, kind, data)
+
+        if output_path:
+            Path(output_path).write_text(md, encoding="utf-8")
+            print(f"[INFO] エクスポート完了: {output_path}")
+            print(f"[INFO] 修正後に以下のコマンドで再インポートしてください:")
+            print(f"  python3 scripts/pm_minutes_import.py {output_path} \\")
+            print(f"      --meeting-name {kind} --held-at {held_at} --no-llm --force")
+        else:
+            print(md)
+        return
+
+    scope = f"'{kind_filter}'" if kind_filter else "全DB"
+    print(f"[ERROR] meeting_id '{meeting_id}' が {scope} に見つかりません。"
+          f" --list で一覧を確認してください。", file=sys.stderr)
+    sys.exit(1)
+
+
+# --------------------------------------------------------------------------- #
 # 削除
 # --------------------------------------------------------------------------- #
 def delete_meeting(minutes_dir: Path, meeting_id: str,
@@ -613,6 +692,7 @@ def process_file(
     dry_run: bool,
     no_encrypt: bool,
     model: str | None = None,
+    no_llm: bool = False,
     log=print,
 ) -> str:
     """Returns: "ok" | "skipped" | "error" """
@@ -625,10 +705,6 @@ def process_file(
     log(f"[INFO] meeting_id   : {meeting_id}")
     log(f"[INFO] 議事録DB     : {db_path}")
 
-    raw_transcript = input_path.read_text(encoding="utf-8")
-    transcript, is_whisper = prepare_transcript(raw_transcript)
-    log(f"[INFO] 文字起こし形式: {'Whisper (話者・タイムスタンプ付き)' if is_whisper else '平文テキスト'}")
-
     # インポート済みチェック（LLM呼び出し前）: 同じ開催日・会議名が議事録DBに存在するか確認
     if not dry_run and not force:
         conn_check = init_minutes_db(db_path, no_encrypt=no_encrypt)
@@ -640,18 +716,26 @@ def process_file(
             log(f"[SKIP] {held_at}/{kind} は既に議事録DBに存在します。--force で上書き可能")
             return "skipped"
 
-    if dry_run:
-        log("[INFO] --dry-run のため LLM呼び出し・DB保存をスキップしました")
-        return "ok"
+    if no_llm:
+        # 入力ファイルを構造化Markdownとして直接パース（LLM不使用）
+        log("[INFO] --no-llm: 入力ファイルを構造化Markdownとして直接解析します")
+        minutes_text = input_path.read_text(encoding="utf-8")
+    else:
+        raw_transcript = input_path.read_text(encoding="utf-8")
+        transcript, is_whisper = prepare_transcript(raw_transcript)
+        log(f"[INFO] 文字起こし形式: {'Whisper (話者・タイムスタンプ付き)' if is_whisper else '平文テキスト'}")
 
-    log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
+        if dry_run:
+            log("[INFO] --dry-run のため LLM呼び出し・DB保存をスキップしました")
+            return "ok"
 
-    prompt = PROMPT_TEMPLATE.format(transcript=transcript, held_at=held_at)
-    try:
-        minutes_text = call_claude(prompt, model=model)
-    except Exception as e:
-        log(f"[ERROR] LLM呼び出し失敗: {e}")
-        return "error"
+        log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
+        prompt = PROMPT_TEMPLATE.format(transcript=transcript, held_at=held_at)
+        try:
+            minutes_text = call_claude(prompt, model=model)
+        except Exception as e:
+            log(f"[ERROR] LLM呼び出し失敗: {e}")
+            return "error"
 
     parsed = parse_minutes_output(minutes_text)
 
@@ -659,6 +743,11 @@ def process_file(
     log("\n" + "=" * 60)
     log(minutes_text)
     log("=" * 60)
+    log(f"  決定事項: {len(parsed['decisions'])} 件 / アクションアイテム: {len(parsed['action_items'])} 件")
+
+    if dry_run:
+        log("[INFO] --dry-run のため DB保存をスキップしました")
+        return "ok"
 
     conn = init_minutes_db(db_path, no_encrypt=no_encrypt)
     save_to_minutes_db(conn, meeting_id, held_at, kind, str(input_path), parsed, force)
@@ -697,6 +786,14 @@ def main():
   # 詳細表示（Slack 投稿済み状況も含む）
   python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
   python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
+
+  # DB内容を修正用Markdownにエクスポート
+  python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting \\
+      --meeting-name Leader_Meeting --output corrected.md
+
+  # 人間が修正したMarkdownをLLM不使用でインポート
+  python3 scripts/pm_minutes_import.py corrected.md \\
+      --meeting-name Leader_Meeting --held-at 2026-03-10 --no-llm --force
 
   # 削除
   python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
@@ -737,6 +834,9 @@ def main():
     add_since_arg(parser, "（--bulk / --list 時）")
     parser.add_argument("--model", default=None, metavar="MODEL",
                         help="使用する Claude モデル（例: claude-haiku-4-5-20251001）。省略時は CLI デフォルト")
+    parser.add_argument("--no-llm", action="store_true", default=False,
+                        help="LLMを呼ばず入力ファイルを構造化Markdownとして直接解析してDBに保存"
+                             "（人間が修正した議事録の再インポート用。--force と併用して上書き）")
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     add_dry_run_arg(parser)
     add_output_arg(parser)
@@ -745,6 +845,9 @@ def main():
                         help="議事録DBの内容を表示して終了")
     parser.add_argument("--show", default=None, metavar="MEETING_ID",
                         help="指定した meeting_id の詳細（決定事項・AI・議事内容）を表示して終了")
+    parser.add_argument("--export", default=None, metavar="MEETING_ID",
+                        help="DB内容を構造化Markdownでエクスポート（人間による修正の叩き台）。"
+                             "--output で保存先を指定しない場合は標準出力に表示")
     parser.add_argument("--delete", default=None, metavar="MEETING_ID",
                         help="指定した meeting_id を議事録DBから削除して終了")
     parser.add_argument("--post-to-slack", action="store_true",
@@ -768,6 +871,12 @@ def main():
     # --- show ---
     if args.show:
         show_meeting(minutes_dir, args.show, args.meeting_name, args.no_encrypt)
+        return
+
+    # --- export ---
+    if args.export:
+        cmd_export(minutes_dir, args.export, args.meeting_name,
+                   args.no_encrypt, args.output)
         return
 
     # --- list ---
@@ -823,6 +932,7 @@ def main():
                 file_path, held_at, kind, minutes_dir,
                 force=args.force, dry_run=args.dry_run,
                 no_encrypt=args.no_encrypt, model=args.model,
+                no_llm=args.no_llm,
             )
             if status == "ok":
                 ok += 1
@@ -854,6 +964,7 @@ def main():
         input_path, held_at, kind, minutes_dir,
         force=args.force, dry_run=args.dry_run,
         no_encrypt=args.no_encrypt, model=args.model,
+        no_llm=args.no_llm,
         log=log,
     )
 
