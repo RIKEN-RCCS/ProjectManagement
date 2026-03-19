@@ -60,9 +60,9 @@ CLOSE_KEYWORDS = {"完了", "done", "済", "対応済", "解決", "close", "clos
 # --------------------------------------------------------------------------- #
 def fetch_canvas_content(canvas_id: str) -> str:
     """Slack Canvas の全テキスト内容を取得して返す"""
-    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
+    token = os.getenv("SLACK_USER_TOKEN")
     if not token:
-        print("ERROR: SLACK_MCP_XOXB_TOKEN を設定してください",
+        print("ERROR: SLACK_USER_TOKEN を設定してください",
               file=sys.stderr)
         sys.exit(1)
 
@@ -212,7 +212,7 @@ def is_close_keyword(note: str) -> bool:
 # --------------------------------------------------------------------------- #
 def fetch_canvas_markdown(canvas_id: str) -> str:
     """url_private 経由で Canvas の全マークダウンを取得する"""
-    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
+    token = os.getenv("SLACK_USER_TOKEN")
     if not token:
         return ""
     app = App(token=token)
@@ -575,7 +575,7 @@ def main() -> None:
 
     if args.debug_canvas:
         log("\n===== Canvas セクションオブジェクト全体 (canvases_sections_lookup) =====")
-        token = os.getenv("SLACK_MCP_XOXB_TOKEN", "")
+        token = os.getenv("SLACK_USER_TOKEN", "")
         if token:
             from slack_bolt import App as _App
             _app = _App(token=token)

@@ -977,16 +977,11 @@ def main():
 # --------------------------------------------------------------------------- #
 def _get_slack_token() -> tuple[str, str]:
     """
-    トークンの優先順位:
-      1. SLACK_USER_TOKEN (xoxp-) → ユーザーとして投稿・本人が削除可能
-      2. SLACK_MCP_XOXB_TOKEN → フォールバック
     Returns: (token, kind_label)
     """
-    token = (os.getenv("SLACK_USER_TOKEN")
-             or os.getenv("SLACK_MCP_XOXB_TOKEN"))
+    token = os.getenv("SLACK_USER_TOKEN")
     if not token:
-        print("[ERROR] SLACK_USER_TOKEN / SLACK_MCP_XOXB_TOKEN "
-              "のいずれかを設定してください", file=sys.stderr)
+        print("[ERROR] SLACK_USER_TOKEN を設定してください", file=sys.stderr)
         sys.exit(1)
     kind_label = "ユーザートークン (xoxp-)" if token.startswith("xoxp-") else "ボットトークン (xoxb-)"
     return token, kind_label

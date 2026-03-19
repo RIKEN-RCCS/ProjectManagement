@@ -158,7 +158,7 @@ python3 scripts/pm_minutes_import.py \
 | `-c / --channel ID` | - | アップロード先チャンネルID（`--post-to-slack` 時に必須） |
 | `--thread-ts TS` | - | 投稿先スレッドTS（省略: チャンネル直接投稿で Files タブに表示 / 指定: スレッド集約） |
 
-**Slack トークン**: `SLACK_USER_TOKEN`（xoxp-）を優先使用。未設定の場合は `SLACK_BOT_TOKEN` / `SLACK_MCP_XOXB_TOKEN` を使用。
+**Slack トークン**: `SLACK_USER_TOKEN`（xoxp-）を使用。
 
 **格納内容**:
 - `minutes_content`: 議題ごとの詳細議事内容（Markdown形式）

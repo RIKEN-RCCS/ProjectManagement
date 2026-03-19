@@ -421,6 +421,10 @@ def sanitize_for_canvas(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
 
+    # 裸のURLを <URL> 形式でラップしてクリッカブルにする（既にラップ済みはスキップ）
+    text = re.sub(r"(?<![<(\[])https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]",
+                  lambda m: f"<{m.group(0)}>", text)
+
     # h4以下の見出しはh3に統一（Canvasで未サポート）
     text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
     # インデントされた番号リストをリストに変換
@@ -488,9 +492,9 @@ def _collect_section_ids(app: App, canvas_id: str) -> list[str]:
 
 
 def post_to_canvas(canvas_id: str, content: str) -> None:
-    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
+    token = os.getenv("SLACK_USER_TOKEN")
     if not token:
-        print("ERROR: SLACK_MCP_XOXB_TOKEN を設定してください",
+        print("ERROR: SLACK_USER_TOKEN を設定してください",
               file=sys.stderr)
         sys.exit(1)
     print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
