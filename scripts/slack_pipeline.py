@@ -9,6 +9,9 @@ Slack要約パイプライン（Phase 1: DB差分処理版）
      - 変化のないスレッドはスキップ（API呼び出しなし）
   2. 新規・更新スレッドのみ Claude CLI で要約しDBに蓄積
      - 変化のないスレッドはDBの要約をそのまま利用（LLM呼び出しなし）
+  3. DB内の全要約（--since フィルタ適用）を統合して全体要約を生成
+     - --canvas-id 指定時: Canvas に投稿
+     - --output 指定時: ファイルに保存
 """
 
 import asyncio
@@ -29,7 +32,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_no_encrypt_arg, make_logger
+from cli_utils import add_no_encrypt_arg, add_output_arg, make_logger
+
+from slack_bolt import App
+from slack_sdk.errors import SlackApiError
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -89,6 +95,11 @@ def parse_args():
                         help="LLM呼び出し（スレッド要約・全体要約）をスキップ")
     parser.add_argument("--list", action="store_true", default=False,
                         help="DB内のスレッド要約一覧を表示して終了（--since 併用可）")
+    parser.add_argument("--canvas-id", default=None,
+                        help="Canvas ID（指定時のみ Canvas に全体要約を投稿）")
+    parser.add_argument("--skip-canvas", action="store_true", default=False,
+                        help="Canvas 投稿をスキップ（全体要約は生成する）")
+    add_output_arg(parser)
     add_no_encrypt_arg(parser)
     parser.add_argument("--dry-run", action="store_true", default=False,
                         help="LLM呼び出しをスキップ（Slack API・DB書き込みは実行される）")
@@ -784,6 +795,179 @@ def cmd_list(conn: sqlite3.Connection, channel_id: str, since: datetime | None) 
 
 
 # ==================================================================
+# ステップ3: 全体要約 & Canvas投稿
+# ==================================================================
+
+def fetch_summaries_for_overall(
+    conn: sqlite3.Connection,
+    channel_id: str,
+    since_date: datetime | None,
+) -> list[dict]:
+    """DB から全スレッド要約と親メッセージ permalink を取得（全体要約用）"""
+    query = """
+        SELECT m.timestamp, m.user_name, m.permalink, s.summary
+        FROM messages m
+        JOIN summaries s ON m.thread_ts = s.thread_ts AND s.channel_id = m.channel_id
+        WHERE m.channel_id = ?
+    """
+    params: list = [channel_id]
+    if since_date:
+        query += " AND m.timestamp >= ?"
+        params.append(since_date.strftime("%Y-%m-%d"))
+    query += " ORDER BY m.timestamp ASC"
+    return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def summarize_overall(entries: list[dict]) -> str:
+    """全スレッド要約を統合してチャンネル全体の総合要約を生成する（LLM使用）"""
+    if not entries:
+        return "（要約対象なし）"
+
+    items = []
+    for e in entries:
+        item = f"- {e['summary']}"
+        if e.get("permalink"):
+            item += f"\n  (元投稿: {e['permalink']})"
+        items.append(item)
+
+    system_prompt = (
+        "以下はSlackチャンネルの個別メッセージ・スレッドごとの要約です。"
+        "これらを統合して、チャンネル全体の活動を俯瞰できる総合要約を作成してください。"
+        "主要なトピック、共有されたリソース（URL含む）を整理して記載してください。"
+        "URLは共有されたリソースにまとめてください。"
+        "URLが含まれる場合は完全な形で記載してください。"
+        "極力、表形式は使わずに文章で表現してください。"
+        "推測を含めず、要約に基づいた内容のみを記載してください。"
+        "\n\n"
+        "【重要】各要約には元のSlack投稿のpermalinkが付記されています。"
+        "全体要約の各トピックや要点の末尾に、参照元の投稿permalinkのURLのみを記載してください。「permalink:」等のラベルは付けないでください。"
+        "言語は日本語としてください。"
+    )
+    print("\n全体要約を生成中...", file=sys.stderr)
+    try:
+        return call_claude(f"{system_prompt}\n\n" + "\n\n".join(items), timeout=600)
+    except subprocess.TimeoutExpired:
+        return "[全体要約失敗: タイムアウト]"
+    except Exception as e:
+        return f"[全体要約失敗: {e}]"
+
+
+def sanitize_for_canvas(text: str) -> str:
+    # 記号・特殊文字を標準的な文字に置換
+    replacements = {
+        # ダッシュ・ハイフン類
+        "\u2013": "-", "\u2014": "-", "\u2015": "-",
+        "\u2212": "-", "\u2011": "-", "\u2010": "-",
+        # 波ダッシュ・チルダ類
+        "\uff5e": "-", "\u301c": "-",
+        # 全角括弧
+        "\uff08": "(", "\uff09": ")",
+        # 全角記号
+        "\uff0c": ",", "\uff0e": ".", "\uff01": "!",
+        "\uff1a": ":", "\uff1b": ";", "\uff1f": "?",
+        # 引用符類
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        "\u300c": '"', "\u300d": '"', "\u300e": '"', "\u300f": '"',
+        # 矢印類
+        "\u2192": "->", "\u2190": "<-", "\u2194": "<->",
+        "\u21d2": "=>", "\u21d0": "<=", "\u21d4": "<=>",
+        "\u25b6": ">", "\u25c0": "<",
+        # 点・中黒
+        "\u30fb": ".", "\u2022": "-", "\u2023": "-",
+        "\u25cf": "-", "\u25cb": "-", "\u2027": ".",
+        # スペース類
+        "\u3000": " ", "\u00a0": " ",
+        # その他よく出る記号
+        "\u2026": "...", "\u22ef": "...",
+        "\u00d7": "x", "\u00f7": "/",
+        "\u2605": "*", "\u2606": "*",
+        "\u2713": "OK", "\u2714": "OK", "\u2715": "NG", "\u2716": "NG",
+        "\u25a0": "-", "\u25a1": "-",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    # h4以下の見出しはh3に統一（Canvasで未サポート）
+    text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
+    # インデントされた番号リストをリストに変換
+    text = re.sub(r"^(\s+)\d+\.\s+", r"\1- ", text, flags=re.MULTILINE)
+    # ブロッククオート内のリスト項目からブロッククオートを除去
+    text = re.sub(r"^> (-|\*|\d+\.)\s+", r"\1 ", text, flags=re.MULTILINE)
+
+    # 上記で対処できなかった非ASCII・非日本語の特殊記号を除去
+    def keep_char(c: str) -> str:
+        cp = ord(c)
+        if 0x20 <= cp <= 0x7E:
+            return c
+        if c in ("\n", "\t"):
+            return c
+        if 0x3000 <= cp <= 0x9FFF:
+            return c
+        if 0xF900 <= cp <= 0xFAFF:
+            return c
+        if 0xFF00 <= cp <= 0xFFEF:
+            return c
+        if 0x00C0 <= cp <= 0x024F:
+            return c
+        return ""
+
+    text = "".join(keep_char(c) for c in text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+def _collect_section_ids(app: App, canvas_id: str) -> list[str]:
+    """Canvas の全セクション ID を収集する（複数クエリで網羅）"""
+    seen: set[str] = set()
+    ids: list[str] = []
+    for text in ["|", "##", "- ", "【", "project", "アクション"]:
+        try:
+            resp = app.client.canvases_sections_lookup(
+                canvas_id=canvas_id,
+                criteria={"contains_text": text},
+            )
+            for sec in resp.get("sections", []):
+                sid = sec.get("id")
+                if sid and sid not in seen:
+                    seen.add(sid)
+                    ids.append(sid)
+        except SlackApiError:
+            pass
+    return ids
+
+
+def post_to_canvas(canvas_id: str, content: str) -> None:
+    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
+    if not token:
+        print("ERROR: SLACK_MCP_XOXB_TOKEN を設定してください", file=sys.stderr)
+        sys.exit(1)
+    print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
+    app = App(token=token)
+
+    try:
+        section_ids = _collect_section_ids(app, canvas_id)
+        if section_ids:
+            print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
+            app.client.canvases_edit(
+                canvas_id=canvas_id,
+                changes=[{"operation": "delete", "section_id": sid} for sid in section_ids],
+            )
+
+        app.client.canvases_edit(
+            canvas_id=canvas_id,
+            changes=[{
+                "operation": "insert_at_start",
+                "document_content": {"type": "markdown", "markdown": content},
+            }],
+        )
+        print(f"✓ Canvas 更新成功: {canvas_id}")
+    except SlackApiError as e:
+        print(f"Slack API エラー: {e.response['error']}", file=sys.stderr)
+        print(f"レスポンス詳細: {e.response}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ==================================================================
 # メイン
 # ==================================================================
 
@@ -843,7 +1027,34 @@ async def main():
     ).fetchone()[0]
     print(f"\nDB内サマリー総数: {total_summaries}スレッド")
 
+    # ---- ステップ3: 全体要約 & Canvas投稿 ----
+    print(f"\n{'='*60}")
+    print("ステップ3: 全体要約")
+    print(f"{'='*60}")
+
+    overall_summary = None
+    if args.dry_run or args.skip_llm:
+        reason = "--dry-run" if args.dry_run else "--skip-llm"
+        print(f"[INFO] {reason} のため全体要約をスキップしました")
+    else:
+        entries = fetch_summaries_for_overall(conn, channel_id, args.since)
+        print(f"全体要約対象: {len(entries)}スレッド", file=sys.stderr)
+        if entries:
+            overall_summary = summarize_overall(entries)
+            overall_summary = sanitize_for_canvas(overall_summary)
+            print(overall_summary)
+
     conn.close()
+
+    if overall_summary and args.output:
+        Path(args.output).write_text(overall_summary, encoding="utf-8")
+        print(f"✓ 全体要約を {args.output} に保存しました")
+
+    if overall_summary and args.canvas_id and not args.skip_canvas:
+        post_to_canvas(args.canvas_id, overall_summary)
+    elif args.canvas_id:
+        print("[INFO] Canvas 投稿をスキップしました")
+
     print("\n✓ パイプライン完了")
 
 

@@ -9,6 +9,16 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db
 # 初回・過去分の取り込み（oldest をAPIに渡してページネーション全件取得）
 python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
     --since 2025-04-01
+
+# 差分取得・要約 → 全体要約を生成して Canvas に投稿
+python3 scripts/slack_pipeline.py -c C08SXA4M7JT --canvas-id F0AAD2494VB
+
+# DBの既存要約から全体要約のみ生成（Slack API呼び出しなし）
+python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch --output overall.md
+
+# 全体要約を生成してファイル保存 & Canvas 投稿
+python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch \
+    --canvas-id F0AAD2494VB --output overall.md
 ```
 
 | オプション | デフォルト | 説明 |
@@ -17,12 +27,15 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
 | `--db PATH` | `data/{channel_id}.db` | SQLite DBファイルパス |
 | `--since YYYY-MM-DD` | なし（全件） | この日付以降のメッセージのみ取得（APIに oldest として渡す） |
 | `-l N` | `100` | 1ページあたりの取得件数上限（最大999） |
-| `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用） |
+| `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用）。全体要約のみ生成したい場合にも使用 |
 | `--force-resummary` | - | 全スレッドを強制再要約 |
-| `--skip-llm` | - | LLM呼び出しをスキップ（取得・DB保存は実行される） |
+| `--skip-llm` | - | LLM呼び出しをスキップ（取得・DB保存は実行される）。全体要約もスキップ |
 | `--list` | - | DB内のスレッド要約一覧を表示して終了（`--since` 併用可） |
 | `--no-permalink` | - | パーマリンク取得を無効化 |
-| `--dry-run` | - | LLM呼び出しをスキップ（Slack API・DB書き込みは実行される） |
+| `--canvas-id ID` | なし | Canvas ID（指定時のみ全体要約を Canvas に投稿） |
+| `--skip-canvas` | - | Canvas 投稿をスキップ（全体要約は生成する） |
+| `--output PATH` | なし | 全体要約をファイルにも保存 |
+| `--dry-run` | - | LLM呼び出しをスキップ（Slack API・DB書き込みは実行される）。全体要約もスキップ |
 
 ### 1b. Slack取得・要約→pm.db抽出 一括実行（slack_to_pm.sh）
 
