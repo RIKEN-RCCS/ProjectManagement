@@ -1002,11 +1002,14 @@ async def main():
     else:
         print(f"\nステップ1: スキップ（DB のみ使用）")
         if args.force_resummary:
-            # DB内の全スレッドを再要約対象にする
-            rows = conn.execute(
-                "SELECT thread_ts FROM messages WHERE channel_id=? ORDER BY thread_ts ASC",
-                (channel_id,),
-            ).fetchall()
+            # DB内の全スレッドを再要約対象にする（--since フィルタを適用）
+            query = "SELECT thread_ts FROM messages WHERE channel_id=?"
+            params: list = [channel_id]
+            if args.since:
+                query += " AND timestamp >= ?"
+                params.append(args.since.strftime("%Y-%m-%d"))
+            query += " ORDER BY thread_ts ASC"
+            rows = conn.execute(query, params).fetchall()
             needs_summarize = [r["thread_ts"] for r in rows]
             print(f"  → force-resummary: {len(needs_summarize)}スレッドを対象")
         else:
