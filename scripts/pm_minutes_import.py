@@ -45,8 +45,7 @@ Usage:
     python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
 
     # DB内容をMarkdownにエクスポート（人間が修正するための叩き台を出力）
-    python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting \\
-        --meeting-name Leader_Meeting --output corrected.md
+    python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting --output corrected.md
 
     # 人間が修正したMarkdownをLLM不使用でインポート（--force で上書き）
     python3 scripts/pm_minutes_import.py corrected.md \\
@@ -787,9 +786,8 @@ def main():
   python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
   python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
 
-  # DB内容を修正用Markdownにエクスポート
-  python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting \\
-      --meeting-name Leader_Meeting --output corrected.md
+  # DB内容を修正用Markdownにエクスポート（MEETING_ID で一意に特定できるため --meeting-name 不要）
+  python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting --output corrected.md
 
   # 人間が修正したMarkdownをLLM不使用でインポート
   python3 scripts/pm_minutes_import.py corrected.md \\

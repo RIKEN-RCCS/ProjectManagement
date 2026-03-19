@@ -110,9 +110,8 @@ python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
 # 詳細表示（Slack 投稿済み状況も含む）
 python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
 
-# DB内容を修正用Markdownにエクスポート（LLM生成版の叩き台として出力）
-python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting \
-    --meeting-name Leader_Meeting --output corrected.md
+# DB内容を修正用Markdownにエクスポート（MEETING_ID で一意に特定できるため --meeting-name 不要）
+python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting --output corrected.md
 
 # 人間が修正したMarkdownをLLM不使用でインポート（既存レコードを上書き）
 python3 scripts/pm_minutes_import.py corrected.md \
