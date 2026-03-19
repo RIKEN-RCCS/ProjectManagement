@@ -110,6 +110,18 @@ python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
 # 詳細表示（Slack 投稿済み状況も含む）
 python3 scripts/pm_minutes_import.py --show 2026-03-10_Leader_Meeting
 
+# DB内容を修正用Markdownにエクスポート（LLM生成版の叩き台として出力）
+python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting \
+    --meeting-name Leader_Meeting --output corrected.md
+
+# 人間が修正したMarkdownをLLM不使用でインポート（既存レコードを上書き）
+python3 scripts/pm_minutes_import.py corrected.md \
+    --meeting-name Leader_Meeting --held-at 2026-03-10 --no-llm --force
+
+# 確認のみ（DB保存なし）
+python3 scripts/pm_minutes_import.py corrected.md \
+    --meeting-name Leader_Meeting --held-at 2026-03-10 --no-llm --force --dry-run
+
 # 議事録DBから削除
 python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
 python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meeting-name Leader_Meeting
@@ -140,6 +152,8 @@ python3 scripts/pm_minutes_import.py \
 | `--no-encrypt` | - | 平文モード |
 | `--list` | - | 議事録DBの内容を表示して終了 |
 | `--show MEETING_ID` | - | 指定した meeting_id の詳細（Slack投稿状況含む）を表示して終了 |
+| `--export MEETING_ID` | - | DB内容を構造化Markdownでエクスポート（人間による修正の叩き台）。`--output` で保存先を指定しない場合は標準出力 |
+| `--no-llm` | - | LLMを呼ばず入力ファイルを構造化Markdownとして直接解析してDBに保存。`--force` と組み合わせて修正版の上書きインポートに使用 |
 | `--delete MEETING_ID` | - | 指定した meeting_id を議事録DBから削除して終了（`--meeting-name` で対象DB絞り込み可） |
 | `--post-to-slack` | - | 議事録ファイルを Slack チャンネルにアップロード |
 | `-c / --channel ID` | - | アップロード先チャンネルID（`--post-to-slack` 時に必須） |
