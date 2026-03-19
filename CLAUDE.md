@@ -126,7 +126,7 @@ export OPENAI_MODEL="..."
 
 - `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。各スクリプトはClaude Codeの外のターミナルから実行すること。
 - `call_claude()` 内で `CLAUDECODE` 環境変数を子プロセスから除外する処理を実装済み。
-- `slack-mcp-server` バイナリが必要。PATH、`~/bin/`、`~/.local/bin/` の順で探索する。
+- `slack-mcp-server` バイナリが必要。PATH、`~/bin/`、`~/.local/bin/` の順で探索する。入手先: https://github.com/korotovsky/slack-mcp-server （Go製。`go build` でビルドして上記パスのいずれかに配置する）。
 - Python仮想環境は `~/.venv_x86_64` を使用。`~/.venv_x86_64/bin/python3 scripts/xxx.py` で実行する。
 
 ---
