@@ -457,6 +457,13 @@ def sanitize_for_canvas(text: str) -> str:
     # 連続する空行を1行に圧縮
     text = re.sub(r"\n{3,}", "\n\n", text)
 
+    # 裸のURLを <URL> 形式に変換してクリッカブルにする
+    url_pattern = r'(?<!\[)(?<!\()(?<!\<)https?://[^\s\)>\]]+(?!\))(?!\>)'
+    def replace_url(match: re.Match) -> str:
+        url = match.group(0).rstrip(".,;:!?、。")
+        return f"<{url}>"
+    text = re.sub(url_pattern, replace_url, text)
+
     return text
 
 
@@ -490,14 +497,15 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
     app = App(token=token)
 
     try:
-        # Step 1: 既存セクションを全削除
+        # Step 1: 既存セクションを全削除（API制限: 1リクエスト1件まで）
         section_ids = _collect_section_ids(app, canvas_id)
         if section_ids:
             print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
-            app.client.canvases_edit(
-                canvas_id=canvas_id,
-                changes=[{"operation": "delete", "section_id": sid} for sid in section_ids],
-            )
+            for sid in section_ids:
+                app.client.canvases_edit(
+                    canvas_id=canvas_id,
+                    changes=[{"operation": "delete", "section_id": sid}],
+                )
 
         # Step 2: 新コンテンツを先頭に挿入
         app.client.canvases_edit(
