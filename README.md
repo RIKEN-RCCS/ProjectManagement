@@ -180,9 +180,8 @@ python3 scripts/pm_minutes_to_pm.py --delete 2026-03-10_Leader_Meeting
 ```
 - LLM生成議事録を人間が修正して再インポート:
 ```sh
-# 1. DB内容を修正用Markdownにエクスポート
-python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting \
-    --meeting-name Leader_Meeting --output corrected.md
+# 1. DB内容を修正用Markdownにエクスポート（MEETING_ID で一意に特定できるため --meeting-name 不要）
+python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting --output corrected.md
 
 # 2. corrected.md をエディタで修正（決定事項・担当者・期限等を確認・修正）
 
