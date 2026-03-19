@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Slack要約パイプライン（Phase 1: DB差分処理版）
+Slack要約パイプライン
 
 処理フロー:
-  1. Slack MCPサーバーからチャンネル履歴を取得
+  1. Slack SDK でチャンネル履歴を取得
      - DBに存在しない新規スレッドのみ全取得
      - DBに存在するが返信が増えたスレッドのみ再取得
      - 変化のないスレッドはスキップ（API呼び出しなし）
@@ -14,42 +14,38 @@ Slack要約パイプライン（Phase 1: DB差分処理版）
      - --output 指定時: ファイルに保存
 """
 
-import asyncio
-import csv
-import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
-from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_no_encrypt_arg, add_output_arg, make_logger
+from cli_utils import add_no_encrypt_arg, add_output_arg
 
 from slack_bolt import App
+from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 # ------------------------------------------------------------------ 定数
 JST = timezone(timedelta(hours=9))
 DEFAULT_CHANNEL = "C0A9KG036CS"
-DEFAULT_DB = None  # デフォルトは {channel_id}.db
 
 # ------------------------------------------------------------------ メモリキャッシュ
 user_cache: dict = {}
-channel_cache: dict = {}
 permalink_cache: dict = {}
 workspace_domain: str | None = None
+
+# subtype のうち activity メッセージとして除外するもの
+_SKIP_SUBTYPES = {
+    "channel_join", "channel_leave", "channel_topic",
+    "channel_purpose", "channel_name",
+    "channel_archive", "channel_unarchive",
+    "pinned_item", "unpinned_item",
+}
 
 
 # ==================================================================
@@ -224,7 +220,6 @@ def db_get_thread(conn: sqlite3.Connection, channel_id: str, thread_ts: str) -> 
         (thread_ts, channel_id),
     ).fetchall()
 
-    # chunk形式に変換（summarization関数が期待する形式）
     def row_to_msg(row: dict, is_reply: bool) -> dict:
         return {
             "timestamp_unix": row.get("msg_ts") or row.get("thread_ts"),
@@ -255,8 +250,41 @@ def db_get_max_reply_ts(conn: sqlite3.Connection, channel_id: str,
 
 
 # ==================================================================
-# Permalink ヘルパー（変更なし）
+# Slack SDK ヘルパー
 # ==================================================================
+
+def _make_client() -> WebClient:
+    token = os.getenv("SLACK_USER_TOKEN")
+    if not token:
+        print("エラー: SLACK_USER_TOKEN 環境変数を設定してください", file=sys.stderr)
+        sys.exit(1)
+    return WebClient(token=token)
+
+
+def ts_to_jst(ts: str) -> str:
+    """Slack unix タイムスタンプ文字列を JST 日時文字列に変換する"""
+    return (
+        datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        .astimezone(JST)
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+
+def resolve_username(client: WebClient, user_id: str) -> str:
+    """ユーザーID → 表示名（キャッシュ付き）"""
+    if not user_id:
+        return "不明"
+    if user_id in user_cache:
+        return user_cache[user_id]
+    try:
+        resp = client.users_info(user=user_id)
+        profile = resp["user"]["profile"]
+        name = profile.get("display_name") or profile.get("real_name") or user_id
+        user_cache[user_id] = name
+    except SlackApiError:
+        user_cache[user_id] = user_id
+    return user_cache[user_id]
+
 
 def build_permalink_fallback(channel_id: str, message_ts: str,
                               thread_ts: str = None) -> str:
@@ -268,146 +296,53 @@ def build_permalink_fallback(channel_id: str, message_ts: str,
     return url
 
 
-async def get_permalink_via_api(channel_id: str, message_ts: str) -> str | None:
+def get_permalink(client: WebClient, channel_id: str, message_ts: str,
+                  thread_ts: str = None) -> str:
     global workspace_domain
-    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
-    if not token:
-        return None
-    params = urllib.parse.urlencode({"channel": channel_id, "message_ts": message_ts})
-    req = urllib.request.Request(f"https://slack.com/api/chat.getPermalink?{params}")
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if data.get("ok"):
-                permalink = data.get("permalink", "")
-                if permalink and not workspace_domain:
-                    m = re.match(r"https://([^.]+)\.slack\.com/", permalink)
-                    if m:
-                        workspace_domain = m.group(1)
-                        print(f"  ワークスペースドメイン検出: {workspace_domain}",
-                              file=sys.stderr)
-                return permalink
-            print(f"  Permalink API エラー ({message_ts}): {data.get('error')}",
-                  file=sys.stderr)
-    except Exception as e:
-        print(f"  Permalink API 通信エラー ({message_ts}): {e}", file=sys.stderr)
-    return None
-
-
-async def get_permalink_via_mcp(session, channel_id: str,
-                                message_ts: str) -> str | None:
-    try:
-        result = await session.call_tool(
-            "chat_getPermalink",
-            arguments={"channel": channel_id, "message_ts": message_ts},
-        )
-        for content in result.content:
-            if hasattr(content, "text"):
-                try:
-                    data = json.loads(content.text)
-                    if data.get("ok"):
-                        return data.get("permalink")
-                except json.JSONDecodeError:
-                    m = re.search(
-                        r"https://[^\s]+slack\.com/archives/[^\s]+", content.text
-                    )
-                    if m:
-                        return m.group(0)
-    except Exception:
-        pass
-    return None
-
-
-async def get_permalink(session, channel_id: str, message_ts: str,
-                        thread_ts: str = None) -> str:
     cache_key = (channel_id, message_ts)
     if cache_key in permalink_cache:
         return permalink_cache[cache_key]
-    permalink = await get_permalink_via_mcp(session, channel_id, message_ts)
-    if not permalink:
-        permalink = await get_permalink_via_api(channel_id, message_ts)
-    if not permalink:
-        permalink = build_permalink_fallback(channel_id, message_ts, thread_ts)
-        print(f"  ⚠ フォールバックURL使用: {message_ts}", file=sys.stderr)
-    permalink_cache[cache_key] = permalink
-    return permalink
-
-
-# ==================================================================
-# メッセージ整形ヘルパー（変更なし）
-# ==================================================================
-
-def format_timestamp(time_str: str) -> str:
     try:
-        dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-        return dt.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return time_str
+        resp = client.chat_getPermalink(channel=channel_id, message_ts=message_ts)
+        permalink = resp["permalink"]
+        if permalink and not workspace_domain:
+            m = re.match(r"https://([^.]+)\.slack\.com/", permalink)
+            if m:
+                workspace_domain = m.group(1)
+                print(f"  ワークスペースドメイン検出: {workspace_domain}", file=sys.stderr)
+        permalink_cache[cache_key] = permalink
+        return permalink
+    except SlackApiError as e:
+        print(f"  Permalink API エラー ({message_ts}): {e.response['error']}", file=sys.stderr)
+        fallback = build_permalink_fallback(channel_id, message_ts, thread_ts)
+        permalink_cache[cache_key] = fallback
+        return fallback
 
 
-def parse_message_time(time_str: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-    except Exception:
-        return None
+def format_message(client: WebClient, msg: dict, channel_id: str,
+                   is_reply: bool = False, fetch_permalink: bool = True,
+                   parent_thread_ts: str = None) -> dict:
+    """SDK メッセージ dict → DB 保存用 dict に変換する"""
+    user_id = msg.get("user", "") or msg.get("bot_id", "")
+    # ボットメッセージは username フィールドを優先
+    user_name = msg.get("username") or resolve_username(client, user_id) if user_id else "不明"
+    text = msg.get("text", "")
+    ts = msg.get("ts", "")
+    thread_ts = msg.get("thread_ts", ts)
 
-
-def is_message_after_date(msg: dict, since_date: datetime | None) -> bool:
-    if since_date is None:
-        return True
-    t = parse_message_time(msg.get("Time", ""))
-    return t is None or t >= since_date
-
-
-def thread_has_recent_replies(replies: list, since_date: datetime | None) -> bool:
-    if since_date is None:
-        return True
-    return any(is_message_after_date(r, since_date) for r in replies)
-
-
-async def get_thread_replies(session, channel_id: str, thread_ts: str) -> list:
-    try:
-        result = await session.call_tool(
-            "conversations_replies",
-            arguments={"channel_id": channel_id, "thread_ts": thread_ts, "limit": "100"},
-        )
-        for content in result.content:
-            if hasattr(content, "text"):
-                reader = csv.DictReader(StringIO(content.text))
-                return [row for row in reader if row.get("MsgID") != thread_ts]
-    except Exception as e:
-        print(f"スレッド取得エラー ({thread_ts}): {e}", file=sys.stderr)
-    return []
-
-
-async def format_message_from_csv(session, msg: dict, channel_id: str,
-                                   is_reply: bool = False,
-                                   fetch_permalink: bool = True,
-                                   parent_thread_ts: str = None) -> dict:
-    user_id = msg.get("UserID", "不明")
-    user_name = msg.get("UserName", user_id)
-    text = msg.get("Text", "")
-    time_str = msg.get("Time", "")
-    msg_id = msg.get("MsgID", "")
-    thread_ts = msg.get("ThreadTs", "")
-
-    formatted_time = format_timestamp(time_str)
-    if user_id and user_name:
-        user_cache[user_id] = user_name
+    formatted_time = ts_to_jst(ts) if ts else ""
 
     permalink = ""
-    if fetch_permalink and msg_id:
+    if fetch_permalink and ts:
         effective_thread_ts = parent_thread_ts if is_reply else None
-        permalink = await get_permalink(session, channel_id, msg_id, effective_thread_ts)
+        permalink = get_permalink(client, channel_id, ts, effective_thread_ts)
 
     indent = "  " if is_reply else ""
     link_info = " 🔗" if permalink else ""
     print(f"{indent}{formatted_time}：{user_name}：{text}{link_info}")
 
     return {
-        "timestamp_unix": msg_id,
+        "timestamp_unix": ts,
         "timestamp": formatted_time,
         "is_reply": is_reply,
         "user_id": user_id,
@@ -415,34 +350,28 @@ async def format_message_from_csv(session, msg: dict, channel_id: str,
         "message": text,
         "type": "user_message",
         "reply_count": 0,
-        "thread_ts": thread_ts if thread_ts else msg_id,
+        "thread_ts": thread_ts,
         "permalink": permalink,
     }
+
+
+def fetch_thread_replies(client: WebClient, channel_id: str,
+                         thread_ts: str) -> list[dict]:
+    """スレッド返信を取得する（親メッセージを除く）"""
+    try:
+        resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
+        # 先頭は親メッセージなのでスキップ
+        return resp.get("messages", [])[1:]
+    except SlackApiError as e:
+        print(f"スレッド取得エラー ({thread_ts}): {e.response['error']}", file=sys.stderr)
+        return []
 
 
 # ==================================================================
 # ステップ1: 差分取得 & DB保存
 # ==================================================================
 
-def _find_mcp_binary() -> str:
-    path = shutil.which("slack-mcp-server")
-    if not path:
-        for p in [
-            os.path.expanduser("~/bin/slack-mcp-server"),
-            os.path.expanduser("~/slack-mcp-server/slack-mcp-server"),
-            os.path.expanduser("~/.local/bin/slack-mcp-server"),
-            "/usr/local/bin/slack-mcp-server",
-        ]:
-            if os.path.exists(p):
-                path = p
-                break
-    if not path:
-        print("エラー: slack-mcp-server が見つかりません", file=sys.stderr)
-        sys.exit(1)
-    return path
-
-
-async def fetch_and_store(
+def fetch_and_store(
     conn: sqlite3.Connection,
     channel_id: str,
     limit: int,
@@ -456,178 +385,116 @@ async def fetch_and_store(
     差分ロジック:
     - DBに存在しない thread_ts → 新規: 返信を取得してDBに保存、要約対象に追加
     - DBに存在する thread_ts:
-        - history レスポンスに含まれる最新返信ts > DB保存済みの last_reply_ts → 更新あり
+        - conversations_history の latest_reply > DB保存済み last_reply_ts → 更新あり
         - 変化なし → スキップ（API・LLM呼び出しなし）
     - force_resummary=True → 全スレッドを要約対象に追加（取得は差分のみ）
     """
-    slack_token = os.getenv("SLACK_MCP_XOXB_TOKEN")
-    if not slack_token:
-        print("エラー: SLACK_MCP_XOXB_TOKEN 環境変数を設定してください", file=sys.stderr)
-        sys.exit(1)
+    client = _make_client()
+    oldest_ts = str(since_date.timestamp()) if since_date else None
 
-    binary_path = _find_mcp_binary()
-    print(f"MCPサーバーバイナリ: {binary_path}", file=sys.stderr)
-
-    server_params = StdioServerParameters(
-        command=binary_path, args=[], env={"SLACK_MCP_XOXB_TOKEN": slack_token}
+    # ページネーションで全件取得
+    all_messages: list[dict] = []
+    cursor = None
+    page = 0
+    print(
+        f"チャンネル {channel_id} の履歴を取得中"
+        + (f" (oldest={oldest_ts})" if oldest_ts else "") + "...",
+        file=sys.stderr,
     )
 
+    while True:
+        page += 1
+        kwargs: dict = {"channel": channel_id, "limit": limit}
+        if oldest_ts:
+            kwargs["oldest"] = oldest_ts
+        if cursor:
+            kwargs["cursor"] = cursor
+
+        try:
+            resp = client.conversations_history(**kwargs)
+        except SlackApiError as e:
+            print(f"チャンネル履歴取得エラー: {e.response['error']}", file=sys.stderr)
+            sys.exit(1)
+
+        messages = resp.get("messages", [])
+        all_messages.extend(messages)
+        print(f"  ページ{page}: {len(messages)}件取得 (累計: {len(all_messages)}件)",
+              file=sys.stderr)
+
+        next_cursor = resp.get("response_metadata", {}).get("next_cursor", "")
+        if not next_cursor:
+            break
+        cursor = next_cursor
+
+    # 親メッセージのみ抽出（activity メッセージを除外）
+    parent_messages = [
+        m for m in all_messages
+        if m.get("type") == "message"
+        and m.get("subtype") not in _SKIP_SUBTYPES
+        and (not m.get("thread_ts") or m["thread_ts"] == m["ts"])
+    ]
+
+    print(f"処理対象の親メッセージ: {len(parent_messages)}件", file=sys.stderr)
+
+    stats = {"new": 0, "updated": 0, "skipped": 0}
     needs_summarize: list[str] = []
 
-    print("Slack MCPサーバーを起動中...", file=sys.stderr)
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            print("Slack MCPサーバーに接続しました", file=sys.stderr)
+    for msg in parent_messages:
+        ts = msg["ts"]
+        thread_ts = ts
+        latest_reply = msg.get("latest_reply")  # SDK が返す最新返信 ts
 
-            # since_date を oldest (unix timestamp文字列) に変換
-            oldest_ts = str(since_date.timestamp()) if since_date else ""
+        existing_summary = db_get_summary(conn, channel_id, thread_ts)
 
-            # ページネーションで全件取得
-            all_rows: list[dict] = []
-            cursor = ""
-            page = 0
-            print(f"チャンネル {channel_id} の履歴を取得中"
-                  + (f" (oldest={oldest_ts})" if oldest_ts else "") + "...", file=sys.stderr)
-            while True:
-                page += 1
-                if cursor:
-                    args = {
-                        "channel_id": channel_id,
-                        "limit": "",          # cursor使用時はlimit不要
-                        "cursor": cursor,
-                        "include_activity_messages": False,
-                    }
-                else:
-                    args = {
-                        "channel_id": channel_id,
-                        "limit": str(limit),
-                        "include_activity_messages": False,
-                    }
-                    if oldest_ts:
-                        args["oldest"] = oldest_ts
+        is_new = existing_summary is None
+        is_updated = (
+            not is_new
+            and latest_reply is not None
+            and latest_reply > (existing_summary.get("last_reply_ts") or "0")
+        )
 
-                result = await session.call_tool("conversations_history", arguments=args)
+        if not is_new and not is_updated and not force_resummary:
+            stats["skipped"] += 1
+            continue
 
-                page_rows: list[dict] = []
-                next_cursor = ""
-                for content in result.content:
-                    if not hasattr(content, "text"):
-                        continue
-                    rows = list(csv.DictReader(StringIO(content.text)))
-                    if not rows:
-                        break
-                    # 最終行の最終カラムが next_cursor
-                    last_row = rows[-1]
-                    last_val = list(last_row.values())[-1] if last_row else ""
-                    # next_cursor 行かどうかはカラム名で判定
-                    last_key = list(last_row.keys())[-1] if last_row else ""
-                    if last_key.lower() in ("cursor", "next_cursor") and last_val:
-                        next_cursor = last_val
-                        rows = rows[:-1]  # cursor行はデータから除外
-                    else:
-                        # MCPサーバーはCursorフィールドを最終メッセージに埋め込む場合もある
-                        cursor_val = last_row.get("Cursor", "")
-                        if cursor_val:
-                            next_cursor = cursor_val
-                    page_rows.extend(rows)
+        # 親メッセージを整形してDBに保存
+        fmt_parent = format_message(
+            client, msg, channel_id,
+            is_reply=False, fetch_permalink=fetch_permalink,
+        )
+        db_upsert_message(conn, channel_id, fmt_parent)
 
-                all_rows.extend(page_rows)
-                print(f"  ページ{page}: {len(page_rows)}件取得 (累計: {len(all_rows)}件)",
-                      file=sys.stderr)
-
-                if not next_cursor:
-                    break
-                cursor = next_cursor
-
-            # ユーザーキャッシュ構築
-            for row in all_rows:
-                uid, uname = row.get("UserID", ""), row.get("UserName", "")
-                if uid and uname:
-                    user_cache[uid] = uname
-
-            # history レスポンス内で各スレッドの最新返信tsを収集
-            # （conversations_history は親メッセージと返信を混在して返す）
-            latest_reply_in_history: dict[str, str] = {}
-            for row in all_rows:
-                t_ts = row.get("ThreadTs", "")
-                msg_id = row.get("MsgID", "")
-                if t_ts and t_ts != msg_id:
-                    # 返信行: thread_ts に対する最新 msg_id を記録
-                    if t_ts not in latest_reply_in_history or \
-                            msg_id > latest_reply_in_history[t_ts]:
-                        latest_reply_in_history[t_ts] = msg_id
-
-            # 親メッセージのみ処理（スレッド返信は後でまとめて取得）
-            parent_rows = []
-            for row in all_rows:
-                t_ts = row.get("ThreadTs", "")
-                msg_id = row.get("MsgID", "")
-                # 返信行はスキップ
-                if t_ts and t_ts != msg_id:
-                    continue
-                parent_rows.append(row)
-
-            print(f"処理対象の親メッセージ: {len(parent_rows)}件", file=sys.stderr)
-
-            stats = {"new": 0, "updated": 0, "skipped": 0}
-
-            for row in parent_rows:
-                msg_id = row.get("MsgID", "")
-                t_ts = row.get("ThreadTs", "") or msg_id
-                # 親メッセージの thread_ts は MsgID と同じ（またはThreadTsが空の場合もMsgID）
-
-                existing_summary = db_get_summary(conn, channel_id, t_ts)
-                history_latest_reply = latest_reply_in_history.get(t_ts)
-
-                # ---- 差分判定 ----
-                is_new = existing_summary is None
-                is_updated = (
-                    not is_new
-                    and history_latest_reply is not None
-                    and history_latest_reply > (existing_summary.get("last_reply_ts") or "0")
-                )
-
-                if not is_new and not is_updated and not force_resummary:
-                    stats["skipped"] += 1
-                    continue
-
-                # ---- 親メッセージを整形してDBに保存 ----
-                fmt_parent = await format_message_from_csv(
-                    session, row, channel_id,
-                    is_reply=False, fetch_permalink=fetch_permalink,
-                )
-                db_upsert_message(conn, channel_id, fmt_parent)
-
-                # ---- 返信を取得してDBに保存 ----
-                reply_rows = await get_thread_replies(session, channel_id, t_ts)
-                for r_row in reply_rows:
-                    fmt_reply = await format_message_from_csv(
-                        session, r_row, channel_id,
-                        is_reply=True, fetch_permalink=fetch_permalink,
-                        parent_thread_ts=t_ts,
-                    )
-                    db_upsert_reply(conn, channel_id, t_ts, fmt_reply)
-
-                conn.commit()
-
-                if is_new:
-                    stats["new"] += 1
-                    status = "新規"
-                else:
-                    stats["updated"] += 1
-                    status = "更新"
-
-                print(f"  [{status}] {t_ts} "
-                      f"({row.get('UserName', '?')}, 返信{len(reply_rows)}件)",
-                      file=sys.stderr)
-                needs_summarize.append(t_ts)
-
-            print(
-                f"\n取得結果: 新規={stats['new']} 更新={stats['updated']} "
-                f"スキップ={stats['skipped']}",
-                file=sys.stderr,
+        # 返信を取得してDBに保存
+        reply_msgs = fetch_thread_replies(client, channel_id, thread_ts)
+        for r_msg in reply_msgs:
+            fmt_reply = format_message(
+                client, r_msg, channel_id,
+                is_reply=True, fetch_permalink=fetch_permalink,
+                parent_thread_ts=thread_ts,
             )
+            db_upsert_reply(conn, channel_id, thread_ts, fmt_reply)
+
+        conn.commit()
+
+        if is_new:
+            stats["new"] += 1
+            status = "新規"
+        else:
+            stats["updated"] += 1
+            status = "更新"
+
+        print(
+            f"  [{status}] {thread_ts} "
+            f"({fmt_parent.get('user_name', '?')}, 返信{len(reply_msgs)}件)",
+            file=sys.stderr,
+        )
+        needs_summarize.append(thread_ts)
+
+    print(
+        f"\n取得結果: 新規={stats['new']} 更新={stats['updated']} "
+        f"スキップ={stats['skipped']}",
+        file=sys.stderr,
+    )
 
     return needs_summarize
 
@@ -742,7 +609,6 @@ def summarize_updated_threads(
 
         summary = summarize_chunk(format_chunk_for_summary(chunk))
 
-        # last_reply_ts: 最新返信の msg_ts（返信なしなら None）
         last_reply_ts = db_get_max_reply_ts(conn, channel_id, thread_ts)
         db_upsert_summary(conn, channel_id, thread_ts, summary, last_reply_ts)
         conn.commit()
@@ -887,6 +753,10 @@ def sanitize_for_canvas(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
 
+    # 裸のURLを <URL> 形式でラップしてクリッカブルにする（既にラップ済みはスキップ）
+    text = re.sub(r"(?<![<(\[])https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]",
+                  lambda m: f"<{m.group(0)}>", text)
+
     # h4以下の見出しはh3に統一（Canvasで未サポート）
     text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
     # インデントされた番号リストをリストに変換
@@ -937,9 +807,9 @@ def _collect_section_ids(app: App, canvas_id: str) -> list[str]:
 
 
 def post_to_canvas(canvas_id: str, content: str) -> None:
-    token = os.getenv("SLACK_MCP_XOXB_TOKEN")
+    token = os.getenv("SLACK_USER_TOKEN")
     if not token:
-        print("ERROR: SLACK_MCP_XOXB_TOKEN を設定してください", file=sys.stderr)
+        print("ERROR: SLACK_USER_TOKEN を設定してください", file=sys.stderr)
         sys.exit(1)
     print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
     app = App(token=token)
@@ -948,10 +818,11 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         section_ids = _collect_section_ids(app, canvas_id)
         if section_ids:
             print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
-            app.client.canvases_edit(
-                canvas_id=canvas_id,
-                changes=[{"operation": "delete", "section_id": sid} for sid in section_ids],
-            )
+            for sid in section_ids:
+                app.client.canvases_edit(
+                    canvas_id=canvas_id,
+                    changes=[{"operation": "delete", "section_id": sid}],
+                )
 
         app.client.canvases_edit(
             canvas_id=canvas_id,
@@ -971,7 +842,7 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
 # メイン
 # ==================================================================
 
-async def main():
+def main():
     args = parse_args()
     channel_id = args.channel
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -991,7 +862,7 @@ async def main():
         print(f"\n{'='*60}")
         print(f"ステップ1: 差分取得 (チャンネル: {channel_id})")
         print(f"{'='*60}")
-        needs_summarize = await fetch_and_store(
+        needs_summarize = fetch_and_store(
             conn=conn,
             channel_id=channel_id,
             limit=args.limit,
@@ -1062,4 +933,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

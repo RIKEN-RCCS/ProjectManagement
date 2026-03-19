@@ -206,7 +206,7 @@ python3 scripts/pm_minutes_import.py \
     --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-16 \
     -c C08SXA4M7JT --thread-ts 1773791072.043109
 ```
-  - `SLACK_USER_TOKEN`（xoxp-）があればユーザーとして投稿（本人が削除可能）。未設定の場合は `SLACK_MCP_XOXB_TOKEN` を使用。
+  - `SLACK_USER_TOKEN`（xoxp-）でユーザーとして投稿（本人が削除可能）。
   - ファイルが削除済みの場合（録音→自動インポートフロー）は DB から議事録を再構築してアップロード。
   - 二重投稿防止あり（再投稿するには `--force`）。
 - .md ファイルを後から一括登録する場合:
@@ -377,14 +377,12 @@ slack-sdk
 ```sh
 mkdir -p ~/.secrets && chmod 700 ~/.secrets
 cat > ~/.secrets/slack_tokens.sh << 'EOF'
-export SLACK_MCP_XOXB_TOKEN="xoxp-..."   # 全スクリプト共通（xoxp- / xoxb- どちらでも可）
-export SLACK_USER_TOKEN="xoxp-..."        # pm_minutes_import.py --post-to-slack 用（ユーザーとして投稿・本人が削除可能）
+export SLACK_USER_TOKEN="xoxp-..."   # 全スクリプト共通（xoxp- ユーザートークン）
 EOF
 chmod 600 ~/.secrets/slack_tokens.sh
 ```
 
-- `SLACK_MCP_XOXB_TOKEN`: 全スクリプト共通（Canvas投稿・Slack取得・ファイルアップロード）。xoxp- / xoxb- どちらでも動作する。
-- `SLACK_USER_TOKEN`: `pm_minutes_import.py --post-to-slack` でファイルを**ユーザーとして**アップロードする場合に設定する（設定するとユーザー自身が投稿を削除可能）。未設定の場合は `SLACK_MCP_XOXB_TOKEN` を使用。
+- `SLACK_USER_TOKEN`: 全スクリプト共通（Canvas投稿・Slack取得・ファイルアップロード）。xoxp- ユーザートークンを使用する。
 
 ---
 
