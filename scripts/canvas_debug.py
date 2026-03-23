@@ -16,7 +16,8 @@ Usage:
 Options:
     --canvas-id ID     対象 Canvas ID（必須）
     --show-raw         files.info の生レスポンスと url_private 全文を表示
-    --delete-all       発見した全セクションを削除して Canvas を空にする（確認プロンプトあり）
+    --delete-all       コンテンツを削除して Canvas を空にする（h1 タイトルは保持）
+    --include-title    --delete-all 時に h1 タイトルも削除対象にする
     --yes              --delete-all の確認プロンプトをスキップ
     --output PATH      結果をファイルにも保存
 """
@@ -92,58 +93,51 @@ def collect_sections_via_api(client: WebClient, canvas_id: str) -> dict[str, dic
 # --------------------------------------------------------------------------- #
 
 # Slack Canvas (filetype: quip) HTML に埋め込まれるセクション ID のパターン:
-#   <h1 id='UeO9CAnkxT8'>          → 短い英数字ID（トップレベルブロック）
-#   <p  id='temp:C:UeOabc123...'>  → temp:C: プレフィックス付きID（サブ要素）
-#   data-block-id / data-section-id は使われない場合がある
-_PAT_SHORT_ID_SQ = re.compile(r"<[a-z][^>]*\sid='([A-Za-z0-9]{6,20})'")
-_PAT_SHORT_ID_DQ = re.compile(r'<[a-z][^>]*\sid="([A-Za-z0-9]{6,20})"')
-_PAT_TEMP_SQ     = re.compile(r"id='(temp:C:[A-Za-z0-9]+)'")
-_PAT_TEMP_DQ     = re.compile(r'id="(temp:C:[A-Za-z0-9]+)"')
-_PAT_DATA_BLOCK  = re.compile(r'data-block-id=["\']([^"\']+)["\']')
-_PAT_DATA_SEC    = re.compile(r'data-section-id=["\']([^"\']+)["\']')
-_SECTION_ID_PATTERNS = [
-    _PAT_SHORT_ID_SQ, _PAT_SHORT_ID_DQ,
-    _PAT_TEMP_SQ, _PAT_TEMP_DQ,
-    _PAT_DATA_BLOCK, _PAT_DATA_SEC,
-]
+#   <h1 id='UeO9CAnkxT8'>          → Canvas タイトル（デフォルトで削除対象外）
+#   <p  id='temp:C:UeOabc123...'>  → temp:C: プレフィックス付きID（コンテンツ）
+#   data-block-id / data-section-id は別形式の Canvas で使われる場合がある
+_PAT_TAG_WITH_ID = re.compile(
+    r"<(h[1-6]|p|div|ul|ol|li|blockquote|pre|hr)\b[^>]*\sid=['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+_PAT_DATA_BLOCK = re.compile(r'data-block-id=["\']([^"\']+)["\']')
+_PAT_DATA_SEC   = re.compile(r'data-section-id=["\']([^"\']+)["\']')
 
 
-def extract_section_ids_from_html(html: str) -> list[str]:
+def extract_section_ids_from_html(
+    html: str,
+    include_h1: bool = False,
+) -> list[tuple[str, str]]:
     """
-    url_private でダウンロードした Canvas HTML から section_id を抽出する。
+    url_private でダウンロードした Canvas HTML から (tag, section_id) を抽出する。
     canvases_sections_lookup が返さないセクションも含めて取得できる。
 
-    戻り値: 短いID（トップレベル候補）を先頭に、temp:C: IDをその後に並べる。
+    Args:
+        include_h1: True のとき h1 タグのIDも含める（デフォルト: 除外）
+
+    戻り値: [(tag, id), ...]  tag は "h1" / "p" / "ul" 等
     """
-    short_ids: list[str] = []
-    temp_ids: list[str] = []
-    other_ids: list[str] = []
+    results: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    for m in _PAT_SHORT_ID_SQ.finditer(html):
-        sid = m.group(1)
-        if sid not in seen:
-            seen.add(sid)
-            short_ids.append(sid)
-    for m in _PAT_SHORT_ID_DQ.finditer(html):
-        sid = m.group(1)
-        if sid not in seen:
-            seen.add(sid)
-            short_ids.append(sid)
-    for pat in [_PAT_TEMP_SQ, _PAT_TEMP_DQ]:
-        for m in pat.finditer(html):
-            sid = m.group(1)
-            if sid not in seen:
-                seen.add(sid)
-                temp_ids.append(sid)
+    for m in _PAT_TAG_WITH_ID.finditer(html):
+        tag = m.group(1).lower()
+        sid = m.group(2)
+        if sid in seen:
+            continue
+        if tag == "h1" and not include_h1:
+            continue
+        seen.add(sid)
+        results.append((tag, sid))
+
     for pat in [_PAT_DATA_BLOCK, _PAT_DATA_SEC]:
         for m in pat.finditer(html):
             sid = m.group(1)
             if sid not in seen:
                 seen.add(sid)
-                other_ids.append(sid)
+                results.append(("attr", sid))
 
-    return short_ids + temp_ids + other_ids
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -197,7 +191,8 @@ def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
 # メイン出力
 # --------------------------------------------------------------------------- #
 
-def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> None:
+def run(canvas_id: str, show_raw: bool, delete_all: bool,
+        include_title: bool, yes: bool, out) -> None:
     client = get_client()
 
     def p(*args, **kwargs):
@@ -232,7 +227,8 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
     # ── 2. url_private ダウンロード & セクション ID 抽出 ───────────────────
     p(_sep("2. url_private ダウンロード"))
     raw_content, url = download_url_private(file_info)
-    html_section_ids: list[str] = []
+    # (tag, id) のリスト。h1 はデフォルト除外
+    html_pairs: list[tuple[str, str]] = []
 
     if not url:
         p("  url_private が見つかりません")
@@ -241,19 +237,35 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
         p(f"  サイズ: {len(raw_content)} バイト")
 
         if raw_content and not raw_content.startswith("[download error"):
-            html_section_ids = extract_section_ids_from_html(raw_content)
-            short = [s for s in html_section_ids if not s.startswith("temp:")]
-            temp  = [s for s in html_section_ids if s.startswith("temp:")]
-            p(f"  HTML から抽出したセクション ID: {len(html_section_ids)} 件")
-            p(f"    短いID（トップレベル候補）: {len(short)} 件")
-            for sid in short:
-                p(f"      {sid}")
-            p(f"    temp:C: ID（サブ要素）: {len(temp)} 件")
-            if temp:
-                for sid in temp[:5]:
+            html_pairs = extract_section_ids_from_html(
+                raw_content, include_h1=include_title
+            )
+            # h1 は常に抽出して情報表示（削除対象か否かに関わらず）
+            all_pairs_for_info = extract_section_ids_from_html(
+                raw_content, include_h1=True
+            )
+            h1_pairs  = [(t, s) for t, s in all_pairs_for_info if t == "h1"]
+            body_pairs = [(t, s) for t, s in html_pairs if t != "h1"]
+            temp_pairs = [(t, s) for t, s in html_pairs if s.startswith("temp:")]
+            other_pairs = [(t, s) for t, s in html_pairs
+                           if not s.startswith("temp:") and t != "h1"]
+
+            p(f"  HTML から抽出したセクション ID: {len(html_pairs)} 件"
+              f"（h1 タイトルは{'含む' if include_title else '除外'}）")
+            if h1_pairs:
+                p(f"    h1（タイトル、{'削除対象' if include_title else '削除対象外'}）: "
+                  f"{len(h1_pairs)} 件")
+                for _, sid in h1_pairs:
                     p(f"      {sid}")
-                if len(temp) > 5:
-                    p(f"      … 他 {len(temp) - 5} 件")
+            p(f"    コンテンツ（h1以外の短いID）: {len(other_pairs)} 件")
+            for tag, sid in other_pairs:
+                p(f"      <{tag}> {sid}")
+            p(f"    temp:C: ID（サブ要素）: {len(temp_pairs)} 件")
+            if temp_pairs:
+                for _, sid in temp_pairs[:5]:
+                    p(f"      {sid}")
+                if len(temp_pairs) > 5:
+                    p(f"      … 他 {len(temp_pairs) - 5} 件")
 
             p()
             p("  ─ 先頭 500 文字 ─")
@@ -267,6 +279,8 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
         else:
             p(f"  {raw_content}")
     p()
+
+    html_ids = {sid for _, sid in html_pairs}
 
     # ── 3. canvases_sections_lookup ────────────────────────────────────────
     p(_sep("3. canvases_sections_lookup（全検索ワード試行）"))
@@ -285,17 +299,16 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
             p(f"       content ({len(content_raw)} 文字): {preview!r}")
     else:
         p("  （canvases_sections_lookup ではセクションが見つかりませんでした）")
-        p("  → これは Canvas が手動編集済み、または API がインデックス未作成の状態を示します。")
+        p("  → Canvas が手動編集済みまたは quip 形式の場合、この API は機能しません。")
         p("    url_private から抽出したセクション ID を使って削除できます（セクション4参照）。")
     p()
 
     # ── 4. HTML vs API の差分 ──────────────────────────────────────────────
     p(_sep("4. HTML抽出 vs API検出 の比較"))
     api_ids = set(api_sections.keys())
-    html_ids = set(html_section_ids)
 
-    p(f"  HTML から抽出: {len(html_ids)} 件")
-    p(f"  API で検出:   {len(api_ids)} 件")
+    p(f"  HTML から抽出（h1{'含む' if include_title else '除外'}）: {len(html_ids)} 件")
+    p(f"  API で検出:                                              {len(api_ids)} 件")
 
     only_in_html = html_ids - api_ids
     only_in_api  = api_ids - html_ids
@@ -343,17 +356,17 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
 
     # ── 6. --delete-all ────────────────────────────────────────────────────
     if delete_all:
-        p(_sep("6. 全セクション削除"))
-        # HTML 抽出 + API 検出の和集合を削除対象にする
+        p(_sep("6. コンテンツ削除"))
         target_ids = sorted(all_known)
         if not target_ids:
             p("  削除対象のセクションがありません")
             p("  ※ url_private のダウンロードに失敗している場合は手動で Canvas を空にしてください")
         else:
-            p(f"  対象: {len(target_ids)} セクション（HTML抽出 + API検出の和集合）")
+            h1_note = "（h1 タイトルを含む）" if include_title else "（h1 タイトルは保持）"
+            p(f"  対象: {len(target_ids)} セクション {h1_note}")
             if not yes:
                 ans = input(
-                    f"  Canvas {canvas_id} の全セクションを削除しますか？ [y/N]: "
+                    f"  Canvas {canvas_id} のコンテンツを削除しますか？ [y/N]: "
                 ).strip().lower()
                 if ans != "y":
                     p("  キャンセルしました")
@@ -361,10 +374,13 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
             ok, fail = delete_sections(client, canvas_id, target_ids, p)
             p(f"  削除完了: {ok} 件成功 / {fail} 件失敗")
 
-            # 削除後に残存確認（API + HTML 両方）
+            # 削除後に残存確認
             remaining_api = collect_sections_via_api(client, canvas_id)
             remaining_raw, _ = download_url_private(file_info)
-            remaining_html = set(extract_section_ids_from_html(remaining_raw))
+            remaining_pairs = extract_section_ids_from_html(
+                remaining_raw, include_h1=include_title
+            )
+            remaining_html = {s for _, s in remaining_pairs}
             remaining_all = set(remaining_api.keys()) | remaining_html
 
             if remaining_all:
@@ -375,7 +391,7 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
                     c = remaining_api.get(sid, {}).get("content", "")[:60].replace("\n", "↵")
                     p(f"     [{src}] {sid}: {c!r}")
             else:
-                p("  ✓ 全セクション削除確認済み")
+                p("  ✓ コンテンツ削除確認済み")
         p()
 
 
@@ -391,7 +407,9 @@ def main() -> None:
     parser.add_argument("--show-raw", action="store_true",
                         help="files.info 生レスポンスと url_private 全文を表示")
     parser.add_argument("--delete-all", action="store_true",
-                        help="発見した全セクションを削除して Canvas を空にする")
+                        help="発見した全セクションを削除してCanvasのコンテンツを空にする（h1タイトルは保持）")
+    parser.add_argument("--include-title", action="store_true",
+                        help="--delete-all 時に h1 タイトルも削除対象にする")
     parser.add_argument("--yes", action="store_true",
                         help="--delete-all の確認プロンプトをスキップ")
     parser.add_argument("--output", default=None, metavar="PATH",
@@ -403,7 +421,8 @@ def main() -> None:
         out = open(args.output, "w", encoding="utf-8")
 
     try:
-        run(args.canvas_id, args.show_raw, args.delete_all, args.yes, out)
+        run(args.canvas_id, args.show_raw, args.delete_all,
+            args.include_title, args.yes, out)
     finally:
         if out:
             out.close()
