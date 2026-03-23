@@ -27,7 +27,9 @@ import os
 import re
 import sqlite3
 import sys
+import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
@@ -523,6 +525,55 @@ def _collect_section_ids(client: WebClient, canvas_id: str) -> list[str]:
     return ids
 
 
+_DELETE_MAX_WORKERS = 8   # 並列スレッド数（16以上は削除失敗が増えるため8が上限）
+_DELETE_MAX_RETRY   = 3   # 429 時の最大リトライ回数
+
+
+def _delete_one(token: str, canvas_id: str, sid: str) -> None:
+    """1セクションを削除する。429 は Retry-After を待ってリトライ。"""
+    c = WebClient(token=token)
+    for _ in range(_DELETE_MAX_RETRY):
+        try:
+            c.canvases_edit(
+                canvas_id=canvas_id,
+                changes=[{"operation": "delete", "section_id": sid}],
+            )
+            return
+        except SlackApiError as e:
+            if e.response.get("error") == "ratelimited":
+                wait = int(e.response.headers.get("Retry-After", 5))
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"rate limit retry exhausted: {sid}")
+
+
+def _delete_sections_parallel(token: str, canvas_id: str,
+                               section_ids: list[str]) -> tuple[int, int]:
+    """section_ids を MAX_WORKERS 並列で削除する。(ok件数, fail件数) を返す。"""
+    total = len(section_ids)
+    ok = fail = done = 0
+    with ThreadPoolExecutor(max_workers=_DELETE_MAX_WORKERS) as pool:
+        futures = {pool.submit(_delete_one, token, canvas_id, sid): sid
+                   for sid in section_ids}
+        for future in as_completed(futures):
+            sid = futures[future]
+            done += 1
+            try:
+                future.result()
+                ok += 1
+            except SlackApiError as e:
+                print(f"\n[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
+                fail += 1
+            except Exception as e:
+                print(f"\n[WARN] {sid} 削除失敗: {e}", file=sys.stderr)
+                fail += 1
+            if done % 10 == 0 or done == total:
+                print(f"\r  進捗: {done}/{total} 件", end="", flush=True)
+    print()
+    return ok, fail
+
+
 def post_to_canvas(canvas_id: str, content: str) -> None:
     token = os.getenv("SLACK_USER_TOKEN")
     if not token:
@@ -538,20 +589,7 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         if section_ids:
             total = len(section_ids)
             print(f"[INFO] 既存セクション {total} 件を削除中...")
-            ok = fail = 0
-            for i, sid in enumerate(section_ids, 1):
-                try:
-                    client.canvases_edit(
-                        canvas_id=canvas_id,
-                        changes=[{"operation": "delete", "section_id": sid}],
-                    )
-                    ok += 1
-                except SlackApiError as e:
-                    print(f"\n[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
-                    fail += 1
-                if i % 10 == 0 or i == total:
-                    print(f"\r  進捗: {i}/{total} 件", end="", flush=True)
-            print()  # 改行
+            ok, fail = _delete_sections_parallel(token, canvas_id, section_ids)
             print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
 
         # Step 2: 新コンテンツを先頭に挿入

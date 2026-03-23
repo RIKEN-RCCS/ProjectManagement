@@ -29,7 +29,9 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from slack_sdk import WebClient
@@ -300,28 +302,60 @@ def _cmd_test_batch_delete(canvas_id: str) -> None:
     print("結論: バッチ削除は不可。1件ずつ削除が必要。")
 
 
-def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
-                    p) -> tuple[int, int]:
-    """
-    section_ids を1件ずつ canvases_edit で削除する。
-    Slack Canvas API はバッチ削除（複数 changes）を受け付けないため1件ずつ。
-    進捗を10件ごとに表示する。
-    """
-    total = len(section_ids)
-    ok = fail = 0
-    for i, sid in enumerate(section_ids, 1):
+_DELETE_MAX_WORKERS = 8   # 並列スレッド数（Rate Limit と相談して調整）
+_DELETE_MAX_RETRY   = 3   # 429 時の最大リトライ回数
+
+
+def _delete_one(token: str, canvas_id: str, sid: str) -> str:
+    """1セクションを削除する。429 は Retry-After を待ってリトライ。成功時は sid を返す。"""
+    c = WebClient(token=token)
+    for attempt in range(_DELETE_MAX_RETRY):
         try:
-            client.canvases_edit(
+            c.canvases_edit(
                 canvas_id=canvas_id,
                 changes=[{"operation": "delete", "section_id": sid}],
             )
-            ok += 1
+            return sid
         except SlackApiError as e:
-            err = e.response.get("error", str(e))
-            p(f"  WARN: {sid} 削除失敗: {err}")
-            fail += 1
-        if i % 10 == 0 or i == total:
-            print(f"\r  進捗: {i}/{total} 件", end="", flush=True)
+            if e.response.get("error") == "ratelimited":
+                wait = int(e.response.headers.get("Retry-After", 5))
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"rate limit retry exhausted: {sid}")
+
+
+def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
+                    p) -> tuple[int, int]:
+    """
+    section_ids を ThreadPoolExecutor で並列削除する。
+    Slack Canvas API はバッチ削除不可のため1件ずつ送るが、並列化で高速化する。
+    進捗を10件ごとに表示する。
+    """
+    token = client.token
+    total = len(section_ids)
+    ok = fail = 0
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=_DELETE_MAX_WORKERS) as pool:
+        futures = {pool.submit(_delete_one, token, canvas_id, sid): sid
+                   for sid in section_ids}
+        for future in as_completed(futures):
+            sid = futures[future]
+            done += 1
+            try:
+                future.result()
+                ok += 1
+            except SlackApiError as e:
+                err = e.response.get("error", str(e))
+                p(f"  WARN: {sid} 削除失敗: {err}")
+                fail += 1
+            except Exception as e:
+                p(f"  WARN: {sid} 削除失敗: {e}")
+                fail += 1
+            if done % 10 == 0 or done == total:
+                print(f"\r  進捗: {done}/{total} 件", end="", flush=True)
+
     print()  # 改行
     return ok, fail
 
