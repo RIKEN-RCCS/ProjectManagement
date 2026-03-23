@@ -405,6 +405,50 @@ python3 scripts/db_utils.py --migrate data/pm.db --dry-run
 
 **鍵ファイルを紛失すると暗号化済みDBは復元不可能。パスワードマネージャー等に必ずバックアップすること。**
 
+### 10. LLMインサイト生成（pm_insight.py）
+
+pm.db のデータを統計集計し、LLM でプロジェクトの健全性評価・リスク特定・改善提案を生成する。
+`pm_report.py` が定型の進捗レポートを出力するのに対し、本スクリプトは「なぜ遅れているか」「どのリスクが最も重大か」「次に何をすべきか」という解釈・洞察を生成する。
+
+```sh
+# 確認用（Canvas投稿なし・標準出力のみ）
+python3 scripts/pm_insight.py --db data/pm.db --dry-run
+
+# ファイルに保存して内容確認
+python3 scripts/pm_insight.py --db data/pm.db --dry-run --output insight.md
+
+# Canvas に投稿
+python3 scripts/pm_insight.py --db data/pm.db --canvas-id F0ALP1XQJHL
+
+# 直近1ヶ月のデータのみ対象
+python3 scripts/pm_insight.py --db data/pm.db --since 2026-02-01 --dry-run
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--db PATH` | - | pm.db のパス（必須） |
+| `--canvas-id ID` | なし | 投稿先 Canvas ID（省略時は Canvas 投稿なし） |
+| `--since YYYY-MM-DD` | なし | この日付以降のデータのみ対象 |
+| `--skip-canvas` | - | Canvas 投稿をスキップ |
+| `--dry-run` | - | Canvas 投稿なし・結果を標準出力のみ |
+| `--output PATH` | - | 結果をファイルにも保存 |
+| `--no-encrypt` | - | 平文モード |
+| `--model MODEL` | CLI デフォルト | 使用する Claude モデル |
+
+**生成されるインサイトの構成**:
+1. 総合評価（A/B/C/D ヘルススコア + LLM生成の日本語ナラティブ）
+2. マイルストーン別評価（進捗評価・懸念事項）
+3. リスク・課題（優先度 H/M/L + 推奨対応）
+4. 改善提案（具体的アクション + 根拠）
+
+**LLMに渡すデータ**:
+- マイルストーン進捗（open/closed件数・期限残日数）
+- 期限超過アイテム一覧（上位15件）
+- 担当者別負荷（open件数・期限超過件数）
+- マイルストーン未紐づけアイテム数・担当者なしアイテム数
+- 週次トレンド（直近4週の作成件数 vs. 完了件数）
+- 未確認決定事項一覧（上位10件）
+
 全スクリプトに `--no-encrypt` オプションがあり、平文モードで動作させることができる。
 
 #### 変更履歴の確認（audit_log）
