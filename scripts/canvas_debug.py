@@ -91,17 +91,20 @@ def collect_sections_via_api(client: WebClient, canvas_id: str) -> dict[str, dic
 # Section ID 抽出（url_private HTML）
 # --------------------------------------------------------------------------- #
 
-# Slack Canvas HTML に埋め込まれるセクション ID のパターン例:
-#   data-block-id="Bf-XXXXXXXX"
-#   data-section-id="Bf-XXXXXXXX"
-#   id="Bf-XXXXXXXX"  （Bf- で始まる形式）
+# Slack Canvas (filetype: quip) HTML に埋め込まれるセクション ID のパターン:
+#   <h1 id='UeO9CAnkxT8'>          → 短い英数字ID（トップレベルブロック）
+#   <p  id='temp:C:UeOabc123...'>  → temp:C: プレフィックス付きID（サブ要素）
+#   data-block-id / data-section-id は使われない場合がある
+_PAT_SHORT_ID_SQ = re.compile(r"<[a-z][^>]*\sid='([A-Za-z0-9]{6,20})'")
+_PAT_SHORT_ID_DQ = re.compile(r'<[a-z][^>]*\sid="([A-Za-z0-9]{6,20})"')
+_PAT_TEMP_SQ     = re.compile(r"id='(temp:C:[A-Za-z0-9]+)'")
+_PAT_TEMP_DQ     = re.compile(r'id="(temp:C:[A-Za-z0-9]+)"')
+_PAT_DATA_BLOCK  = re.compile(r'data-block-id=["\']([^"\']+)["\']')
+_PAT_DATA_SEC    = re.compile(r'data-section-id=["\']([^"\']+)["\']')
 _SECTION_ID_PATTERNS = [
-    re.compile(r'data-block-id="([^"]+)"'),
-    re.compile(r"data-block-id='([^']+)'"),
-    re.compile(r'data-section-id="([^"]+)"'),
-    re.compile(r"data-section-id='([^']+)'"),
-    # Slack の Canvas セクション ID は英数字+ハイフン（例: Bf-abc123）
-    re.compile(r'"id"\s*:\s*"(Bf-[A-Za-z0-9_\-]+)"'),
+    _PAT_SHORT_ID_SQ, _PAT_SHORT_ID_DQ,
+    _PAT_TEMP_SQ, _PAT_TEMP_DQ,
+    _PAT_DATA_BLOCK, _PAT_DATA_SEC,
 ]
 
 
@@ -109,16 +112,38 @@ def extract_section_ids_from_html(html: str) -> list[str]:
     """
     url_private でダウンロードした Canvas HTML から section_id を抽出する。
     canvases_sections_lookup が返さないセクションも含めて取得できる。
+
+    戻り値: 短いID（トップレベル候補）を先頭に、temp:C: IDをその後に並べる。
     """
+    short_ids: list[str] = []
+    temp_ids: list[str] = []
+    other_ids: list[str] = []
     seen: set[str] = set()
-    ids: list[str] = []
-    for pat in _SECTION_ID_PATTERNS:
+
+    for m in _PAT_SHORT_ID_SQ.finditer(html):
+        sid = m.group(1)
+        if sid not in seen:
+            seen.add(sid)
+            short_ids.append(sid)
+    for m in _PAT_SHORT_ID_DQ.finditer(html):
+        sid = m.group(1)
+        if sid not in seen:
+            seen.add(sid)
+            short_ids.append(sid)
+    for pat in [_PAT_TEMP_SQ, _PAT_TEMP_DQ]:
         for m in pat.finditer(html):
             sid = m.group(1)
             if sid not in seen:
                 seen.add(sid)
-                ids.append(sid)
-    return ids
+                temp_ids.append(sid)
+    for pat in [_PAT_DATA_BLOCK, _PAT_DATA_SEC]:
+        for m in pat.finditer(html):
+            sid = m.group(1)
+            if sid not in seen:
+                seen.add(sid)
+                other_ids.append(sid)
+
+    return short_ids + temp_ids + other_ids
 
 
 # --------------------------------------------------------------------------- #
@@ -217,9 +242,18 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
 
         if raw_content and not raw_content.startswith("[download error"):
             html_section_ids = extract_section_ids_from_html(raw_content)
+            short = [s for s in html_section_ids if not s.startswith("temp:")]
+            temp  = [s for s in html_section_ids if s.startswith("temp:")]
             p(f"  HTML から抽出したセクション ID: {len(html_section_ids)} 件")
-            for sid in html_section_ids:
-                p(f"    {sid}")
+            p(f"    短いID（トップレベル候補）: {len(short)} 件")
+            for sid in short:
+                p(f"      {sid}")
+            p(f"    temp:C: ID（サブ要素）: {len(temp)} 件")
+            if temp:
+                for sid in temp[:5]:
+                    p(f"      {sid}")
+                if len(temp) > 5:
+                    p(f"      … 他 {len(temp) - 5} 件")
 
             p()
             p("  ─ 先頭 500 文字 ─")
