@@ -207,44 +207,79 @@ def parse_action_items_list(content: str) -> list[dict]:
     """
     新リスト形式（テーブルなし）の Canvas HTML からアクションアイテムを解析する。
 
-    pm_report.py の format_action_items() が生成する形式:
-      - [ ] **#1** 担当者:NAME | 期限:DATE | MS:MILESTONE | 内容:TEXT | 出典:SRC | 対応状況:NOTE
+    pm_report.py の format_action_items() が生成する形式（ネスト箇条書き）:
+      - [ ] **#1** 内容テキスト
+        - 担当者:NAME | 期限:DATE | MS:MILESTONE
+        - 対応状況:NOTE
+        - 出典:SRC
 
-    Canvas HTML では <li class=''> または <li class='checked'> に変換される。
+    Canvas は <li> をネスト・フラット問わず生成するため、全 <li> をフラットに収集し
+    #N を持つ <li> を起点に次の #N までをひとつのアイテムとして束ねて解析する。
+    単一行形式（旧: 全フィールドを一行に|区切り）にも対応。
     """
     results: list[dict] = []
     seen_ids: set[int] = set()
 
+    # 全 <li> をフラットに取得（非貪欲: ネスト最内部から順に取れる）
     li_pattern = re.compile(r"<li([^>]*)>(.*?)</li>", re.DOTALL)
-    for m in li_pattern.finditer(content):
-        attrs, inner = m.group(1), m.group(2)
-        text = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "",
-                      strip_html_tags(inner)).strip()
+    all_li: list[tuple[str, str]] = [
+        (m.group(1), re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "",
+                            strip_html_tags(m.group(2))).strip())
+        for m in li_pattern.finditer(content)
+    ]
 
+    i = 0
+    while i < len(all_li):
+        attrs, text = all_li[i]
         id_match = re.search(r"#(\d+)\b", text)
         if not id_match:
+            i += 1
             continue
+
         ai_id = int(id_match.group(1))
         if ai_id in seen_ids:
+            i += 1
             continue
         seen_ids.add(ai_id)
 
         is_checked = "class='checked'" in attrs or 'class="checked"' in attrs
         status_val = "[x]" if is_checked else ""
 
-        def extract(label: str, t: str = text) -> str:
+        # 内容: #N の直後から最初のフィールドラベルの前まで
+        content_val = re.sub(r"\*{0,2}#\d+\*{0,2}", "", text).strip()
+        content_val = re.sub(r"^\[[ x]\]\s*", "", content_val)
+        # 単一行形式の場合は「内容:」ラベルで上書き
+        if re.search(r"担当者:|期限:|MS:|対応状況:|出典:", content_val):
+            lm = re.search(r"内容:([^|]+?)(?=\s*\||$)", content_val)
+            content_val = lm.group(1).strip() if lm else re.sub(
+                r"\s*(?:担当者|期限|MS|内容|対応状況|出典):.*", "", content_val).strip()
+
+        # 次の #N が来るまでの <li> を収集して結合テキストを作る
+        j = i + 1
+        sub_texts: list[str] = []
+        while j < len(all_li):
+            _, sub = all_li[j]
+            if re.search(r"#\d+\b", sub):
+                break  # 次のアイテム開始
+            sub_texts.append(sub)
+            j += 1
+
+        combined = " | ".join([text] + sub_texts)
+
+        def extract(label: str, t: str = combined) -> str:
             m2 = re.search(rf"{re.escape(label)}:([^|]+?)(?=\s*\||\s*$)", t)
             return m2.group(1).strip() if m2 else ""
 
         results.append({
             "id":           ai_id,
             "assignee":     extract("担当者"),
-            "content":      extract("内容"),
+            "content":      extract("内容") or content_val,
             "due_date":     extract("期限"),
             "milestone_id": extract("MS"),
             "status_val":   status_val,
             "note":         extract("対応状況"),
         })
+        i = j
 
     return results
 
