@@ -3,22 +3,24 @@
 canvas_debug.py
 
 Slack Canvas の詳細状態を表示するデバッグ用スクリプト。
-Canvas に投稿しても既存内容が残ってしまう場合の原因調査に使う。
-
-canvases_sections_lookup でセクションが見つからない場合でも、
-url_private でダウンロードした HTML からセクション ID を抽出して削除できる。
+Canvas に投稿しても既存内容が残ってしまう場合の原因調査・クリーンアップに使う。
 
 Usage:
     python3 scripts/canvas_debug.py --canvas-id F0AAD2494VB
     python3 scripts/canvas_debug.py --canvas-id F0AAD2494VB --show-raw
     python3 scripts/canvas_debug.py --canvas-id F0AAD2494VB --delete-all
+    python3 scripts/canvas_debug.py --canvas-id F0AAD2494VB --recreate
+    python3 scripts/canvas_debug.py --canvas-id F0AAD2494VB --recreate --title "Summary"
 
 Options:
     --canvas-id ID     対象 Canvas ID（必須）
-    --show-raw         files.info の生レスポンスと url_private 全文を表示
-    --delete-all       コンテンツを削除して Canvas を空にする（h1 タイトルは保持）
+    --show-raw         files.info 生レスポンスと url_private 全文を表示
+    --delete-all       セクション単位でコンテンツ削除（h1 タイトルは保持）
     --include-title    --delete-all 時に h1 タイトルも削除対象にする
-    --yes              --delete-all の確認プロンプトをスキップ
+    --recreate         Canvas を削除して新規作成（テーブル等も完全消去）
+                       !! 新しい Canvas ID が発行される。CLAUDE.md の更新が必要 !!
+    --title TEXT       --recreate 時の Canvas タイトル（デフォルト: 元のタイトル）
+    --yes              確認プロンプトをスキップ
     --output PATH      結果をファイルにも保存
 """
 
@@ -202,8 +204,43 @@ def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
 # メイン出力
 # --------------------------------------------------------------------------- #
 
+def recreate_canvas(client: WebClient, old_canvas_id: str, title: str, p) -> str | None:
+    """
+    既存 Canvas を削除して同名の新規 Canvas を作成する。
+    成功時は新しい canvas_id を返す。
+
+    !! 新しい Canvas ID が発行されるため、CLAUDE.md 等の参照先を更新すること !!
+    """
+    # 削除
+    try:
+        client.canvases_delete(canvas_id=old_canvas_id)
+        p(f"  ✓ Canvas {old_canvas_id} を削除しました")
+    except SlackApiError as e:
+        p(f"  ERROR: Canvas 削除失敗: {e.response.get('error', e)}")
+        return None
+
+    # 新規作成
+    try:
+        resp = client.canvases_create(
+            title=title,
+            document_content={"type": "markdown", "markdown": f"# {title}\n"},
+        )
+        new_id = resp.get("canvas_id") or resp.get("file", {}).get("id")
+        p(f"  ✓ 新規 Canvas を作成しました")
+        p(f"  新しい Canvas ID: {new_id}")
+        p()
+        p("  !! CLAUDE.md と canvas_report.sh 等の Canvas ID を更新してください !!")
+        p(f"     旧: {old_canvas_id}")
+        p(f"     新: {new_id}")
+        return new_id
+    except SlackApiError as e:
+        p(f"  ERROR: Canvas 作成失敗: {e.response.get('error', e)}")
+        return None
+
+
 def run(canvas_id: str, show_raw: bool, delete_all: bool,
-        include_title: bool, yes: bool, out) -> None:
+        include_title: bool, recreate: bool, new_title: str | None,
+        yes: bool, out) -> None:
     client = get_client()
 
     def p(*args, **kwargs):
@@ -405,6 +442,24 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool,
                 p("  ✓ コンテンツ削除確認済み")
         p()
 
+    # ── 7. --recreate ───────────────────────────────────────────────────────
+    if recreate:
+        p(_sep("7. Canvas 削除 & 新規作成"))
+        p("  !! 警告: 旧 Canvas ID は無効になります。CLAUDE.md 等の更新が必要です !!")
+        p()
+        title = new_title or file_info.get("title") or file_info.get("name") or "Canvas"
+        p(f"  対象 Canvas ID : {canvas_id}")
+        p(f"  新 Canvas タイトル: {title}")
+        if not yes:
+            ans = input(
+                f"  Canvas {canvas_id} を削除して再作成しますか？ [y/N]: "
+            ).strip().lower()
+            if ans != "y":
+                p("  キャンセルしました")
+                return
+        recreate_canvas(client, canvas_id, title, p)
+        p()
+
 
 # --------------------------------------------------------------------------- #
 # エントリポイント
@@ -418,11 +473,15 @@ def main() -> None:
     parser.add_argument("--show-raw", action="store_true",
                         help="files.info 生レスポンスと url_private 全文を表示")
     parser.add_argument("--delete-all", action="store_true",
-                        help="発見した全セクションを削除してCanvasのコンテンツを空にする（h1タイトルは保持）")
+                        help="セクション単位でコンテンツ削除（h1 タイトルは保持）")
     parser.add_argument("--include-title", action="store_true",
                         help="--delete-all 時に h1 タイトルも削除対象にする")
+    parser.add_argument("--recreate", action="store_true",
+                        help="Canvas を削除して新規作成（テーブル等も完全消去。新 ID が発行される）")
+    parser.add_argument("--title", default=None, metavar="TEXT",
+                        help="--recreate 時の Canvas タイトル（省略時: 元のタイトルを使用）")
     parser.add_argument("--yes", action="store_true",
-                        help="--delete-all の確認プロンプトをスキップ")
+                        help="確認プロンプトをスキップ")
     parser.add_argument("--output", default=None, metavar="PATH",
                         help="結果をファイルにも保存")
     args = parser.parse_args()
@@ -433,7 +492,8 @@ def main() -> None:
 
     try:
         run(args.canvas_id, args.show_raw, args.delete_all,
-            args.include_title, args.yes, out)
+            args.include_title, args.recreate, args.title,
+            args.yes, out)
     finally:
         if out:
             out.close()
