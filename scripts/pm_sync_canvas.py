@@ -373,6 +373,72 @@ def parse_decision_checkboxes(content: str) -> tuple[list[str], list[str]]:
 _D_ID_PATTERN = re.compile(r"^\[D:(\d+)\]\s*")
 
 
+def parse_decision_contents(content: str) -> list[dict]:
+    """
+    Canvas HTML から決定事項のID・内容を抽出する。
+    形式: <li ...>[D:N] 決定事項の内容 （出典）</li>
+    戻り値: [{"id": 1, "content": "決定事項の内容"}, ...]
+    （出典部分は _extract_li_text() が除去済み）
+    """
+    results: list[dict] = []
+    seen_ids: set[int] = set()
+    li_pattern = re.compile(r"<li([^>]*)>(.*?)</li>", re.DOTALL)
+    for m in li_pattern.finditer(content):
+        inner = m.group(2)
+        text = _extract_li_text(inner)
+        if not text:
+            continue
+        dm = _D_ID_PATTERN.match(text)
+        if not dm:
+            continue
+        d_id = int(dm.group(1))
+        if d_id in seen_ids:
+            continue
+        seen_ids.add(d_id)
+        d_content = text[dm.end():].strip()
+        if d_content:
+            results.append({"id": d_id, "content": d_content})
+    return results
+
+
+def sync_decision_content(
+    conn: sqlite3.Connection,
+    decisions: list[dict],
+    dry_run: bool,
+    log,
+) -> int:
+    """
+    Canvas から取得した決定事項の内容を decisions.content に同期する。
+    Canvas 値が非空かつ DB 値と異なる場合のみ上書きする。
+    戻り値: 更新件数
+    """
+    updated = 0
+    for d in decisions:
+        d_id = d["id"]
+        canvas_content = d["content"]
+        if not canvas_content:
+            continue
+        row = conn.execute("SELECT id, content FROM decisions WHERE id = ?", (d_id,)).fetchone()
+        if row is None:
+            log(f"  [未検出] D={d_id} は pm.db に存在しません")
+            continue
+        db_content = (row["content"] or "").strip()
+        if canvas_content == db_content:
+            continue
+        log(f"  [更新] D={d_id} 内容変更: '{db_content[:50]}' → '{canvas_content[:50]}'")
+        if not dry_run:
+            conn.execute(
+                "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
+                " VALUES ('decisions', ?, 'content', ?, ?, ?, 'canvas_sync')",
+                (str(d_id), db_content or None, canvas_content,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            conn.execute("UPDATE decisions SET content = ? WHERE id = ?", (canvas_content, d_id))
+            conn.commit()
+        updated += 1
+    return updated
+
+
 def sync_decision_acknowledgements(
     conn: sqlite3.Connection,
     checked_texts: list[str],
@@ -746,13 +812,20 @@ def main() -> None:
         conn, checked_decisions, unchecked_decisions, args.dry_run, log
     )
 
+    # 決定事項内容を同期
+    log(f"\n[INFO] 決定事項内容を pm.db に同期中...")
+    decision_contents = parse_decision_contents(combined)
+    dcontent_count = sync_decision_content(conn, decision_contents, args.dry_run, log)
+    if dcontent_count == 0:
+        log(f"[INFO] 決定事項内容: 変更なし（Canvas確認={len(decision_contents)}件）")
+
     conn.close()
 
     log(
         f"\n完了: 状況完了={closed_count}件, メモ保存={noted_count}件, "
         f"フィールド更新={updated_count}件, 変更なし={unchanged_count}件, 未検出={not_found_count}件"
     )
-    log(f"決定事項: 確認済み={ack_count}件, 取消={rev_count}件, 未検出={ack_not_found}件")
+    log(f"決定事項: 確認済み={ack_count}件, 取消={rev_count}件, 内容更新={dcontent_count}件, 未検出={ack_not_found}件")
     if args.dry_run:
         log("[INFO] --dry-run のため DB保存をスキップしました")
     close_log()

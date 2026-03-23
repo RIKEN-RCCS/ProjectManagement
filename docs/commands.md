@@ -250,6 +250,7 @@ python3 scripts/pm_report.py --dry-run --output report.md
 | `--since YYYY-MM-DD` | なし（全期間） | この日付以降のデータのみ対象 |
 | `--skip-canvas` | - | Canvas 投稿をスキップ |
 | `--show-acknowledged` | - | 確認済み決定事項も表示する（デフォルトは非表示） |
+| `--show-workload` | - | 担当者別負荷セクションを出力する（デフォルトは非表示） |
 | `--dry-run` | - | Canvas 投稿なし・結果を標準出力のみ |
 | `--output PATH` | - | 出力をファイルにも保存 |
 

@@ -19,6 +19,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -785,23 +786,44 @@ def sanitize_for_canvas(text: str) -> str:
     return text
 
 
+_PAT_TAG_WITH_ID = re.compile(
+    r"<(h[1-6]|p|div|ul|ol|li|blockquote|pre|hr|table|tbody|thead|tr|td|th)\b[^>]*\sid=['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+_PAT_DATA_BLOCK = re.compile(r'data-block-id=["\']([^"\']+)["\']')
+_PAT_DATA_SEC   = re.compile(r'data-section-id=["\']([^"\']+)["\']')
+
+
 def _collect_section_ids(client: WebClient, canvas_id: str) -> list[str]:
-    """Canvas の全セクション ID を収集する（複数クエリで網羅）"""
+    """url_private HTML から全セクション ID を収集する（h1 タイトルは除外）"""
+    token = os.getenv("SLACK_USER_TOKEN", "")
+    try:
+        resp = client.files_info(file=canvas_id)
+        file_info = resp.get("file", {})
+        url = file_info.get("url_private") or file_info.get("url_private_download", "")
+        if not url:
+            return []
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req) as r:
+            html = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"[WARN] url_private 取得失敗: {e}", file=sys.stderr)
+        return []
+
     seen: set[str] = set()
     ids: list[str] = []
-    for text in ["|", "##", "- ", "【", "project", "アクション"]:
-        try:
-            resp = client.canvases_sections_lookup(
-                canvas_id=canvas_id,
-                criteria={"contains_text": text},
-            )
-            for sec in resp.get("sections", []):
-                sid = sec.get("id")
-                if sid and sid not in seen:
-                    seen.add(sid)
-                    ids.append(sid)
-        except SlackApiError:
-            pass
+    for m in _PAT_TAG_WITH_ID.finditer(html):
+        tag, sid = m.group(1).lower(), m.group(2)
+        if sid in seen or tag == "h1":
+            continue
+        seen.add(sid)
+        ids.append(sid)
+    for pat in [_PAT_DATA_BLOCK, _PAT_DATA_SEC]:
+        for m in pat.finditer(html):
+            sid = m.group(1)
+            if sid not in seen:
+                seen.add(sid)
+                ids.append(sid)
     return ids
 
 
@@ -814,15 +836,24 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
     client = WebClient(token=token)
 
     try:
+        # Step 1: url_private HTML から全セクション ID を収集して削除
         section_ids = _collect_section_ids(client, canvas_id)
         if section_ids:
             print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
+            ok = fail = 0
             for sid in section_ids:
-                client.canvases_edit(
-                    canvas_id=canvas_id,
-                    changes=[{"operation": "delete", "section_id": sid}],
-                )
+                try:
+                    client.canvases_edit(
+                        canvas_id=canvas_id,
+                        changes=[{"operation": "delete", "section_id": sid}],
+                    )
+                    ok += 1
+                except SlackApiError as e:
+                    print(f"[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
+                    fail += 1
+            print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
 
+        # Step 2: 新コンテンツを先頭に挿入
         client.canvases_edit(
             canvas_id=canvas_id,
             changes=[{

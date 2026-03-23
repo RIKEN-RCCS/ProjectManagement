@@ -1,6 +1,6 @@
 ## Slack Canvas API 調査結果
 
-調査日: 2026-03 (`canvas_debug.py` 開発時)
+調査日: 2026-03 (`canvas_debug.py` 開発時)、2026-03 追記（バッチ削除・セクションID取得方法）
 
 ---
 
@@ -37,10 +37,46 @@ python3 scripts/canvas_debug.py -c CHANNEL_ID --show-bookmarks
 ### Canvas セクション構造
 
 - セクションIDは HTML の `id='...'` 属性（`h1`/`p`/`div`/`table` 等のタグ上）
-- `canvases_sections_lookup` はキーワード検索のみ。全件列挙**不可**
-- `url_private` の HTML（filetype=quip）をパースして ID を取得する必要がある
+- `canvases_sections_lookup` はキーワード検索のみ。全件列挙**不可**。キーワードによって漏れが出るため信頼性が低い
+- **推奨**: `files_info` → `url_private` の HTML（filetype=quip）をダウンロードして正規表現で ID を全件抽出する
 - 空の `<table>` タグには `id` 属性がなく、セクションAPIで削除**不可**
-- バッチ削除（`changes=[...]` に複数操作）は `invalid_arguments` で**失敗** → 1件ずつ削除必須
+- バッチ削除は以下の3形式すべて**失敗** → 1件ずつ削除必須
+
+| バッチ削除の試み | 結果 |
+|---|---|
+| `changes=[op1, op2]`（複数 operation） | ❌ `invalid_arguments` |
+| `changes=[{"operation": "delete", "section_id": [sid1, sid2]}]` | ❌ 失敗 |
+| `changes=[{"operation": "delete", "section_ids": [sid1, sid2]}]` | ❌ 失敗 |
+
+検証コマンド:
+```sh
+python3 scripts/canvas_debug.py --canvas-id CANVAS_ID --test-batch-delete
+```
+
+#### セクションID取得の実装パターン
+
+```python
+import re, urllib.request
+
+_PAT_TAG_WITH_ID = re.compile(
+    r"<(h[1-6]|p|div|ul|ol|li|blockquote|pre|hr|table|tbody|thead|tr|td|th)\b[^>]*\sid=['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+
+def collect_section_ids(client, canvas_id, include_h1=False):
+    resp = client.files_info(file=canvas_id)
+    url = resp["file"].get("url_private", "")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req) as r:
+        html = r.read().decode("utf-8", errors="replace")
+
+    seen, ids = set(), []
+    for m in _PAT_TAG_WITH_ID.finditer(html):
+        tag, sid = m.group(1).lower(), m.group(2)
+        if sid not in seen and (include_h1 or tag != "h1"):
+            seen.add(sid); ids.append(sid)
+    return ids
+```
 
 ---
 
@@ -51,7 +87,7 @@ python3 scripts/canvas_debug.py -c CHANNEL_ID --show-bookmarks
 | タブ付きCanvasを新規作成 | `conversations.canvases.create` | ✅ 成功。ただし既存タブは**置き換わらず追加**される |
 | スタンドアロンCanvas削除 | `canvases.delete` | ✅ ファイルは消えるが `properties.tabs` のエントリは**残る（stale）** |
 | 旧タブエントリ削除 | `conversations.canvases.delete` | ❌ `unknown_method`（非公開API） |
-| 旧タブエントリ削除 | `bookmarks.remove(bookmark_id=Ct0...)` | 未確認（要テスト） |
+| 旧タブエントリ削除 | `bookmarks.remove(bookmark_id=Ct0...)` | ❌ 失敗（確認済み） |
 | bookmarks.list でタブ取得 | `bookmarks.list` | ❌ Canvas タブは返らない（常に空） |
 | conversations.info でタブ取得 | `conversations.info` | ✅ `properties.tabs` で全タブ取得可能 |
 
