@@ -374,7 +374,7 @@ def recreate_canvas(client: WebClient, old_canvas_id: str, title: str, p) -> str
 def run(canvas_id: str, channel_id: str | None,
         show_raw: bool, show_bookmarks: bool, delete_all: bool,
         include_title: bool, recreate: bool, force_channel_canvas: bool,
-        new_title: str | None, yes: bool, out) -> None:
+        add_tab: bool, new_title: str | None, yes: bool, out) -> None:
     client = get_client()
 
     def p(*args, **kwargs):
@@ -680,6 +680,9 @@ def run(canvas_id: str, channel_id: str | None,
                         p("     削除後に新 Canvas を同じタブとして再登録します")
                     else:
                         p(f"  → Canvas ID {canvas_id} に一致するタブなし（タブ付け替えはスキップ）")
+        else:
+            p("  ヒント: -c CHANNEL_ID を指定するとタブの自動付け替えが有効になります")
+        if channel_id:
             try:
                 auth = client.auth_test()
                 team_id = auth.get("team_id", "")
@@ -687,8 +690,6 @@ def run(canvas_id: str, channel_id: str | None,
                            .removeprefix("https://").removeprefix("http://"))
             except SlackApiError:
                 pass
-        else:
-            p("  ヒント: -c CHANNEL_ID を指定するとタブの自動付け替えが有効になります")
 
         if not yes:
             ans = input(
@@ -723,7 +724,7 @@ def run(canvas_id: str, channel_id: str | None,
                 p(f"  WARN: conversations.canvases.create 失敗: {e.response.get('error', e)}")
                 p("  → 手動でチャンネルに Canvas タブを追加してください")
         elif channel_id and old_bookmark and team_id:
-            # (B) ブックマークタブ
+            # (B) ブックマークタブ（既存タブを付け替え）
             p()
             p("  ── ブックマークタブ付け替え ──")
             if remove_bookmark(client, channel_id, old_bookmark["id"]):
@@ -734,6 +735,19 @@ def run(canvas_id: str, channel_id: str | None,
             else:
                 p("  !! タブ追加失敗。手動でチャンネルにタブとして追加してください")
                 p(f"     Canvas ID: {new_id}")
+        elif channel_id and add_tab and team_id:
+            # (C) --add-tab: タブが存在しなかった場合に新規追加
+            p()
+            p("  ── ブックマークタブとして新規追加（--add-tab） ──")
+            if add_canvas_bookmark(client, channel_id, new_id, title, team_id, domain):
+                canvas_url = f"https://{domain}/docs/{team_id}/{new_id}"
+                p(f"  ✓ タブを追加しました: {canvas_url}")
+            else:
+                p("  !! タブ追加失敗")
+                p(f"     Canvas ID: {new_id}")
+        elif channel_id and add_tab and not team_id:
+            p()
+            p("  WARN: auth.test 失敗のため --add-tab をスキップしました")
         p()
 
 
@@ -775,6 +789,9 @@ def main() -> None:
     parser.add_argument("--channel-canvas", action="store_true",
                         help="--recreate 時、チャンネルCanvasタブとして再作成を強制"
                              "（conversations.info に missing_scope が出る場合に使用）")
+    parser.add_argument("--add-tab", action="store_true",
+                        help="--recreate 時、新 Canvas をチャンネルのブックマークタブとして追加"
+                             "（元のCanvasがタブになかった場合にも新規追加する）")
     parser.add_argument("--title", default=None, metavar="TEXT",
                         help="--recreate 時の Canvas タイトル（省略時: 元のタイトルを使用）")
     parser.add_argument("--yes", action="store_true",
@@ -829,7 +846,7 @@ def main() -> None:
     try:
         run(canvas_id, channel_id, args.show_raw, args.show_bookmarks,
             args.delete_all, args.include_title, args.recreate,
-            args.channel_canvas, args.title, args.yes, out)
+            args.channel_canvas, args.add_tab, args.title, args.yes, out)
     finally:
         if out:
             out.close()
