@@ -146,18 +146,17 @@ def fetch_assignee_workload(conn: sqlite3.Connection, today: str) -> list[dict]:
 
 
 def format_assignee_workload(workload: list[dict]) -> str:
-    """「担当者別負荷」セクションをMarkdown表形式で生成する（LLM不使用）"""
+    """「担当者別負荷」セクションをリスト形式で生成する（LLM不使用・テーブルなし）"""
     if not workload:
         return "（データなし）"
-    header = "| 担当者 | 合計 | 期限超過 | 期限未設定 |"
-    sep    = "|--------|------|----------|------------|"
-    rows = [header, sep]
+    lines = []
     for w in workload:
         overdue_str = f"**{w['overdue']}**" if w["overdue"] > 0 else "0"
-        rows.append(
-            f"| {w['assignee']} | {w['total_open']} | {overdue_str} | {w['no_due_date']} |"
+        lines.append(
+            f"- **{w['assignee']}**: {w['total_open']}件"
+            f"（期限超過:{overdue_str}件 / 期限未設定:{w['no_due_date']}件）"
         )
-    return "\n".join(rows)
+    return "\n".join(lines)
 
 
 def fetch_milestone_progress(conn: sqlite3.Connection) -> list[dict]:
@@ -304,22 +303,26 @@ def _format_source(a: dict, permalink_map: dict[str, str] | None = None) -> str:
 
 def format_action_items(items: list[dict],
                         permalink_map: dict[str, str] | None = None) -> str:
-    """Canvas に貼るアクションアイテム表（pm_relink.py --export と列・順序を統一）"""
+    """Canvas に貼るアクションアイテムリスト（テーブルなし・1行1件・フィールドを|区切り）
+    テーブル形式を廃止し、Canvasセクション削除が確実に機能するようにした。
+    pm_sync_canvas.py は parse_action_items_list() でこの形式を解析する。
+    """
     if not items:
         return "（なし）"
-    header = "| ID | 担当者 | 期限 | マイルストーン | 状況 | 内容 | 対応状況 | 出典 |"
-    sep    = "|----|--------|------|----------------|------|------|----------|------|"
-    rows = [header, sep]
+    lines = []
     for a in items:
         ai_id     = a.get("id", "")
         assignee  = a.get("assignee") or "未定"
-        due       = a.get("due_date") or ""
-        milestone = a.get("milestone_id") or ""
+        due       = a.get("due_date") or "-"
+        milestone = a.get("milestone_id") or "-"
         content   = a.get("content", "").replace("|", "｜").replace("\n", " ").replace("\r", "")
-        source    = _format_source(a, permalink_map)
-        note      = (a.get("note") or "").replace("\n", " ").replace("\r", "")
-        rows.append(f"| {ai_id} | {assignee} | {due} | {milestone} | - [ ] | {content} | {note} | {source} |")
-    return "\n".join(rows)
+        source    = _format_source(a, permalink_map).replace("|", "｜")
+        note      = (a.get("note") or "").replace("|", "｜").replace("\n", " ").replace("\r", "")
+        lines.append(
+            f"- [ ] **#{ai_id}** 担当者:{assignee} | 期限:{due} | MS:{milestone}"
+            f" | 内容:{content} | 出典:{source} | 対応状況:{note}"
+        )
+    return "\n".join(lines)
 
 
 def format_action_items_text(items: list[dict],
