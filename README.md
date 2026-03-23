@@ -362,24 +362,24 @@ python3 scripts/pm_report.py ...
 ### 必要パッケージ
 
 ```
-slack-bolt
 slack-sdk
 ```
 
-### Slack Bot Token の取得
+### Slack User Token の取得
 
-以下のスクリプトの実行には Slack Bot Token（`xoxb-...`）が必要。
+以下のスクリプトの実行には Slack User Token（`xoxp-...`）が必要。
 
-1. Slack API サイト（api.slack.com/apps）でアプリを作成する
-2. 「OAuth & Permissions」で以下のBot Token Scopesを付与する:
-   - `channels:history` - メッセージ取得
-   - `channels:read` - チャンネル情報取得
-   - `users:read` - ユーザー名取得
-   - `files:read` - Canvas（ファイル）取得
-   - `canvases:read` - Canvas内容読み取り
-   - `canvases:write` - Canvas編集
-3. アプリをワークスペースにインストールし、「Bot User OAuth Token」をコピーする
-4. アプリを対象チャンネルに招待する（`/invite @アプリ名`）
+Slack の「Settings & administration」→「Manage apps」または [api.slack.com/apps](https://api.slack.com/apps) でアプリを確認し、「OAuth & Permissions」の **User Token Scopes** に以下を付与する:
+
+- `channels:history` - メッセージ取得
+- `channels:read` - チャンネル情報取得
+- `users:read` - ユーザー名取得
+- `files:read` - Canvas（ファイル）取得
+- `files:write` - ファイルアップロード（議事録Slack投稿）
+- `canvases:read` - Canvas内容読み取り
+- `canvases:write` - Canvas編集
+
+「OAuth & Permissions」の **OAuth Tokens** セクションから「User OAuth Token」（`xoxp-`）をコピーする。
 
 ### トークン設定（安全な方法）
 
