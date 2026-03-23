@@ -727,16 +727,21 @@ def run(canvas_id: str, channel_id: str | None,
 
             # Step 3: 旧タブエントリを削除（stale tab cleanup）
             if old_tab_id:
+                # bookmarks.remove で Ct0... 形式のタブIDを削除できる場合がある
+                removed = False
                 try:
-                    client.api_call(
-                        "conversations.canvases.delete",
-                        http_verb="POST",
-                        json={"channel_id": channel_id, "canvas_id": canvas_id},
+                    client.bookmarks_remove(
+                        channel_id=channel_id,
+                        bookmark_id=old_tab_id,
                     )
                     p(f"  ✓ 旧タブエントリを削除しました (tab_id={old_tab_id!r})")
-                except Exception as e:
-                    p(f"  WARN: 旧タブエントリの削除失敗: {e}")
-                    p(f"       Slack UI 上で古いタブが残る場合があります（手動削除が必要）")
+                    removed = True
+                except SlackApiError as e:
+                    err = e.response.get("error", str(e))
+                    p(f"  WARN: 旧タブ削除失敗 (bookmarks.remove → {err})")
+                if not removed:
+                    p(f"  　　 旧タブ (tab_id={old_tab_id!r}) は Slack UI から手動で削除してください")
+                    p(f"  　　 （タブ上で右クリック → 「タブを閉じる」）")
 
             # Step 4: canvas_map.json 更新
             if new_id and channel_id:
