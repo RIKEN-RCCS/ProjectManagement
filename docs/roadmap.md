@@ -134,6 +134,7 @@ PMBOKの観点から現システムを評価した結果、以下の領域が未
   - アクションアイテムの担当者・期限・マイルストーン・状況を対話的に編集（`pm_relink.py` 相当）
   - 決定事項の内容・日付を編集（`pm_relink.py` 相当）
   - `pm_report.py` の実行・Canvas投稿をSlackコマンドから起動
+  - `pm_sync_canvas.py` の実行（Canvas上の編集をpm.dbに反映）をSlackコマンドから起動
 - 実装方針: `slack_sdk` の Socket Mode（`SocketModeHandler`）を使用、`SLACK_APP_TOKEN` が追加で必要
 
 ### P7: 外部ステークホルダー状態の追跡（未実装）
