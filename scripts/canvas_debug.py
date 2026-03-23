@@ -35,6 +35,74 @@ from pathlib import Path
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CANVAS_MAP_PATH = REPO_ROOT / "data" / "canvas_map.json"
+
+
+# --------------------------------------------------------------------------- #
+# Canvas ID マップ（チャンネルID ↔ Canvas ID の永続ストア）
+# --------------------------------------------------------------------------- #
+
+def load_canvas_map() -> dict:
+    """data/canvas_map.json を読み込む。存在しなければ空辞書を返す。"""
+    if CANVAS_MAP_PATH.exists():
+        try:
+            return json.loads(CANVAS_MAP_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_canvas_map(m: dict) -> None:
+    """data/canvas_map.json に書き込む。"""
+    CANVAS_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CANVAS_MAP_PATH.write_text(
+        json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def map_set(channel_id: str, canvas_id: str, title: str = "") -> None:
+    """チャンネルID → Canvas ID のエントリを保存する。"""
+    from datetime import datetime, timezone
+    m = load_canvas_map()
+    m[channel_id] = {
+        "canvas_id": canvas_id,
+        "title": title,
+        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    save_canvas_map(m)
+
+
+def map_get(channel_id: str) -> str | None:
+    """チャンネルID から Canvas ID を返す。未登録なら None。"""
+    m = load_canvas_map()
+    entry = m.get(channel_id)
+    if isinstance(entry, dict):
+        return entry.get("canvas_id")
+    if isinstance(entry, str):
+        return entry  # 旧形式互換
+    return None
+
+
+def cmd_list_map(p) -> None:
+    """登録済みチャンネル→Canvas IDの一覧を表示する。"""
+    m = load_canvas_map()
+    if not m:
+        p("  （登録なし）")
+        p(f"  マップファイル: {CANVAS_MAP_PATH}")
+        return
+    p(f"  マップファイル: {CANVAS_MAP_PATH}")
+    p(f"  {'チャンネルID':<20} {'Canvas ID':<16} {'更新日時':<22} タイトル")
+    p(f"  {'─'*20} {'─'*16} {'─'*22} {'─'*20}")
+    for ch, v in m.items():
+        if isinstance(v, dict):
+            cid = v.get("canvas_id", "")
+            ts  = v.get("updated_at", "")
+            ttl = v.get("title", "")
+        else:
+            cid, ts, ttl = v, "", ""
+        p(f"  {ch:<20} {cid:<16} {ts:<22} {ttl}")
+
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -238,7 +306,8 @@ def recreate_canvas(client: WebClient, old_canvas_id: str, title: str, p) -> str
         return None
 
 
-def run(canvas_id: str, show_raw: bool, delete_all: bool,
+def run(canvas_id: str, channel_id: str | None,
+        show_raw: bool, delete_all: bool,
         include_title: bool, recreate: bool, new_title: str | None,
         yes: bool, out) -> None:
     client = get_client()
@@ -457,7 +526,13 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool,
             if ans != "y":
                 p("  キャンセルしました")
                 return
-        recreate_canvas(client, canvas_id, title, p)
+        new_id = recreate_canvas(client, canvas_id, title, p)
+        if new_id and channel_id:
+            map_set(channel_id, new_id, title)
+            p(f"  ✓ canvas_map.json を更新しました ({channel_id} → {new_id})")
+        elif new_id and not channel_id:
+            p()
+            p("  ヒント: -c CHANNEL_ID を指定すると canvas_map.json に自動保存できます")
         p()
 
 
@@ -467,9 +542,24 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Slack Canvas の詳細状態を表示するデバッグツール"
+        description="Slack Canvas の詳細状態を表示するデバッグツール",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--canvas-id", required=True, help="対象 Canvas ID")
+
+    # Canvas 指定（--canvas-id か -c のどちらか）
+    id_group = parser.add_mutually_exclusive_group()
+    id_group.add_argument("--canvas-id", metavar="ID",
+                          help="対象 Canvas ID を直接指定")
+    id_group.add_argument("-c", "--channel", metavar="CHANNEL_ID",
+                          help="チャンネルID を指定（canvas_map.json から Canvas ID を解決）")
+
+    # マップ操作
+    parser.add_argument("--list-map", action="store_true",
+                        help="登録済みチャンネル→Canvas ID 一覧を表示して終了")
+    parser.add_argument("--register", metavar="CANVAS_ID",
+                        help="-c と組み合わせてチャンネル→Canvas ID を手動登録")
+
+    # デバッグ・操作
     parser.add_argument("--show-raw", action="store_true",
                         help="files.info 生レスポンスと url_private 全文を表示")
     parser.add_argument("--delete-all", action="store_true",
@@ -477,7 +567,8 @@ def main() -> None:
     parser.add_argument("--include-title", action="store_true",
                         help="--delete-all 時に h1 タイトルも削除対象にする")
     parser.add_argument("--recreate", action="store_true",
-                        help="Canvas を削除して新規作成（テーブル等も完全消去。新 ID が発行される）")
+                        help="Canvas を削除して新規作成（テーブル等も完全消去）"
+                             " -c 指定時は新 ID を canvas_map.json に自動保存")
     parser.add_argument("--title", default=None, metavar="TEXT",
                         help="--recreate 時の Canvas タイトル（省略時: 元のタイトルを使用）")
     parser.add_argument("--yes", action="store_true",
@@ -486,12 +577,51 @@ def main() -> None:
                         help="結果をファイルにも保存")
     args = parser.parse_args()
 
+    # --list-map
+    if args.list_map:
+        def p(*a, **kw): print(*a, **kw)
+        p(_sep("canvas_map.json"))
+        cmd_list_map(p)
+        return
+
+    # --register
+    if args.register:
+        if not args.channel:
+            print("ERROR: --register には -c CHANNEL_ID が必要です", file=sys.stderr)
+            sys.exit(1)
+        map_set(args.channel, args.register, args.title or "")
+        print(f"✓ 登録しました: {args.channel} → {args.register}")
+        print(f"  マップファイル: {CANVAS_MAP_PATH}")
+        return
+
+    # Canvas ID を解決
+    canvas_id: str | None = None
+    channel_id: str | None = None
+
+    if args.canvas_id:
+        canvas_id = args.canvas_id
+    elif args.channel:
+        channel_id = args.channel
+        canvas_id = map_get(channel_id)
+        if not canvas_id:
+            print(f"ERROR: チャンネル {channel_id} の Canvas ID が canvas_map.json に未登録です",
+                  file=sys.stderr)
+            print(f"  先に登録してください:", file=sys.stderr)
+            print(f"    python3 scripts/canvas_debug.py -c {channel_id} --register CANVAS_ID",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"[INFO] {channel_id} → Canvas ID: {canvas_id} (canvas_map.json)")
+    else:
+        print("ERROR: --canvas-id または -c CHANNEL_ID が必要です", file=sys.stderr)
+        parser.print_help()
+        sys.exit(1)
+
     out = None
     if args.output:
         out = open(args.output, "w", encoding="utf-8")
 
     try:
-        run(args.canvas_id, args.show_raw, args.delete_all,
+        run(canvas_id, channel_id, args.show_raw, args.delete_all,
             args.include_title, args.recreate, args.title,
             args.yes, out)
     finally:
