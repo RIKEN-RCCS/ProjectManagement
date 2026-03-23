@@ -517,7 +517,11 @@ def main() -> None:
     add_output_arg(parser)
     args = parser.parse_args()
 
-    db_path = Path(args.db) if args.db else DEFAULT_PM_DB
+    if not args.db:
+        print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
+        print("  例: --db data/pm.db / --db data/pm-hpc.db / --db data/pm-bmt.db", file=sys.stderr)
+        sys.exit(1)
+    db_path = Path(args.db)
     log, close_log = make_logger(args.output)
 
     # --acknowledge / --unacknowledge: Canvas同期なしで直接更新

@@ -24,7 +24,7 @@ Usage:
 Options:
     --meeting-name NAME     特定の会議名のみ処理（省略時は全DBを対象）
     --minutes-dir DIR       議事録DBのディレクトリ（デフォルト: data/minutes/）
-    --db PATH               pm.db のパス（デフォルト: data/pm.db）
+    --db PATH               pm.db のパス（必須: data/pm.db / data/pm-hpc.db / data/pm-bmt.db）
     --since YYYY-MM-DD      この日付以降の会議のみ転記
     --force                 既存レコードを上書き
     --dry-run               DB保存なし・転記内容を表示のみ
@@ -308,7 +308,7 @@ def main():
                         help="特定の会議名のみ処理（省略時は全DBを対象）")
     parser.add_argument("--minutes-dir", default=None,
                         help="議事録DBのディレクトリ（デフォルト: data/minutes/）")
-    parser.add_argument("--db", default=None, help="pm.db のパス（デフォルト: data/pm.db）")
+    parser.add_argument("--db", default=None, help="pm.db のパス（必須: data/pm.db / data/pm-hpc.db / data/pm-bmt.db）")
     add_since_arg(parser)
     parser.add_argument("--force", action="store_true", help="既存レコードを上書き")
     add_dry_run_arg(parser)
@@ -320,7 +320,11 @@ def main():
     args = parser.parse_args()
 
     minutes_dir = Path(args.minutes_dir) if args.minutes_dir else DEFAULT_MINUTES_DIR
-    db_path     = Path(args.db) if args.db else DEFAULT_DB
+    if not args.db:
+        print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
+        print("  例: --db data/pm.db / --db data/pm-hpc.db / --db data/pm-bmt.db", file=sys.stderr)
+        sys.exit(1)
+    db_path = Path(args.db)
 
     # --- list ---
     if args.list:

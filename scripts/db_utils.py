@@ -364,7 +364,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-backup", action="store_true", help="--migrate 時にバックアップを作成しない")
     parser.add_argument("--dry-run", action="store_true", help="--migrate 時に変換せず確認のみ")
     parser.add_argument("--audit-log", action="store_true", help="audit_log を表示する")
-    parser.add_argument("--db", default="data/pm.db", metavar="PATH", help="--audit-log 時の pm.db パス（デフォルト: data/pm.db）")
+    parser.add_argument("--db", default=None, metavar="PATH", help="--audit-log 時の pm.db パス（必須）")
     parser.add_argument("--no-encrypt", action="store_true", help="--audit-log 時に平文モードで接続する")
     parser.add_argument("--limit", type=int, default=30, metavar="N", help="--audit-log 時の表示件数（デフォルト: 30）")
     parser.add_argument("--source", metavar="SOURCE", help="--audit-log 時にソースで絞り込む（canvas_sync / relink）")
@@ -402,6 +402,10 @@ if __name__ == "__main__":
                 skipped += 1
         print(f"\n完了: 変換={success}件, スキップ={skipped}件")
     elif args.audit_log:
+        if not args.db:
+            print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
+            print("  例: --db data/pm.db / --db data/pm-hpc.db / --db data/pm-bmt.db", file=sys.stderr)
+            sys.exit(1)
         db_path = Path(args.db)
         if not db_path.exists():
             print(f"ERROR: {db_path} が見つかりません", file=sys.stderr)
