@@ -501,15 +501,13 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
     client = WebClient(token=token)
 
     try:
-        # Step 1: 既存セクションを全削除（API制限: 1リクエスト1件まで）
+        # Step 1: 既存セクションを全削除（changes 配列に一括送信）
         section_ids = _collect_section_ids(client, canvas_id)
         if section_ids:
             print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
-            for sid in section_ids:
-                client.canvases_edit(
-                    canvas_id=canvas_id,
-                    changes=[{"operation": "delete", "section_id": sid}],
-                )
+            changes = [{"operation": "delete", "section_id": sid}
+                       for sid in section_ids]
+            client.canvases_edit(canvas_id=canvas_id, changes=changes)
 
         # Step 2: 新コンテンツを先頭に挿入
         client.canvases_edit(
