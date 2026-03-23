@@ -174,18 +174,33 @@ def download_url_private(file_info: dict) -> tuple[str, str]:
 
 def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
                     p) -> tuple[int, int]:
+    """
+    section_ids を全て canvases_edit の changes 配列に一括送信して削除する。
+    Slack の1リクエスト上限に引っかかる場合は CHUNK_SIZE 件ずつ分割する。
+    """
+    CHUNK_SIZE = 50  # Slack API の変更上限（実測値次第で調整）
     ok = fail = 0
-    for sid in section_ids:
+    chunks = [section_ids[i:i + CHUNK_SIZE]
+              for i in range(0, len(section_ids), CHUNK_SIZE)]
+    for chunk in chunks:
+        changes = [{"operation": "delete", "section_id": sid} for sid in chunk]
         try:
-            client.canvases_edit(
-                canvas_id=canvas_id,
-                changes=[{"operation": "delete", "section_id": sid}],
-            )
-            ok += 1
+            client.canvases_edit(canvas_id=canvas_id, changes=changes)
+            ok += len(chunk)
         except SlackApiError as e:
             err = e.response.get("error", str(e))
-            p(f"  WARN: {sid} 削除失敗: {err}")
-            fail += 1
+            p(f"  WARN: バッチ削除失敗 ({len(chunk)} 件): {err}")
+            p(f"  → 1件ずつ再試行...")
+            for sid in chunk:
+                try:
+                    client.canvases_edit(
+                        canvas_id=canvas_id,
+                        changes=[{"operation": "delete", "section_id": sid}],
+                    )
+                    ok += 1
+                except SlackApiError as e2:
+                    p(f"    WARN: {sid} 削除失敗: {e2.response.get('error', e2)}")
+                    fail += 1
     return ok, fail
 
 
