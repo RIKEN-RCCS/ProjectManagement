@@ -203,6 +203,52 @@ def parse_action_items_table(content: str) -> list[dict]:
     return results
 
 
+def parse_action_items_list(content: str) -> list[dict]:
+    """
+    新リスト形式（テーブルなし）の Canvas HTML からアクションアイテムを解析する。
+
+    pm_report.py の format_action_items() が生成する形式:
+      - [ ] **#1** 担当者:NAME | 期限:DATE | MS:MILESTONE | 内容:TEXT | 出典:SRC | 対応状況:NOTE
+
+    Canvas HTML では <li class=''> または <li class='checked'> に変換される。
+    """
+    results: list[dict] = []
+    seen_ids: set[int] = set()
+
+    li_pattern = re.compile(r"<li([^>]*)>(.*?)</li>", re.DOTALL)
+    for m in li_pattern.finditer(content):
+        attrs, inner = m.group(1), m.group(2)
+        text = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "",
+                      strip_html_tags(inner)).strip()
+
+        id_match = re.search(r"#(\d+)\b", text)
+        if not id_match:
+            continue
+        ai_id = int(id_match.group(1))
+        if ai_id in seen_ids:
+            continue
+        seen_ids.add(ai_id)
+
+        is_checked = "class='checked'" in attrs or 'class="checked"' in attrs
+        status_val = "[x]" if is_checked else ""
+
+        def extract(label: str, t: str = text) -> str:
+            m2 = re.search(rf"{re.escape(label)}:([^|]+?)(?=\s*\||\s*$)", t)
+            return m2.group(1).strip() if m2 else ""
+
+        results.append({
+            "id":           ai_id,
+            "assignee":     extract("担当者"),
+            "content":      extract("内容"),
+            "due_date":     extract("期限"),
+            "milestone_id": extract("MS"),
+            "status_val":   status_val,
+            "note":         extract("対応状況"),
+        })
+
+    return results
+
+
 def is_close_keyword(note: str) -> bool:
     return note.lower().strip() in {k.lower() for k in CLOSE_KEYWORDS}
 
@@ -604,8 +650,13 @@ def main() -> None:
         close_log()
         return
 
-    items = parse_action_items_table(content)
-    log(f"[INFO] テーブルから読み込んだアクションアイテム: {len(items)} 件")
+    # 新リスト形式を先に試み、見つからなければ旧テーブル形式にフォールバック
+    items = parse_action_items_list(content)
+    if items:
+        log(f"[INFO] リスト形式から読み込んだアクションアイテム: {len(items)} 件")
+    else:
+        items = parse_action_items_table(content)
+        log(f"[INFO] テーブル形式から読み込んだアクションアイテム: {len(items)} 件")
 
     combined = content + "\n" + (markdown or "")
     checked_decisions, unchecked_decisions = parse_decision_checkboxes(combined)
