@@ -37,19 +37,19 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch \
 | `--output PATH` | なし | 全体要約をファイルにも保存 |
 | `--dry-run` | - | LLM呼び出しをスキップ（Slack API・DB書き込みは実行される）。全体要約もスキップ |
 
-### 1b. Slack取得・要約→pm.db抽出 一括実行（slack_to_pm.sh）
+### 1b. Slack取得・要約→pm.db抽出 一括実行（pm_from_slack.sh）
 
 `slack_pipeline.py`（取得・要約）→ `pm_extractor.py`（pm.db抽出）を連続実行する。
 
 ```sh
 # 通常運用
-bash scripts/slack_to_pm.sh -c C08SXA4M7JT
+bash scripts/pm_from_slack.sh -c C08SXA4M7JT
 
 # 日付フィルタ付き
-bash scripts/slack_to_pm.sh -c C08SXA4M7JT --since 2026-01-01
+bash scripts/pm_from_slack.sh -c C08SXA4M7JT --since 2026-01-01
 
 # 確認用（DB保存なし）
-bash scripts/slack_to_pm.sh -c C08SXA4M7JT --dry-run
+bash scripts/pm_from_slack.sh -c C08SXA4M7JT --dry-run
 ```
 
 | オプション | デフォルト | 説明 |
@@ -64,18 +64,18 @@ bash scripts/slack_to_pm.sh -c C08SXA4M7JT --dry-run
 | `--force-resummary` | - | 全スレッドを強制再要約（`slack_pipeline.py` のみ） |
 | `--force-reextract` | - | 抽出済みスレッドも再処理（`pm_extractor.py` のみ） |
 
-### 2. 会議録文字起こし（recording_to_pm.sh + whisper_vad.py）
+### 2. 会議録文字起こし（pm_from_recording.sh + whisper_vad.py）
 
 ```sh
 # 推奨: --meeting-name を指定すると pm.db に直接保存し .md を削除（平文ファイルが残らない）
-sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
-sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
+sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
+sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
 
 # 日付を明示上書き（省略時はファイル名の GMT タイムスタンプを JST 変換して自動取得）
-sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
+sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
 
 # 従来方式: .md ファイルをそのまま残す（セキュリティ警告が出る）
-sbatch scripts/recording_to_pm.sh GMT20260302-032528_Recording.mp4
+sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4
 ```
 
 | オプション | デフォルト | 説明 |

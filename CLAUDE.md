@@ -56,7 +56,7 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
                               （LLM不使用）      （担当者・期限を直接転記）
 ```
 
-`recording_to_pm.sh --meeting-name` は `pm_minutes_import.py` → `pm_minutes_to_pm.py` の順で呼び出す。
+`pm_from_recording.sh --meeting-name` は `pm_minutes_import.py` → `pm_minutes_to_pm.py` の順で呼び出す。
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
@@ -82,8 +82,11 @@ slack/
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md）
-│   ├── auto_recording_import.sh     # data/*.m4a を検出して recording_to_pm.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
-│   ├── recording_to_pm.sh           # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
+│   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
+│   ├── pm_from_recording.sh         # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
+│   ├── pm_from_slack.sh             # Slack取得・要約 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）
+│   ├── canvas_report.sh             # Canvas同期 → PMレポート生成・Canvas投稿（pm_sync_canvas.py + pm_report.py）
+│   ├── slack_post_minutes.sh        # 議事録DBの内容をSlackチャンネルに投稿（pm_minutes_import.py --post-to-slack）
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
 └── data/                            # DBと出力ファイル
     ├── {channel_id}.db              # Slackデータ（例: C0A9KG036CS.db）
