@@ -303,9 +303,16 @@ def _format_source(a: dict, permalink_map: dict[str, str] | None = None) -> str:
 
 def format_action_items(items: list[dict],
                         permalink_map: dict[str, str] | None = None) -> str:
-    """Canvas に貼るアクションアイテムリスト（テーブルなし・1行1件・フィールドを|区切り）
-    テーブル形式を廃止し、Canvasセクション削除が確実に機能するようにした。
-    pm_sync_canvas.py は parse_action_items_list() でこの形式を解析する。
+    """Canvas に貼るアクションアイテムリスト（テーブルなし・IDの下に属性を箇条書き）
+
+    形式:
+      - [ ] **#1** 内容テキスト全文
+        - 担当者:井上 | 期限:2026-03-31 | MS:M1
+        - 対応状況:
+        - 出典:Leader_Meeting (2026-03-10)
+
+    pm_sync_canvas.py の parse_action_items_list() が全 <li> をフラットに収集して
+    #N を持つ <li> を起点にグループ化することでフィールドを解析する。
     """
     if not items:
         return "（なし）"
@@ -318,10 +325,10 @@ def format_action_items(items: list[dict],
         content   = a.get("content", "").replace("|", "｜").replace("\n", " ").replace("\r", "")
         source    = _format_source(a, permalink_map).replace("|", "｜")
         note      = (a.get("note") or "").replace("|", "｜").replace("\n", " ").replace("\r", "")
-        lines.append(
-            f"- [ ] **#{ai_id}** 担当者:{assignee} | 期限:{due} | MS:{milestone}"
-            f" | 内容:{content} | 出典:{source} | 対応状況:{note}"
-        )
+        lines.append(f"- [ ] **#{ai_id}** {content}")
+        lines.append(f"  - 担当者:{assignee} | 期限:{due} | MS:{milestone}")
+        lines.append(f"  - 対応状況:{note}")
+        lines.append(f"  - 出典:{source}")
     return "\n".join(lines)
 
 
