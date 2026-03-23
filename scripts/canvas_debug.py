@@ -761,6 +761,99 @@ def run(canvas_id: str, channel_id: str | None,
 
 
 # --------------------------------------------------------------------------- #
+# タブ削除（properties.tabs 直接操作の試み）
+# --------------------------------------------------------------------------- #
+
+def _cmd_remove_tab(channel_id: str, tab_id: str) -> None:
+    """
+    properties.tabs から特定タブエントリの削除を複数のAPIで順番に試みる。
+    どれが有効かは Slack の実装次第のため、成功したものを記録する。
+    """
+    client = get_client()
+
+    def p(*a, **kw): print(*a, **kw)
+
+    p(_sep(f"タブ削除: channel={channel_id}  tab_id={tab_id}"))
+    p()
+
+    # ── 現在の properties.tabs を取得 ──────────────────────────────────────
+    p("【事前確認】 現在の properties.tabs")
+    try:
+        ci = client.conversations_info(channel=channel_id)
+        ch = ci.get("channel", {})
+        props = ch.get("properties") or {}
+        tabs_before = props.get("tabs") or []
+        for t in tabs_before:
+            mark = " ◀ 削除対象" if t.get("id") == tab_id else ""
+            fid = (t.get("data") or {}).get("file_id", "")
+            p(f"  [{t.get('id','')}] type={t.get('type','')} file_id={fid!r} label={t.get('label','')!r}{mark}")
+        target = next((t for t in tabs_before if t.get("id") == tab_id), None)
+        if not target:
+            p(f"  → tab_id={tab_id!r} は properties.tabs に見当たりません（既に削除済み？）")
+            return
+    except SlackApiError as e:
+        p(f"  ERROR: conversations.info 失敗: {e.response.get('error', e)}")
+        return
+    p()
+
+    candidates = [
+        # (説明, api_method, payload)
+        ("bookmarks.remove",
+         "bookmarks.remove",
+         {"channel_id": channel_id, "bookmark_id": tab_id}),
+
+        ("conversations.tabs.delete (tab_id)",
+         "conversations.tabs.delete",
+         {"channel_id": channel_id, "tab_id": tab_id}),
+
+        ("conversations.tabs.remove (tab_id)",
+         "conversations.tabs.remove",
+         {"channel_id": channel_id, "tab_id": tab_id}),
+
+        ("conversations.canvas.tab.delete",
+         "conversations.canvas.tab.delete",
+         {"channel_id": channel_id, "tab_id": tab_id}),
+
+        ("admin.conversations.setProperties (tabs上書き)",
+         "admin.conversations.setProperties",
+         {"channel_id": channel_id,
+          "properties": {"tabs": [t for t in tabs_before if t.get("id") != tab_id]}}),
+    ]
+
+    for desc, method, payload in candidates:
+        p(f"── 試行: {desc}")
+        try:
+            resp = client.api_call(method, http_verb="POST", json=payload)
+            if resp.get("ok"):
+                p(f"  ✅ 成功！  ({method})")
+                break
+            else:
+                err = resp.get("error", "unknown")
+                p(f"  ❌ {err}")
+        except Exception as e:
+            p(f"  ❌ {e}")
+        p()
+
+    p()
+    p("【事後確認】 properties.tabs")
+    try:
+        ci2 = client.conversations_info(channel=channel_id)
+        tabs_after = (ci2.get("channel", {}).get("properties") or {}).get("tabs") or []
+        for t in tabs_after:
+            fid = (t.get("data") or {}).get("file_id", "")
+            p(f"  [{t.get('id','')}] type={t.get('type','')} file_id={fid!r} label={t.get('label','')!r}")
+        removed = not any(t.get("id") == tab_id for t in tabs_after)
+        p()
+        if removed:
+            p(f"  ✅ tab_id={tab_id!r} が削除されました")
+        else:
+            p(f"  ❌ tab_id={tab_id!r} は依然として残っています")
+            p(f"     Slack UI でタブを右クリック → 「タブを閉じる」で手動削除してください")
+    except SlackApiError as e:
+        p(f"  ERROR: conversations.info 失敗: {e.response.get('error', e)}")
+
+
+# --------------------------------------------------------------------------- #
 # エントリポイント
 # --------------------------------------------------------------------------- #
 
@@ -805,6 +898,9 @@ def main() -> None:
                         help="--recreate 時の Canvas タイトル（省略時: 元のタイトルを使用）")
     parser.add_argument("--yes", action="store_true",
                         help="確認プロンプトをスキップ")
+    parser.add_argument("--remove-tab", metavar="TAB_ID",
+                        help="-c と組み合わせて properties.tabs のエントリを削除する"
+                             "（Ct0... 形式のタブID）。複数のAPIを順番に試みる")
     parser.add_argument("--output", default=None, metavar="PATH",
                         help="結果をファイルにも保存")
     args = parser.parse_args()
@@ -824,6 +920,14 @@ def main() -> None:
         map_set(args.channel, args.register, args.title or "")
         print(f"✓ 登録しました: {args.channel} → {args.register}")
         print(f"  マップファイル: {CANVAS_MAP_PATH}")
+        return
+
+    # --remove-tab
+    if args.remove_tab:
+        if not args.channel:
+            print("ERROR: --remove-tab には -c CHANNEL_ID が必要です", file=sys.stderr)
+            sys.exit(1)
+        _cmd_remove_tab(args.channel, args.remove_tab)
         return
 
     # Canvas ID を解決
