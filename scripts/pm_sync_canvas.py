@@ -38,7 +38,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from slack_bolt import App
+from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -66,14 +66,14 @@ def fetch_canvas_content(canvas_id: str) -> str:
               file=sys.stderr)
         sys.exit(1)
 
-    app = App(token=token)
+    client = WebClient(token=token)
 
     # 1. canvases_sections_lookup（テーブル行 + チェックボックスセクション）
     try:
         all_sections: list[str] = []
         for criteria_text in ["|", "checked"]:
             try:
-                sections_resp = app.client.canvases_sections_lookup(
+                sections_resp = client.canvases_sections_lookup(
                     canvas_id=canvas_id,
                     criteria={"contains_text": criteria_text},
                 )
@@ -91,7 +91,7 @@ def fetch_canvas_content(canvas_id: str) -> str:
 
     # 2. files.info の url_private をダウンロード
     try:
-        resp = app.client.files_info(file=canvas_id)
+        resp = client.files_info(file=canvas_id)
         file_info = resp.get("file", {})
         url = file_info.get("url_private") or file_info.get("url_private_download", "")
         if url:
@@ -215,9 +215,9 @@ def fetch_canvas_markdown(canvas_id: str) -> str:
     token = os.getenv("SLACK_USER_TOKEN")
     if not token:
         return ""
-    app = App(token=token)
+    client = WebClient(token=token)
     try:
-        resp = app.client.files_info(file=canvas_id)
+        resp = client.files_info(file=canvas_id)
         file_info = resp.get("file", {})
         url = file_info.get("url_private") or file_info.get("url_private_download", "")
         if url:
@@ -581,11 +581,10 @@ def main() -> None:
         log("\n===== Canvas セクションオブジェクト全体 (canvases_sections_lookup) =====")
         token = os.getenv("SLACK_USER_TOKEN", "")
         if token:
-            from slack_bolt import App as _App
-            _app = _App(token=token)
+            _client = WebClient(token=token)
             for criteria_text in ["|", "[D:"]:
                 try:
-                    resp = _app.client.canvases_sections_lookup(
+                    resp = _client.canvases_sections_lookup(
                         canvas_id=args.canvas_id,
                         criteria={"contains_text": criteria_text},
                     )
