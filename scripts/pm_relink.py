@@ -469,13 +469,23 @@ def main():
                         help="--export / --list 時に全アイテム対象（デフォルトは milestone_id IS NULL のみ）")
     parser.add_argument("--output", default="relink.csv", metavar="PATH",
                         help="--export 時の出力ファイルパス（デフォルト: relink.csv）")
-    parser.add_argument("--db", default="data/pm.db", metavar="PATH",
-                        help="pm.db のパス（デフォルト: data/pm.db）")
+    parser.add_argument("--db", default=None, metavar="PATH",
+                        help="pm.db のパス（必須）")
     add_no_encrypt_arg(parser)
     add_dry_run_arg(parser)
     add_since_arg(parser, "（--export / --list 時のフィルタ）")
 
     args = parser.parse_args()
+
+    if args.db is None:
+        print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  例:", file=sys.stderr)
+        print("    --db data/pm.db       # Leader_Meeting / Co-design_Review_Meeting", file=sys.stderr)
+        print("    --db data/pm-hpc.db   # Block*_Meeting / SubWG*_Meeting", file=sys.stderr)
+        print("    --db data/pm-bmt.db   # BenchmarkWG_Meeting", file=sys.stderr)
+        sys.exit(1)
+
     conn = open_db(args.db, encrypt=not args.no_encrypt, migrations=[_AUDIT_LOG_DDL])
 
     if args.export:
