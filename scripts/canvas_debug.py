@@ -646,7 +646,8 @@ def run(canvas_id: str, channel_id: str | None,
         # チャンネルタブの確認
         team_id: str = ""
         domain: str = ""
-        # is_channel_canvas: True → 削除後に conversations.canvases.create で再作成
+        old_tab_id: str = ""   # 削除すべき古いタブエントリのID
+        # is_channel_canvas: True → canvases.create を使わず conversations.canvases.create のみ
         is_channel_canvas = force_channel_canvas  # --channel-canvas で強制
         if channel_id and not force_channel_canvas:
             # conversations.info の properties.tabs / meeting_notes でタブ検索
@@ -660,8 +661,9 @@ def run(canvas_id: str, channel_id: str | None,
                         fid = (tab.get("data") or {}).get("file_id", "")
                         if fid == canvas_id:
                             is_channel_canvas = True
+                            old_tab_id = tab.get("id", "")
                             label = tab.get("label", "")
-                            p(f"  チャンネルタブ検出（properties.{field}）: id={tab.get('id')} label={label!r}")
+                            p(f"  チャンネルタブ検出（properties.{field}）: id={old_tab_id!r} label={label!r}")
                             p("  → 削除後に conversations.canvases.create で再作成します")
                             break
                     if is_channel_canvas:
@@ -684,14 +686,6 @@ def run(canvas_id: str, channel_id: str | None,
                     p(f"  WARN: conversations.info 失敗: {err}")
         else:
             p("  ヒント: -c CHANNEL_ID を指定するとタブの自動付け替えが有効になります")
-        if channel_id:
-            try:
-                auth = client.auth_test()
-                team_id = auth.get("team_id", "")
-                domain  = (auth.get("url", "").rstrip("/")
-                           .removeprefix("https://").removeprefix("http://"))
-            except SlackApiError:
-                pass
 
         if not yes:
             ans = input(
@@ -701,42 +695,63 @@ def run(canvas_id: str, channel_id: str | None,
                 p("  キャンセルしました")
                 return
 
-        new_id = recreate_canvas(client, canvas_id, title, p)
-        if not new_id:
-            return
-
-        # canvas_map.json 更新
-        if channel_id:
-            map_set(channel_id, new_id, title)
-            p(f"  ✓ canvas_map.json を更新しました ({channel_id} → {new_id})")
-
-        # チャンネルタブの付け替え / 新規追加
         if channel_id and (is_channel_canvas or add_tab):
+            # ─── チャンネルタブモード ───────────────────────────────────────
+            # conversations.canvases.create のみ使用（canvases.create は呼ばない）
             p()
-            p("  ── チャンネルCanvasタブ付け替え ──")
+            p("  ── チャンネルCanvasタブとして再作成 ──")
+
+            # Step 1: 旧 Canvas ファイルを削除
+            try:
+                client.canvases_delete(canvas_id=canvas_id)
+                p(f"  ✓ 旧 Canvas を削除しました ({canvas_id})")
+            except SlackApiError as e:
+                p(f"  ERROR: Canvas 削除失敗: {e.response.get('error', e)}")
+                return
+
+            # Step 2: 新 Canvas をチャンネルタブとして作成
+            new_id: str | None = None
             try:
                 resp = client.conversations_canvases_create(
                     channel_id=channel_id,
                     document_content={"type": "markdown", "markdown": f"# {title}\n"},
                 )
-                # 新 Canvas ID をレスポンスから取得して canvas_map.json を再更新
-                new_tab_id = (resp.get("canvas_id")
-                              or (resp.get("file") or {}).get("id")
-                              or (((resp.get("channel") or {}).get("properties") or {})
-                                  .get("meeting_notes") or {}).get("file_id"))
-                if new_tab_id and new_tab_id != new_id:
-                    # conversations.canvases.create が別 ID を生成した場合
-                    p(f"  ✓ チャンネルCanvasタブとして新規作成しました")
-                    p(f"  　 Canvas ID (tab): {new_tab_id}")
-                    p(f"  　 Canvas ID (standalone): {new_id}  ← canvas_map.json を tab ID に更新")
-                    if channel_id:
-                        map_set(channel_id, new_tab_id, title)
-                        p(f"  ✓ canvas_map.json を更新しました ({channel_id} → {new_tab_id})")
-                else:
-                    p(f"  ✓ conversations.canvases.create で新 Canvas をチャンネルに設定しました")
-                p("  ※ 新しい Canvas ID は conversations.info の properties.tabs で確認できます")
+                new_id = (resp.get("canvas_id")
+                          or (resp.get("file") or {}).get("id")
+                          or (((resp.get("channel") or {}).get("properties") or {})
+                              .get("meeting_notes") or {}).get("file_id"))
+                p(f"  ✓ 新 Canvas をチャンネルタブとして作成しました (ID: {new_id})")
             except SlackApiError as e:
-                p(f"  WARN: conversations.canvases.create 失敗: {e.response.get('error', e)}")
+                p(f"  ERROR: conversations.canvases.create 失敗: {e.response.get('error', e)}")
+                return
+
+            # Step 3: 旧タブエントリを削除（stale tab cleanup）
+            if old_tab_id:
+                try:
+                    client.api_call(
+                        "conversations.canvases.delete",
+                        http_verb="POST",
+                        json={"channel_id": channel_id, "canvas_id": canvas_id},
+                    )
+                    p(f"  ✓ 旧タブエントリを削除しました (tab_id={old_tab_id!r})")
+                except Exception as e:
+                    p(f"  WARN: 旧タブエントリの削除失敗: {e}")
+                    p(f"       Slack UI 上で古いタブが残る場合があります（手動削除が必要）")
+
+            # Step 4: canvas_map.json 更新
+            if new_id and channel_id:
+                map_set(channel_id, new_id, title)
+                p(f"  ✓ canvas_map.json を更新しました ({channel_id} → {new_id})")
+            p(f"  ※ タブの確認: --show-bookmarks で properties.tabs を再確認してください")
+
+        else:
+            # ─── スタンドアロンモード ────────────────────────────────────────
+            new_id = recreate_canvas(client, canvas_id, title, p)
+            if not new_id:
+                return
+            if channel_id:
+                map_set(channel_id, new_id, title)
+                p(f"  ✓ canvas_map.json を更新しました ({channel_id} → {new_id})")
         p()
 
 
