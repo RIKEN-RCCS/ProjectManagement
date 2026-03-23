@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
 from cli_utils import add_no_encrypt_arg, add_output_arg
 
-from slack_bolt import App
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -786,13 +785,13 @@ def sanitize_for_canvas(text: str) -> str:
     return text
 
 
-def _collect_section_ids(app: App, canvas_id: str) -> list[str]:
+def _collect_section_ids(client: WebClient, canvas_id: str) -> list[str]:
     """Canvas の全セクション ID を収集する（複数クエリで網羅）"""
     seen: set[str] = set()
     ids: list[str] = []
     for text in ["|", "##", "- ", "【", "project", "アクション"]:
         try:
-            resp = app.client.canvases_sections_lookup(
+            resp = client.canvases_sections_lookup(
                 canvas_id=canvas_id,
                 criteria={"contains_text": text},
             )
@@ -812,19 +811,19 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         print("ERROR: SLACK_USER_TOKEN を設定してください", file=sys.stderr)
         sys.exit(1)
     print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
-    app = App(token=token)
+    client = WebClient(token=token)
 
     try:
-        section_ids = _collect_section_ids(app, canvas_id)
+        section_ids = _collect_section_ids(client, canvas_id)
         if section_ids:
             print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
             for sid in section_ids:
-                app.client.canvases_edit(
+                client.canvases_edit(
                     canvas_id=canvas_id,
                     changes=[{"operation": "delete", "section_id": sid}],
                 )
 
-        app.client.canvases_edit(
+        client.canvases_edit(
             canvas_id=canvas_id,
             changes=[{
                 "operation": "insert_at_start",

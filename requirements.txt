@@ -2,7 +2,6 @@
 # slack_pipeline.py, pm_extractor.py, meeting_parser.py で使用
 
 # Slack SDK
-slack-bolt
 slack-sdk
 
 # MCP (Model Context Protocol) client

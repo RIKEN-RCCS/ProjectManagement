@@ -1024,7 +1024,7 @@ def _reconstruct_minutes_md(held_at: str, kind: str, data: dict) -> str:
     return "\n".join(lines)
 
 
-def _upload_md_file(app, channel_id: str, md_path: Path | None,
+def _upload_md_file(client, channel_id: str, md_path: Path | None,
                     held_at: str, kind: str, log,
                     fallback_content: str | None = None,
                     thread_ts: str | None = None) -> str | None:
@@ -1063,7 +1063,7 @@ def _upload_md_file(app, channel_id: str, md_path: Path | None,
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
     try:
-        resp = app.client.files_upload_v2(**kwargs)
+        resp = client.files_upload_v2(**kwargs)
         # レスポンスから permalink を取得（"file" キーが dict またはリストの場合に対応）
         file_obj = resp.get("file") or (resp.get("files") or [None])[0]
         permalink = file_obj.get("permalink") if file_obj else None
@@ -1080,7 +1080,7 @@ def _upload_md_file(app, channel_id: str, md_path: Path | None,
 
 def cmd_post_to_slack(args, minutes_dir: Path, meetings_dir: Path, log) -> None:
     """議事録ファイルを Slack チャンネルにアップロードする"""
-    from slack_bolt import App
+    from slack_sdk import WebClient
 
     db_path = db_path_for_kind(minutes_dir, args.meeting_name)
     if not db_path.exists():
@@ -1157,10 +1157,10 @@ def cmd_post_to_slack(args, minutes_dir: Path, meetings_dir: Path, log) -> None:
 
     token, token_kind = _get_slack_token()
     log(f"[INFO] トークン種別: {token_kind}")
-    app = App(token=token)
+    client = WebClient(token=token)
 
     fallback = _reconstruct_minutes_md(args.held_at, args.meeting_name, data) if not md_path else None
-    permalink = _upload_md_file(app, args.channel, md_path, args.held_at, args.meeting_name, log,
+    permalink = _upload_md_file(client, args.channel, md_path, args.held_at, args.meeting_name, log,
                                 fallback_content=fallback, thread_ts=thread_ts)
 
     if permalink:

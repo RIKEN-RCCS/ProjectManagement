@@ -362,8 +362,7 @@ python3 scripts/pm_report.py ...
 ### 必要パッケージ
 
 ```
-slack-sdk    # Slack API（メッセージ取得・ファイル投稿等）
-slack-bolt   # Canvas API（canvases_sections_lookup / canvases_edit）
+slack-sdk    # Slack API（メッセージ取得・ファイル投稿・Canvas操作等）
 ```
 
 ### Slack User Token の取得
