@@ -141,4 +141,8 @@ export OPENAI_MODEL="..."
 
 ---
 
+@docs/canvas_api.md
+
+---
+
 @docs/roadmap.md
