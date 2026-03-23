@@ -373,8 +373,8 @@ def recreate_canvas(client: WebClient, old_canvas_id: str, title: str, p) -> str
 
 def run(canvas_id: str, channel_id: str | None,
         show_raw: bool, show_bookmarks: bool, delete_all: bool,
-        include_title: bool, recreate: bool, new_title: str | None,
-        yes: bool, out) -> None:
+        include_title: bool, recreate: bool, force_channel_canvas: bool,
+        new_title: str | None, yes: bool, out) -> None:
     client = get_client()
 
     def p(*args, **kwargs):
@@ -636,8 +636,8 @@ def run(canvas_id: str, channel_id: str | None,
         team_id: str = ""
         domain: str = ""
         # チャンネルCanvasタブ種別の判定
-        is_channel_canvas = False  # conversations.info 由来のチャンネルCanvas
-        if channel_id:
+        is_channel_canvas = force_channel_canvas  # --channel-canvas で強制
+        if channel_id and not force_channel_canvas:
             # (A) conversations.info でチャンネルCanvasタブを確認
             try:
                 ci = client.conversations_info(channel=channel_id)
@@ -652,7 +652,14 @@ def run(canvas_id: str, channel_id: str | None,
                         p(f"  チャンネルCanvasタブ検出（conversations.info）: {ch_canvas_id}")
                         p("  → 削除後に conversations.canvases.create で再作成します")
             except SlackApiError as e:
-                p(f"  WARN: conversations.info 失敗: {e.response.get('error', e)}")
+                err = e.response.get("error", str(e))
+                if err == "missing_scope":
+                    p(f"  WARN: conversations.info にスコープ不足 (channels:read または groups:read)")
+                    p(f"  → タブ種別を自動判定できません。")
+                    p(f"     チャンネルCanvasタブの場合: --channel-canvas フラグを追加してください")
+                    p(f"     ブックマークタブの場合:     そのまま続行（bookmarks.list で検出）")
+                else:
+                    p(f"  WARN: conversations.info 失敗: {err}")
 
             # (B) bookmarks.list でブックマークタブを確認
             if not is_channel_canvas:
@@ -765,6 +772,9 @@ def main() -> None:
     parser.add_argument("--recreate", action="store_true",
                         help="Canvas を削除して新規作成（テーブル等も完全消去）"
                              " -c 指定時は新 ID を canvas_map.json に自動保存")
+    parser.add_argument("--channel-canvas", action="store_true",
+                        help="--recreate 時、チャンネルCanvasタブとして再作成を強制"
+                             "（conversations.info に missing_scope が出る場合に使用）")
     parser.add_argument("--title", default=None, metavar="TEXT",
                         help="--recreate 時の Canvas タイトル（省略時: 元のタイトルを使用）")
     parser.add_argument("--yes", action="store_true",
@@ -818,8 +828,8 @@ def main() -> None:
 
     try:
         run(canvas_id, channel_id, args.show_raw, args.show_bookmarks,
-            args.delete_all, args.include_title, args.recreate, args.title,
-            args.yes, out)
+            args.delete_all, args.include_title, args.recreate,
+            args.channel_canvas, args.title, args.yes, out)
     finally:
         if out:
             out.close()
