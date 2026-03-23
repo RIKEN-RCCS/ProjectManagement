@@ -272,6 +272,66 @@ def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
 # メイン出力
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# チャンネルタブ（ブックマーク）操作
+# --------------------------------------------------------------------------- #
+
+def get_workspace_domain(client: WebClient) -> str:
+    """auth.test から workspace の URL ドメインを返す（例: fugakunextfs.slack.com）"""
+    try:
+        resp = client.auth_test()
+        return resp.get("url", "").rstrip("/").removeprefix("https://").removeprefix("http://")
+    except SlackApiError:
+        return "slack.com"
+
+
+def find_canvas_bookmark(client: WebClient, channel_id: str,
+                         canvas_id: str) -> dict | None:
+    """
+    チャンネルのブックマーク一覧から、指定 canvas_id を参照しているものを返す。
+    見つからなければ None。
+    """
+    try:
+        resp = client.bookmarks_list(channel_id=channel_id)
+        for bm in resp.get("bookmarks", []):
+            link = bm.get("link", "")
+            if canvas_id in link:
+                return bm
+    except SlackApiError:
+        pass
+    return None
+
+
+def remove_bookmark(client: WebClient, channel_id: str, bookmark_id: str) -> bool:
+    """チャンネルからブックマークを削除する。成功時 True。"""
+    try:
+        client.bookmarks_remove(channel_id=channel_id, bookmark_id=bookmark_id)
+        return True
+    except SlackApiError as e:
+        print(f"  WARN: ブックマーク削除失敗: {e.response.get('error', e)}")
+        return False
+
+
+def add_canvas_bookmark(client: WebClient, channel_id: str, canvas_id: str,
+                        title: str, team_id: str, domain: str) -> bool:
+    """
+    新しい Canvas をチャンネルのタブ（ブックマーク）として追加する。
+    canvas URL: https://{domain}/docs/{team_id}/{canvas_id}
+    """
+    canvas_url = f"https://{domain}/docs/{team_id}/{canvas_id}"
+    try:
+        client.bookmarks_add(
+            channel_id=channel_id,
+            title=title,
+            type="link",
+            link=canvas_url,
+        )
+        return True
+    except SlackApiError as e:
+        print(f"  WARN: ブックマーク追加失敗: {e.response.get('error', e)}")
+        return False
+
+
 def recreate_canvas(client: WebClient, old_canvas_id: str, title: str, p) -> str | None:
     """
     既存 Canvas を削除して同名の新規 Canvas を作成する。
@@ -514,11 +574,34 @@ def run(canvas_id: str, channel_id: str | None,
     # ── 7. --recreate ───────────────────────────────────────────────────────
     if recreate:
         p(_sep("7. Canvas 削除 & 新規作成"))
-        p("  !! 警告: 旧 Canvas ID は無効になります。CLAUDE.md 等の更新が必要です !!")
+        p("  !! 警告: 旧 Canvas ID は無効になります。canvas_map.json は自動更新されます !!")
         p()
         title = new_title or file_info.get("title") or file_info.get("name") or "Canvas"
         p(f"  対象 Canvas ID : {canvas_id}")
         p(f"  新 Canvas タイトル: {title}")
+
+        # チャンネルタブ（ブックマーク）の確認
+        old_bookmark: dict | None = None
+        team_id: str = ""
+        domain: str = ""
+        if channel_id:
+            old_bookmark = find_canvas_bookmark(client, channel_id, canvas_id)
+            if old_bookmark:
+                p(f"  チャンネルタブ検出: bookmark_id={old_bookmark['id']}"
+                  f"  title={old_bookmark.get('title', '')!r}")
+                p("  → 削除後に新 Canvas を同じタブとして再登録します")
+            else:
+                p("  チャンネルタブ: なし（タブへの再登録はスキップ）")
+            try:
+                auth = client.auth_test()
+                team_id = auth.get("team_id", "")
+                domain  = (auth.get("url", "").rstrip("/")
+                           .removeprefix("https://").removeprefix("http://"))
+            except SlackApiError:
+                pass
+        else:
+            p("  ヒント: -c CHANNEL_ID を指定するとタブの自動付け替えが有効になります")
+
         if not yes:
             ans = input(
                 f"  Canvas {canvas_id} を削除して再作成しますか？ [y/N]: "
@@ -526,13 +609,30 @@ def run(canvas_id: str, channel_id: str | None,
             if ans != "y":
                 p("  キャンセルしました")
                 return
+
         new_id = recreate_canvas(client, canvas_id, title, p)
-        if new_id and channel_id:
+        if not new_id:
+            return
+
+        # canvas_map.json 更新
+        if channel_id:
             map_set(channel_id, new_id, title)
             p(f"  ✓ canvas_map.json を更新しました ({channel_id} → {new_id})")
-        elif new_id and not channel_id:
+
+        # チャンネルタブの付け替え
+        if channel_id and old_bookmark and team_id:
             p()
-            p("  ヒント: -c CHANNEL_ID を指定すると canvas_map.json に自動保存できます")
+            p("  ── チャンネルタブ付け替え ──")
+            # 旧タブ削除
+            if remove_bookmark(client, channel_id, old_bookmark["id"]):
+                p(f"  ✓ 旧タブを削除しました (bookmark_id={old_bookmark['id']})")
+            # 新タブ追加
+            if add_canvas_bookmark(client, channel_id, new_id, title, team_id, domain):
+                canvas_url = f"https://{domain}/docs/{team_id}/{new_id}"
+                p(f"  ✓ 新タブを追加しました: {canvas_url}")
+            else:
+                p("  !! タブ追加失敗。手動でチャンネルにタブとして追加してください")
+                p(f"     Canvas ID: {new_id}")
         p()
 
 
