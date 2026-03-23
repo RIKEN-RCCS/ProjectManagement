@@ -285,20 +285,25 @@ def get_workspace_domain(client: WebClient) -> str:
         return "slack.com"
 
 
-def find_canvas_bookmark(client: WebClient, channel_id: str,
-                         canvas_id: str) -> dict | None:
+def list_bookmarks(client: WebClient, channel_id: str) -> tuple[list[dict], str]:
     """
-    チャンネルのブックマーク一覧から、指定 canvas_id を参照しているものを返す。
-    見つからなければ None。
+    チャンネルのブックマーク一覧を返す。
+    戻り値: (bookmarks_list, error_message_or_empty)
     """
     try:
         resp = client.bookmarks_list(channel_id=channel_id)
-        for bm in resp.get("bookmarks", []):
-            link = bm.get("link", "")
-            if canvas_id in link:
-                return bm
-    except SlackApiError:
-        pass
+        return resp.get("bookmarks", []), ""
+    except SlackApiError as e:
+        return [], e.response.get("error", str(e))
+
+
+def find_canvas_bookmark(bookmarks: list[dict], canvas_id: str) -> dict | None:
+    """ブックマーク一覧から canvas_id を含むものを返す。"""
+    for bm in bookmarks:
+        link = bm.get("link", "") or ""
+        entity_id = bm.get("entity_id", "") or ""
+        if canvas_id in link or canvas_id in entity_id:
+            return bm
     return None
 
 
@@ -367,7 +372,7 @@ def recreate_canvas(client: WebClient, old_canvas_id: str, title: str, p) -> str
 
 
 def run(canvas_id: str, channel_id: str | None,
-        show_raw: bool, delete_all: bool,
+        show_raw: bool, show_bookmarks: bool, delete_all: bool,
         include_title: bool, recreate: bool, new_title: str | None,
         yes: bool, out) -> None:
     client = get_client()
@@ -379,6 +384,25 @@ def run(canvas_id: str, channel_id: str | None,
 
     p(_sep(f"Canvas Debug: {canvas_id}"))
     p()
+
+    # ── 0. チャンネルブックマーク一覧（-c + --show-bookmarks 時）──────────
+    if channel_id and show_bookmarks:
+        p(_sep("0. チャンネルブックマーク一覧"))
+        bookmarks_preview, bm_err = list_bookmarks(client, channel_id)
+        if bm_err:
+            p(f"  ERROR: bookmarks.list 失敗: {bm_err}")
+            p("  → User Token に bookmarks:read スコープが必要です")
+        elif not bookmarks_preview:
+            p("  （ブックマークなし）")
+        else:
+            for bm in bookmarks_preview:
+                p(f"  id:       {bm.get('id', '')}")
+                p(f"  title:    {bm.get('title', '')!r}")
+                p(f"  type:     {bm.get('type', '')}")
+                p(f"  link:     {bm.get('link', '')}")
+                p(f"  entity_id:{bm.get('entity_id', '')}")
+                p()
+        p()
 
     # ── 1. files.info ──────────────────────────────────────────────────────
     p(_sep("1. files.info"))
@@ -582,16 +606,27 @@ def run(canvas_id: str, channel_id: str | None,
 
         # チャンネルタブ（ブックマーク）の確認
         old_bookmark: dict | None = None
+        bookmarks: list[dict] = []
         team_id: str = ""
         domain: str = ""
         if channel_id:
-            old_bookmark = find_canvas_bookmark(client, channel_id, canvas_id)
-            if old_bookmark:
-                p(f"  チャンネルタブ検出: bookmark_id={old_bookmark['id']}"
-                  f"  title={old_bookmark.get('title', '')!r}")
-                p("  → 削除後に新 Canvas を同じタブとして再登録します")
+            bookmarks, bm_err = list_bookmarks(client, channel_id)
+            if bm_err:
+                p(f"  WARN: bookmarks.list 失敗: {bm_err}")
+                p("  → スコープ不足の場合: bookmarks:read を User Token に追加してください")
             else:
-                p("  チャンネルタブ: なし（タブへの再登録はスキップ）")
+                p(f"  チャンネルのブックマーク一覧 ({len(bookmarks)} 件):")
+                for bm in bookmarks:
+                    bm_id    = bm.get("id", "")
+                    bm_title = bm.get("title", "")
+                    bm_link  = bm.get("link", "") or bm.get("entity_id", "")
+                    p(f"    [{bm_id}] {bm_title!r}  {bm_link[:80]}")
+                old_bookmark = find_canvas_bookmark(bookmarks, canvas_id)
+                if old_bookmark:
+                    p(f"  → 対象 Canvas のタブを検出しました: {old_bookmark.get('id')!r}")
+                    p("     削除後に新 Canvas を同じタブとして再登録します")
+                else:
+                    p(f"  → Canvas ID {canvas_id} に一致するタブなし（タブ付け替えはスキップ）")
             try:
                 auth = client.auth_test()
                 team_id = auth.get("team_id", "")
@@ -662,6 +697,8 @@ def main() -> None:
     # デバッグ・操作
     parser.add_argument("--show-raw", action="store_true",
                         help="files.info 生レスポンスと url_private 全文を表示")
+    parser.add_argument("--show-bookmarks", action="store_true",
+                        help="-c と組み合わせてチャンネルのブックマーク一覧を表示（タブ確認用）")
     parser.add_argument("--delete-all", action="store_true",
                         help="セクション単位でコンテンツ削除（h1 タイトルは保持）")
     parser.add_argument("--include-title", action="store_true",
@@ -721,8 +758,8 @@ def main() -> None:
         out = open(args.output, "w", encoding="utf-8")
 
     try:
-        run(canvas_id, channel_id, args.show_raw, args.delete_all,
-            args.include_title, args.recreate, args.title,
+        run(canvas_id, channel_id, args.show_raw, args.show_bookmarks,
+            args.delete_all, args.include_title, args.recreate, args.title,
             args.yes, out)
     finally:
         if out:
