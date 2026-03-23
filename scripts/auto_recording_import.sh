@@ -238,16 +238,31 @@ if has_available_nodes "ai-h100l-pu"; then
     EXTRA_OPTS=""
     TIME_LIMIT="00:30:00"
     log "[INFO] ai-h100l-pu に空きあり → ai-h100l-pu に投入"
+elif has_available_nodes "a100"; then
+    PARTITION="a100"
+    EXTRA_OPTS=""
+    TIME_LIMIT="24:00:00"
+    log "[INFO] a100 に空きあり → a100 に投入"
+elif has_available_nodes "ai-h200-brc"; then
+    PARTITION="ai-h200-brc"
+    EXTRA_OPTS="--gpus=1"
+    TIME_LIMIT="24:00:00"
+    log "[INFO] ai-h200-brc に空きあり → ai-h200-brc に投入"
+elif has_available_nodes "qc-a100"; then
+    PARTITION="qc-a100"
+    EXTRA_OPTS="--gpus=1"
+    TIME_LIMIT="24:00:00"
+    log "[INFO] qc-a100 に空きあり → qc-a100 に投入"
 elif has_available_nodes "ai-l40s"; then
     PARTITION="ai-l40s"
     EXTRA_OPTS="--gpus=1"
     TIME_LIMIT="24:00:00"
-    log "[INFO] ai-h100l-pu は空きなし、ai-l40s に空きあり → ai-l40s に投入"
+    log "[INFO] ai-l40s に空きあり → ai-l40s に投入"
 elif has_available_nodes "qc-gh200"; then
     PARTITION="qc-gh200"
     EXTRA_OPTS=""
     TIME_LIMIT="24:00:00"
-    log "[INFO] ai-h100l-pu/ai-l40s は空きなし、qc-gh200 に空きあり → qc-gh200 に投入"
+    log "[INFO] qc-gh200 に空きあり → qc-gh200 に投入"
 else
     PARTITION="ai-h100l-pu"
     EXTRA_OPTS=""
