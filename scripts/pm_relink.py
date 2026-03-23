@@ -2,39 +2,47 @@
 """
 pm_relink.py
 
-アクションアイテムの各フィールドをCSVを介して一括編集する。
+アクションアイテムと決定事項をCSVを介して一括編集する。
 LLMは使用しない。
 
-編集可能なフィールド: assignee / due_date / milestone_id / content / status
+1ファイルに2セクション（アクションアイテム / 決定事項）を出力・入力する。
 
 Usage:
-    # 未紐づけ（milestone_id IS NULL）のアイテムをCSVにエクスポート
+    # 未紐づけアイテム + 全決定事項をCSVにエクスポート
     python3 scripts/pm_relink.py --export
 
     # 全アイテムをエクスポート
     python3 scripts/pm_relink.py --export --all
 
-    # 編集済みCSVをDBに反映（空欄 = NULL で上書き）
+    # 編集済みCSVをDBに反映
     python3 scripts/pm_relink.py --import relink.csv
 
     # 反映内容を確認のみ（DB更新なし）
     python3 scripts/pm_relink.py --import relink.csv --dry-run
 
+    # 一覧表示
+    python3 scripts/pm_relink.py --list
+
 Options:
-    --export            アクションアイテムをCSVにエクスポート
+    --export            アクションアイテム + 決定事項をCSVにエクスポート
     --import PATH       CSVを読み込んでDBを更新
-    --all               --export 時に全件対象（デフォルトは milestone_id IS NULL のみ）
+    --list              一覧表示して終了
+    --all               --export / --list 時に全アイテム対象（デフォルトは milestone_id IS NULL のみ）
     --output PATH       --export 時の出力ファイルパス（デフォルト: relink.csv）
     --db PATH           pm.db のパス（デフォルト: data/pm.db）
     --no-encrypt        平文モード（暗号化なし）
     --dry-run           DB更新なし・変更内容を表示のみ
 
-各列のNULL扱い:
+アクションアイテムの編集可能列:
     assignee     空欄 → NULL（担当者なし）
     due_date     空欄 → NULL（期限なし）
     milestone_id 空欄 → NULL（紐づけ解除）
-    content      空欄の場合はスキップ（内容を空にはできない）
+    content      空欄の場合はスキップ（変更なし）
     status       空欄の場合はスキップ。'open' または 'closed' を推奨
+
+決定事項の編集可能列:
+    content      空欄の場合はスキップ（変更なし）
+    decided_at   空欄の場合はスキップ（変更なし）
 """
 
 import argparse
@@ -49,10 +57,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from db_utils import open_db
 from cli_utils import add_no_encrypt_arg, add_dry_run_arg, add_since_arg
 
-# 編集可能なフィールド一覧
-EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status"]
-# 空欄をNULLとして扱うフィールド（content/statusは空欄→スキップ）
-NULLABLE_FIELDS = {"assignee", "due_date", "milestone_id"}
+# アクションアイテムの編集可能フィールド
+AI_EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status"]
+AI_NULLABLE_FIELDS = {"assignee", "due_date", "milestone_id"}
+
+# 決定事項の編集可能フィールド（空欄はスキップ）
+DEC_EDITABLE_FIELDS = ["content", "decided_at"]
 
 _AUDIT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -66,13 +76,17 @@ CREATE TABLE IF NOT EXISTS audit_log (
     source     TEXT
 )"""
 
+_SECTION_ACTIONS   = "# === アクションアイテム ==="
+_SECTION_DECISIONS = "# === 決定事項 ==="
 
-def write_audit_log(conn, record_id: int, field: str, old_value, new_value, source: str) -> None:
-    """変更前の値を audit_log に記録する（dry_run 時は呼ばない）"""
+
+def write_audit_log(conn, table_name: str, record_id: int, field: str,
+                    old_value, new_value, source: str) -> None:
     conn.execute(
         "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
-        " VALUES ('action_items', ?, ?, ?, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
+            table_name,
             str(record_id),
             field,
             str(old_value) if old_value is not None else None,
@@ -100,7 +114,6 @@ def fetch_milestones(conn) -> list[dict]:
 
 
 def milestone_header(milestones: list[dict]) -> str:
-    """CSVの先頭コメント行用にマイルストーン一覧を文字列化する"""
     if not milestones:
         return "# Milestones: (未登録)"
     parts = [
@@ -110,8 +123,7 @@ def milestone_header(milestones: list[dict]) -> str:
     return "# Milestones: " + " / ".join(parts)
 
 
-def format_source(a: dict) -> str:
-    """アクションアイテムの出典を人が読める形式に変換する"""
+def format_ai_source(a: dict) -> str:
     if a.get("source") == "meeting":
         kind = a.get("meeting_kind") or ""
         held = a.get("meeting_held_at") or ""
@@ -120,9 +132,15 @@ def format_source(a: dict) -> str:
     return ref if ref else "Slack"
 
 
+def format_dec_source(d: dict) -> str:
+    if d.get("source") == "meeting":
+        return d.get("source_ref") or "meeting"
+    ref = d.get("source_ref") or ""
+    return ref if ref else "Slack"
+
+
 def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[dict]:
-    conds = []
-    params = []
+    conds, params = [], []
     if not all_items:
         conds.append("a.milestone_id IS NULL")
     if since:
@@ -140,6 +158,21 @@ def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[
     return [dict(r) for r in rows]
 
 
+def fetch_decisions(conn, since: str | None = None) -> list[dict]:
+    conds, params = [], []
+    if since:
+        conds.append("extracted_at >= ?")
+        params.append(since)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    rows = conn.execute(f"""
+        SELECT id, content, decided_at, source, source_ref
+        FROM decisions
+        {where}
+        ORDER BY decided_at IS NULL, decided_at, id
+    """, params).fetchall()
+    return [dict(r) for r in rows]
+
+
 # --------------------------------------------------------------------------- #
 # エクスポート
 # --------------------------------------------------------------------------- #
@@ -147,20 +180,18 @@ def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[
 def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = None):
     milestones = fetch_milestones(conn)
     items = fetch_action_items(conn, all_items, since=since)
-
-    if not items:
-        label = "全件" if all_items else "milestone_id IS NULL"
-        since_msg = f", since={since}" if since else ""
-        print(f"[INFO] 対象アイテムなし（{label}{since_msg}）")
-        return
+    decisions = fetch_decisions(conn, since=since)
 
     lines = []
     lines.append(milestone_header(milestones))
-    lines.append("# 編集可能な列: assignee / due_date / milestone_id / content / status")
+    lines.append("#")
+
+    # --- アクションアイテムセクション ---
+    lines.append(_SECTION_ACTIONS)
+    lines.append("# 編集可能: assignee / due_date / milestone_id / content / status")
     lines.append("# assignee / due_date / milestone_id は空欄 → NULL（解除）")
     lines.append("# content / status は空欄の場合スキップ（変更なし）")
-    lines.append("# source / note は参照用（読み取り専用・--import 時は無視される）")
-    lines.append("# note はCanvasの対応状況列（pm_sync_canvas.py実行後に反映）")
+    lines.append("# source / note は参照用（読み取り専用）")
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
@@ -173,17 +204,35 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
             item["milestone_id"] or "",
             item["status"] or "",
             item["content"] or "",
-            format_source(item),
+            format_ai_source(item),
             item["note"] or "",
         ])
     lines.append(buf.getvalue().rstrip("\n"))
+
+    # --- 決定事項セクション ---
+    lines.append("")
+    lines.append(_SECTION_DECISIONS)
+    lines.append("# 編集可能: content / decided_at（空欄はスキップ）")
+    lines.append("# source は参照用（読み取り専用）")
+
+    buf2 = io.StringIO()
+    writer2 = csv.writer(buf2, lineterminator="\n")
+    writer2.writerow(["id", "content", "decided_at", "source"])
+    for d in decisions:
+        writer2.writerow([
+            d["id"],
+            d["content"] or "",
+            d["decided_at"] or "",
+            format_dec_source(d),
+        ])
+    lines.append(buf2.getvalue().rstrip("\n"))
 
     text = "\n".join(lines) + "\n"
     output_path.write_text(text, encoding="utf-8")
 
     label = "全件" if all_items else "milestone_id IS NULL のみ"
     since_msg = f", since={since}" if since else ""
-    print(f"[INFO] {len(items)} 件をエクスポートしました（{label}{since_msg}）: {output_path}")
+    print(f"[INFO] アクションアイテム {len(items)} 件 + 決定事項 {len(decisions)} 件をエクスポートしました（{label}{since_msg}）: {output_path}")
     print(f"[INFO] 各列を編集後、--import で反映してください")
 
 
@@ -191,65 +240,93 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
 # インポート
 # --------------------------------------------------------------------------- #
 
-def parse_row_values(row: dict) -> dict[str, str | None]:
-    """CSVの1行から更新すべきフィールドと値を返す（スキップは含めない）"""
-    result = {}
-    for field in EDITABLE_FIELDS:
-        if field not in row:
+def _split_sections(text: str) -> tuple[list[str], list[str]]:
+    """ファイルテキストをアクションアイテム行と決定事項行に分割する"""
+    action_lines: list[str] = []
+    decision_lines: list[str] = []
+    current = None
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == _SECTION_ACTIONS:
+            current = "actions"
             continue
-        raw = row[field].strip()
-        if field in NULLABLE_FIELDS:
-            result[field] = raw or None  # 空文字 → None
-        else:
-            # content / status: 空欄はスキップ（変更なし）
-            if raw:
-                result[field] = raw
-    return result
+        if stripped == _SECTION_DECISIONS:
+            current = "decisions"
+            continue
+        if current == "actions":
+            action_lines.append(line)
+        elif current == "decisions":
+            decision_lines.append(line)
+
+    return action_lines, decision_lines
 
 
-def cmd_import(conn, csv_path: Path, dry_run: bool):
-    if not csv_path.exists():
-        print(f"[ERROR] ファイルが見つかりません: {csv_path}", file=sys.stderr)
-        sys.exit(1)
-
-    # コメント行を除いてCSVをパース
-    lines = csv_path.read_text(encoding="utf-8").splitlines()
-    data_lines = [l for l in lines if not l.startswith("#")]
+def _parse_action_rows(lines: list[str]) -> dict[int, dict[str, str | None]]:
+    data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
     reader = csv.DictReader(data_lines)
-
-    csv_rows: dict[int, dict[str, str | None]] = {}
-    skipped = 0
-
+    result: dict[int, dict[str, str | None]] = {}
     for row in reader:
         try:
             item_id = int(row["id"])
         except (KeyError, ValueError):
-            print(f"[WARN] id が不正な行をスキップ: {row}", file=sys.stderr)
-            skipped += 1
+            print(f"[WARN] アクションアイテム: id が不正な行をスキップ: {row}", file=sys.stderr)
             continue
-        csv_rows[item_id] = parse_row_values(row)
+        values: dict[str, str | None] = {}
+        for field in AI_EDITABLE_FIELDS:
+            if field not in row:
+                continue
+            raw = row[field].strip()
+            if field in AI_NULLABLE_FIELDS:
+                values[field] = raw or None
+            else:
+                if raw:
+                    values[field] = raw
+        result[item_id] = values
+    return result
 
+
+def _parse_decision_rows(lines: list[str]) -> dict[int, dict[str, str]]:
+    data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
+    reader = csv.DictReader(data_lines)
+    result: dict[int, dict[str, str]] = {}
+    for row in reader:
+        try:
+            dec_id = int(row["id"])
+        except (KeyError, ValueError):
+            print(f"[WARN] 決定事項: id が不正な行をスキップ: {row}", file=sys.stderr)
+            continue
+        values: dict[str, str] = {}
+        for field in DEC_EDITABLE_FIELDS:
+            if field not in row:
+                continue
+            raw = row[field].strip()
+            if raw:  # 空欄はスキップ
+                values[field] = raw
+        result[dec_id] = values
+    return result
+
+
+def _apply_changes(conn, table: str, csv_rows: dict[int, dict], select_fields: list[str],
+                   dry_run: bool) -> tuple[int, int]:
+    """差分を計算してDBに反映する。(変更フィールド数, 変更レコード数) を返す"""
     if not csv_rows:
-        print("[INFO] 更新対象なし")
-        return
+        return 0, 0
 
-    # 現在値をDBから取得
     placeholders = ",".join("?" * len(csv_rows))
+    field_list = ", ".join(select_fields)
     current: dict[int, dict] = {
         r["id"]: dict(r)
         for r in conn.execute(
-            f"SELECT id, assignee, due_date, milestone_id, content, status"
-            f" FROM action_items WHERE id IN ({placeholders})",
+            f"SELECT id, {field_list} FROM {table} WHERE id IN ({placeholders})",
             list(csv_rows.keys()),
         ).fetchall()
     }
 
-    # 差分を収集: list of (item_id, field, old_value, new_value)
     changes: list[tuple[int, str, any, any]] = []
     for item_id, new_values in csv_rows.items():
         if item_id not in current:
-            print(f"[WARN] ID {item_id} はDBに存在しません。スキップします。", file=sys.stderr)
-            skipped += 1
+            print(f"[WARN] {table} ID {item_id} はDBに存在しません。スキップします。", file=sys.stderr)
             continue
         cur = current[item_id]
         for field, new_val in new_values.items():
@@ -258,50 +335,76 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
                 changes.append((item_id, field, old_val, new_val))
 
     if not changes:
-        print(f"[INFO] 変更なし（{len(csv_rows)} 件すべて現在値と同一）")
-        return
+        return 0, 0
 
-    changed_items = len({item_id for item_id, _, _, _ in changes})
-    skipped_msg = f" / スキップ: {skipped} 件" if skipped else ""
-    print(f"[INFO] 変更: {len(changes)} フィールド / {changed_items} アイテム{skipped_msg}")
-    print()
-
-    # 変更内容プレビュー（アイテムIDごとにグループ表示）
     by_item: dict[int, list] = defaultdict(list)
     for item_id, field, old_val, new_val in changes:
         by_item[item_id].append((field, old_val, new_val))
 
+    label = "アクションアイテム" if table == "action_items" else "決定事項"
     for item_id in sorted(by_item):
-        print(f"  ID:{item_id:4d}")
+        print(f"  [{label}] ID:{item_id:4d}")
         for field, old_val, new_val in by_item[item_id]:
             old_str = str(old_val) if old_val is not None else "NULL"
             new_str = str(new_val) if new_val is not None else "NULL"
             print(f"    {field:<14}: {old_str} → {new_str}")
 
-    if dry_run:
-        print()
-        print("[DRY-RUN] DB は更新されていません")
+    if not dry_run:
+        for item_id, field, old_val, new_val in changes:
+            write_audit_log(conn, table, item_id, field, old_val, new_val, "relink")
+        for item_id, field_changes in by_item.items():
+            set_clause = ", ".join(f"{field} = ?" for field, _, _ in field_changes)
+            values = [new_val for _, _, new_val in field_changes] + [item_id]
+            conn.execute(f"UPDATE {table} SET {set_clause} WHERE id = ?", values)
+
+    return len(changes), len(by_item)
+
+
+def cmd_import(conn, csv_path: Path, dry_run: bool):
+    if not csv_path.exists():
+        print(f"[ERROR] ファイルが見つかりません: {csv_path}", file=sys.stderr)
+        sys.exit(1)
+
+    text = csv_path.read_text(encoding="utf-8")
+    action_lines, decision_lines = _split_sections(text)
+
+    ai_rows  = _parse_action_rows(action_lines)
+    dec_rows = _parse_decision_rows(decision_lines)
+
+    if not ai_rows and not dec_rows:
+        print("[INFO] 更新対象なし")
+        return
+
+    total_fields = total_items = 0
+
+    # アクションアイテム
+    f, i = _apply_changes(conn, "action_items", ai_rows, AI_EDITABLE_FIELDS, dry_run)
+    total_fields += f
+    total_items  += i
+
+    # 決定事項
+    f, i = _apply_changes(conn, "decisions", dec_rows, DEC_EDITABLE_FIELDS, dry_run)
+    total_fields += f
+    total_items  += i
+
+    if total_fields == 0:
+        print(f"[INFO] 変更なし（現在値と同一）")
         return
 
     print()
-    ans = input(
-        f"上記 {changed_items} アイテム（{len(changes)} フィールド）を更新しますか？ [y/N]: "
-    ).strip().lower()
+    print(f"[INFO] 変更: {total_fields} フィールド / {total_items} レコード")
+
+    if dry_run:
+        print("[DRY-RUN] DB は更新されていません")
+        return
+
+    ans = input(f"上記 {total_items} レコード（{total_fields} フィールド）を更新しますか？ [y/N]: ").strip().lower()
     if ans != "y":
         print("[INFO] キャンセルしました")
         return
 
-    # audit_log に記録してからアイテムごとにまとめてUPDATE
-    for item_id, field, old_val, new_val in changes:
-        write_audit_log(conn, item_id, field, old_val, new_val, "relink")
-
-    for item_id, field_changes in by_item.items():
-        set_clause = ", ".join(f"{field} = ?" for field, _, _ in field_changes)
-        values = [new_val for _, _, new_val in field_changes] + [item_id]
-        conn.execute(f"UPDATE action_items SET {set_clause} WHERE id = ?", values)
-
     conn.commit()
-    print(f"[OK] {changed_items} アイテム（{len(changes)} フィールド）を更新しました")
+    print(f"[OK] {total_items} レコード（{total_fields} フィールド）を更新しました")
 
 
 # --------------------------------------------------------------------------- #
@@ -309,25 +412,41 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
 # --------------------------------------------------------------------------- #
 
 def cmd_list(conn, all_items: bool, since: str | None = None):
-    """アクションアイテムをターミナル向け整形テキストで一覧表示する"""
     items = fetch_action_items(conn, all_items, since=since)
     label = "全件" if all_items else "milestone_id IS NULL のみ"
     since_msg = f"（since={since}）" if since else ""
-    print(f"アクションアイテム一覧（{label}{since_msg}）")
-    print("─" * 100)
+
+    print(f"【アクションアイテム】（{label}{since_msg}）")
+    print("─" * 120)
     print(f"{'ID':>4}  {'担当者':<12}  {'期限':<12}  {'MS':<4}  {'状況':<6}  {'出典':<28}  {'内容':<40}  対応状況")
     print("-" * 120)
     for item in items:
-        ai_id    = item["id"]
-        assignee = (item["assignee"] or "(未定)")[:12]
-        due      = (item["due_date"] or "(なし)")[:12]
-        ms       = (item["milestone_id"] or "-")[:4]
-        status   = (item["status"] or "")[:6]
-        source   = format_source(item)[:28]
-        content  = (item["content"] or "")[:40]
-        note     = (item["note"] or "")[:20]
-        print(f"{ai_id:>4}  {assignee:<12}  {due:<12}  {ms:<4}  {status:<6}  {source:<28}  {content:<40}  {note}")
+        print(
+            f"{item['id']:>4}  "
+            f"{(item['assignee'] or '(未定)')[:12]:<12}  "
+            f"{(item['due_date'] or '(なし)')[:12]:<12}  "
+            f"{(item['milestone_id'] or '-')[:4]:<4}  "
+            f"{(item['status'] or '')[:6]:<6}  "
+            f"{format_ai_source(item)[:28]:<28}  "
+            f"{(item['content'] or '')[:40]:<40}  "
+            f"{(item['note'] or '')[:20]}"
+        )
     print(f"\n合計: {len(items)} 件")
+
+    decisions = fetch_decisions(conn, since=since)
+    print()
+    print(f"【決定事項】{since_msg}")
+    print("─" * 120)
+    print(f"{'ID':>4}  {'決定日':<12}  {'出典':<30}  {'内容'}")
+    print("-" * 120)
+    for d in decisions:
+        print(
+            f"{d['id']:>4}  "
+            f"{(d['decided_at'] or '')[:12]:<12}  "
+            f"{format_dec_source(d)[:30]:<30}  "
+            f"{(d['content'] or '')[:60]}"
+        )
+    print(f"\n合計: {len(decisions)} 件")
 
 
 # --------------------------------------------------------------------------- #
@@ -336,15 +455,18 @@ def cmd_list(conn, all_items: bool, since: str | None = None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="アクションアイテムの各フィールドをCSV経由で一括編集する"
+        description="アクションアイテムと決定事項をCSV経由で一括編集する"
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--export", action="store_true", help="CSVにエクスポート")
-    group.add_argument("--import", dest="import_path", metavar="PATH", help="CSVを読み込んでDBを更新")
-    group.add_argument("--list", action="store_true", help="アクションアイテムをターミナルに一覧表示")
+    group.add_argument("--export", action="store_true",
+                       help="アクションアイテム + 決定事項をCSVにエクスポート")
+    group.add_argument("--import", dest="import_path", metavar="PATH",
+                       help="CSVを読み込んでDBを更新")
+    group.add_argument("--list", action="store_true",
+                       help="アクションアイテムと決定事項を一覧表示")
 
     parser.add_argument("--all", action="store_true",
-                        help="--export / --list 時に全件対象（デフォルトは milestone_id IS NULL のみ）")
+                        help="--export / --list 時に全アイテム対象（デフォルトは milestone_id IS NULL のみ）")
     parser.add_argument("--output", default="relink.csv", metavar="PATH",
                         help="--export 時の出力ファイルパス（デフォルト: relink.csv）")
     parser.add_argument("--db", default="data/pm.db", metavar="PATH",
@@ -354,7 +476,6 @@ def main():
     add_since_arg(parser, "（--export / --list 時のフィルタ）")
 
     args = parser.parse_args()
-
     conn = open_db(args.db, encrypt=not args.no_encrypt, migrations=[_AUDIT_LOG_DDL])
 
     if args.export:
