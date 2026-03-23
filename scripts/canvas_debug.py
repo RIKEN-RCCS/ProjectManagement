@@ -385,22 +385,48 @@ def run(canvas_id: str, channel_id: str | None,
     p(_sep(f"Canvas Debug: {canvas_id}"))
     p()
 
-    # ── 0. チャンネルブックマーク一覧（-c + --show-bookmarks 時）──────────
+    # ── 0. チャンネルCanvas状態確認（-c + --show-bookmarks 時）────────────
     if channel_id and show_bookmarks:
-        p(_sep("0. チャンネルブックマーク一覧"))
+        p(_sep("0. チャンネルCanvas状態確認"))
+
+        # (A) conversations.info でチャンネルCanvasタブを確認
+        p("  [A] conversations.info（チャンネルCanvasタブ）")
+        try:
+            ci = client.conversations_info(channel=channel_id)
+            ch = ci.get("channel", {})
+            # Slack はチャンネルCanvasを複数の場所に格納する
+            canvas_fields = {
+                "properties.canvas": (ch.get("properties") or {}).get("canvas"),
+                "canvas":            ch.get("canvas"),
+                "canvas_id":         ch.get("canvas_id"),
+            }
+            found_any = False
+            for key, val in canvas_fields.items():
+                if val:
+                    found_any = True
+                    p(f"    {key}: {json.dumps(val, ensure_ascii=False)}")
+            if not found_any:
+                p("  → チャンネルCanvasタブ（conversations.info）には Canvas なし")
+        except SlackApiError as e:
+            p(f"  ERROR: conversations.info 失敗: {e.response.get('error', e)}")
+
+        p()
+
+        # (B) bookmarks.list でブックマークタブを確認
+        p("  [B] bookmarks.list（ブックマークタブ）")
         bookmarks_preview, bm_err = list_bookmarks(client, channel_id)
         if bm_err:
             p(f"  ERROR: bookmarks.list 失敗: {bm_err}")
             p("  → User Token に bookmarks:read スコープが必要です")
         elif not bookmarks_preview:
-            p("  （ブックマークなし）")
+            p("  → ブックマークなし")
         else:
             for bm in bookmarks_preview:
-                p(f"  id:       {bm.get('id', '')}")
-                p(f"  title:    {bm.get('title', '')!r}")
-                p(f"  type:     {bm.get('type', '')}")
-                p(f"  link:     {bm.get('link', '')}")
-                p(f"  entity_id:{bm.get('entity_id', '')}")
+                p(f"    id:        {bm.get('id', '')}")
+                p(f"    title:     {bm.get('title', '')!r}")
+                p(f"    type:      {bm.get('type', '')}")
+                p(f"    link:      {bm.get('link', '')}")
+                p(f"    entity_id: {bm.get('entity_id', '')}")
                 p()
         p()
 
@@ -609,24 +635,44 @@ def run(canvas_id: str, channel_id: str | None,
         bookmarks: list[dict] = []
         team_id: str = ""
         domain: str = ""
+        # チャンネルCanvasタブ種別の判定
+        is_channel_canvas = False  # conversations.info 由来のチャンネルCanvas
         if channel_id:
-            bookmarks, bm_err = list_bookmarks(client, channel_id)
-            if bm_err:
-                p(f"  WARN: bookmarks.list 失敗: {bm_err}")
-                p("  → スコープ不足の場合: bookmarks:read を User Token に追加してください")
-            else:
-                p(f"  チャンネルのブックマーク一覧 ({len(bookmarks)} 件):")
-                for bm in bookmarks:
-                    bm_id    = bm.get("id", "")
-                    bm_title = bm.get("title", "")
-                    bm_link  = bm.get("link", "") or bm.get("entity_id", "")
-                    p(f"    [{bm_id}] {bm_title!r}  {bm_link[:80]}")
-                old_bookmark = find_canvas_bookmark(bookmarks, canvas_id)
-                if old_bookmark:
-                    p(f"  → 対象 Canvas のタブを検出しました: {old_bookmark.get('id')!r}")
-                    p("     削除後に新 Canvas を同じタブとして再登録します")
+            # (A) conversations.info でチャンネルCanvasタブを確認
+            try:
+                ci = client.conversations_info(channel=channel_id)
+                ch = ci.get("channel", {})
+                ch_canvas = ((ch.get("properties") or {}).get("canvas")
+                             or ch.get("canvas") or ch.get("canvas_id"))
+                if ch_canvas:
+                    ch_canvas_id = (ch_canvas.get("file_id") or ch_canvas
+                                    if isinstance(ch_canvas, dict) else ch_canvas)
+                    if canvas_id in str(ch_canvas_id):
+                        is_channel_canvas = True
+                        p(f"  チャンネルCanvasタブ検出（conversations.info）: {ch_canvas_id}")
+                        p("  → 削除後に conversations.canvases.create で再作成します")
+            except SlackApiError as e:
+                p(f"  WARN: conversations.info 失敗: {e.response.get('error', e)}")
+
+            # (B) bookmarks.list でブックマークタブを確認
+            if not is_channel_canvas:
+                bookmarks, bm_err = list_bookmarks(client, channel_id)
+                if bm_err:
+                    p(f"  WARN: bookmarks.list 失敗: {bm_err}")
+                    p("  → スコープ不足の場合: bookmarks:read を User Token に追加してください")
                 else:
-                    p(f"  → Canvas ID {canvas_id} に一致するタブなし（タブ付け替えはスキップ）")
+                    p(f"  チャンネルのブックマーク一覧 ({len(bookmarks)} 件):")
+                    for bm in bookmarks:
+                        bm_id    = bm.get("id", "")
+                        bm_title = bm.get("title", "")
+                        bm_link  = bm.get("link", "") or bm.get("entity_id", "")
+                        p(f"    [{bm_id}] {bm_title!r}  {bm_link[:80]}")
+                    old_bookmark = find_canvas_bookmark(bookmarks, canvas_id)
+                    if old_bookmark:
+                        p(f"  → ブックマークタブ検出: {old_bookmark.get('id')!r}")
+                        p("     削除後に新 Canvas を同じタブとして再登録します")
+                    else:
+                        p(f"  → Canvas ID {canvas_id} に一致するタブなし（タブ付け替えはスキップ）")
             try:
                 auth = client.auth_test()
                 team_id = auth.get("team_id", "")
@@ -655,13 +701,26 @@ def run(canvas_id: str, channel_id: str | None,
             p(f"  ✓ canvas_map.json を更新しました ({channel_id} → {new_id})")
 
         # チャンネルタブの付け替え
-        if channel_id and old_bookmark and team_id:
+        if channel_id and is_channel_canvas:
+            # (A) チャンネルCanvas（conversations.canvases.create で付け替え）
             p()
-            p("  ── チャンネルタブ付け替え ──")
-            # 旧タブ削除
+            p("  ── チャンネルCanvasタブ付け替え ──")
+            try:
+                client.conversations_canvases_create(
+                    channel_id=channel_id,
+                    document_content={"type": "markdown", "markdown": f"# {title}\n"},
+                )
+                p("  ✓ conversations.canvases.create で新 Canvas をチャンネルに設定しました")
+                p("  ※ 新しく作成された Canvas の ID は conversations.info で確認できます")
+            except SlackApiError as e:
+                p(f"  WARN: conversations.canvases.create 失敗: {e.response.get('error', e)}")
+                p("  → 手動でチャンネルに Canvas タブを追加してください")
+        elif channel_id and old_bookmark and team_id:
+            # (B) ブックマークタブ
+            p()
+            p("  ── ブックマークタブ付け替え ──")
             if remove_bookmark(client, channel_id, old_bookmark["id"]):
                 p(f"  ✓ 旧タブを削除しました (bookmark_id={old_bookmark['id']})")
-            # 新タブ追加
             if add_canvas_bookmark(client, channel_id, new_id, title, team_id, domain):
                 canvas_url = f"https://{domain}/docs/{team_id}/{new_id}"
                 p(f"  ✓ 新タブを追加しました: {canvas_url}")
