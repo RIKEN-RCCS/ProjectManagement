@@ -390,44 +390,64 @@ def run(canvas_id: str, channel_id: str | None,
         p(_sep("0. チャンネルCanvas状態確認"))
 
         # (A) conversations.info でチャンネルCanvasタブを確認
-        p("  [A] conversations.info（チャンネルCanvasタブ）")
+        p("  [A] conversations.info（全フィールド）")
         try:
             ci = client.conversations_info(channel=channel_id)
             ch = ci.get("channel", {})
-            # Slack はチャンネルCanvasを複数の場所に格納する
+            # 既知フィールドを確認
             canvas_fields = {
                 "properties.canvas": (ch.get("properties") or {}).get("canvas"),
                 "canvas":            ch.get("canvas"),
                 "canvas_id":         ch.get("canvas_id"),
             }
-            found_any = False
+            known_found = False
             for key, val in canvas_fields.items():
                 if val:
-                    found_any = True
+                    known_found = True
                     p(f"    {key}: {json.dumps(val, ensure_ascii=False)}")
-            if not found_any:
-                p("  → チャンネルCanvasタブ（conversations.info）には Canvas なし")
+            if not known_found:
+                p("  → 既知フィールド（properties.canvas / canvas / canvas_id）には Canvas なし")
+            # channel オブジェクトの全キーを表示（未知フィールドの発見用）
+            p("  channel オブジェクトのキー一覧:")
+            for k, v in sorted(ch.items()):
+                if k in ("properties", "canvas", "canvas_id"):
+                    continue  # 上で表示済み
+                # 値が空でないものだけ表示
+                if v not in (None, "", False, [], {}):
+                    snippet = json.dumps(v, ensure_ascii=False)
+                    if len(snippet) > 120:
+                        snippet = snippet[:120] + " ..."
+                    p(f"    {k}: {snippet}")
+            # properties の全フィールドも表示
+            props = ch.get("properties") or {}
+            if props:
+                p("  channel.properties:")
+                for k, v in sorted(props.items()):
+                    snippet = json.dumps(v, ensure_ascii=False)
+                    if len(snippet) > 120:
+                        snippet = snippet[:120] + " ..."
+                    p(f"    properties.{k}: {snippet}")
         except SlackApiError as e:
             p(f"  ERROR: conversations.info 失敗: {e.response.get('error', e)}")
 
         p()
 
-        # (B) bookmarks.list でブックマークタブを確認
-        p("  [B] bookmarks.list（ブックマークタブ）")
-        bookmarks_preview, bm_err = list_bookmarks(client, channel_id)
-        if bm_err:
-            p(f"  ERROR: bookmarks.list 失敗: {bm_err}")
-            p("  → User Token に bookmarks:read スコープが必要です")
-        elif not bookmarks_preview:
-            p("  → ブックマークなし")
-        else:
-            for bm in bookmarks_preview:
-                p(f"    id:        {bm.get('id', '')}")
-                p(f"    title:     {bm.get('title', '')!r}")
-                p(f"    type:      {bm.get('type', '')}")
-                p(f"    link:      {bm.get('link', '')}")
-                p(f"    entity_id: {bm.get('entity_id', '')}")
+        # (B) bookmarks.list でブックマークタブを確認（生レスポンス含む）
+        p("  [B] bookmarks.list（生レスポンス）")
+        try:
+            bm_resp = client.bookmarks_list(channel_id=channel_id)
+            p(f"  ok: {bm_resp.get('ok')}")
+            bookmarks_raw = bm_resp.get("bookmarks") or []
+            p(f"  件数: {len(bookmarks_raw)}")
+            for bm in bookmarks_raw:
+                for k, v in sorted(bm.items()):
+                    p(f"    {k}: {json.dumps(v, ensure_ascii=False)}")
                 p()
+            if not bookmarks_raw:
+                p("  → ブックマークなし")
+        except SlackApiError as e:
+            p(f"  ERROR: bookmarks.list 失敗: {e.response.get('error', e)}")
+            p("  → User Token に bookmarks:read スコープが必要です")
         p()
 
     # ── 1. files.info ──────────────────────────────────────────────────────
