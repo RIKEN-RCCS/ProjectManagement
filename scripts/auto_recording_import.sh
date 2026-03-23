@@ -227,6 +227,35 @@ if [[ ${#BATCH_FILES[@]} -eq 0 ]]; then
 fi
 
 # --------------------------------------------------------------------------- #
+# パーティション選択
+# --------------------------------------------------------------------------- #
+has_available_nodes() {
+    sinfo -p "$1" --noheader -o "%t" 2>/dev/null | grep -qE "^(idle|mix)$"
+}
+
+if has_available_nodes "ai-h100l-pu"; then
+    PARTITION="ai-h100l-pu"
+    EXTRA_OPTS=""
+    TIME_LIMIT="00:30:00"
+    log "[INFO] ai-h100l-pu に空きあり → ai-h100l-pu に投入"
+elif has_available_nodes "ai-l40s"; then
+    PARTITION="ai-l40s"
+    EXTRA_OPTS="--gpus=1"
+    TIME_LIMIT="24:00:00"
+    log "[INFO] ai-h100l-pu は空きなし、ai-l40s に空きあり → ai-l40s に投入"
+elif has_available_nodes "qc-gh200"; then
+    PARTITION="qc-gh200"
+    EXTRA_OPTS=""
+    TIME_LIMIT="24:00:00"
+    log "[INFO] ai-h100l-pu/ai-l40s は空きなし、qc-gh200 に空きあり → qc-gh200 に投入"
+else
+    PARTITION="ai-h100l-pu"
+    EXTRA_OPTS=""
+    TIME_LIMIT="00:30:00"
+    log "[INFO] 全パーティション混雑 → デフォルト ai-h100l-pu に投入"
+fi
+
+# --------------------------------------------------------------------------- #
 # 一時バッチスクリプトを生成（全ファイルを1ジョブで順次処理）
 # SLURM_JOB_ID が設定された環境で recording_to_pm.sh を呼ぶと処理モードに入る
 # --------------------------------------------------------------------------- #
@@ -234,7 +263,7 @@ BATCH_SCRIPT=$(mktemp /tmp/auto_batch_XXXXXX.sh)
 {
     echo "#!/bin/bash"
     echo "#SBATCH --nodes=1"
-    echo "#SBATCH --time=24:00:00"
+    echo "#SBATCH --time=${TIME_LIMIT}"
     echo ""
     if [[ -n "$SLACK_CHANNEL" ]]; then
         echo ". ~/.secrets/slack_tokens.sh"
@@ -252,27 +281,6 @@ BATCH_SCRIPT=$(mktemp /tmp/auto_batch_XXXXXX.sh)
         echo ""
     done
 } > "$BATCH_SCRIPT"
-
-# --------------------------------------------------------------------------- #
-# パーティション選択（recording_to_pm.sh と同じロジック）
-# --------------------------------------------------------------------------- #
-has_available_nodes() {
-    sinfo -p "$1" --noheader -o "%t" 2>/dev/null | grep -qE "^(idle|mix)$"
-}
-
-if has_available_nodes "ai-l40s"; then
-    PARTITION="ai-l40s"
-    EXTRA_OPTS="--gpus=1"
-    log "[INFO] ai-l40s に空きあり → ai-l40s に投入"
-elif has_available_nodes "qc-gh200"; then
-    PARTITION="qc-gh200"
-    EXTRA_OPTS=""
-    log "[INFO] qc-gh200 に空きあり → qc-gh200 に投入"
-else
-    PARTITION="ai-l40s"
-    EXTRA_OPTS="--gpus=1"
-    log "[INFO] 両パーティション混雑 → デフォルト ai-l40s に投入"
-fi
 
 # --------------------------------------------------------------------------- #
 # sbatch 投入
