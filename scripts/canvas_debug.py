@@ -67,6 +67,8 @@ SEARCH_TERMS = [
     "project", "status", "action", "milestone",
     # 記号
     "!", "OK", "—", "✓",
+    # 空テーブル対策（スペース1文字・タブ）
+    " ", "\t",
 ]
 
 
@@ -97,7 +99,7 @@ def collect_sections_via_api(client: WebClient, canvas_id: str) -> dict[str, dic
 #   <p  id='temp:C:UeOabc123...'>  → temp:C: プレフィックス付きID（コンテンツ）
 #   data-block-id / data-section-id は別形式の Canvas で使われる場合がある
 _PAT_TAG_WITH_ID = re.compile(
-    r"<(h[1-6]|p|div|ul|ol|li|blockquote|pre|hr)\b[^>]*\sid=['\"]([^'\"]+)['\"]",
+    r"<(h[1-6]|p|div|ul|ol|li|blockquote|pre|hr|table|tbody|thead|tr|td|th)\b[^>]*\sid=['\"]([^'\"]+)['\"]",
     re.IGNORECASE,
 )
 _PAT_DATA_BLOCK = re.compile(r'data-block-id=["\']([^"\']+)["\']')
@@ -268,14 +270,14 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool,
                     p(f"      … 他 {len(temp_pairs) - 5} 件")
 
             p()
-            p("  ─ 先頭 500 文字 ─")
-            p(raw_content[:500])
-            if len(raw_content) > 500:
-                p(f"  … （残り {len(raw_content) - 500} 文字）")
-            if show_raw:
-                p()
-                p("  ─ 全文 ─")
+            # 5KB 以下なら全文表示、それ以上は先頭のみ（--show-raw で全文強制）
+            if len(raw_content) <= 5000 or show_raw:
+                p(f"  ─ HTML 全文 ({len(raw_content)} バイト) ─")
                 p(raw_content)
+            else:
+                p("  ─ 先頭 500 文字 ─")
+                p(raw_content[:500])
+                p(f"  … （残り {len(raw_content) - 500} 文字、--show-raw で全文表示）")
         else:
             p(f"  {raw_content}")
     p()
