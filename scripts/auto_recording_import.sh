@@ -194,12 +194,10 @@ for m4a_file in "${m4a_files[@]}"; do
         if [[ -n "$SLACK_CHANNEL" ]] && ! is_already_posted_to_slack "$held_at" "$meeting_name" "$SLACK_CHANNEL"; then
             log "[SLACK] 議事録DBインポート済み・Slack未投稿 → 直接投稿: $filename"
             # GPU不要のため sbatch を介さず直接実行
-            # shellcheck disable=SC1090
-            source ~/.secrets/slack_tokens.sh 2>>"$LOG_FILE" || true
             # チャンネル単位で未投稿と確認済みのため --force を渡す
             # （pm_minutes_import.py の posted_to_slack_at チェックをバイパス）
-            "$VENV_PYTHON" "$SCRIPT_DIR/pm_minutes_import.py" \
-                --post-to-slack --meeting-name "$meeting_name" --held-at "$held_at" \
+            bash "$SCRIPT_DIR/post_minutes_to_slack.sh" \
+                --meeting-name "$meeting_name" --held-at "$held_at" \
                 -c "$SLACK_CHANNEL" --force 2>&1 | tee -a "$LOG_FILE"
         else
             log "[SKIP] 議事録DBにインポート済み（held_at=${held_at}, meeting=${meeting_name}）: $filename"
@@ -289,8 +287,8 @@ BATCH_SCRIPT=$(mktemp /tmp/auto_batch_XXXXXX.sh)
             "$SCRIPT_DIR" "${BATCH_FILES[$i]}" "${BATCH_HELD_AT[$i]}" "${BATCH_NAMES[$i]}" "${BATCH_DBS[$i]}"
         if [[ -n "$SLACK_CHANNEL" ]]; then
             printf "if [[ \$? -eq 0 ]]; then\n"
-            printf "  '%s' '%s/pm_minutes_import.py' --post-to-slack --meeting-name '%s' --held-at '%s' -c '%s'\n" \
-                "$VENV_PYTHON" "$SCRIPT_DIR" "${BATCH_NAMES[$i]}" "${BATCH_HELD_AT[$i]}" "$SLACK_CHANNEL"
+            printf "  bash '%s/post_minutes_to_slack.sh' --meeting-name '%s' --held-at '%s' -c '%s'\n" \
+                "$SCRIPT_DIR" "${BATCH_NAMES[$i]}" "${BATCH_HELD_AT[$i]}" "$SLACK_CHANNEL"
             printf "fi\n"
         fi
         echo ""
