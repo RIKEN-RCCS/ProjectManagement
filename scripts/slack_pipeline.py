@@ -814,7 +814,7 @@ def _collect_section_ids(client: WebClient, canvas_id: str) -> list[str]:
     ids: list[str] = []
     for m in _PAT_TAG_WITH_ID.finditer(html):
         tag, sid = m.group(1).lower(), m.group(2)
-        if sid in seen or tag == "h1":
+        if sid in seen:
             continue
         seen.add(sid)
         ids.append(sid)
@@ -839,9 +839,10 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         # Step 1: url_private HTML から全セクション ID を収集して削除
         section_ids = _collect_section_ids(client, canvas_id)
         if section_ids:
-            print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
+            total = len(section_ids)
+            print(f"[INFO] 既存セクション {total} 件を削除中...")
             ok = fail = 0
-            for sid in section_ids:
+            for i, sid in enumerate(section_ids, 1):
                 try:
                     client.canvases_edit(
                         canvas_id=canvas_id,
@@ -849,8 +850,11 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
                     )
                     ok += 1
                 except SlackApiError as e:
-                    print(f"[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
+                    print(f"\n[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
                     fail += 1
+                if i % 10 == 0 or i == total:
+                    print(f"\r  進捗: {i}/{total} 件", end="", flush=True)
+            print()  # 改行
             print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
 
         # Step 2: 新コンテンツを先頭に挿入
