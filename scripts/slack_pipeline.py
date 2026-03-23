@@ -817,9 +817,11 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         section_ids = _collect_section_ids(client, canvas_id)
         if section_ids:
             print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
-            changes = [{"operation": "delete", "section_id": sid}
-                       for sid in section_ids]
-            client.canvases_edit(canvas_id=canvas_id, changes=changes)
+            for sid in section_ids:
+                client.canvases_edit(
+                    canvas_id=canvas_id,
+                    changes=[{"operation": "delete", "section_id": sid}],
+                )
 
         client.canvases_edit(
             canvas_id=canvas_id,
