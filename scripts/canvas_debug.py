@@ -5,6 +5,9 @@ canvas_debug.py
 Slack Canvas の詳細状態を表示するデバッグ用スクリプト。
 Canvas に投稿しても既存内容が残ってしまう場合の原因調査に使う。
 
+canvases_sections_lookup でセクションが見つからない場合でも、
+url_private でダウンロードした HTML からセクション ID を抽出して削除できる。
+
 Usage:
     python3 scripts/canvas_debug.py --canvas-id F0AAD2494VB
     python3 scripts/canvas_debug.py --canvas-id F0AAD2494VB --show-raw
@@ -12,7 +15,7 @@ Usage:
 
 Options:
     --canvas-id ID     対象 Canvas ID（必須）
-    --show-raw         files.info の生レスポンスをすべて表示
+    --show-raw         files.info の生レスポンスと url_private 全文を表示
     --delete-all       発見した全セクションを削除して Canvas を空にする（確認プロンプトあり）
     --yes              --delete-all の確認プロンプトをスキップ
     --output PATH      結果をファイルにも保存
@@ -21,6 +24,7 @@ Options:
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -49,27 +53,24 @@ def _sep(title: str = "", width: int = 70) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Section 収集（検索ワードを幅広く試す）
+# Section 収集（canvases_sections_lookup）
 # --------------------------------------------------------------------------- #
 
 SEARCH_TERMS = [
-    # 一般的な Markdown 要素
+    # Markdown 要素
     "|", "##", "# ", "- ", "* ", "> ",
-    # 日本語キーワード
+    # 日本語
     "【", "アクション", "決定", "マイルストーン", "プロジェクト",
     "状況", "要注意", "サマリー", "進捗", "未完了",
-    # 英語キーワード
+    # 英語
     "project", "status", "action", "milestone",
     # 記号
     "!", "OK", "—", "✓",
 ]
 
 
-def collect_all_section_ids(client: WebClient, canvas_id: str) -> dict[str, dict]:
-    """
-    複数の検索ワードで canvases_sections_lookup を試し、
-    section_id → セクション情報の辞書を返す。
-    """
+def collect_sections_via_api(client: WebClient, canvas_id: str) -> dict[str, dict]:
+    """canvases_sections_lookup で section_id → セクション情報の辞書を返す"""
     found: dict[str, dict] = {}
     for term in SEARCH_TERMS:
         try:
@@ -87,7 +88,41 @@ def collect_all_section_ids(client: WebClient, canvas_id: str) -> dict[str, dict
 
 
 # --------------------------------------------------------------------------- #
-# files.info
+# Section ID 抽出（url_private HTML）
+# --------------------------------------------------------------------------- #
+
+# Slack Canvas HTML に埋め込まれるセクション ID のパターン例:
+#   data-block-id="Bf-XXXXXXXX"
+#   data-section-id="Bf-XXXXXXXX"
+#   id="Bf-XXXXXXXX"  （Bf- で始まる形式）
+_SECTION_ID_PATTERNS = [
+    re.compile(r'data-block-id="([^"]+)"'),
+    re.compile(r"data-block-id='([^']+)'"),
+    re.compile(r'data-section-id="([^"]+)"'),
+    re.compile(r"data-section-id='([^']+)'"),
+    # Slack の Canvas セクション ID は英数字+ハイフン（例: Bf-abc123）
+    re.compile(r'"id"\s*:\s*"(Bf-[A-Za-z0-9_\-]+)"'),
+]
+
+
+def extract_section_ids_from_html(html: str) -> list[str]:
+    """
+    url_private でダウンロードした Canvas HTML から section_id を抽出する。
+    canvases_sections_lookup が返さないセクションも含めて取得できる。
+    """
+    seen: set[str] = set()
+    ids: list[str] = []
+    for pat in _SECTION_ID_PATTERNS:
+        for m in pat.finditer(html):
+            sid = m.group(1)
+            if sid not in seen:
+                seen.add(sid)
+                ids.append(sid)
+    return ids
+
+
+# --------------------------------------------------------------------------- #
+# files.info / url_private
 # --------------------------------------------------------------------------- #
 
 def fetch_files_info(client: WebClient, canvas_id: str) -> dict:
@@ -113,6 +148,27 @@ def download_url_private(file_info: dict) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# 削除
+# --------------------------------------------------------------------------- #
+
+def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
+                    p) -> tuple[int, int]:
+    ok = fail = 0
+    for sid in section_ids:
+        try:
+            client.canvases_edit(
+                canvas_id=canvas_id,
+                changes=[{"operation": "delete", "section_id": sid}],
+            )
+            ok += 1
+        except SlackApiError as e:
+            err = e.response.get("error", str(e))
+            p(f"  WARN: {sid} 削除失敗: {err}")
+            fail += 1
+    return ok, fail
+
+
+# --------------------------------------------------------------------------- #
 # メイン出力
 # --------------------------------------------------------------------------- #
 
@@ -121,7 +177,8 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
 
     def p(*args, **kwargs):
         print(*args, **kwargs)
-        print(*args, file=out, **kwargs) if out else None
+        if out:
+            print(*args, file=out, **kwargs)
 
     p(_sep(f"Canvas Debug: {canvas_id}"))
     p()
@@ -133,89 +190,99 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
     if "_error" in file_info:
         p(f"  ERROR: {file_info['_error']}")
     else:
-        important_keys = [
-            "id", "name", "title", "filetype", "pretty_type",
-            "created", "updated", "size",
-            "url_private", "url_private_download",
-            "has_more", "content_type",
-        ]
-        for k in important_keys:
+        for k in ["id", "name", "title", "filetype", "pretty_type",
+                  "created", "updated", "size",
+                  "url_private", "url_private_download", "content_type"]:
             if k in file_info:
-                val = file_info[k]
+                val = str(file_info[k])
                 if k in ("url_private", "url_private_download"):
-                    val = str(val)[:80] + ("…" if len(str(val)) > 80 else "")
+                    val = val[:80] + ("…" if len(val) > 80 else "")
                 p(f"  {k}: {val}")
         if show_raw:
             p()
             p("  [raw files.info response]")
             p(json.dumps(file_info, ensure_ascii=False, indent=2))
-
     p()
 
-    # ── 2. url_private ダウンロード ────────────────────────────────────────
+    # ── 2. url_private ダウンロード & セクション ID 抽出 ───────────────────
     p(_sep("2. url_private ダウンロード"))
     raw_content, url = download_url_private(file_info)
+    html_section_ids: list[str] = []
+
     if not url:
         p("  url_private が見つかりません")
     else:
         p(f"  URL: {url[:80]}…")
         p(f"  サイズ: {len(raw_content)} バイト")
+
         if raw_content and not raw_content.startswith("[download error"):
+            html_section_ids = extract_section_ids_from_html(raw_content)
+            p(f"  HTML から抽出したセクション ID: {len(html_section_ids)} 件")
+            for sid in html_section_ids:
+                p(f"    {sid}")
+
             p()
             p("  ─ 先頭 500 文字 ─")
             p(raw_content[:500])
             if len(raw_content) > 500:
                 p(f"  … （残り {len(raw_content) - 500} 文字）")
-        elif raw_content:
+            if show_raw:
+                p()
+                p("  ─ 全文 ─")
+                p(raw_content)
+        else:
             p(f"  {raw_content}")
     p()
 
     # ── 3. canvases_sections_lookup ────────────────────────────────────────
     p(_sep("3. canvases_sections_lookup（全検索ワード試行）"))
-    sections = collect_all_section_ids(client, canvas_id)
-    p(f"  発見したセクション数: {len(sections)}")
-    p()
+    api_sections = collect_sections_via_api(client, canvas_id)
+    p(f"  API で発見したセクション数: {len(api_sections)}")
 
-    if sections:
-        for i, (sid, sec) in enumerate(sections.items(), 1):
+    if api_sections:
+        p()
+        for i, (sid, sec) in enumerate(api_sections.items(), 1):
             content_raw = sec.get("content", "")
-            content_preview = content_raw[:120].replace("\n", "↵")
+            preview = content_raw[:120].replace("\n", "↵")
             if len(content_raw) > 120:
-                content_preview += "…"
+                preview += "…"
             p(f"  [{i:02d}] id: {sid}")
             p(f"       type: {sec.get('type', '?')}")
-            p(f"       content ({len(content_raw)} 文字): {content_preview!r}")
+            p(f"       content ({len(content_raw)} 文字): {preview!r}")
     else:
-        p("  （セクションが見つかりませんでした）")
-        p("  ※ canvases_sections_lookup は Slack の Canvas が特定の構造を持つ場合のみ機能します。")
-        p("    空の Canvas や、検索ワードにマッチしないコンテンツは検出できません。")
-
+        p("  （canvases_sections_lookup ではセクションが見つかりませんでした）")
+        p("  → これは Canvas が手動編集済み、または API がインデックス未作成の状態を示します。")
+        p("    url_private から抽出したセクション ID を使って削除できます（セクション4参照）。")
     p()
 
-    # ── 4. section_id ごとの検索ワード対応表 ───────────────────────────────
-    if sections and show_raw:
-        p(_sep("4. 各セクションが引っかかった検索ワード"))
-        for sid in sections:
-            matched = []
-            for term in SEARCH_TERMS:
-                try:
-                    resp = client.canvases_sections_lookup(
-                        canvas_id=canvas_id,
-                        criteria={"contains_text": term},
-                    )
-                    ids_in_resp = [s.get("id") for s in resp.get("sections", [])]
-                    if sid in ids_in_resp:
-                        matched.append(repr(term))
-                except SlackApiError:
-                    pass
-            p(f"  {sid}: {', '.join(matched) if matched else '（なし）'}")
-        p()
+    # ── 4. HTML vs API の差分 ──────────────────────────────────────────────
+    p(_sep("4. HTML抽出 vs API検出 の比較"))
+    api_ids = set(api_sections.keys())
+    html_ids = set(html_section_ids)
 
-    # ── 5. pm_report._collect_section_ids との差分 ─────────────────────────
+    p(f"  HTML から抽出: {len(html_ids)} 件")
+    p(f"  API で検出:   {len(api_ids)} 件")
+
+    only_in_html = html_ids - api_ids
+    only_in_api  = api_ids - html_ids
+    both         = html_ids & api_ids
+
+    p(f"  両方に存在:    {len(both)} 件")
+    if only_in_html:
+        p(f"  !! HTMLのみ（APIで見えない）: {len(only_in_html)} 件  ← --delete-all で削除対象")
+        for sid in sorted(only_in_html):
+            p(f"     {sid}")
+    if only_in_api:
+        p(f"  APIのみ（HTMLにない）: {len(only_in_api)} 件")
+        for sid in sorted(only_in_api):
+            p(f"     {sid}")
+    p()
+
+    # ── 5. pm_report との比較 ──────────────────────────────────────────────
     p(_sep("5. pm_report._collect_section_ids との比較"))
-    pm_report_terms = ["|", "##", "- ", "【", "project", "アクション"]
-    pm_report_found: set[str] = set()
-    for term in pm_report_terms:
+    pm_terms = ["|", "##", "- ", "【", "project", "アクション"]
+    pm_found: set[str] = set()
+    for term in pm_terms:
         try:
             resp = client.canvases_sections_lookup(
                 canvas_id=canvas_id,
@@ -224,17 +291,17 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
             for sec in resp.get("sections", []):
                 sid = sec.get("id")
                 if sid:
-                    pm_report_found.add(sid)
+                    pm_found.add(sid)
         except SlackApiError:
             pass
 
-    all_ids = set(sections.keys())
-    missed = all_ids - pm_report_found
-    p(f"  pm_report が検出できるセクション数: {len(pm_report_found)} / {len(all_ids)}")
-    if missed:
-        p(f"  !! 削除漏れになるセクション ({len(missed)} 件):")
-        for sid in missed:
-            c = sections[sid].get("content", "")[:80].replace("\n", "↵")
+    all_known = html_ids | api_ids
+    pm_missed = all_known - pm_found
+    p(f"  pm_report が検出できる: {len(pm_found)} / {len(all_known)} 件")
+    if pm_missed:
+        p(f"  !! 削除漏れになるセクション ({len(pm_missed)} 件):")
+        for sid in sorted(pm_missed):
+            c = api_sections.get(sid, {}).get("content", "（HTMLのみ）")[:60].replace("\n", "↵")
             p(f"     {sid}: {c!r}")
     else:
         p("  （削除漏れなし）")
@@ -243,36 +310,36 @@ def run(canvas_id: str, show_raw: bool, delete_all: bool, yes: bool, out) -> Non
     # ── 6. --delete-all ────────────────────────────────────────────────────
     if delete_all:
         p(_sep("6. 全セクション削除"))
-        if not sections:
+        # HTML 抽出 + API 検出の和集合を削除対象にする
+        target_ids = sorted(all_known)
+        if not target_ids:
             p("  削除対象のセクションがありません")
+            p("  ※ url_private のダウンロードに失敗している場合は手動で Canvas を空にしてください")
         else:
-            p(f"  対象: {len(sections)} セクション")
+            p(f"  対象: {len(target_ids)} セクション（HTML抽出 + API検出の和集合）")
             if not yes:
-                ans = input(f"  Canvas {canvas_id} の全セクションを削除しますか？ [y/N]: ").strip().lower()
+                ans = input(
+                    f"  Canvas {canvas_id} の全セクションを削除しますか？ [y/N]: "
+                ).strip().lower()
                 if ans != "y":
                     p("  キャンセルしました")
                     return
-            ok = 0
-            fail = 0
-            for sid in sections:
-                try:
-                    client.canvases_edit(
-                        canvas_id=canvas_id,
-                        changes=[{"operation": "delete", "section_id": sid}],
-                    )
-                    ok += 1
-                except SlackApiError as e:
-                    p(f"  WARN: {sid} の削除失敗: {e.response.get('error', e)}")
-                    fail += 1
+            ok, fail = delete_sections(client, canvas_id, target_ids, p)
             p(f"  削除完了: {ok} 件成功 / {fail} 件失敗")
 
-            # 削除後に残存確認
-            remaining = collect_all_section_ids(client, canvas_id)
-            if remaining:
-                p(f"  !! まだ {len(remaining)} セクション残存:")
-                for sid in remaining:
-                    c = remaining[sid].get("content", "")[:60].replace("\n", "↵")
-                    p(f"     {sid}: {c!r}")
+            # 削除後に残存確認（API + HTML 両方）
+            remaining_api = collect_sections_via_api(client, canvas_id)
+            remaining_raw, _ = download_url_private(file_info)
+            remaining_html = set(extract_section_ids_from_html(remaining_raw))
+            remaining_all = set(remaining_api.keys()) | remaining_html
+
+            if remaining_all:
+                p(f"  !! まだ {len(remaining_all)} セクション残存:")
+                for sid in sorted(remaining_all):
+                    src = "HTML+API" if sid in remaining_api and sid in remaining_html \
+                          else ("API" if sid in remaining_api else "HTML")
+                    c = remaining_api.get(sid, {}).get("content", "")[:60].replace("\n", "↵")
+                    p(f"     [{src}] {sid}: {c!r}")
             else:
                 p("  ✓ 全セクション削除確認済み")
         p()
@@ -288,7 +355,7 @@ def main() -> None:
     )
     parser.add_argument("--canvas-id", required=True, help="対象 Canvas ID")
     parser.add_argument("--show-raw", action="store_true",
-                        help="files.info 生レスポンスと検索ワード対応表を表示")
+                        help="files.info 生レスポンスと url_private 全文を表示")
     parser.add_argument("--delete-all", action="store_true",
                         help="発見した全セクションを削除して Canvas を空にする")
     parser.add_argument("--yes", action="store_true",
