@@ -242,6 +242,64 @@ def download_url_private(file_info: dict) -> tuple[str, str]:
 # 削除
 # --------------------------------------------------------------------------- #
 
+def _cmd_test_batch_delete(canvas_id: str) -> None:
+    """
+    canvases_edit でのバッチ削除を試す実験コマンド。
+    Canvas の先頭2セクションを使って以下の形式を順番に試す:
+      A. changes=[{"operation": "delete", "section_id": [sid1, sid2]}]
+      B. changes=[{"operation": "delete", "section_ids": [sid1, sid2]}]
+    ※ 成功した場合はセクションが実際に削除される。
+    """
+    client = get_client()
+
+    # セクションIDを収集（HTML優先、最低2件必要）
+    try:
+        resp = client.files_info(file=canvas_id)
+        file_info = resp.get("file", {})
+        raw, _ = download_url_private(file_info)
+    except Exception as e:
+        print(f"ERROR: Canvas取得失敗: {e}")
+        return
+
+    pairs = extract_section_ids_from_html(raw, include_h1=True)
+    ids = [sid for _, sid in pairs]
+
+    if len(ids) < 2:
+        print(f"ERROR: セクションが2件未満（{len(ids)}件）のため実験不可")
+        return
+
+    sid1, sid2 = ids[0], ids[1]
+    print(f"対象セクション: {sid1}, {sid2}")
+    print()
+
+    # A. section_id に配列を渡す
+    print("【パターンA】section_id: [sid1, sid2]")
+    try:
+        client.canvases_edit(
+            canvas_id=canvas_id,
+            changes=[{"operation": "delete", "section_id": [sid1, sid2]}],
+        )
+        print("  → OK（2件まとめて削除成功）")
+        return
+    except SlackApiError as e:
+        print(f"  → NG: {e.response.get('error', str(e))}")
+
+    # B. section_ids（複数形）に配列を渡す
+    print("【パターンB】section_ids: [sid1, sid2]")
+    try:
+        client.canvases_edit(
+            canvas_id=canvas_id,
+            changes=[{"operation": "delete", "section_ids": [sid1, sid2]}],
+        )
+        print("  → OK（2件まとめて削除成功）")
+        return
+    except SlackApiError as e:
+        print(f"  → NG: {e.response.get('error', str(e))}")
+
+    print()
+    print("結論: バッチ削除は不可。1件ずつ削除が必要。")
+
+
 def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
                     p) -> tuple[int, int]:
     """
@@ -903,6 +961,9 @@ def main() -> None:
                              "（Ct0... 形式のタブID）。複数のAPIを順番に試みる")
     parser.add_argument("--output", default=None, metavar="PATH",
                         help="結果をファイルにも保存")
+    parser.add_argument("--test-batch-delete", action="store_true",
+                        help="バッチ削除APIの検証: section_id配列・section_ids配列の2形式を試す"
+                             "（先頭2セクションが実際に削除される）")
     args = parser.parse_args()
 
     # --list-map
@@ -930,6 +991,8 @@ def main() -> None:
         _cmd_remove_tab(args.channel, args.remove_tab)
         return
 
+    # --test-batch-delete（Canvas ID を先に解決する必要があるため後段で処理）
+
     # Canvas ID を解決
     canvas_id: str | None = None
     channel_id: str | None = None
@@ -951,6 +1014,11 @@ def main() -> None:
         print("ERROR: --canvas-id または -c CHANNEL_ID が必要です", file=sys.stderr)
         parser.print_help()
         sys.exit(1)
+
+    # --test-batch-delete
+    if args.test_batch_delete:
+        _cmd_test_batch_delete(canvas_id)
+        return
 
     out = None
     if args.output:
