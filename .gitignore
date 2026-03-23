@@ -1,12 +1,16 @@
-# Slack data (contains confidential messages)
+# Slack data / PM DB (contains confidential messages)
 data/*.db
+data/minutes/
+data/processing/
+data/*.log
+data/*.md
 
 # Meeting transcripts and audio (機密性2)
-meetings
+meetings/
 docs/project.md
-scripts/slack_to_pm_leader.sh
-scripts/slack_to_pm_hpcwg.sh
-scripts/slack_to_pm_bmtwg.sh
+scripts/pm_from_slack_leader.sh
+scripts/pm_from_slack_hpcwg.sh
+scripts/pm_from_slack_bmtwg.sh
 
 # Generated summary files
 data/slack_summarize*.md
