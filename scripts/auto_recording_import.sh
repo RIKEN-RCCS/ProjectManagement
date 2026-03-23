@@ -53,6 +53,26 @@ is_valid_meeting_name() {
 }
 
 # --------------------------------------------------------------------------- #
+# meeting-name → pm.db パスのマッピング
+#   Leader_Meeting / Co-design_Review_Meeting → pm.db
+#   Block1/Block2/SubWG系                     → pm-hpc.db
+#   BenchmarkWG_Meeting                        → pm-bmt.db
+# --------------------------------------------------------------------------- #
+get_pm_db() {
+    local name="$1"
+    case "$name" in
+        Leader_Meeting|Co-design_Review_Meeting)
+            echo "$REPO_ROOT/data/pm.db" ;;
+        Block1_Meeting|Block2_Meeting|SubWG_Meeting|SubWG[0-9]*_Meeting)
+            echo "$REPO_ROOT/data/pm-hpc.db" ;;
+        BenchmarkWG_Meeting)
+            echo "$REPO_ROOT/data/pm-bmt.db" ;;
+        *)
+            echo "$REPO_ROOT/data/pm.db" ;;
+    esac
+}
+
+# --------------------------------------------------------------------------- #
 # ログ出力
 # --------------------------------------------------------------------------- #
 log() {
@@ -144,6 +164,7 @@ fi
 declare -a BATCH_FILES=()
 declare -a BATCH_HELD_AT=()
 declare -a BATCH_NAMES=()
+declare -a BATCH_DBS=()
 skipped=0
 
 for m4a_file in "${m4a_files[@]}"; do
@@ -190,11 +211,13 @@ for m4a_file in "${m4a_files[@]}"; do
     # processing/ に移動（再投入防止）
     dest="$PROCESSING_DIR/$filename"
     mv "$m4a_file" "$dest"
-    log "[QUEUE] $filename → held_at=$held_at, meeting_name=$meeting_name"
+    pm_db=$(get_pm_db "$meeting_name")
+    log "[QUEUE] $filename → held_at=$held_at, meeting_name=$meeting_name, db=$(basename "$pm_db")"
 
     BATCH_FILES+=("$dest")
     BATCH_HELD_AT+=("$held_at")
     BATCH_NAMES+=("$meeting_name")
+    BATCH_DBS+=("$pm_db")
 done
 
 if [[ ${#BATCH_FILES[@]} -eq 0 ]]; then
@@ -218,8 +241,8 @@ BATCH_SCRIPT=$(mktemp /tmp/auto_batch_XXXXXX.sh)
         echo ""
     fi
     for i in "${!BATCH_FILES[@]}"; do
-        printf "bash '%s/recording_to_pm.sh' '%s' --held-at '%s' --meeting-name '%s'\n" \
-            "$SCRIPT_DIR" "${BATCH_FILES[$i]}" "${BATCH_HELD_AT[$i]}" "${BATCH_NAMES[$i]}"
+        printf "bash '%s/recording_to_pm.sh' '%s' --held-at '%s' --meeting-name '%s' --db '%s'\n" \
+            "$SCRIPT_DIR" "${BATCH_FILES[$i]}" "${BATCH_HELD_AT[$i]}" "${BATCH_NAMES[$i]}" "${BATCH_DBS[$i]}"
         if [[ -n "$SLACK_CHANNEL" ]]; then
             printf "if [[ \$? -eq 0 ]]; then\n"
             printf "  '%s' '%s/pm_minutes_import.py' --post-to-slack --meeting-name '%s' --held-at '%s' -c '%s'\n" \

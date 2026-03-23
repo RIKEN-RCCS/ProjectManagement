@@ -68,12 +68,14 @@ export SINGULARITY_BIND=/lvs0
 SKIP_SECONDS=""
 MEETING_NAME=""
 HELD_AT=""
+DB_PATH=""
 FILES=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip)         SKIP_SECONDS="$2"; shift 2 ;;
     --meeting-name) MEETING_NAME="$2"; shift 2 ;;
     --held-at)      HELD_AT="$2";      shift 2 ;;
+    --db)           DB_PATH="$2";      shift 2 ;;
     *)              FILES+=("$1"); shift ;;
   esac
 done
@@ -167,7 +169,8 @@ EOF
         echo "[INFO] pm.db へ転記中: $MEETING_NAME ($DATE_TO_USE)"
         "$PYTHON3" "$PM_MINUTES_TO_PM" \
           --meeting-name "$MEETING_NAME" \
-          --since "$DATE_TO_USE"
+          --since "$DATE_TO_USE" \
+          ${DB_PATH:+--db "$DB_PATH"}
 
         if [[ $? -eq 0 ]]; then
           rm -f "$BASENAME.md"
