@@ -4,6 +4,9 @@ data/*.db
 # Meeting transcripts and audio (機密性2)
 meetings
 docs/project.md
+scripts/slack_to_pm_leader.sh
+scripts/slack_to_pm_hpcwg.sh
+scripts/slack_to_pm_bmtwg.sh
 
 # Generated summary files
 data/slack_summarize*.md
