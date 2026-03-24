@@ -213,6 +213,73 @@ def normalize_assignee(name: str | None) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# pm.db 高レベルユーティリティ
+# --------------------------------------------------------------------------- #
+import sys as _sys  # noqa: E402
+
+
+def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connection":
+    """
+    pm.db を開いて接続を返す。ファイルが存在しない場合は sys.exit(1)。
+
+    acknowledged_at マイグレーションを自動適用する。
+    """
+    if not db_path.exists():
+        print(f"ERROR: pm.db が見つかりません: {db_path}", file=_sys.stderr)
+        _sys.exit(1)
+    return open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        migrations=["ALTER TABLE decisions ADD COLUMN acknowledged_at TEXT"],
+    )
+
+
+def fetch_milestone_progress(conn: "_sqlite3.Connection") -> list[dict]:
+    """マイルストーンごとのアクションアイテム完了率を取得する"""
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.milestone_id, m.goal_id, m.name, m.due_date, m.area,
+                   m.status, m.success_criteria,
+                   COUNT(DISTINCT CASE WHEN a.status='open'   THEN a.id END) AS open_count,
+                   COUNT(DISTINCT CASE WHEN a.status='closed' THEN a.id END) AS closed_count
+            FROM milestones m
+            LEFT JOIN action_items a ON a.milestone_id = m.milestone_id
+            WHERE m.status = 'active'
+            GROUP BY m.milestone_id
+            ORDER BY m.due_date ASC NULLS LAST
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def fetch_assignee_workload(conn: "_sqlite3.Connection", today: str) -> list[dict]:
+    """担当者別の負荷（オープンアイテム数・期限超過数・期限未設定数）を取得する（LLM不使用）"""
+    try:
+        rows = conn.execute(
+            "SELECT assignee, due_date FROM action_items WHERE status = 'open'"
+        ).fetchall()
+    except Exception:
+        return []
+
+    counts: dict[str, dict] = {}
+    for row in rows:
+        name = normalize_assignee(row["assignee"]) or "未定"
+        entry = counts.setdefault(name, {"total_open": 0, "overdue": 0, "no_due_date": 0})
+        entry["total_open"] += 1
+        if row["due_date"] and row["due_date"] < today:
+            entry["overdue"] += 1
+        if not row["due_date"]:
+            entry["no_due_date"] += 1
+
+    result = [{"assignee": k, **v} for k, v in counts.items()]
+    result.sort(key=lambda x: (-x["overdue"], -x["total_open"]))
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # 平文DB → 暗号化DB 変換
 # --------------------------------------------------------------------------- #
 def is_encrypted(db_path: Path) -> bool:

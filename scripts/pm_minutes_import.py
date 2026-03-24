@@ -77,7 +77,6 @@ Options:
 import argparse
 import os
 import re
-import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -87,7 +86,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
 from cli_utils import (
     add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    make_logger, prepare_transcript,
+    make_logger, prepare_transcript, call_claude,
 )
 
 
@@ -200,22 +199,6 @@ PROMPT_TEMPLATE = """\
 
 {transcript}
 """
-
-
-# --------------------------------------------------------------------------- #
-# claude CLI 呼び出し
-# --------------------------------------------------------------------------- #
-def call_claude(prompt: str, timeout: int = 300, model: str | None = None) -> str:
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    cmd = ["claude", "-p", prompt]
-    if model:
-        cmd += ["--model", model]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, env=env,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"claude failed: {result.stderr[:500]}")
-    return result.stdout.strip()
 
 
 # --------------------------------------------------------------------------- #
