@@ -629,9 +629,12 @@ def _delete_one(token: str, canvas_id: str, sid: str) -> None:
     raise RuntimeError(f"rate limit retry exhausted: {sid}")
 
 
-def _delete_sections_parallel(token: str, canvas_id: str, section_ids: list[str]) -> tuple[int, int]:
+def _delete_sections_parallel(token: str, canvas_id: str,
+                               section_ids: list[str]) -> tuple[int, list[str]]:
+    """section_ids を MAX_WORKERS 並列で削除する。(ok件数, 失敗IDリスト) を返す。"""
     total = len(section_ids)
-    ok = fail = done = 0
+    ok = done = 0
+    failed: list[str] = []
     with ThreadPoolExecutor(max_workers=_DELETE_MAX_WORKERS) as pool:
         futures = {pool.submit(_delete_one, token, canvas_id, sid): sid for sid in section_ids}
         for future in as_completed(futures):
@@ -642,14 +645,34 @@ def _delete_sections_parallel(token: str, canvas_id: str, section_ids: list[str]
                 ok += 1
             except SlackApiError as e:
                 print(f"\n[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
-                fail += 1
+                failed.append(sid)
             except Exception as e:
                 print(f"\n[WARN] {sid} 削除失敗: {e}", file=sys.stderr)
-                fail += 1
+                failed.append(sid)
             if done % 10 == 0 or done == total:
                 print(f"\r  進捗: {done}/{total} 件", end="", flush=True)
     print()
-    return ok, fail
+    return ok, failed
+
+
+def _delete_sections_sequential(token: str, canvas_id: str,
+                                 section_ids: list[str],
+                                 delay: float = 1.0) -> tuple[int, list[str]]:
+    """失敗セクションを1件ずつ順次リトライする。(ok件数, 依然失敗のIDリスト) を返す。"""
+    ok = 0
+    still_failed: list[str] = []
+    for sid in section_ids:
+        time.sleep(delay)
+        try:
+            _delete_one(token, canvas_id, sid)
+            ok += 1
+        except SlackApiError as e:
+            print(f"[WARN] {sid} 再試行も失敗: {e.response.get('error')}", file=sys.stderr)
+            still_failed.append(sid)
+        except Exception as e:
+            print(f"[WARN] {sid} 再試行も失敗: {e}", file=sys.stderr)
+            still_failed.append(sid)
+    return ok, still_failed
 
 
 def post_to_canvas(canvas_id: str, content: str) -> None:
@@ -663,7 +686,14 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
         section_ids = _collect_section_ids(client, canvas_id)
         if section_ids:
             print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
-            ok, fail = _delete_sections_parallel(token, canvas_id, section_ids)
+            ok, failed_ids = _delete_sections_parallel(token, canvas_id, section_ids)
+            if failed_ids:
+                print(f"[INFO] 失敗 {len(failed_ids)} 件を順次リトライ中...")
+                retry_ok, still_failed = _delete_sections_sequential(token, canvas_id, failed_ids)
+                ok += retry_ok
+                fail = len(still_failed)
+            else:
+                fail = 0
             print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
         client.canvases_edit(
             canvas_id=canvas_id,
