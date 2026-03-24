@@ -333,12 +333,17 @@ def parse_decision_checkboxes(content: str) -> tuple[list[str], list[str]]:
     unchecked: list[str] = []
 
     # --- HTML形式: <li> 要素を全件取得 ---
+    # アクションアイテムの形式（"#N ..." や "**#N**..."）はスキップ: 決定事項ではない
+    _AI_PREFIX = re.compile(r"^#\d+[\s\u3000]")
     li_pattern = re.compile(r"<li([^>]*)>(.*?)</li>", re.DOTALL)
     found_any = False
     for m in li_pattern.finditer(content):
         attrs, inner = m.group(1), m.group(2)
         text = _extract_li_text(inner)
         if not text:
+            continue
+        if _AI_PREFIX.match(text):
+            found_any = True  # <li> は存在するがスキップ
             continue
         found_any = True
         if re.search(r"\bchecked\b", attrs):
