@@ -302,7 +302,7 @@ def _cmd_test_batch_delete(canvas_id: str) -> None:
     print("結論: バッチ削除は不可。1件ずつ削除が必要。")
 
 
-_DELETE_MAX_WORKERS = 32   # 並列スレッド数（Rate Limit と相談して調整）
+_DELETE_MAX_WORKERS = 8   # 並列スレッド数（Rate Limit と相談して調整）
 _DELETE_MAX_RETRY   = 3   # 429 時の最大リトライ回数
 
 
