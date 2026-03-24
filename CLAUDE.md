@@ -81,8 +81,9 @@ slack/
 │   ├── pm_relink.py                 # アクションアイテムの各フィールド（担当者・期限・内容・マイルストーン等）をCSV経由で一括編集（LLM不使用）。note列は参照用として出力
 │   ├── pm_insight.py                # pm.db → LLMによるプロジェクト健全性評価・リスク特定・改善提案を生成・Canvas投稿
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
-│   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）
-│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md）
+│   ├── canvas_utils.py              # Slack Canvas 操作の共通ユーティリティ（sanitize_for_canvas・post_to_canvas・セクション削除ロジック）
+│   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload も提供
+│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude）
 │   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
 │   ├── pm_from_recording.sh         # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
 │   ├── pm_from_slack.sh             # Slack取得・要約 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）

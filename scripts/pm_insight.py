@@ -23,26 +23,19 @@ Options:
 
 import argparse
 import json
-import os
 import re
 import sqlite3
-import subprocess
 import sys
-import time
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db_utils import open_db
+from db_utils import open_pm_db, fetch_milestone_progress, fetch_assignee_workload, normalize_assignee
 from cli_utils import (
     add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    make_logger, load_claude_md,
+    make_logger, load_claude_md, call_claude,
 )
+from canvas_utils import sanitize_for_canvas, post_to_canvas
 
 # --------------------------------------------------------------------------- #
 # パス解決
@@ -52,38 +45,8 @@ CLAUDE_MD  = REPO_ROOT / "CLAUDE.md"
 
 
 # --------------------------------------------------------------------------- #
-# DB 接続
-# --------------------------------------------------------------------------- #
-def open_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
-    if not db_path.exists():
-        print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
-        sys.exit(1)
-    return open_db(
-        db_path,
-        encrypt=not no_encrypt,
-        migrations=["ALTER TABLE decisions ADD COLUMN acknowledged_at TEXT"],
-    )
-
-
-# --------------------------------------------------------------------------- #
 # データ収集
 # --------------------------------------------------------------------------- #
-def fetch_milestone_progress(conn: sqlite3.Connection) -> list[dict]:
-    try:
-        rows = conn.execute("""
-            SELECT m.milestone_id, m.goal_id, m.name, m.due_date, m.area,
-                   m.status, m.success_criteria,
-                   COUNT(DISTINCT CASE WHEN a.status='open'   THEN a.id END) AS open_count,
-                   COUNT(DISTINCT CASE WHEN a.status='closed' THEN a.id END) AS closed_count
-            FROM milestones m
-            LEFT JOIN action_items a ON a.milestone_id = m.milestone_id
-            WHERE m.status = 'active'
-            GROUP BY m.milestone_id
-            ORDER BY m.due_date ASC NULLS LAST
-        """).fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
 
 
 def fetch_overdue_items(conn: sqlite3.Connection, today: str, since: str | None) -> list[dict]:
@@ -99,35 +62,6 @@ def fetch_overdue_items(conn: sqlite3.Connection, today: str, since: str | None)
         params.append(since)
     query += " ORDER BY due_date ASC"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
-
-
-def _normalize_assignee(name: str | None) -> str:
-    if not name:
-        return "未定"
-    if re.search(r"[\u3040-\u9fff]", name):
-        name = name.replace(" ", "").replace("\u3000", "")
-    return name
-
-
-def fetch_assignee_workload(conn: sqlite3.Connection, today: str) -> list[dict]:
-    try:
-        rows = conn.execute(
-            "SELECT assignee, due_date FROM action_items WHERE status = 'open'"
-        ).fetchall()
-    except Exception:
-        return []
-    counts: dict[str, dict] = {}
-    for row in rows:
-        name = _normalize_assignee(row["assignee"])
-        entry = counts.setdefault(name, {"total_open": 0, "overdue": 0, "no_due_date": 0})
-        entry["total_open"] += 1
-        if row["due_date"] and row["due_date"] < today:
-            entry["overdue"] += 1
-        if not row["due_date"]:
-            entry["no_due_date"] += 1
-    result = [{"assignee": k, **v} for k, v in counts.items()]
-    result.sort(key=lambda x: (-x["overdue"], -x["total_open"]))
-    return result
 
 
 def fetch_unlinked_items_count(conn: sqlite3.Connection, since: str | None) -> int:
@@ -266,7 +200,7 @@ def _format_overdue_list(items: list[dict]) -> str:
         return "（なし）"
     lines = []
     for it in items[:15]:
-        assignee = _normalize_assignee(it.get("assignee"))
+        assignee = normalize_assignee(it.get("assignee")) or "未定"
         ms = it.get("milestone_id") or "-"
         lines.append(f"- [ID:{it['id']}][期限:{it['due_date']}][担当:{assignee}][MS:{ms}] {it['content'][:80]}")
     if len(items) > 15:
@@ -411,21 +345,6 @@ def build_analysis_prompt(
     )
 
 
-# --------------------------------------------------------------------------- #
-# LLM 呼び出し
-# --------------------------------------------------------------------------- #
-def call_claude(prompt: str, model: str | None = None, timeout: int = 300) -> str:
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    cmd = ["claude"]
-    if model:
-        cmd += ["--model", model]
-    cmd += ["-p", prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-    if result.returncode != 0:
-        raise RuntimeError(f"claude failed: {result.stderr[:500]}")
-    return result.stdout.strip()
-
-
 def extract_json(text: str) -> dict:
     m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
     if m:
@@ -515,194 +434,6 @@ def format_insight_report(insight: dict, data: dict, today: str, since: str | No
     return "\n\n".join(sections)
 
 
-def sanitize_for_canvas(text: str) -> str:
-    """Canvas向けMarkdown変換（特殊文字・見出しレベルの正規化）"""
-    replacements = {
-        "\u2013": "-", "\u2014": "-", "\u2015": "-",
-        "\u2212": "-", "\u2011": "-", "\u2010": "-",
-        "\uff5e": "-", "\u301c": "-",
-        "\uff08": "(", "\uff09": ")",
-        "\uff0c": ",", "\uff0e": ".", "\uff01": "!",
-        "\uff1a": ":", "\uff1b": ";", "\uff1f": "?",
-        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-        "\u300c": '"', "\u300d": '"', "\u300e": '"', "\u300f": '"',
-        "\u2192": "->", "\u2190": "<-", "\u2194": "<->",
-        "\u21d2": "=>", "\u21d0": "<=", "\u21d4": "<=>",
-        "\u25b6": ">", "\u25c0": "<",
-        "\u30fb": ".", "\u2022": "-", "\u2023": "-",
-        "\u25cf": "-", "\u25cb": "-", "\u2027": ".",
-        "\u3000": " ", "\u00a0": " ",
-        "\u2026": "...", "\u22ef": "...",
-        "\u00d7": "x", "\u00f7": "/",
-        "\u2605": "*", "\u2606": "*",
-        "\u2713": "OK", "\u2714": "OK", "\u2715": "NG", "\u2716": "NG",
-        "\u25a0": "-", "\u25a1": "-",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    text = re.sub(r"(?<![<(\[])https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]",
-                  lambda m: f"<{m.group(0)}>", text)
-    text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
-    text = re.sub(r"^(\s+)\d+\.\s+", r"\1- ", text, flags=re.MULTILINE)
-    text = re.sub(r"^> (-|\*|\d+\.)\s+", r"\1 ", text, flags=re.MULTILINE)
-
-    def keep_char(c: str) -> str:
-        cp = ord(c)
-        if 0x20 <= cp <= 0x7E:
-            return c
-        if c in ("\n", "\t"):
-            return c
-        if 0x3000 <= cp <= 0x9FFF:
-            return c
-        if 0xF900 <= cp <= 0xFAFF:
-            return c
-        if 0xFF00 <= cp <= 0xFFEF:
-            return c
-        if 0x00C0 <= cp <= 0x024F:
-            return c
-        return ""
-
-    text = "".join(keep_char(c) for c in text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text
-
-
-# --------------------------------------------------------------------------- #
-# Canvas 投稿
-# --------------------------------------------------------------------------- #
-_PAT_TAG_WITH_ID = re.compile(
-    r"<(h[1-6]|p|div|ul|ol|li|blockquote|pre|hr|table|tbody|thead|tr|td|th)\b[^>]*\sid=['\"]([^'\"]+)['\"]",
-    re.IGNORECASE,
-)
-_PAT_DATA_BLOCK = re.compile(r'data-block-id=["\']([^"\']+)["\']')
-_PAT_DATA_SEC   = re.compile(r'data-section-id=["\']([^"\']+)["\']')
-
-_DELETE_MAX_WORKERS = 8
-_DELETE_MAX_RETRY   = 3
-
-
-def _collect_section_ids(client: WebClient, canvas_id: str) -> list[str]:
-    token = os.getenv("SLACK_USER_TOKEN", "")
-    try:
-        resp = client.files_info(file=canvas_id)
-        file_info = resp.get("file", {})
-        url = file_info.get("url_private") or file_info.get("url_private_download", "")
-        if not url:
-            return []
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req) as r:
-            html = r.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"[WARN] url_private 取得失敗: {e}", file=sys.stderr)
-        return []
-    seen: set[str] = set()
-    ids: list[str] = []
-    for m in _PAT_TAG_WITH_ID.finditer(html):
-        sid = m.group(2)
-        if sid not in seen:
-            seen.add(sid)
-            ids.append(sid)
-    for pat in (_PAT_DATA_BLOCK, _PAT_DATA_SEC):
-        for m in pat.finditer(html):
-            sid = m.group(1)
-            if sid not in seen:
-                seen.add(sid)
-                ids.append(sid)
-    return ids
-
-
-def _delete_one(token: str, canvas_id: str, sid: str) -> None:
-    c = WebClient(token=token)
-    for _ in range(_DELETE_MAX_RETRY):
-        try:
-            c.canvases_edit(
-                canvas_id=canvas_id,
-                changes=[{"operation": "delete", "section_id": sid}],
-            )
-            return
-        except SlackApiError as e:
-            if e.response.get("error") == "ratelimited":
-                wait = int(e.response.headers.get("Retry-After", 5))
-                time.sleep(wait)
-            else:
-                raise
-    raise RuntimeError(f"rate limit retry exhausted: {sid}")
-
-
-def _delete_sections_parallel(token: str, canvas_id: str,
-                               section_ids: list[str]) -> tuple[int, list[str]]:
-    """section_ids を MAX_WORKERS 並列で削除する。(ok件数, 失敗IDリスト) を返す。
-    結果の集約は as_completed() のメインスレッドループで行うためスレッドセーフ。"""
-    ok = 0
-    failed: list[str] = []
-    with ThreadPoolExecutor(max_workers=_DELETE_MAX_WORKERS) as pool:
-        futures = {pool.submit(_delete_one, token, canvas_id, sid): sid for sid in section_ids}
-        for future in as_completed(futures):
-            sid = futures[future]
-            try:
-                future.result()
-                ok += 1
-            except SlackApiError as e:
-                print(f"[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
-                failed.append(sid)
-            except Exception as e:
-                print(f"[WARN] {sid} 削除失敗: {e}", file=sys.stderr)
-                failed.append(sid)
-    return ok, failed
-
-
-def _delete_sections_sequential(token: str, canvas_id: str,
-                                 section_ids: list[str],
-                                 delay: float = 1.0) -> tuple[int, list[str]]:
-    """失敗セクションを1件ずつ順次リトライする。(ok件数, 依然失敗のIDリスト) を返す。"""
-    ok = 0
-    still_failed: list[str] = []
-    for sid in section_ids:
-        time.sleep(delay)
-        try:
-            _delete_one(token, canvas_id, sid)
-            ok += 1
-        except SlackApiError as e:
-            print(f"[WARN] {sid} 再試行も失敗: {e.response.get('error')}", file=sys.stderr)
-            still_failed.append(sid)
-        except Exception as e:
-            print(f"[WARN] {sid} 再試行も失敗: {e}", file=sys.stderr)
-            still_failed.append(sid)
-    return ok, still_failed
-
-
-def post_to_canvas(canvas_id: str, content: str) -> None:
-    token = os.getenv("SLACK_USER_TOKEN")
-    if not token:
-        print("ERROR: SLACK_USER_TOKEN を設定してください", file=sys.stderr)
-        sys.exit(1)
-    print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
-    client = WebClient(token=token)
-    try:
-        section_ids = _collect_section_ids(client, canvas_id)
-        if section_ids:
-            print(f"[INFO] 既存セクション {len(section_ids)} 件を削除中...")
-            ok, failed_ids = _delete_sections_parallel(token, canvas_id, section_ids)
-            if failed_ids:
-                print(f"[INFO] 失敗 {len(failed_ids)} 件を順次リトライ中...")
-                retry_ok, still_failed = _delete_sections_sequential(token, canvas_id, failed_ids)
-                ok += retry_ok
-                fail = len(still_failed)
-            else:
-                fail = 0
-            print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
-        client.canvases_edit(
-            canvas_id=canvas_id,
-            changes=[{
-                "operation": "insert_at_start",
-                "document_content": {"type": "markdown", "markdown": content},
-            }],
-        )
-        print(f"✓ Canvas 更新成功: {canvas_id}")
-    except SlackApiError as e:
-        print(f"Slack API エラー: {e.response['error']}", file=sys.stderr)
-        print(f"レスポンス詳細: {e.response}", file=sys.stderr)
-        sys.exit(1)
 
 
 # --------------------------------------------------------------------------- #

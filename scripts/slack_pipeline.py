@@ -19,13 +19,13 @@ import re
 import sqlite3
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_no_encrypt_arg, add_output_arg
+from cli_utils import add_no_encrypt_arg, add_output_arg, call_claude
+from canvas_utils import sanitize_for_canvas, post_to_canvas
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -544,18 +544,6 @@ def remove_thinking_tags(text: str) -> str:
     return text.strip()
 
 
-def call_claude(prompt: str, timeout: int) -> str:
-    # CLAUDECODE 環境変数が設定されているとネストセッション判定でエラーになるため除外する
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    result = subprocess.run(
-        ["claude", "-p", prompt],
-        capture_output=True, text=True, timeout=timeout, env=env,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip())
-    return remove_thinking_tags(result.stdout.strip())
-
-
 def summarize_chunk(chunk_text: str) -> str:
     system_prompt = (
         "Slackのメッセージとスレッドを冗長な表現を控え端的に要約してください。"
@@ -571,7 +559,7 @@ def summarize_chunk(chunk_text: str) -> str:
         "決定事項・アクションアイテムがない場合は言及不要です。言語は日本語としてください。"
     )
     try:
-        summary = call_claude(f"{system_prompt}\n\n{chunk_text}", timeout=300)
+        summary = remove_thinking_tags(call_claude(f"{system_prompt}\n\n{chunk_text}", timeout=300))
         print(summary)
         return summary
     except subprocess.TimeoutExpired:
@@ -711,165 +699,12 @@ def summarize_overall(entries: list[dict]) -> str:
     )
     print("\n全体要約を生成中...", file=sys.stderr)
     try:
-        return call_claude(f"{system_prompt}\n\n" + "\n\n".join(items), timeout=600)
+        return remove_thinking_tags(call_claude(f"{system_prompt}\n\n" + "\n\n".join(items), timeout=600))
     except subprocess.TimeoutExpired:
         return "[全体要約失敗: タイムアウト]"
     except Exception as e:
         return f"[全体要約失敗: {e}]"
 
-
-def sanitize_for_canvas(text: str) -> str:
-    # 記号・特殊文字を標準的な文字に置換
-    replacements = {
-        # ダッシュ・ハイフン類
-        "\u2013": "-", "\u2014": "-", "\u2015": "-",
-        "\u2212": "-", "\u2011": "-", "\u2010": "-",
-        # 波ダッシュ・チルダ類
-        "\uff5e": "-", "\u301c": "-",
-        # 全角括弧
-        "\uff08": "(", "\uff09": ")",
-        # 全角記号
-        "\uff0c": ",", "\uff0e": ".", "\uff01": "!",
-        "\uff1a": ":", "\uff1b": ";", "\uff1f": "?",
-        # 引用符類
-        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-        "\u300c": '"', "\u300d": '"', "\u300e": '"', "\u300f": '"',
-        # 矢印類
-        "\u2192": "->", "\u2190": "<-", "\u2194": "<->",
-        "\u21d2": "=>", "\u21d0": "<=", "\u21d4": "<=>",
-        "\u25b6": ">", "\u25c0": "<",
-        # 点・中黒
-        "\u30fb": ".", "\u2022": "-", "\u2023": "-",
-        "\u25cf": "-", "\u25cb": "-", "\u2027": ".",
-        # スペース類
-        "\u3000": " ", "\u00a0": " ",
-        # その他よく出る記号
-        "\u2026": "...", "\u22ef": "...",
-        "\u00d7": "x", "\u00f7": "/",
-        "\u2605": "*", "\u2606": "*",
-        "\u2713": "OK", "\u2714": "OK", "\u2715": "NG", "\u2716": "NG",
-        "\u25a0": "-", "\u25a1": "-",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    # 裸のURLを <URL> 形式でラップしてクリッカブルにする（既にラップ済みはスキップ）
-    text = re.sub(r"(?<![<(\[])https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]",
-                  lambda m: f"<{m.group(0)}>", text)
-
-    # h4以下の見出しはh3に統一（Canvasで未サポート）
-    text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
-    # インデントされた番号リストをリストに変換
-    text = re.sub(r"^(\s+)\d+\.\s+", r"\1- ", text, flags=re.MULTILINE)
-    # ブロッククオート内のリスト項目からブロッククオートを除去
-    text = re.sub(r"^> (-|\*|\d+\.)\s+", r"\1 ", text, flags=re.MULTILINE)
-
-    # 上記で対処できなかった非ASCII・非日本語の特殊記号を除去
-    def keep_char(c: str) -> str:
-        cp = ord(c)
-        if 0x20 <= cp <= 0x7E:
-            return c
-        if c in ("\n", "\t"):
-            return c
-        if 0x3000 <= cp <= 0x9FFF:
-            return c
-        if 0xF900 <= cp <= 0xFAFF:
-            return c
-        if 0xFF00 <= cp <= 0xFFEF:
-            return c
-        if 0x00C0 <= cp <= 0x024F:
-            return c
-        return ""
-
-    text = "".join(keep_char(c) for c in text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text
-
-
-_PAT_TAG_WITH_ID = re.compile(
-    r"<(h[1-6]|p|div|ul|ol|li|blockquote|pre|hr|table|tbody|thead|tr|td|th)\b[^>]*\sid=['\"]([^'\"]+)['\"]",
-    re.IGNORECASE,
-)
-_PAT_DATA_BLOCK = re.compile(r'data-block-id=["\']([^"\']+)["\']')
-_PAT_DATA_SEC   = re.compile(r'data-section-id=["\']([^"\']+)["\']')
-
-
-def _collect_section_ids(client: WebClient, canvas_id: str) -> list[str]:
-    """url_private HTML から全セクション ID を収集する（h1 タイトルは除外）"""
-    token = os.getenv("SLACK_USER_TOKEN", "")
-    try:
-        resp = client.files_info(file=canvas_id)
-        file_info = resp.get("file", {})
-        url = file_info.get("url_private") or file_info.get("url_private_download", "")
-        if not url:
-            return []
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req) as r:
-            html = r.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"[WARN] url_private 取得失敗: {e}", file=sys.stderr)
-        return []
-
-    seen: set[str] = set()
-    ids: list[str] = []
-    for m in _PAT_TAG_WITH_ID.finditer(html):
-        tag, sid = m.group(1).lower(), m.group(2)
-        if sid in seen:
-            continue
-        seen.add(sid)
-        ids.append(sid)
-    for pat in [_PAT_DATA_BLOCK, _PAT_DATA_SEC]:
-        for m in pat.finditer(html):
-            sid = m.group(1)
-            if sid not in seen:
-                seen.add(sid)
-                ids.append(sid)
-    return ids
-
-
-def post_to_canvas(canvas_id: str, content: str) -> None:
-    token = os.getenv("SLACK_USER_TOKEN")
-    if not token:
-        print("ERROR: SLACK_USER_TOKEN を設定してください", file=sys.stderr)
-        sys.exit(1)
-    print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
-    client = WebClient(token=token)
-
-    try:
-        # Step 1: url_private HTML から全セクション ID を収集して削除
-        section_ids = _collect_section_ids(client, canvas_id)
-        if section_ids:
-            total = len(section_ids)
-            print(f"[INFO] 既存セクション {total} 件を削除中...")
-            ok = fail = 0
-            for i, sid in enumerate(section_ids, 1):
-                try:
-                    client.canvases_edit(
-                        canvas_id=canvas_id,
-                        changes=[{"operation": "delete", "section_id": sid}],
-                    )
-                    ok += 1
-                except SlackApiError as e:
-                    print(f"\n[WARN] {sid} 削除失敗: {e.response.get('error')}", file=sys.stderr)
-                    fail += 1
-                if i % 10 == 0 or i == total:
-                    print(f"\r  進捗: {i}/{total} 件", end="", flush=True)
-            print()  # 改行
-            print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
-
-        # Step 2: 新コンテンツを先頭に挿入
-        client.canvases_edit(
-            canvas_id=canvas_id,
-            changes=[{
-                "operation": "insert_at_start",
-                "document_content": {"type": "markdown", "markdown": content},
-            }],
-        )
-        print(f"✓ Canvas 更新成功: {canvas_id}")
-    except SlackApiError as e:
-        print(f"Slack API エラー: {e.response['error']}", file=sys.stderr)
-        print(f"レスポンス詳細: {e.response}", file=sys.stderr)
-        sys.exit(1)
 
 
 # ==================================================================

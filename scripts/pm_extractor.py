@@ -24,26 +24,15 @@ Options:
 
 import argparse
 import json
-import os
 import re
 import sqlite3
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db_utils import open_db
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md
-
-
-def normalize_assignee(name: str | None) -> str | None:
-    """日本語を含む担当者名の姓名間スペース（半角・全角）を除去する"""
-    if not name:
-        return name
-    if re.search(r"[\u3040-\u9fff]", name):
-        name = name.replace(" ", "").replace("\u3000", "")
-    return name
+from db_utils import open_db, normalize_assignee
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md, call_claude
 
 
 # --------------------------------------------------------------------------- #
@@ -195,23 +184,6 @@ def mark_extracted(pm_conn: sqlite3.Connection, thread_ts: str, channel_id: str)
         "INSERT OR REPLACE INTO slack_extractions (thread_ts, channel_id, extracted_at) VALUES (?,?,?)",
         (thread_ts, channel_id, datetime.now().isoformat()),
     )
-
-
-# --------------------------------------------------------------------------- #
-# claude CLI 呼び出し
-# --------------------------------------------------------------------------- #
-def call_claude(prompt: str, timeout: int = 120) -> str:
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    result = subprocess.run(
-        ["claude", "-p", prompt],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"claude failed: {result.stderr[:500]}")
-    return result.stdout.strip()
 
 
 # --------------------------------------------------------------------------- #

@@ -7,7 +7,10 @@ argparse ヘルパー関数・make_logger() を提供する。
 """
 
 import argparse
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -77,6 +80,47 @@ def make_logger(output_path: str | None):
             output_file.close()
 
     return log, close
+
+
+# --------------------------------------------------------------------------- #
+# LLM 呼び出し
+# --------------------------------------------------------------------------- #
+
+def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
+    """
+    Claude CLI を subprocess 経由で呼び出す。
+
+    Parameters
+    ----------
+    prompt : str
+        LLM に渡すプロンプト
+    model : str | None
+        使用するモデル名（省略時は Claude CLI のデフォルト）
+    timeout : int
+        タイムアウト秒数（デフォルト: 120秒）
+
+    Returns
+    -------
+    str
+        LLM の標準出力（strip済み）
+
+    Raises
+    ------
+    RuntimeError
+        returncode != 0 の場合
+    subprocess.TimeoutExpired
+        タイムアウトした場合（呼び出し元でキャッチすること）
+    """
+    # CLAUDECODE 環境変数が設定されているとネストセッション判定でエラーになるため除外する
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    cmd = ["claude"]
+    if model:
+        cmd += ["--model", model]
+    cmd += ["-p", prompt]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    if result.returncode != 0:
+        raise RuntimeError(f"claude failed: {result.stderr[:500]}")
+    return result.stdout.strip()
 
 
 # --------------------------------------------------------------------------- #
