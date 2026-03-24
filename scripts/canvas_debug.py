@@ -302,7 +302,7 @@ def _cmd_test_batch_delete(canvas_id: str) -> None:
     print("結論: バッチ削除は不可。1件ずつ削除が必要。")
 
 
-_DELETE_MAX_WORKERS = 8   # 並列スレッド数（Rate Limit と相談して調整）
+_DELETE_MAX_WORKERS = 32   # 並列スレッド数（Rate Limit と相談して調整）
 _DELETE_MAX_RETRY   = 3   # 429 時の最大リトライ回数
 
 
@@ -330,11 +330,11 @@ def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
     """
     section_ids を ThreadPoolExecutor で並列削除し、失敗分を順次リトライする。
     Slack Canvas API はバッチ削除不可のため1件ずつ送るが、並列化で高速化する。
-    進捗を10件ごとに表示する。戻り値: (ok件数, 最終失敗件数)
+    結果の集約は as_completed() のメインスレッドループで行うためスレッドセーフ。
+    戻り値: (ok件数, 最終失敗件数)
     """
     token = client.token
-    total = len(section_ids)
-    ok = done = 0
+    ok = 0
     failed: list[str] = []
 
     with ThreadPoolExecutor(max_workers=_DELETE_MAX_WORKERS) as pool:
@@ -342,7 +342,6 @@ def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
                    for sid in section_ids}
         for future in as_completed(futures):
             sid = futures[future]
-            done += 1
             try:
                 future.result()
                 ok += 1
@@ -353,10 +352,6 @@ def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
             except Exception as e:
                 p(f"  WARN: {sid} 削除失敗: {e}")
                 failed.append(sid)
-            if done % 10 == 0 or done == total:
-                print(f"\r  進捗: {done}/{total} 件", end="", flush=True)
-
-    print()  # 改行
 
     if failed:
         p(f"  失敗 {len(failed)} 件を順次リトライ中（1秒間隔）...")
