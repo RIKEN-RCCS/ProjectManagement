@@ -328,14 +328,14 @@ def _delete_one(token: str, canvas_id: str, sid: str) -> str:
 def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
                     p) -> tuple[int, int]:
     """
-    section_ids を ThreadPoolExecutor で並列削除する。
+    section_ids を ThreadPoolExecutor で並列削除し、失敗分を順次リトライする。
     Slack Canvas API はバッチ削除不可のため1件ずつ送るが、並列化で高速化する。
-    進捗を10件ごとに表示する。
+    進捗を10件ごとに表示する。戻り値: (ok件数, 最終失敗件数)
     """
     token = client.token
     total = len(section_ids)
-    ok = fail = 0
-    done = 0
+    ok = done = 0
+    failed: list[str] = []
 
     with ThreadPoolExecutor(max_workers=_DELETE_MAX_WORKERS) as pool:
         futures = {pool.submit(_delete_one, token, canvas_id, sid): sid
@@ -349,15 +349,42 @@ def delete_sections(client: WebClient, canvas_id: str, section_ids: list[str],
             except SlackApiError as e:
                 err = e.response.get("error", str(e))
                 p(f"  WARN: {sid} 削除失敗: {err}")
-                fail += 1
+                failed.append(sid)
             except Exception as e:
                 p(f"  WARN: {sid} 削除失敗: {e}")
-                fail += 1
+                failed.append(sid)
             if done % 10 == 0 or done == total:
                 print(f"\r  進捗: {done}/{total} 件", end="", flush=True)
 
     print()  # 改行
-    return ok, fail
+
+    if failed:
+        p(f"  失敗 {len(failed)} 件を順次リトライ中（1秒間隔）...")
+        retry_ok, still_failed = _delete_sections_sequential(token, canvas_id, failed, p)
+        ok += retry_ok
+        if still_failed:
+            for sid in still_failed:
+                p(f"  WARN: {sid} 再試行も失敗")
+        return ok, len(still_failed)
+
+    return ok, 0
+
+
+def _delete_sections_sequential(token: str, canvas_id: str,
+                                 section_ids: list[str], p) -> tuple[int, list[str]]:
+    """失敗セクションを1件ずつ1秒間隔で順次リトライする。(ok件数, 依然失敗のIDリスト) を返す。"""
+    ok = 0
+    still_failed: list[str] = []
+    for sid in section_ids:
+        time.sleep(1.0)
+        try:
+            _delete_one(token, canvas_id, sid)
+            ok += 1
+        except SlackApiError as e:
+            still_failed.append(sid)
+        except Exception as e:
+            still_failed.append(sid)
+    return ok, still_failed
 
 
 # --------------------------------------------------------------------------- #
