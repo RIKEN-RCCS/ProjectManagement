@@ -404,7 +404,6 @@ pip install -r requirements.txt
 
 ```
 slack-sdk    # Slack API（メッセージ取得・ファイル投稿・Canvas操作等）
-mcp          # Model Context Protocol クライアント
 ```
 
 文字起こし機能の依存パッケージは `requirements-whisper.txt` を参照（Singularity コンテナ内で使用）。
