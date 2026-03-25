@@ -145,7 +145,7 @@ bash scripts/pm_from_recording_auto.sh -c C08SXA4M7JT
   - 議事録DBにインポート済み・Slack投稿済み: スキップ（再投稿するには手動で `--force`）
   - `~/.secrets/slack_tokens.sh` が自動的に読み込まれる
 
-#### 2.2. 個別のスクリプトで実行する場合 ※通常は2.2.の手順で実施する
+#### 2.2. 個別のスクリプトで実行する場合 ※通常は2.1.の手順で実施する
 
 * 会議録音データ(m4aフォーマット)から文字起こしを実施
 
@@ -226,7 +226,7 @@ python3 scripts/pm_minutes_to_pm.py --since 2026-01-01
 
 ### 3. プロジェクトのゴール・マイルストーンの更新
 
-`goals.yaml` を編集・承認したら pm.db に登録
+`goals.yaml` を編集・承認後に pm.db へ同期
 
 ```sh
 # 変更内容の確認（DB操作なし）
@@ -378,10 +378,16 @@ python3 scripts/db_utils.py --audit-log --output audit.txt  # ファイルにも
 
 ## 環境セットアップ
 
+### 動作要件
+
+- Python 3.10 以上
+- Claude Code（`claude` コマンド）: [インストール手順](https://docs.anthropic.com/en/docs/claude-code)
+- 文字起こし機能（`whisper_vad.py`）を使用する場合: GPU環境（NVIDIA L40S / GH200 等）および Singularity コンテナ
+
 ### Python環境
 
 ```sh
-# uv仮想環境を使用
+# Python仮想環境（~/.venv_x86_64）を使用
 ~/.venv_x86_64/bin/python3 scripts/pm_report.py ...
 # または
 source ~/.venv_x86_64/bin/activate
@@ -390,9 +396,18 @@ python3 scripts/pm_report.py ...
 
 ### 必要パッケージ
 
+```sh
+pip install -r requirements.txt
+```
+
+主な依存パッケージ（`requirements.txt`）:
+
 ```
 slack-sdk    # Slack API（メッセージ取得・ファイル投稿・Canvas操作等）
+mcp          # Model Context Protocol クライアント
 ```
+
+文字起こし機能の依存パッケージは `requirements-whisper.txt` を参照（Singularity コンテナ内で使用）。
 
 ### Slack User Token の取得
 
@@ -454,7 +469,7 @@ python3 scripts/db_utils.py --migrate data/pm.db --no-backup
 
 ## 注意事項
 
-- `claude -p` はClaude Codeセッション内からは実行不可。`pm_minutes_import.py`, `pm_extractor.py`, `pm_report.py` は**Claude Codeの外のターミナル**から実行すること。
+- `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。`pm_minutes_import.py`・`pm_extractor.py`・`pm_report.py` は**Claude Codeの外のターミナル**から実行すること。
 - Slack Canvasは表示できない文字（特殊Unicode）を含むとAPIエラーになる。スクリプト内で`sanitize_for_canvas()`による除去処理を実施済み。
-- `pm_report.py` および `slack_pipeline.py --canvas-id` は実行のたびにCanvasを全置換する（`url_private` HTMLからセクションIDを全件取得→全削除→新規挿入）。手動削除は不要。
+- `pm_report.py` および `slack_pipeline.py --canvas-id` は実行のたびにCanvasを全置換する（`url_private` のHTMLからセクションIDを全件取得→全削除→新規挿入）。手動での事前削除は不要。
 - Slack DBはチャンネルごとに独立（`data/{channel_id}.db`）。pm.dbは複数チャンネル・複数会議を横断して統合する。
