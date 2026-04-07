@@ -266,12 +266,52 @@ def _parse_decisions(section_text: str) -> list[dict]:
     return items
 
 
+def _parse_action_items_table(section_text: str) -> list[dict]:
+    """マークダウンテーブル形式のアクションアイテムをパースする。
+    generate_minutes_local.py の出力形式: | 担当者 | タスク内容 | 期限 |
+    """
+    _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+    _NONE_VALS = {"未定", "（未定）", "(未定)", ""}
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        # セパレータ行（|---|---| 等）をスキップ
+        if re.match(r"^\|[-| :]+\|$", line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        # ヘッダー行をスキップ
+        if cells[0] in ("担当者",) or cells[1] in ("タスク内容", "タスク"):
+            continue
+        assignee_raw = cells[0]
+        content = cells[1] if len(cells) > 1 else ""
+        due_raw = cells[2] if len(cells) > 2 else ""
+        if not content or content in ("（なし）", "(なし)"):
+            continue
+        assignee = None if assignee_raw in _NONE_VALS else assignee_raw
+        # YYYY-MM-DD 形式のみ保存（「26日」等の相対日付は None）
+        due_m = _DATE_RE.search(due_raw)
+        due_date = due_m.group(0) if due_m else None
+        items.append({"content": content, "assignee": assignee, "due_date": due_date})
+    return items
+
+
 def _parse_action_items(section_text: str) -> list[dict]:
     """
-    アクションアイテム箇条書きを構造化して返す。
+    アクションアイテムをパースして返す。
     各要素: {"content": str, "assignee": str|None, "due_date": str|None}
-    フォーマット外の行はフォールバックとして content のみ設定する。
+
+    テーブル形式（generate_minutes_local.py 出力）とリスト形式（pm_minutes_import.py 直接LLM呼び出し）
+    の両方に対応する。テーブル形式は "|" と区切り行で自動検出する。
     """
+    # テーブル形式を検出: "|" を含む行と "---" セパレータが存在する場合
+    if "|" in section_text and re.search(r"^\|[-| :]+\|$", section_text, re.MULTILINE):
+        return _parse_action_items_table(section_text)
+
+    # リスト形式（従来）
     items = []
     for line in section_text.splitlines():
         line = line.strip()
