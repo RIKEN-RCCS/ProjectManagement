@@ -88,29 +88,35 @@ def make_logger(output_path: str | None):
 
 def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
     """
-    Claude CLI を subprocess 経由で呼び出す。
+    LLM を呼び出す。OPENAI_API_BASE が設定されている場合は OpenAI 互換 API を使用し、
+    未設定の場合は Claude CLI（subprocess）を使用する。
 
     Parameters
     ----------
     prompt : str
         LLM に渡すプロンプト
     model : str | None
-        使用するモデル名（省略時は Claude CLI のデフォルト）
+        使用するモデル名。OpenAI互換モード時は OPENAI_MODEL 環境変数 → "gemma4" の順で
+        フォールバックする。Claude CLI モード時は Claude CLI のデフォルトを使用する。
     timeout : int
         タイムアウト秒数（デフォルト: 120秒）
 
     Returns
     -------
     str
-        LLM の標準出力（strip済み）
+        LLM の出力（strip済み）
 
     Raises
     ------
     RuntimeError
-        returncode != 0 の場合
-    subprocess.TimeoutExpired
+        Claude CLI モードで returncode != 0 の場合
+    requests.HTTPError
+        OpenAI互換モードで HTTP エラーが発生した場合
+    subprocess.TimeoutExpired / requests.Timeout
         タイムアウトした場合（呼び出し元でキャッチすること）
     """
+    if os.environ.get("OPENAI_API_BASE"):
+        return _call_openai_compat(prompt, model=model, timeout=timeout)
     # CLAUDECODE 環境変数が設定されているとネストセッション判定でエラーになるため除外する
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     cmd = ["claude"]
@@ -121,6 +127,33 @@ def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) ->
     if result.returncode != 0:
         raise RuntimeError(f"claude failed: {result.stderr[:500]}")
     return result.stdout.strip()
+
+
+def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
+    """
+    OpenAI 互換 API を requests で直接呼び出す。
+    環境変数:
+        OPENAI_API_BASE  — エンドポイント URL（例: http://localhost:8000/v1）
+        OPENAI_API_KEY   — API キー（省略時は "dummy"）
+        OPENAI_MODEL     — モデル名（省略時は "gemma4"）
+    """
+    import requests  # slack-sdk の依存として既にインストール済み
+    base_url = os.environ["OPENAI_API_BASE"].rstrip("/")
+    api_key = os.environ.get("OPENAI_API_KEY", "dummy")
+    model_name = model or os.environ.get("OPENAI_MODEL", "gemma4")
+    url = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
 # --------------------------------------------------------------------------- #
