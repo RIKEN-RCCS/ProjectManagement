@@ -414,12 +414,16 @@ def save_to_minutes_db(conn, meeting_id: str, held_at: str, kind: str,
         )
 
     for d in parsed["decisions"]:
+        if not d.get("content"):
+            continue
         conn.execute(
             "INSERT INTO decisions (meeting_id, content, source_context) VALUES (?, ?, ?)",
             (meeting_id, d["content"], d.get("source_context")),
         )
 
     for a in parsed["action_items"]:
+        if not a.get("content"):
+            continue
         conn.execute(
             "INSERT INTO action_items (meeting_id, content, assignee, due_date) VALUES (?, ?, ?, ?)",
             (meeting_id, a["content"], a.get("assignee"), a.get("due_date")),

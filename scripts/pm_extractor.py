@@ -278,6 +278,8 @@ def save_slack_items(
 
     d_count = 0
     for d in extracted.get("decisions", []):
+        if not d.get("content"):
+            continue
         decided_at = d.get("decided_at") or post_date
         pm_conn.execute(
             """
@@ -290,6 +292,8 @@ def save_slack_items(
 
     a_count = 0
     for a in extracted.get("action_items", []):
+        if not a.get("content"):
+            continue
         pm_conn.execute(
             """
             INSERT INTO action_items
