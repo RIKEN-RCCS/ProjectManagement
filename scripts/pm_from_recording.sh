@@ -164,7 +164,7 @@ EOF
 #     VENV_PYTHON=~/.venv_x86_64/bin/python3
       PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
       PM_MINUTES_TO_PM="$SCRIPT_DIR/pm_minutes_to_pm.py"
-      GENERATE_MINUTES_LOCAL="/lvs0/dne1/rccs-nghpcadu/hikaru.inoue/Minutes/scripts/generate_minutes_local.py"
+      GENERATE_MINUTES_LOCAL="$SCRIPT_DIR/generate_minutes_local.py"
 
       # ------------------------------------------------------------------ #
       # Step 1: generate_minutes_local.py で高品質議事録を生成
