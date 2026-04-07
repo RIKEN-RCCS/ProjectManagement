@@ -714,7 +714,7 @@ def process_file(
         log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
         prompt = PROMPT_TEMPLATE.format(transcript=transcript, held_at=held_at)
         try:
-            minutes_text = call_claude(prompt, model=model)
+            minutes_text = call_claude(prompt, model=model, timeout=600)
         except Exception as e:
             log(f"[ERROR] LLM呼び出し失敗: {e}")
             return "error"
