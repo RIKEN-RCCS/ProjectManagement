@@ -283,6 +283,48 @@ def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int =
 # CLAUDE.md ローダー
 # --------------------------------------------------------------------------- #
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_claude_md_context() -> str:
+    """ローカルLLM向けプロジェクト文脈を返す。generate_minutes_local.py より移植。
+
+    docs/project.md から「ステークホルダー・主なプロジェクト参加者・プロジェクト固有の用語・
+    会議の種類」の各セクションを抽出する。docs/project.md が存在しない場合は CLAUDE.md に
+    フォールバックする。Claude CLI は CLAUDE.md を自動ロードするが、ローカルLLMはしないため
+    このコンテキストをプロンプトに明示的に埋め込む必要がある。
+    """
+    _SECTION_PAT = re.compile(
+        r"^###\s+(ステークホルダー|主なプロジェクト参加者|プロジェクト固有の用語|会議の種類)"
+    )
+    project_md = _REPO_ROOT / "docs" / "project.md"
+    claude_md  = _REPO_ROOT / "CLAUDE.md"
+
+    if project_md.exists():
+        content = project_md.read_text(encoding="utf-8")
+        sections, capture = [], False
+        for line in content.splitlines():
+            if _SECTION_PAT.match(line):
+                capture = True
+            if capture:
+                sections.append(line)
+        return "\n".join(sections) if sections else content
+
+    # フォールバック: CLAUDE.md から抽出
+    if not claude_md.exists():
+        return ""
+    content = claude_md.read_text(encoding="utf-8")
+    sections, capture = [], False
+    for line in content.splitlines():
+        if _SECTION_PAT.match(line):
+            capture = True
+        elif re.match(r"^---", line) and capture:
+            capture = False
+        if capture:
+            sections.append(line)
+    return "\n".join(sections) if sections else content[:3000]
+
+
 def load_claude_md(claude_md_path: Path) -> str:
     """
     CLAUDE.md を読み込み、`@path` 参照を再帰的に展開して返す。

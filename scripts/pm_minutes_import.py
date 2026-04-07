@@ -86,7 +86,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
 from cli_utils import (
     add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    make_logger, prepare_transcript, call_claude,
+    make_logger, prepare_transcript, call_claude, load_claude_md_context,
 )
 
 
@@ -160,7 +160,7 @@ PROMPT_TEMPLATE = """\
 
 - 文字起こしテキストの内容に忠実に従い、推測を含めない
 - Whisperの書き起こし誤認識による不自然な表現は自然な日本語に修正してよいが、事実は変えない
-- プロジェクト固有の用語はCLAUDE.mdの用語集を参照して正しく表記する
+- 下記「プロジェクト文脈」に記載の用語集・人名を参照して正しく表記する
 - 必ず以下のフォーマットのみで出力すること。フォーマット外の説明・コメントは不要
 
 ## 出力フォーマット
@@ -192,6 +192,12 @@ PROMPT_TEMPLATE = """\
 ## 議事内容
 
 （議論の流れを要旨としてまとめて記載）
+
+---
+
+## プロジェクト文脈（用語集・人名・会議種別）
+
+{claude_md_context}
 
 ---
 
@@ -712,7 +718,12 @@ def process_file(
             return "ok"
 
         log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
-        prompt = PROMPT_TEMPLATE.format(transcript=transcript, held_at=held_at)
+        claude_md_context = load_claude_md_context()
+        prompt = PROMPT_TEMPLATE.format(
+            transcript=transcript,
+            held_at=held_at,
+            claude_md_context=claude_md_context,
+        )
         try:
             minutes_text = call_claude(prompt, model=model, timeout=600)
         except Exception as e:
