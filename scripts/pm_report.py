@@ -250,7 +250,7 @@ def format_action_items(items: list[dict],
         assignee  = a.get("assignee") or "未定"
         due       = a.get("due_date") or "-"
         milestone = a.get("milestone_id") or "-"
-        content   = a.get("content", "").replace("|", "｜").replace("\n", " ").replace("\r", "")
+        content   = (a.get("content") or "").replace("|", "｜").replace("\n", " ").replace("\r", "")
         source    = _format_source(a, permalink_map).replace("|", "｜")
         note      = (a.get("note") or "").replace("|", "｜").replace("\n", " ").replace("\r", "")
         lines.append(f"- [ ] **#{ai_id}** {content}")
@@ -271,7 +271,7 @@ def format_action_items_text(items: list[dict],
         due = f" 期限:{a['due_date']}" if a.get("due_date") else ""
         src = _format_source(a, permalink_map)
         source = f" 出典:{src}" if src else ""
-        lines.append(f"- [ID:{a.get('id','')}][{assignee}]{due}{source} {a['content']}")
+        lines.append(f"- [ID:{a.get('id','')}][{assignee}]{due}{source} {a.get('content') or ''}")
     return "\n".join(lines)
 
 
@@ -284,7 +284,7 @@ def format_decisions(items: list[dict],
         source = _format_source(d, permalink_map)
         source_str = f" （{source}）" if source else ""
         check = "x" if d.get("acknowledged_at") else " "
-        lines.append(f"- [{check}] [D:{d['id']}] {d['content']}{source_str}")
+        lines.append(f"- [{check}] [D:{d['id']}] {d.get('content') or ''}{source_str}")
     return "\n".join(lines)
 
 
