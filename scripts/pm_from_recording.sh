@@ -36,7 +36,6 @@ export SINGULARITY_BIND=/lvs0
 export OPENAI_API_BASE="http://localhost:8000/v1"
 export OPENAI_API_KEY="dummy"
 export OPENAI_MODEL="google/gemma-4-26B-A4B-it"
-export OPENAI_MAX_TOKENS="8192"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WHISPER_VAD="$SCRIPT_DIR/whisper_vad.py"
