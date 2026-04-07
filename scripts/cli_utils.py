@@ -133,9 +133,11 @@ def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int =
     """
     OpenAI 互換 API を requests で直接呼び出す。
     環境変数:
-        OPENAI_API_BASE  — エンドポイント URL（例: http://localhost:8000/v1）
-        OPENAI_API_KEY   — API キー（省略時は "dummy"）
-        OPENAI_MODEL     — モデル名（省略時は "gemma4"）
+        OPENAI_API_BASE   — エンドポイント URL（例: http://localhost:8000/v1）
+        OPENAI_API_KEY    — API キー（省略時は "dummy"）
+        OPENAI_MODEL      — モデル名（省略時は "gemma4"）
+        OPENAI_MAX_TOKENS — 最大出力トークン数（省略時はサーバーデフォルト）
+                            議事録など長い出力が必要な場合は 8192 以上を推奨
     """
     import requests  # slack-sdk の依存として既にインストール済み
     base_url = os.environ["OPENAI_API_BASE"].rstrip("/")
@@ -146,11 +148,14 @@ def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int =
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
+    payload: dict = {
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
+    max_tokens_env = os.environ.get("OPENAI_MAX_TOKENS")
+    if max_tokens_env:
+        payload["max_tokens"] = int(max_tokens_env)
     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
