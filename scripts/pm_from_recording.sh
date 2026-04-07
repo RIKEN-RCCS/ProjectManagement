@@ -159,10 +159,11 @@ EOF
   echo "[INFO] generate_minutes_local.py で議事録を生成中: $MEETING_NAME ($DATE_TO_USE)"
   TMPLOG=$(mktemp)
   "$PYTHON3" "$GENERATE_MINUTES_LOCAL" "$BASENAME.md" \
-    --model   "$OPENAI_MODEL" \
-    --url     "$OPENAI_API_BASE" \
-    --token   "$OPENAI_API_KEY" \
-    --output  "$(dirname "$BASENAME")" \
+    --model      "$OPENAI_MODEL" \
+    --url        "$OPENAI_API_BASE" \
+    --token      "$OPENAI_API_KEY" \
+    --output     "$(dirname "$BASENAME")" \
+    --max-tokens 16384 \
     --multi-stage --chunk-minutes 10 \
     2>&1 | tee "$TMPLOG"
   GEN_EXIT=${PIPESTATUS[0]}
