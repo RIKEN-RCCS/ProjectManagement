@@ -166,7 +166,7 @@ def detect_risk_items(action_items: list[dict]) -> list[dict]:
     """リスクキーワードを含むアクションアイテムを抽出"""
     risk_items = []
     for item in action_items:
-        content = item.get("content", "").lower()
+        content = (item.get("content") or "").lower()
         if any(kw.lower() in content for kw in RISK_KEYWORDS):
             risk_items.append(item)
     return risk_items
