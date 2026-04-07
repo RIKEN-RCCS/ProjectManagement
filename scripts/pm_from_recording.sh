@@ -164,27 +164,53 @@ EOF
 #     VENV_PYTHON=~/.venv_x86_64/bin/python3
       PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
       PM_MINUTES_TO_PM="$SCRIPT_DIR/pm_minutes_to_pm.py"
+      GENERATE_MINUTES_LOCAL="/lvs0/dne1/rccs-nghpcadu/hikaru.inoue/Minutes/scripts/generate_minutes_local.py"
 
-      echo "[INFO] 議事録DBへインポート中: $MEETING_NAME ($DATE_TO_USE)"
-      "$PYTHON3" "$PM_MINUTES_IMPORT" "$BASENAME.md" \
-        --meeting-name "$MEETING_NAME" \
-        --held-at "$DATE_TO_USE"
+      # ------------------------------------------------------------------ #
+      # Step 1: generate_minutes_local.py で高品質議事録を生成
+      # ------------------------------------------------------------------ #
+      echo "[INFO] generate_minutes_local.py で議事録を生成中: $MEETING_NAME ($DATE_TO_USE)"
+      TMPLOG=$(mktemp)
+      "$PYTHON3" "$GENERATE_MINUTES_LOCAL" "$BASENAME.md" \
+        --model   "$OPENAI_MODEL" \
+        --url     "$OPENAI_API_BASE" \
+        --token   "$OPENAI_API_KEY" \
+        --output  "$(dirname "$BASENAME")" \
+        --multi-stage --chunk-minutes 10 \
+        2>&1 | tee "$TMPLOG"
+      GEN_EXIT=${PIPESTATUS[0]}
 
-      if [[ $? -eq 0 ]]; then
-        echo "[INFO] pm.db へ転記中: $MEETING_NAME ($DATE_TO_USE)"
-        "$PYTHON3" "$PM_MINUTES_TO_PM" \
+      MINUTES_MD=$(grep '議事録を保存しました:' "$TMPLOG" | sed 's/.*議事録を保存しました: //')
+      rm -f "$TMPLOG"
+
+      if [[ $GEN_EXIT -ne 0 || -z "$MINUTES_MD" || ! -f "$MINUTES_MD" ]]; then
+        echo "[WARN] generate_minutes_local.py が失敗しました。$BASENAME.md は保持されています"
+      else
+        # ---------------------------------------------------------------- #
+        # Step 2: --no-llm で議事録DBへインポート
+        # ---------------------------------------------------------------- #
+        echo "[INFO] 議事録DBへインポート中: $MEETING_NAME ($DATE_TO_USE)"
+        "$PYTHON3" "$PM_MINUTES_IMPORT" "$MINUTES_MD" \
           --meeting-name "$MEETING_NAME" \
-          --since "$DATE_TO_USE" \
-          ${DB_PATH:+--db "$DB_PATH"}
+          --held-at "$DATE_TO_USE" \
+          --no-llm --force
 
         if [[ $? -eq 0 ]]; then
-          rm -f "$BASENAME.md"
-          echo "[INFO] 文字起こし結果を議事録DB・pm.db に保存し、$BASENAME.md を削除しました"
+          echo "[INFO] pm.db へ転記中: $MEETING_NAME ($DATE_TO_USE)"
+          "$PYTHON3" "$PM_MINUTES_TO_PM" \
+            --meeting-name "$MEETING_NAME" \
+            --since "$DATE_TO_USE" \
+            ${DB_PATH:+--db "$DB_PATH"}
+
+          if [[ $? -eq 0 ]]; then
+            rm -f "$BASENAME.md" "$MINUTES_MD"
+            echo "[INFO] 文字起こし・議事録ファイルを議事録DB・pm.db に保存し削除しました"
+          else
+            echo "[WARN] pm.db への転記に失敗しました。ファイルは保持されています"
+          fi
         else
-          echo "[WARN] pm.db への転記に失敗しました。$BASENAME.md は保持されています"
+          echo "[WARN] 議事録DBへのインポートに失敗しました。$MINUTES_MD は保持されています"
         fi
-      else
-        echo "[WARN] 議事録DBへのインポートに失敗しました。$BASENAME.md は保持されています"
       fi
     fi
   else
