@@ -56,7 +56,7 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
                               （LLM不使用）      （担当者・期限を直接転記）
 ```
 
-`pm_from_recording.sh --meeting-name` は `pm_minutes_import.py` → `pm_minutes_to_pm.py` の順で呼び出す。
+`pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_minutes_to_pm.py`（pm.db転記）の順で呼び出す。
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
@@ -83,9 +83,10 @@ slack/
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── canvas_utils.py              # Slack Canvas 操作の共通ユーティリティ（sanitize_for_canvas・post_to_canvas・セクション削除ロジック）
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload も提供
-│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude）
+│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用（call_local_llm 経由）
+│   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理・CoT除去・ストリーミング対応。../Minutes/scripts/ からコピー
 │   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
-│   ├── pm_from_recording.sh         # 会議録音をテキスト化するSlurmジョブスクリプト。文字起こし後 pm_minutes_import.py → pm_minutes_to_pm.py を自動実行
+│   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。文字起こし後 generate_minutes_local.py → pm_minutes_import.py --no-llm → pm_minutes_to_pm.py を自動実行
 │   ├── pm_from_slack.sh             # Slack取得・要約 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）
 │   ├── canvas_report.sh             # Canvas同期 → PMレポート生成・Canvas投稿（pm_sync_canvas.py + pm_report.py）
 │   ├── slack_post_minutes.sh        # 議事録DBの内容をSlackチャンネルに投稿（pm_minutes_import.py --post-to-slack）
@@ -119,16 +120,21 @@ python3 scripts/slack_pipeline.py ...
 
 ローカルLLM（OpenAI互換API）を使う場合:
 ```sh
-export OPENAI_API_BASE="http://..."
-export OPENAI_API_KEY="..."
-export OPENAI_MODEL="..."
+export OPENAI_API_BASE="http://localhost:8000/v1"   # vLLM エンドポイント
+export OPENAI_API_KEY="dummy"                        # 認証不要のローカルサーバは "dummy" で可
+export OPENAI_MODEL="google/gemma-4-26B-A4B-it"     # サーバに読み込まれているモデル名
+export OPENAI_MAX_TOKENS="8192"                      # Slack 要約用（pm_extractor・slack_pipeline）
 ```
+
+`OPENAI_API_BASE` が設定されている場合、`call_claude()` は Claude CLI の代わりにローカルLLMを呼び出す（`cli_utils.py` の `call_local_llm()` 経由）。会議録音処理（`pm_from_recording.sh`）はこれらの変数をスクリプト内でハードコードしているため、別途設定は不要。
+
+`OPENAI_MAX_TOKENS` は Slack 要約・抽出（`pm_extractor.py`・`slack_pipeline.py`）の最大出力トークン数。会議録音処理では `generate_minutes_local.py` の `--max-tokens 16384` が使われるため本変数は影響しない。
 
 ---
 
 ## 注意事項
 
-- `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。各スクリプトはClaude Codeの外のターミナルから実行すること。
+- `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。各スクリプトはClaude Codeの外のターミナルから実行すること。ローカルLLM（`OPENAI_API_BASE` 設定時）はこの制限を受けない。
 - `call_claude()` 内で `CLAUDECODE` 環境変数を子プロセスから除外する処理を実装済み。
 - `slack-mcp-server` は不要（`slack_pipeline.py` が Slack SDK に移行済み）。
 - Python仮想環境は `~/.venv_x86_64` を使用。`~/.venv_x86_64/bin/python3 scripts/xxx.py` で実行する。
