@@ -130,7 +130,16 @@ def open_db(
         conn.row_factory = _sqlcipher3.Row if encrypt and SQLCIPHER_AVAILABLE else _sqlite3.Row
 
     if schema:
-        conn.executescript(schema)
+        # executescript() は暗号化コンテキスト初期化前に暗黙 COMMIT を発行し
+        # SQLCipher の HMAC を破損させるため、個別 execute + 明示 commit を使う
+        for stmt in schema.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass
+        conn.commit()
 
     if migrations:
         for sql in migrations:
