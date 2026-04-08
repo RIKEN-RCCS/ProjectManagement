@@ -88,29 +88,35 @@ def make_logger(output_path: str | None):
 
 def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
     """
-    Claude CLI を subprocess 経由で呼び出す。
+    LLM を呼び出す。OPENAI_API_BASE が設定されている場合は OpenAI 互換 API を使用し、
+    未設定の場合は Claude CLI（subprocess）を使用する。
 
     Parameters
     ----------
     prompt : str
         LLM に渡すプロンプト
     model : str | None
-        使用するモデル名（省略時は Claude CLI のデフォルト）
+        使用するモデル名。OpenAI互換モード時は OPENAI_MODEL 環境変数 → "gemma4" の順で
+        フォールバックする。Claude CLI モード時は Claude CLI のデフォルトを使用する。
     timeout : int
         タイムアウト秒数（デフォルト: 120秒）
 
     Returns
     -------
     str
-        LLM の標準出力（strip済み）
+        LLM の出力（strip済み）
 
     Raises
     ------
     RuntimeError
-        returncode != 0 の場合
-    subprocess.TimeoutExpired
+        Claude CLI モードで returncode != 0 の場合
+    requests.HTTPError
+        OpenAI互換モードで HTTP エラーが発生した場合
+    subprocess.TimeoutExpired / requests.Timeout
         タイムアウトした場合（呼び出し元でキャッチすること）
     """
+    if os.environ.get("OPENAI_API_BASE"):
+        return _call_openai_compat(prompt, model=model, timeout=timeout)
     # CLAUDECODE 環境変数が設定されているとネストセッション判定でエラーになるため除外する
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     cmd = ["claude"]
@@ -123,9 +129,201 @@ def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) ->
     return result.stdout.strip()
 
 
+def strip_think_blocks(text: str) -> str:
+    """CoT を除去して日本語本文のみを返す。
+
+    generate_minutes_local.py より移植。対応パターン:
+    1. <think>...</think> タグ付きブロック（Qwen3/ELYZA 系）
+    2. タグなし英語 CoT の前置き（Nemotron 系）— 日本語文字が最初に現れる段落から抽出する
+    """
+    # パターン1: <think>...</think> タグ除去
+    # 閉じタグが無い場合（max_tokens 打ち切り）は空文字を返してリトライを促す
+    if "<think>" in text and "</think>" not in text:
+        return ""
+    text = re.sub(r"<think>[\s\S]*?</think>\s*", "", text).strip()
+
+    # パターン2: 先頭が英語 CoT（ASCII主体）の場合、最初の日本語段落から開始
+    if text and not re.search(r"[^\x00-\x7F]", text[:200]):
+        # 日本語文字（ひらがな・カタカナ・漢字）を含む最初の行を探す
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if re.search(r"[\u3000-\u9FFF\uF900-\uFAFF]", line):
+                text = "\n".join(lines[i:]).strip()
+                break
+
+    return text
+
+
+def call_local_llm(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+) -> str:
+    """OpenAI 互換 API を requests で直接呼び出す。generate_minutes_local.py より移植。
+
+    ストリーミングをデフォルトとし、CoT ブロック（<think>タグ・英語前置き）を自動除去する。
+    """
+    import requests
+    import json as _json
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    # temperature: 明示指定があればそれを使用、なければ think モードに応じたデフォルト
+    effective_temp = temperature if temperature is not None else (0.6 if think else 0.8)
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": effective_temp,
+    }
+    # thinking モードを有効化（enable_thinking のみ送信; clear_thinking は Qwen3 専用のため除外）
+    # thinking 時は top_p=0.95 を追加（ELYZA/Nemotron の推奨設定、反復ループ防止）
+    # no_chat_template_kwargs=True の場合は chat_template_kwargs を送信しない
+    # （Qwen3-Swallow 等の常時 reasoning モデル向け: toggle 不要、送信すると 400 エラーの可能性）
+    if think:
+        if not no_chat_template_kwargs:
+            payload["chat_template_kwargs"] = {"enable_thinking": True}
+        payload["top_p"] = 0.95
+    # Qwen3-Swallow 推奨サンプリングパラメータ（HF公式サンプルより）
+    if no_chat_template_kwargs:
+        payload["top_k"] = 20
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    url = base_url.rstrip("/") + "/chat/completions"
+
+    if no_stream:
+        # 非ストリーミング（LiteLLM プロキシ経由で streaming が動作しない場合等）
+        payload["stream"] = False
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+        # reasoning_content は reasoning parser が有効な場合に thinking が分離される領域。
+        # content のみを使用し、thinking トークンが出力に混入するのを防ぐ。
+        content = msg.get("content") or ""
+        print(f"[INFO] 生成トークン数（strip前）: {len(content)} chars, think={think}", file=sys.stderr)
+        stripped = strip_think_blocks(content)
+        print(f"[INFO] 生成トークン数（strip後）: {len(stripped)} chars", file=sys.stderr)
+        return stripped
+
+    # ストリーミング（デフォルト）
+    payload["stream"] = True
+    resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+    resp.raise_for_status()
+
+    content_parts: list[str] = []
+    print("[INFO] 生成中 ", end="", flush=True, file=sys.stderr)
+    for raw_line in resp.iter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+        if not line.startswith("data: "):
+            continue
+        data_str = line[len("data: "):]
+        if data_str.strip() == "[DONE]":
+            break
+        try:
+            chunk = _json.loads(data_str)
+        except _json.JSONDecodeError:
+            continue
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {})
+        # reasoning parser 有効時は reasoning_content に thinking が流れる。
+        # content のみを取得し、thinking トークンが出力に混入するのを防ぐ。
+        token = delta.get("content") or ""
+        if token:
+            content_parts.append(token)
+            print(".", end="", flush=True, file=sys.stderr)
+    print(" 完了", flush=True, file=sys.stderr)
+
+    content = "".join(content_parts)
+    print(f"[INFO] 生成トークン数（strip前）: {len(content)} chars, think={think}", file=sys.stderr)
+    stripped = strip_think_blocks(content)
+    print(f"[INFO] 生成トークン数（strip後）: {len(stripped)} chars", file=sys.stderr)
+    return stripped
+
+
+def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
+    """
+    call_local_llm() を環境変数経由で呼び出すラッパー。
+    環境変数:
+        OPENAI_API_BASE   — エンドポイント URL（例: http://localhost:8000/v1）
+        OPENAI_API_KEY    — API キー（省略時は "dummy"）
+        OPENAI_MODEL      — モデル名（省略時は "gemma4"）
+        OPENAI_MAX_TOKENS — 最大出力トークン数（省略時: 8192）
+    """
+    base_url = os.environ["OPENAI_API_BASE"]
+    api_key = os.environ.get("OPENAI_API_KEY", "dummy")
+    model_name = model or os.environ.get("OPENAI_MODEL", "gemma4")
+    max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
+    return call_local_llm(
+        prompt,
+        model=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=timeout,
+        max_tokens=max_tokens,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # CLAUDE.md ローダー
 # --------------------------------------------------------------------------- #
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_claude_md_context() -> str:
+    """ローカルLLM向けプロジェクト文脈を返す。generate_minutes_local.py より移植。
+
+    docs/project.md から「ステークホルダー・主なプロジェクト参加者・プロジェクト固有の用語・
+    会議の種類」の各セクションを抽出する。docs/project.md が存在しない場合は CLAUDE.md に
+    フォールバックする。Claude CLI は CLAUDE.md を自動ロードするが、ローカルLLMはしないため
+    このコンテキストをプロンプトに明示的に埋め込む必要がある。
+    """
+    _SECTION_PAT = re.compile(
+        r"^###\s+(ステークホルダー|主なプロジェクト参加者|プロジェクト固有の用語|会議の種類)"
+    )
+    project_md = _REPO_ROOT / "docs" / "project.md"
+    claude_md  = _REPO_ROOT / "CLAUDE.md"
+
+    if project_md.exists():
+        content = project_md.read_text(encoding="utf-8")
+        sections, capture = [], False
+        for line in content.splitlines():
+            if _SECTION_PAT.match(line):
+                capture = True
+            if capture:
+                sections.append(line)
+        return "\n".join(sections) if sections else content
+
+    # フォールバック: CLAUDE.md から抽出
+    if not claude_md.exists():
+        return ""
+    content = claude_md.read_text(encoding="utf-8")
+    sections, capture = [], False
+    for line in content.splitlines():
+        if _SECTION_PAT.match(line):
+            capture = True
+        elif re.match(r"^---", line) and capture:
+            capture = False
+        if capture:
+            sections.append(line)
+    return "\n".join(sections) if sections else content[:3000]
+
 
 def load_claude_md(claude_md_path: Path) -> str:
     """

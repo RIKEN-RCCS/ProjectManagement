@@ -23,9 +23,21 @@ set -euo pipefail
 
 . ~/.secrets/slack_tokens.sh
 
+ARCH=$(uname -m)
+if [[ "$ARCH" == "aarch64" ]]; then
+  PYTHON3="$HOME/.venv_aarch64/bin/python3"
+elif [[ "$ARCH" == "x86_64" ]]; then
+  PYTHON3="$HOME/.venv_x86_64/bin/python3"
+else
+  echo "Unknown architecture: $ARCH"; exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-PYTHON3="${HOME}/.venv_x86_64/bin/python3"
+
+export OPENAI_API_BASE="http://localhost:8000/v1"
+export OPENAI_API_KEY="dummy"
+export OPENAI_MODEL="google/gemma-4-26B-A4B-it"
 
 # --------------------------------------------------------------------------- #
 # 引数パース

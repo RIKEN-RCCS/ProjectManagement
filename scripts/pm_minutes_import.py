@@ -86,7 +86,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
 from cli_utils import (
     add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    make_logger, prepare_transcript, call_claude,
+    make_logger, prepare_transcript, call_claude, load_claude_md_context,
 )
 
 
@@ -160,7 +160,7 @@ PROMPT_TEMPLATE = """\
 
 - 文字起こしテキストの内容に忠実に従い、推測を含めない
 - Whisperの書き起こし誤認識による不自然な表現は自然な日本語に修正してよいが、事実は変えない
-- プロジェクト固有の用語はCLAUDE.mdの用語集を参照して正しく表記する
+- 下記「プロジェクト文脈」に記載の用語集・人名を参照して正しく表記する
 - 必ず以下のフォーマットのみで出力すること。フォーマット外の説明・コメントは不要
 
 ## 出力フォーマット
@@ -192,6 +192,12 @@ PROMPT_TEMPLATE = """\
 ## 議事内容
 
 （議論の流れを要旨としてまとめて記載）
+
+---
+
+## プロジェクト文脈（用語集・人名・会議種別）
+
+{claude_md_context}
 
 ---
 
@@ -260,12 +266,52 @@ def _parse_decisions(section_text: str) -> list[dict]:
     return items
 
 
+def _parse_action_items_table(section_text: str) -> list[dict]:
+    """マークダウンテーブル形式のアクションアイテムをパースする。
+    generate_minutes_local.py の出力形式: | 担当者 | タスク内容 | 期限 |
+    """
+    _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+    _NONE_VALS = {"未定", "（未定）", "(未定)", ""}
+    items = []
+    for line in section_text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        # セパレータ行（|---|---| 等）をスキップ
+        if re.match(r"^\|[-| :]+\|$", line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        # ヘッダー行をスキップ
+        if cells[0] in ("担当者",) or cells[1] in ("タスク内容", "タスク"):
+            continue
+        assignee_raw = cells[0]
+        content = cells[1] if len(cells) > 1 else ""
+        due_raw = cells[2] if len(cells) > 2 else ""
+        if not content or content in ("（なし）", "(なし)"):
+            continue
+        assignee = None if assignee_raw in _NONE_VALS else assignee_raw
+        # YYYY-MM-DD 形式のみ保存（「26日」等の相対日付は None）
+        due_m = _DATE_RE.search(due_raw)
+        due_date = due_m.group(0) if due_m else None
+        items.append({"content": content, "assignee": assignee, "due_date": due_date})
+    return items
+
+
 def _parse_action_items(section_text: str) -> list[dict]:
     """
-    アクションアイテム箇条書きを構造化して返す。
+    アクションアイテムをパースして返す。
     各要素: {"content": str, "assignee": str|None, "due_date": str|None}
-    フォーマット外の行はフォールバックとして content のみ設定する。
+
+    テーブル形式（generate_minutes_local.py 出力）とリスト形式（pm_minutes_import.py 直接LLM呼び出し）
+    の両方に対応する。テーブル形式は "|" と区切り行で自動検出する。
     """
+    # テーブル形式を検出: "|" を含む行と "---" セパレータが存在する場合
+    if "|" in section_text and re.search(r"^\|[-| :]+\|$", section_text, re.MULTILINE):
+        return _parse_action_items_table(section_text)
+
+    # リスト形式（従来）
     items = []
     for line in section_text.splitlines():
         line = line.strip()
@@ -368,12 +414,16 @@ def save_to_minutes_db(conn, meeting_id: str, held_at: str, kind: str,
         )
 
     for d in parsed["decisions"]:
+        if not d.get("content"):
+            continue
         conn.execute(
             "INSERT INTO decisions (meeting_id, content, source_context) VALUES (?, ?, ?)",
             (meeting_id, d["content"], d.get("source_context")),
         )
 
     for a in parsed["action_items"]:
+        if not a.get("content"):
+            continue
         conn.execute(
             "INSERT INTO action_items (meeting_id, content, assignee, due_date) VALUES (?, ?, ?, ?)",
             (meeting_id, a["content"], a.get("assignee"), a.get("due_date")),
@@ -712,9 +762,14 @@ def process_file(
             return "ok"
 
         log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
-        prompt = PROMPT_TEMPLATE.format(transcript=transcript, held_at=held_at)
+        claude_md_context = load_claude_md_context()
+        prompt = PROMPT_TEMPLATE.format(
+            transcript=transcript,
+            held_at=held_at,
+            claude_md_context=claude_md_context,
+        )
         try:
-            minutes_text = call_claude(prompt, model=model)
+            minutes_text = call_claude(prompt, model=model, timeout=600)
         except Exception as e:
             log(f"[ERROR] LLM呼び出し失敗: {e}")
             return "error"
