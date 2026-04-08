@@ -102,6 +102,7 @@ for INPUT_FILE in "${FILES[@]}"; do
   echo "=============================="
 
   cat << EOF > "$WORKDIR/run.sh"
+. /.venv/bin/activate
 export HUGGING_FACE_TOKEN="${HUGGING_FACE_TOKEN:?HUGGING_FACE_TOKEN 環境変数が設定されていません}"
 export HF_HOME="$WORKDIR/hf_cache"
 
@@ -197,7 +198,7 @@ EOF
   "$PYTHON3" "$PM_MINUTES_TO_PM" \
     --meeting-name "$MEETING_NAME" \
     --since "$DATE_TO_USE" \
-    ${DB_PATH:+--db "$DB_PATH"}
+    --db "${DB_PATH:-data/pm.db}"
 
   if [[ $? -eq 0 ]]; then
     rm -f "$BASENAME.md" "$MINUTES_MD"

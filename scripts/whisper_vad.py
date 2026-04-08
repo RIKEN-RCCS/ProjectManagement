@@ -1,36 +1,28 @@
 import os
 import argparse
 import torch
-import torchaudio
+import soundfile as sf
 from datetime import timedelta
 from pyannote.audio import Pipeline
-from silero_vad import collect_chunks, get_speech_timestamps, load_silero_vad, read_audio
+from silero_vad import collect_chunks, get_speech_timestamps, load_silero_vad
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 import numpy as np
 
-from df.enhance import enhance, init_df, load_audio, save_audio
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 THRESHOLD = 0.05
 MIN_SPEECH_DURATION_MS = 500 # 250
 MIN_SILENCE_DURATION_MS = 300 # 100
 SPEECH_PAD_MS = 250 # 120
 CHUNK_LENGTH = 30 # time in second
-#MODEL_REMOTE = "openai/whisper-small"
-#MODEL_LOCAL = "./whisper-small-final"
-#MODEL_REMOTE = "kotoba-tech/kotoba-whisper-v2.2"
-#MODEL_REMOTE = "openai/whisper-large-v2"
 MODEL_REMOTE = "openai/whisper-large-v3"
 MODEL_LOCAL = "./whisper-large-v3-ja-final"
 
 TEMPERATURE = 0.2 # 0.6
 NUM_BEAMS = 10
-MAX_NEW_TOKENS = 440
 REPETITION_PENALTY = 1.2
 NO_REPEAT_NGRAM_SIZE = 3
 
-#INITIAL_PROMPT="以下は日本語の会議録です。話者の発言を正確に書き起こしてください。"
-#INITIAL_PROMPT="以下は富岳NEXT開発プロジェクトの日本語の会議録です。話者の発言を正確に書き起こしてください。"
-#INITIAL_PROMPT="以下は富岳NEXT開発プロジェクトの日本語の会議録です。主にベンチマークフレームワークとしてBenchKitやBenchparkを活用する予定です。話者の発言を正確に書き起こしてください。"
 INITIAL_PROMPT = (
     "以下は富岳NEXT開発プロジェクトの日本語の会議録です。"
     "固有名詞：理化学研究所、富岳、富士通、NVIDIA、R-CCS、BenchKit、Benchpark、"
@@ -42,44 +34,19 @@ INITIAL_PROMPT = (
 )  # 222 tokens (上限 224)
 
 
-def apply_deepfilternet(audio_file, sample_rate=16000, chunk_duration_sec=600):
-    """
-    DeepFilterNet noise suppression processing with chunking support for long audio files
-
-    Parameters:
-        audio_file (str): Input audio file (.wav)
-        sample_rate (int): Target sample rate for resampling (default: 16kHz)
-        chunk_duration_sec (int): Chunk duration (in seconds) (default: 600sec. = 10min.)
-
-    Returns:
-        str: File path to save the denoised audio
-    """
-    print("[INFO] Applying DeepFilterNet3 noise suppression with chunking...")
-    model, df_state, _ = init_df()
-
-    waveform, _ = load_audio(audio_file, sr=df_state.sr())
-
-    chunk_size = sample_rate * chunk_duration_sec
-    total_frames = waveform.shape[1]
-
-    enhanced_chunks = []
-    with torch.no_grad():
-        for i in range(0, total_frames, chunk_size):
-            chunk = waveform[:, i:i + chunk_size].contiguous()
-            enhanced_chunk = enhance(model, df_state, chunk)
-            enhanced_chunks.append(enhanced_chunk)
-
-    enhanced_audio = torch.cat(enhanced_chunks, dim=-1)
-
-    enhanced_path = "denoised.wav"
-    save_audio(enhanced_path, enhanced_audio, df_state.sr())
-    return enhanced_path
-
-
-def remove_silence(audio_file, sampling_rate):
+def remove_silence(audio_file, sampling_rate, device=None):
     print("[INFO] Detecting silent segments (Silero VAD)...")
     model = load_silero_vad(onnx=False)
-    audio = read_audio(audio_file, sampling_rate=sampling_rate)
+    if device is not None:
+        model = model.to(device)
+    # silero_vad.read_audio は torchaudio.load を使うため soundfile で代替する。
+    # ffmpegで16kHz monoに変換済みのWAVを受け取る前提。
+    audio_np, sr = sf.read(audio_file, dtype="float32")
+    if audio_np.ndim > 1:
+        audio_np = audio_np.mean(axis=1)
+    audio = torch.from_numpy(audio_np)
+    if device is not None:
+        audio = audio.to(device)
     speech_timestamps = get_speech_timestamps(
         audio,
         model,
@@ -136,11 +103,15 @@ def load_model(use_local, hf_token, device):
     if use_local:
         print(f"[INFO] Loading Whisper model from local directory: {MODEL_LOCAL}")
         processor = WhisperProcessor.from_pretrained(MODEL_LOCAL, language="Japanese", task="transcribe")
-        model = WhisperForConditionalGeneration.from_pretrained(MODEL_LOCAL).to(device)
+        model = WhisperForConditionalGeneration.from_pretrained(
+            MODEL_LOCAL, torch_dtype=torch.float16
+        ).to(device)
     else:
         print(f"[INFO] Loading Whisper model from Hugging Face: {MODEL_REMOTE}")
-        processor = WhisperProcessor.from_pretrained(MODEL_REMOTE, use_auth_token=hf_token, language="ja", task="transcribe")
-        model = WhisperForConditionalGeneration.from_pretrained(MODEL_REMOTE, use_auth_token=hf_token).to(device)
+        processor = WhisperProcessor.from_pretrained(MODEL_REMOTE, token=hf_token, language="ja", task="transcribe")
+        model = WhisperForConditionalGeneration.from_pretrained(
+            MODEL_REMOTE, token=hf_token, torch_dtype=torch.float16
+        ).to(device)
     model.eval()
     return processor, model
 
@@ -149,16 +120,16 @@ def transcribe_chunks(chunks, processor, model, device):
     print("[INFO] Transcribing chunks (Whisper)...")
     segments = []
     for start_sec, end_sec, chunk in chunks:
-        print(f"[INFO] Transcribing chunk {start_sec}s - {end_sec}s")
+        print(f"[INFO] Transcribing chunk {start_sec}s - {end_sec}s", flush=True)
         inputs = processor(
-            chunk.squeeze().numpy(),
+            chunk.squeeze().cpu().numpy(),
             sampling_rate=16000,
             return_tensors="pt",
             language="ja",
             task="transcribe",
             initial_prompt=INITIAL_PROMPT,
         )
-        input_features = inputs.input_features.to(device)
+        input_features = inputs.input_features.to(device, dtype=model.dtype)
 
         with torch.no_grad():
             generated_ids = model.generate(
@@ -166,7 +137,6 @@ def transcribe_chunks(chunks, processor, model, device):
                 return_timestamps=True,
                 temperature=TEMPERATURE,
                 do_sample=TEMPERATURE > 0,
-                max_new_tokens=MAX_NEW_TOKENS,
                 num_beams=NUM_BEAMS,
                 repetition_penalty=REPETITION_PENALTY,
                 no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
@@ -174,7 +144,7 @@ def transcribe_chunks(chunks, processor, model, device):
 
         result = processor.batch_decode(generated_ids, skip_special_tokens=True)
         transcription = result[0].encode("utf-8", errors="ignore").decode("utf-8").strip()
-        print(transcription)
+        print(transcription, flush=True)
 
         segments.append({"start": start_sec, "end": end_sec, "text": transcription})
     return segments
@@ -241,24 +211,29 @@ def main():
     parser.add_argument("input_audio", help="Input audio file path (e.g., meeting.wav)")
     parser.add_argument("output_text", help="Output text file path (e.g., result.txt)")
     parser.add_argument("--local", action="store_true", help=f"Use local fine-tuned model ({MODEL_LOCAL})")
-    parser.add_argument("--denoise", action="store_true", help="Apply DeepFilterNet3 noise suppression before VAD")
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"[INFO] GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("[WARNING] CUDA not available, falling back to CPU (this will be very slow)")
+        device = torch.device("cpu")
     hf_token = os.getenv("HUGGING_FACE_TOKEN")
 
-    audio_file = args.input_audio
-    if args.denoise:
-        audio_file = apply_deepfilternet(audio_file, sample_rate=16000)
-
-    processed_waveform, sample_rate, speech_timestamps = remove_silence(audio_file, sampling_rate=16000)
+    # Silero VAD はCPUで実行する（vLLMがGPUメモリを大量確保しているため）
+    processed_waveform, sample_rate, speech_timestamps = remove_silence(args.input_audio, sampling_rate=16000, device=None)
     chunks = chunk_audio(processed_waveform, sample_rate, speech_timestamps, chunk_length_sec=CHUNK_LENGTH)
 
     print("[INFO] Running speaker diarization (PyAnnote)...")
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1",
-                                        use_auth_token=hf_token).to(device)
-    original_waveform, sr = torchaudio.load(args.input_audio)
+                                        token=hf_token).to(device)
+    audio_np, sr = sf.read(args.input_audio, dtype="float32", always_2d=True)
+    original_waveform = torch.from_numpy(audio_np.T)  # (channels, samples)
     diarization = pipeline({"waveform": original_waveform, "sample_rate": sr})
+    # 新しい pyannote は DiarizeOutput を返す。Annotation を取り出す。
+    if not hasattr(diarization, "itertracks"):
+        diarization = diarization.speaker_diarization
 
     processor, model = load_model(args.local, hf_token, device)
     segments = transcribe_chunks(chunks, processor, model, device)
