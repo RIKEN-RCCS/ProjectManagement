@@ -123,6 +123,10 @@ def open_db(
         # パスフレーズをSQLエスケープして PRAGMA key に渡す
         escaped = key.replace("'", "''")
         conn.execute(f"PRAGMA key='{escaped}'")
+        # 既存DBの場合: PRAGMA key 直後に SELECT を行い SQLCipher が既存の
+        # salt を読み込んで HMAC コンテキストを確立させる。これをしないと
+        # 後続の commit が新しい salt で page 1 を上書きし HMAC 破損が起きる。
+        conn.execute("SELECT count(*) FROM sqlite_master")
     else:
         conn = _sqlite3.connect(db_path)
 
@@ -130,8 +134,8 @@ def open_db(
         conn.row_factory = _sqlcipher3.Row if encrypt and SQLCIPHER_AVAILABLE else _sqlite3.Row
 
     if schema:
-        # executescript() は暗号化コンテキスト初期化前に暗黙 COMMIT を発行し
-        # SQLCipher の HMAC を破損させるため、個別 execute + 明示 commit を使う
+        # executescript() は暗黙 COMMIT を発行するため使用しない。
+        # 個別 execute + 明示 commit を使う。
         for stmt in schema.split(";"):
             stmt = stmt.strip()
             if stmt:
