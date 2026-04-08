@@ -126,7 +126,7 @@ def open_db(
         # 既存DBの場合: PRAGMA key 直後に SELECT を行い SQLCipher が既存の
         # salt を読み込んで HMAC コンテキストを確立させる。これをしないと
         # 後続の commit が新しい salt で page 1 を上書きし HMAC 破損が起きる。
-        conn.execute("SELECT count(*) FROM sqlite_master")
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
     else:
         conn = _sqlite3.connect(db_path)
 
