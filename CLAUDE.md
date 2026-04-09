@@ -154,3 +154,7 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 要約用（pm_extr
 ---
 
 @docs/roadmap.md
+
+---
+
+@docs/qa_system.md

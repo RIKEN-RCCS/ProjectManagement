@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""
+pm_embed.py - FTS5インデックス構築スクリプト
+
+qa_config.yaml の定義に従い、会議議事録本文・Slack要約を
+インデックスDB（qa_pm.db / qa_pm-hpc.db / qa_pm-bmt.db / qa_pm-pmo.db）に書き込む。
+
+使い方:
+  python3 scripts/pm_embed.py                          # 全インデックス差分更新
+  python3 scripts/pm_embed.py --full-rebuild           # 全インデックス全件再構築
+  python3 scripts/pm_embed.py --index-name pm-bmt      # 特定インデックスのみ
+  python3 scripts/pm_embed.py --dry-run                # 件数確認のみ
+"""
+
+import argparse
+import logging
+import re
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from db_utils import open_db
+
+# --- スキーマ定義 ---
+SCHEMA_CHUNKS = """
+CREATE TABLE IF NOT EXISTS chunks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,
+    source_db   TEXT NOT NULL,
+    record_id   TEXT,
+    held_at     TEXT,
+    content     TEXT NOT NULL,
+    source_ref  TEXT,
+    indexed_at  TEXT NOT NULL
+);
+"""
+
+SCHEMA_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
+    content,
+    content='chunks',
+    content_rowid='id',
+    tokenize='trigram'
+);
+"""
+
+SCHEMA_INDEX_STATE = """
+CREATE TABLE IF NOT EXISTS index_state (
+    source_db    TEXT PRIMARY KEY,
+    last_indexed TEXT
+);
+"""
+
+# tokens カラムの追加（既存DBへの移行用）
+SCHEMA_ADD_TOKENS_COLUMN = "ALTER TABLE chunks ADD COLUMN tokens TEXT"
+
+# SudachiPy形態素解析トークンによるFTS5インデックス
+SCHEMA_FTS_TOKENS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_tokens USING fts5(
+    tokens,
+    content='chunks',
+    content_rowid='id',
+    tokenize='unicode61'
+);
+"""
+
+CHUNK_MAX_CHARS = 1000
+CHUNK_OVERLAP_CHARS = 100
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# --- SudachiPy 形態素解析 ---
+
+_sudachi_tokenizer = None
+_sudachi_split_mode = None
+_SUDACHI_TARGET_POS = {"名詞", "動詞", "形容詞", "副詞"}
+
+
+def _init_sudachi() -> bool:
+    """SudachiPy の初期化。利用可能なら True を返す。"""
+    global _sudachi_tokenizer, _sudachi_split_mode
+    try:
+        import sudachipy
+        try:
+            # sudachipy v0.5.0+
+            _sudachi_tokenizer = sudachipy.Dictionary().create()
+            _sudachi_split_mode = sudachipy.SplitMode.C
+            return True
+        except Exception:
+            # 旧API
+            from sudachipy import tokenizer as tm
+            _sudachi_tokenizer = tm.Tokenizer()
+            _sudachi_split_mode = tm.Tokenizer.SplitMode.C
+            return True
+    except ImportError:
+        return False
+
+
+def sudachi_tokenize(text: str) -> str:
+    """SudachiPyで形態素解析し、検索用トークン文字列（スペース区切り）を返す。
+    SudachiPyが利用不可の場合は空文字列を返す。
+    """
+    if _sudachi_tokenizer is None:
+        return ""
+    try:
+        morphemes = _sudachi_tokenizer.tokenize(text, _sudachi_split_mode)
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for m in morphemes:
+            pos = m.part_of_speech()[0]
+            if pos in _SUDACHI_TARGET_POS:
+                form = m.dictionary_form()
+                if len(form) >= 2 and form not in seen:
+                    seen.add(form)
+                    tokens.append(form)
+        return " ".join(tokens)
+    except Exception:
+        return ""
+
+
+def load_qa_config(config_path: Path) -> dict:
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    cfg.setdefault("indices", {})
+    cfg.setdefault("channel_map", {})
+    cfg.setdefault("default_index", "pm")
+    return cfg
+
+
+def open_index_db(index_db_path: Path) -> sqlite3.Connection:
+    """インデックスDB（平文sqlite3）を開く。"""
+    conn = sqlite3.connect(str(index_db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(SCHEMA_CHUNKS)
+    conn.execute(SCHEMA_FTS)
+    conn.execute(SCHEMA_INDEX_STATE)
+    # tokens カラムの追加（既存DBの移行）
+    try:
+        conn.execute(SCHEMA_ADD_TOKENS_COLUMN)
+    except sqlite3.OperationalError:
+        pass  # already exists
+    conn.execute(SCHEMA_FTS_TOKENS)
+    conn.commit()
+    return conn
+
+
+def split_into_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK_OVERLAP_CHARS) -> list[str]:
+    """テキストを段落単位で分割し、max_chars以下のチャンクに収める。"""
+    if not text or not text.strip():
+        return []
+    paragraphs = re.split(r"\n\s*\n", text.strip())
+    chunks: list[str] = []
+    current = ""
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        if len(current) + len(para) + 2 <= max_chars:
+            current = (current + "\n\n" + para).strip()
+        else:
+            if current:
+                chunks.append(current)
+            if len(para) <= max_chars:
+                tail = current[-overlap:] if current and overlap else ""
+                current = (tail + "\n\n" + para).strip() if tail else para
+            else:
+                for i in range(0, len(para), max_chars - overlap):
+                    seg = para[i:i + max_chars]
+                    if seg.strip():
+                        chunks.append(seg.strip())
+                current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def get_last_indexed(index_conn: sqlite3.Connection, source_db: str) -> str | None:
+    row = index_conn.execute(
+        "SELECT last_indexed FROM index_state WHERE source_db = ?", (source_db,)
+    ).fetchone()
+    return row["last_indexed"] if row else None
+
+
+def set_last_indexed(index_conn: sqlite3.Connection, source_db: str, ts: str) -> None:
+    index_conn.execute(
+        "INSERT OR REPLACE INTO index_state (source_db, last_indexed) VALUES (?, ?)",
+        (source_db, ts),
+    )
+
+
+def insert_chunks(index_conn: sqlite3.Connection, chunk_rows: list[dict]) -> int:
+    if not chunk_rows:
+        return 0
+    index_conn.executemany(
+        """INSERT INTO chunks (source_type, source_db, record_id, held_at, content, tokens, source_ref, indexed_at)
+           VALUES (:source_type, :source_db, :record_id, :held_at, :content, :tokens, :source_ref, :indexed_at)""",
+        chunk_rows,
+    )
+    return len(chunk_rows)
+
+
+def delete_source_chunks(index_conn: sqlite3.Connection, source_db: str) -> None:
+    index_conn.execute("DELETE FROM chunks WHERE source_db = ?", (source_db,))
+
+
+def rebuild_fts(index_conn: sqlite3.Connection) -> None:
+    index_conn.execute("INSERT INTO fts(fts) VALUES('rebuild')")
+    index_conn.execute("INSERT INTO fts_tokens(fts_tokens) VALUES('rebuild')")
+
+
+# --- minutes/{kind}.db からの抽出（minutes_content のみ）---
+
+def index_minutes_content(
+    index_conn: sqlite3.Connection,
+    db_path: Path,
+    full_rebuild: bool,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """minutes/{kind}.db の minutes_content テーブルのみを索引化する。"""
+    source_db = f"minutes/{db_path.name}"
+
+    try:
+        src_conn = open_db(db_path)
+    except Exception as e:
+        logger.warning(f"  {source_db}: 開けませんでした - {e}")
+        return 0
+
+    chunk_rows: list[dict] = []
+    now = now_iso()
+
+    # instances から held_at, slack_file_permalink を取得
+    instances: dict[str, dict] = {}
+    for row in src_conn.execute("SELECT meeting_id, held_at, slack_file_permalink FROM instances"):
+        instances[row["meeting_id"]] = {
+            "held_at": row["held_at"],
+            "source_ref": row["slack_file_permalink"],
+        }
+
+    for row in src_conn.execute("SELECT id, meeting_id, content FROM minutes_content"):
+        inst = instances.get(row["meeting_id"], {})
+        for chunk in split_into_chunks(row["content"] or ""):
+            chunk_rows.append({
+                "source_type": "minutes_content",
+                "source_db": source_db,
+                "record_id": str(row["id"]),
+                "held_at": inst.get("held_at"),
+                "content": chunk,
+                "tokens": sudachi_tokenize(chunk),
+                "source_ref": inst.get("source_ref"),
+                "indexed_at": now,
+            })
+
+    src_conn.close()
+    logger.info(f"    minutes_content {db_path.stem}: {len(chunk_rows)} チャンク")
+
+    if dry_run:
+        return len(chunk_rows)
+
+    delete_source_chunks(index_conn, source_db)
+    count = insert_chunks(index_conn, chunk_rows)
+    set_last_indexed(index_conn, source_db, now)
+    return count
+
+
+# --- {channel_id}.db からの抽出（slack_summary のみ）---
+
+def index_slack_summaries(
+    index_conn: sqlite3.Connection,
+    db_path: Path,
+    full_rebuild: bool,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """Slack チャンネルDBの summaries テーブルのみを索引化する。"""
+    source_db = db_path.name
+    last_indexed = None if full_rebuild else get_last_indexed(index_conn, source_db)
+
+    try:
+        src_conn = open_db(db_path)
+    except Exception as e:
+        logger.warning(f"    {source_db}: 開けませんでした - {e}")
+        return 0
+
+    chunk_rows: list[dict] = []
+    now = now_iso()
+
+    where_clause = "WHERE s.summarized_at > ?" if last_indexed else ""
+    params = (last_indexed,) if last_indexed else ()
+
+    for row in src_conn.execute(
+        f"""SELECT s.thread_ts, s.summary, s.summarized_at, m.timestamp, m.permalink
+            FROM summaries s
+            LEFT JOIN messages m ON s.thread_ts = m.thread_ts AND s.channel_id = m.channel_id
+            {where_clause}
+            ORDER BY s.summarized_at""",
+        params,
+    ):
+        text = (row["summary"] or "").strip()
+        if not text:
+            continue
+        held_at = (row["timestamp"] or "")[:10] if row["timestamp"] else None
+        chunk_rows.append({
+            "source_type": "slack_summary",
+            "source_db": source_db,
+            "record_id": row["thread_ts"],
+            "held_at": held_at,
+            "content": text,
+            "tokens": sudachi_tokenize(text),
+            "source_ref": row["permalink"],
+            "indexed_at": now,
+        })
+
+    src_conn.close()
+    logger.info(f"    slack_summary {source_db}: {len(chunk_rows)} チャンク")
+
+    if dry_run:
+        return len(chunk_rows)
+
+    if full_rebuild:
+        delete_source_chunks(index_conn, source_db)
+    count = insert_chunks(index_conn, chunk_rows)
+    set_last_indexed(index_conn, source_db, now)
+    return count
+
+
+# --- メイン ---
+
+def build_index(
+    index_name: str,
+    index_cfg: dict,
+    data_dir: Path,
+    full_rebuild: bool,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """1つのインデックスを構築する。追加したチャンク数を返す。"""
+    db_path = Path(index_cfg["db"])
+    minutes_kinds = index_cfg.get("minutes") or []
+    channel_ids = index_cfg.get("channels") or []
+
+    logger.info(f"[{index_name}] → {db_path}")
+    logger.info(f"  minutes: {minutes_kinds or '(なし)'}")
+    logger.info(f"  channels: {channel_ids or '(なし)'}")
+
+    if not minutes_kinds and not channel_ids:
+        logger.warning(f"  ソースが未設定です。qa_config.yaml を編集してください。")
+        return 0
+
+    index_conn = open_index_db(db_path)
+
+    if full_rebuild and not dry_run:
+        logger.info(f"  全件再構築: 既存インデックスをクリア")
+        index_conn.execute("DELETE FROM chunks")
+        index_conn.execute("DELETE FROM index_state")
+        index_conn.commit()
+
+    total = 0
+
+    # minutes_content
+    for kind in minutes_kinds:
+        minutes_path = data_dir / "minutes" / f"{kind}.db"
+        if not minutes_path.exists():
+            logger.warning(f"  {minutes_path} が見つかりません")
+            continue
+        total += index_minutes_content(index_conn, minutes_path, full_rebuild, dry_run, logger)
+
+    # slack_summary
+    for channel_id in channel_ids:
+        channel_path = data_dir / f"{channel_id}.db"
+        if not channel_path.exists():
+            logger.warning(f"  {channel_path} が見つかりません")
+            continue
+        total += index_slack_summaries(index_conn, channel_path, full_rebuild, dry_run, logger)
+
+    if not dry_run:
+        index_conn.commit()
+        logger.info(f"  FTS5 再構築中...")
+        rebuild_fts(index_conn)
+        index_conn.commit()
+        db_total = index_conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        logger.info(f"  完了: {db_total} チャンク in {db_path}")
+
+    index_conn.close()
+    return total
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="QAインデックスDB (FTS5) を構築する")
+    parser.add_argument("--full-rebuild", action="store_true", help="全件再構築（差分なし）")
+    parser.add_argument("--index-name", help="特定インデックスのみ処理（qa_config.yaml のキー名）")
+    parser.add_argument("--config", default="data/qa_config.yaml", help="設定ファイルのパス")
+    parser.add_argument("--data-dir", default="data", help="data/ ディレクトリのパス")
+    parser.add_argument("--dry-run", action="store_true", help="書き込みなしで件数のみ表示")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logger = logging.getLogger("pm_embed")
+
+    if _init_sudachi():
+        logger.info("SudachiPy: 初期化完了（形態素解析インデックスを構築します）")
+    else:
+        logger.warning("SudachiPy: 利用不可（trigramのみでインデックスを構築します）")
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        logger.error(f"設定ファイルが見つかりません: {config_path}")
+        sys.exit(1)
+
+    config = load_qa_config(config_path)
+    data_dir = Path(args.data_dir)
+
+    if args.dry_run:
+        logger.info("[DRY-RUN] 書き込みは行いません")
+
+    indices = config.get("indices", {})
+    if args.index_name:
+        if args.index_name not in indices:
+            logger.error(f"インデックス '{args.index_name}' は qa_config.yaml に定義されていません")
+            logger.error(f"定義済み: {list(indices.keys())}")
+            sys.exit(1)
+        indices = {args.index_name: indices[args.index_name]}
+
+    total = 0
+    for index_name, index_cfg in indices.items():
+        total += build_index(index_name, index_cfg, data_dir, args.full_rebuild, args.dry_run, logger)
+
+    if args.dry_run:
+        logger.info(f"\n[DRY-RUN] 合計 {total} チャンク（書き込みなし）")
+    else:
+        logger.info(f"\n全インデックス更新完了")
+
+
+if __name__ == "__main__":
+    main()
