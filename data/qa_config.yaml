@@ -1,0 +1,49 @@
+# QAインデックス定義ファイル
+#
+# indices:
+#   {index名}:
+#     db: インデックスDBのパス（data/ 以下）
+#     minutes: 対象の会議種別名リスト（data/minutes/{name}.db の {name}）
+#     channels: 対象のSlackチャンネルIDリスト
+#
+# channel_map:
+#   {チャンネルID}: {index名}
+#   ここにないチャンネルでは default_index を使用
+#
+# default_index: マッピングなしチャンネルのフォールバック
+
+indices:
+  pm:
+    db: data/qa_pm.db
+    minutes: [Leader_Meeting, Co-design_Review_Meeting]
+    channels: [C08M0249GRL, C08SXA4M7JT, C08LSJP4R6K, C093DQFSCRH, C093LP1J15G, C0A6AC59AHM, C08MJ0NF5UZ, C096ER1A0LU]
+
+  pm-hpc:
+    db: data/qa_pm-hpc.db
+    minutes: [Block1_Meeting, Block2_Meeting, SubWG1_Meeting, SubWG3_Meeting, SubWG4_Meeting, SubWG6_Meeting, SubWG7_Meeting, SubWG8_Meeting]
+    channels: [C08M0249GRL, C08LSJP4R6K, C093DQFSCRH, C093LP1J15G, C0A6AC59AHM]
+
+  pm-bmt:
+    db: data/qa_pm-bmt.db
+    minutes: [BenchmarkWG_Meeting]
+    channels: [C08M0249GRL, C08MJ0NF5UZ, C096ER1A0LU]
+
+  pm-pmo:
+    db: data/qa_pm-pmo.db
+    minutes: []
+    channels: [C08PE3K9N72]
+
+# /ask 実行チャンネル → インデックス名のマッピング
+channel_map: {}
+#  C08SXA4M7JT: pm
+#  C08LSJP4R6K: pm-hpc
+#  C093DQFSCRH: pm-hpc
+#  C093LP1J15G: pm-hpc
+#  C0A6AC59AHM: pm-hpc
+#  C08MJ0NF5UZ: pm-bmt
+#  C096ER1A0LU: pm-bmt
+#  C08M0249GRL: pm-pmo
+#  C08PE3K9N72: pm-pmo
+
+# マッピングなしチャンネルのフォールバック
+default_index: pm
