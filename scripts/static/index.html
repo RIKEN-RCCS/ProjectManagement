@@ -8,7 +8,7 @@
   <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32/dist/ag-grid-community.min.js"></script>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body class="h-screen flex flex-col overflow-hidden bg-gray-50">
+<body class="h-screen flex flex-col bg-gray-50 overflow-hidden">
 
   <!-- Header -->
   <header class="bg-blue-800 text-white px-4 py-2 flex-none flex items-center gap-4">
@@ -25,7 +25,7 @@
   <!-- ================================================================ -->
   <!-- Action Items Panel                                               -->
   <!-- ================================================================ -->
-  <div id="panel-ai" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1">
+  <div id="panel-ai" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto">
     <!-- Filters -->
     <div class="flex items-end gap-3 flex-none">
       <label class="flex flex-col text-xs text-gray-600">
@@ -73,7 +73,7 @@
   <!-- ================================================================ -->
   <!-- Decisions Panel                                                  -->
   <!-- ================================================================ -->
-  <div id="panel-dec" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 hidden">
+  <div id="panel-dec" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
     <!-- Filters -->
     <div class="flex items-end gap-3 flex-none">
       <label class="flex flex-col text-xs text-gray-600">
