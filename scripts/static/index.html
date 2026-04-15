@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PM DB Editor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32/dist/ag-grid-community.min.js"></script>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="h-screen flex flex-col overflow-hidden bg-gray-50">
+
+  <!-- Header -->
+  <header class="bg-blue-800 text-white px-4 py-2 flex-none flex items-center gap-4">
+    <h1 class="text-xl font-bold">PM DB Editor</h1>
+    <select id="sel-db" class="bg-blue-700 text-white text-sm rounded px-2 py-1 border border-blue-600"></select>
+  </header>
+
+  <!-- Tabs -->
+  <nav class="flex border-b border-gray-300 bg-white flex-none">
+    <button class="tab-btn active px-6 py-2 font-medium text-sm" data-tab="ai">アクションアイテム</button>
+    <button class="tab-btn px-6 py-2 font-medium text-sm text-gray-500" data-tab="dec">決定事項</button>
+  </nav>
+
+  <!-- ================================================================ -->
+  <!-- Action Items Panel                                               -->
+  <!-- ================================================================ -->
+  <div id="panel-ai" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1">
+    <!-- Filters -->
+    <div class="flex items-end gap-3 flex-none">
+      <label class="flex flex-col text-xs text-gray-600">
+        ステータス
+        <select id="f-ai-status" class="border rounded px-2 py-1 text-sm w-28">
+          <option value="open" selected>open</option>
+          <option value="closed">closed</option>
+          <option value="すべて">すべて</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-600">
+        マイルストーン
+        <select id="f-ai-ms" class="border rounded px-2 py-1 text-sm w-40">
+          <option value="すべて" selected>すべて</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-600">
+        削除
+        <select id="f-ai-del" class="border rounded px-2 py-1 text-sm w-24">
+          <option value="非削除" selected>非削除</option>
+          <option value="削除のみ">削除のみ</option>
+          <option value="すべて">すべて</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-600">
+        発生日（以降）
+        <input id="f-ai-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
+      </label>
+      <button onclick="loadActionItems()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
+    </div>
+
+    <!-- Buttons -->
+    <div class="flex items-center gap-2 flex-none">
+      <button onclick="saveActionItems()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
+      <button id="btn-ai-del" onclick="bulkToggle('ai','deleted')" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">全件削除</button>
+      <button id="btn-ai-done" onclick="bulkToggle('ai','done')" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">全件完了</button>
+      <button onclick="loadActionItems()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">再読み込み</button>
+      <button onclick="openDialog('dialog-ai-new')" class="border border-blue-600 text-blue-600 hover:bg-blue-50 rounded px-3 py-1 text-sm">+ 新規追加</button>
+    </div>
+
+    <!-- Grid -->
+    <div id="grid-ai" class="ag-theme-quartz flex-1 min-h-0"></div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- Decisions Panel                                                  -->
+  <!-- ================================================================ -->
+  <div id="panel-dec" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 hidden">
+    <!-- Filters -->
+    <div class="flex items-end gap-3 flex-none">
+      <label class="flex flex-col text-xs text-gray-600">
+        削除
+        <select id="f-dec-del" class="border rounded px-2 py-1 text-sm w-24">
+          <option value="非削除" selected>非削除</option>
+          <option value="削除のみ">削除のみ</option>
+          <option value="すべて">すべて</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-600">
+        発生日（以降）
+        <input id="f-dec-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
+      </label>
+      <button onclick="loadDecisions()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
+    </div>
+
+    <!-- Buttons -->
+    <div class="flex items-center gap-2 flex-none">
+      <button onclick="saveDecisions()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
+      <button onclick="ackAll()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">未確認を一括確認</button>
+      <button onclick="loadDecisions()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">再読み込み</button>
+      <button onclick="openDialog('dialog-dec-new')" class="border border-blue-600 text-blue-600 hover:bg-blue-50 rounded px-3 py-1 text-sm">+ 新規追加</button>
+    </div>
+
+    <!-- Grid -->
+    <div id="grid-dec" class="ag-theme-quartz flex-1 min-h-0"></div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- Dialogs                                                          -->
+  <!-- ================================================================ -->
+
+  <!-- New Action Item -->
+  <dialog id="dialog-ai-new" class="rounded-lg shadow-xl p-6 w-[560px] backdrop:bg-black/30">
+    <h2 class="text-lg font-bold mb-3">新規アクションアイテム</h2>
+    <form id="form-ai-new" method="dialog" class="flex flex-col gap-2">
+      <textarea name="content" rows="3" required placeholder="内容 *" class="border rounded p-2 text-sm w-full"></textarea>
+      <div class="flex gap-2">
+        <input name="assignee" placeholder="担当者" class="border rounded p-2 text-sm flex-1">
+        <input name="due_date" placeholder="期限 YYYY-MM-DD" class="border rounded p-2 text-sm flex-1">
+      </div>
+      <div class="flex gap-2">
+        <select name="milestone_id" class="border rounded p-2 text-sm flex-1">
+          <option value="">マイルストーン</option>
+        </select>
+        <select name="status" class="border rounded p-2 text-sm flex-1">
+          <option value="open">open</option>
+          <option value="closed">closed</option>
+        </select>
+      </div>
+      <input name="note" placeholder="対応状況" class="border rounded p-2 text-sm w-full">
+      <input name="source" placeholder="出典（任意）" class="border rounded p-2 text-sm w-full">
+      <div class="flex justify-end gap-2 mt-2">
+        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">キャンセル</button>
+        <button type="submit" class="bg-blue-600 text-white rounded px-4 py-1 text-sm">追加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- New Decision -->
+  <dialog id="dialog-dec-new" class="rounded-lg shadow-xl p-6 w-[560px] backdrop:bg-black/30">
+    <h2 class="text-lg font-bold mb-3">新規決定事項</h2>
+    <form id="form-dec-new" method="dialog" class="flex flex-col gap-2">
+      <textarea name="content" rows="3" required placeholder="内容 *" class="border rounded p-2 text-sm w-full"></textarea>
+      <div class="flex gap-2">
+        <input name="decided_at" placeholder="決定日 YYYY-MM-DD" class="border rounded p-2 text-sm flex-1">
+        <input name="source" placeholder="出典（任意）" class="border rounded p-2 text-sm flex-1">
+      </div>
+      <div class="flex justify-end gap-2 mt-2">
+        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">キャンセル</button>
+        <button type="submit" class="bg-blue-600 text-white rounded px-4 py-1 text-sm">追加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Toast container -->
+  <div id="toast-container" class="fixed bottom-4 right-4 flex flex-col gap-2 z-50"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
