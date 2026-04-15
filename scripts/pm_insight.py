@@ -54,7 +54,7 @@ def fetch_overdue_items(conn: sqlite3.Connection, today: str, since: str | None)
     query = """
         SELECT id, content, assignee, due_date, milestone_id
         FROM action_items
-        WHERE status = 'open' AND due_date IS NOT NULL AND due_date < ?
+        WHERE status = 'open' AND COALESCE(deleted,0)=0 AND due_date IS NOT NULL AND due_date < ?
     """
     params: list = [today]
     if since:
@@ -66,7 +66,7 @@ def fetch_overdue_items(conn: sqlite3.Connection, today: str, since: str | None)
 
 def fetch_unlinked_items_count(conn: sqlite3.Connection, since: str | None) -> int:
     """milestone_id が未設定の open アイテム数（計画の穴）"""
-    query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND milestone_id IS NULL"
+    query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND COALESCE(deleted,0)=0 AND milestone_id IS NULL"
     params: list = []
     if since:
         query += " AND extracted_at >= ?"
@@ -76,7 +76,7 @@ def fetch_unlinked_items_count(conn: sqlite3.Connection, since: str | None) -> i
 
 def fetch_no_assignee_count(conn: sqlite3.Connection, since: str | None) -> int:
     """担当者なしの open アイテム数"""
-    query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND (assignee IS NULL OR assignee = '')"
+    query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND COALESCE(deleted,0)=0 AND (assignee IS NULL OR assignee = '')"
     params: list = []
     if since:
         query += " AND extracted_at >= ?"
@@ -92,11 +92,11 @@ def fetch_weekly_trends(conn: sqlite3.Connection, weeks: int = 4) -> list[dict]:
         week_start = (today_dt - timedelta(weeks=w)).isoformat()
         week_end   = (today_dt - timedelta(weeks=w - 1)).isoformat()
         created = conn.execute(
-            "SELECT COUNT(*) FROM action_items WHERE extracted_at >= ? AND extracted_at < ?",
+            "SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND extracted_at >= ? AND extracted_at < ?",
             (week_start, week_end),
         ).fetchone()[0]
         closed = conn.execute(
-            "SELECT COUNT(*) FROM action_items WHERE status='closed' AND extracted_at >= ? AND extracted_at < ?",
+            "SELECT COUNT(*) FROM action_items WHERE status='closed' AND COALESCE(deleted,0)=0 AND extracted_at >= ? AND extracted_at < ?",
             (week_start, week_end),
         ).fetchone()[0]
         result.append({
@@ -110,7 +110,7 @@ def fetch_weekly_trends(conn: sqlite3.Connection, weeks: int = 4) -> list[dict]:
 
 def fetch_unacknowledged_decisions(conn: sqlite3.Connection, since: str | None) -> list[dict]:
     """未確認（acknowledged_at IS NULL）の決定事項（最大20件）"""
-    query = "SELECT id, content, decided_at FROM decisions WHERE acknowledged_at IS NULL"
+    query = "SELECT id, content, decided_at FROM decisions WHERE COALESCE(deleted,0)=0 AND acknowledged_at IS NULL"
     params: list = []
     if since:
         query += " AND decided_at >= ?"
@@ -126,24 +126,24 @@ def fetch_summary_stats(conn: sqlite3.Connection, since: str | None, today: str)
 
     p_since = [since] if since else []
     since_filter_ai = " AND extracted_at >= ?" if since else ""
-    since_filter_d  = " WHERE decided_at >= ?" if since else ""
+    since_filter_d  = " AND decided_at >= ?" if since else ""
 
     return {
         "total_open": _count(
-            f"SELECT COUNT(*) FROM action_items WHERE status='open'{since_filter_ai}", p_since
+            f"SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='open'{since_filter_ai}", p_since
         ),
         "total_closed": _count(
-            f"SELECT COUNT(*) FROM action_items WHERE status='closed'{since_filter_ai}", p_since
+            f"SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='closed'{since_filter_ai}", p_since
         ),
         "overdue_count": _count(
-            "SELECT COUNT(*) FROM action_items WHERE status='open' AND due_date IS NOT NULL AND due_date < ?",
+            "SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='open' AND due_date IS NOT NULL AND due_date < ?",
             [today],
         ),
         "total_decisions": _count(
-            f"SELECT COUNT(*) FROM decisions{since_filter_d}", p_since
+            f"SELECT COUNT(*) FROM decisions WHERE COALESCE(deleted,0)=0{since_filter_d}", p_since
         ),
         "unacknowledged_decisions": _count(
-            "SELECT COUNT(*) FROM decisions WHERE acknowledged_at IS NULL", []
+            "SELECT COUNT(*) FROM decisions WHERE COALESCE(deleted,0)=0 AND acknowledged_at IS NULL", []
         ),
     }
 

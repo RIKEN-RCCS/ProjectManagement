@@ -74,7 +74,8 @@ Slack から取得した最新返信 msg_ts  vs  summaries.last_reply_ts
 | `milestone_id` | TEXT | 紐づくマイルストーンID（M1〜M5、なければNULL） |
 | `source` | TEXT | `meeting` または `slack` |
 | `source_ref` | TEXT | 背景への参照（議事録パス or Slackパーマリンク） |
-| `extracted_at` | TEXT | 抽出日時 |
+| `extracted_at` | TEXT | 発生日（meetingは開催日、slackは投稿日。YYYY-MM-DD） |
+| `deleted` | INTEGER | 論理削除フラグ（0=有効、1=削除済み。デフォルト0）。全クエリで `COALESCE(deleted,0)=0` でフィルタ |
 
 #### decisions
 
@@ -86,7 +87,8 @@ Slack から取得した最新返信 msg_ts  vs  summaries.last_reply_ts
 | `source` | TEXT | `meeting` または `slack` |
 | `source_ref` | TEXT | 背景への参照（議事録パス or Slackパーマリンク） |
 | `source_context` | TEXT | 根拠となった議論・発言の要約（`pm_minutes_to_pm.py` 経由のみ。LLMが抽出） |
-| `extracted_at` | TEXT | 抽出日時 |
+| `extracted_at` | TEXT | 発生日（meetingは開催日、slackは投稿日。YYYY-MM-DD） |
+| `deleted` | INTEGER | 論理削除フラグ（0=有効、1=削除済み。デフォルト0）。全クエリで `COALESCE(deleted,0)=0` でフィルタ |
 
 #### slack_extractions（抽出済みスレッド管理）
 

@@ -56,7 +56,7 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
                m.kind as meeting_kind, m.held_at as meeting_held_at
         FROM action_items a
         LEFT JOIN meetings m ON a.meeting_id = m.meeting_id
-        WHERE a.status = 'open'
+        WHERE a.status = 'open' AND COALESCE(a.deleted,0)=0
     """
     params: list = []
     if since:
@@ -77,7 +77,7 @@ def fetch_recent_decisions(
                m.kind as meeting_kind, m.held_at as meeting_held_at
         FROM decisions d
         LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
-        WHERE 1=1
+        WHERE COALESCE(d.deleted,0)=0
     """
     params: list = []
     if not show_acknowledged:
