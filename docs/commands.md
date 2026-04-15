@@ -481,3 +481,37 @@ python3 scripts/db_utils.py --audit-log --output audit.txt
 | `--id ID` | なし（全件） | アクションアイテムIDで絞り込む |
 | `--no-encrypt` | - | 平文モード |
 | `--output PATH` | - | 結果をファイルにも保存 |
+
+### 11. PM DB Editor Web UI（pm_web.py）
+
+pm.db の内容をブラウザ上で閲覧・編集できる Web UI。NiceGUI + AG Grid を使用。アクションアイテム・決定事項の各フィールドをセル上で直接編集できる。`source` 列をクリックすると Slack リンク（Slackを新規タブで開く）または議事録ポップアップを表示する。
+
+```sh
+# 起動（バックグラウンドデーモン）
+bash scripts/pm_web_start.sh
+# → http://localhost:8501 でブラウザアクセス
+# → ログ: logs/pm_web.log
+# → PID: logs/pm_web.pid
+
+# 停止
+bash scripts/pm_web_stop.sh
+
+# 起動状態の確認
+cat logs/pm_web.pid | xargs kill -0 && echo 起動中 || echo 停止中
+
+# ログ確認
+tail -f logs/pm_web.log
+```
+
+| オプション（環境変数・引数） | デフォルト | 説明 |
+|---|---|---|
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--no-encrypt` | - | 平文モード |
+| `--port N` | `8501` | ポート番号 |
+
+**機能**:
+- アクションアイテム: 内容・担当者・期限・マイルストーン・状況・対応状況・削除フラグをセル編集
+- 決定事項: 内容・発生日・削除フラグをセル編集
+- `source` 列: `Slack` クリック → 投稿をブラウザの新規タブで開く / `minutes` クリック → 議事録をポップアップ表示
+- フィルタ: status（open/closed/すべて）・マイルストーン・発生日・削除状態（非削除/削除済み/すべて）
+- 楽観的排他制御: 別タブや他ユーザーが先に保存した場合はエラーを表示し上書きを防止

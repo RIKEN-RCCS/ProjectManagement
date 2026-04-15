@@ -39,10 +39,14 @@ Options:
     milestone_id 空欄 → NULL（紐づけ解除）
     content      空欄の場合はスキップ（変更なし）
     status       空欄の場合はスキップ。'open' または 'closed' を推奨
+    deleted      0=有効 / 1=削除済み。空欄の場合はスキップ
 
 決定事項の編集可能列:
     content      空欄の場合はスキップ（変更なし）
     decided_at   空欄の場合はスキップ（変更なし）
+    deleted      0=有効 / 1=削除済み。空欄の場合はスキップ
+
+--include-deleted を指定すると削除済みアイテムもエクスポート・表示対象に含める
 """
 
 import argparse
@@ -58,11 +62,13 @@ from db_utils import open_db
 from cli_utils import add_no_encrypt_arg, add_dry_run_arg, add_since_arg
 
 # アクションアイテムの編集可能フィールド
-AI_EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status"]
+AI_EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status", "deleted"]
 AI_NULLABLE_FIELDS = {"assignee", "due_date", "milestone_id"}
+AI_BOOL_FIELDS     = {"deleted"}   # 0/1 整数として扱うフィールド
 
 # 決定事項の編集可能フィールド（空欄はスキップ）
-DEC_EDITABLE_FIELDS = ["content", "decided_at"]
+DEC_EDITABLE_FIELDS = ["content", "decided_at", "deleted"]
+DEC_BOOL_FIELDS     = {"deleted"}
 
 _AUDIT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -139,8 +145,11 @@ def format_dec_source(d: dict) -> str:
     return ref if ref else "Slack"
 
 
-def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[dict]:
+def fetch_action_items(conn, all_items: bool, since: str | None = None,
+                       include_deleted: bool = False) -> list[dict]:
     conds, params = [], []
+    if not include_deleted:
+        conds.append("COALESCE(a.deleted,0)=0")
     if not all_items:
         conds.append("a.milestone_id IS NULL")
     if since:
@@ -149,6 +158,7 @@ def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     rows = conn.execute(f"""
         SELECT a.id, a.assignee, a.due_date, a.milestone_id, a.status, a.content,
+               COALESCE(a.deleted,0) AS deleted, a.extracted_at,
                a.note, a.source, a.source_ref, m.kind AS meeting_kind, m.held_at AS meeting_held_at
         FROM action_items a
         LEFT JOIN meetings m ON a.meeting_id = m.meeting_id
@@ -158,14 +168,16 @@ def fetch_action_items(conn, all_items: bool, since: str | None = None) -> list[
     return [dict(r) for r in rows]
 
 
-def fetch_decisions(conn, since: str | None = None) -> list[dict]:
+def fetch_decisions(conn, since: str | None = None, include_deleted: bool = False) -> list[dict]:
     conds, params = [], []
+    if not include_deleted:
+        conds.append("COALESCE(deleted,0)=0")
     if since:
         conds.append("extracted_at >= ?")
         params.append(since)
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     rows = conn.execute(f"""
-        SELECT id, content, decided_at, source, source_ref
+        SELECT id, content, decided_at, COALESCE(deleted,0) AS deleted, extracted_at, source, source_ref
         FROM decisions
         {where}
         ORDER BY decided_at IS NULL, decided_at, id
@@ -177,10 +189,11 @@ def fetch_decisions(conn, since: str | None = None) -> list[dict]:
 # エクスポート
 # --------------------------------------------------------------------------- #
 
-def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = None):
+def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = None,
+               include_deleted: bool = False):
     milestones = fetch_milestones(conn)
-    items = fetch_action_items(conn, all_items, since=since)
-    decisions = fetch_decisions(conn, since=since)
+    items     = fetch_action_items(conn, all_items, since=since, include_deleted=include_deleted)
+    decisions = fetch_decisions(conn, since=since, include_deleted=include_deleted)
 
     lines = []
     lines.append(milestone_header(milestones))
@@ -188,16 +201,19 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
 
     # --- アクションアイテムセクション ---
     lines.append(_SECTION_ACTIONS)
-    lines.append("# 編集可能: assignee / due_date / milestone_id / content / status")
+    lines.append("# 編集可能: assignee / due_date / milestone_id / content / status / deleted")
     lines.append("# assignee / due_date / milestone_id は空欄 → NULL（解除）")
-    lines.append("# content / status は空欄の場合スキップ（変更なし）")
+    lines.append("# content / status / deleted は空欄の場合スキップ（変更なし）")
+    lines.append("# deleted: 0=有効 / 1=削除済み")
     lines.append("# source / note は参照用（読み取り専用）")
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(["id", "assignee", "due_date", "milestone_id", "status", "content", "source", "note"])
+    writer.writerow(["deleted", "extracted_at", "id", "assignee", "due_date", "milestone_id", "status", "content", "source", "note"])
     for item in items:
         writer.writerow([
+            item["deleted"],
+            item["extracted_at"] or "",
             item["id"],
             item["assignee"] or "",
             item["due_date"] or "",
@@ -212,14 +228,17 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
     # --- 決定事項セクション ---
     lines.append("")
     lines.append(_SECTION_DECISIONS)
-    lines.append("# 編集可能: content / decided_at（空欄はスキップ）")
+    lines.append("# 編集可能: content / decided_at / deleted（空欄はスキップ）")
+    lines.append("# deleted: 0=有効 / 1=削除済み")
     lines.append("# source は参照用（読み取り専用）")
 
     buf2 = io.StringIO()
     writer2 = csv.writer(buf2, lineterminator="\n")
-    writer2.writerow(["id", "content", "decided_at", "source"])
+    writer2.writerow(["deleted", "extracted_at", "id", "content", "decided_at", "source"])
     for d in decisions:
         writer2.writerow([
+            d["deleted"],
+            d["extracted_at"] or "",
             d["id"],
             d["content"] or "",
             d["decided_at"] or "",
@@ -231,8 +250,9 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
     output_path.write_text(text, encoding="utf-8")
 
     label = "全件" if all_items else "milestone_id IS NULL のみ"
+    del_msg = "（削除済み含む）" if include_deleted else ""
     since_msg = f", since={since}" if since else ""
-    print(f"[INFO] アクションアイテム {len(items)} 件 + 決定事項 {len(decisions)} 件をエクスポートしました（{label}{since_msg}）: {output_path}")
+    print(f"[INFO] アクションアイテム {len(items)} 件 + 決定事項 {len(decisions)} 件をエクスポートしました（{label}{del_msg}{since_msg}）: {output_path}")
     print(f"[INFO] 各列を編集後、--import で反映してください")
 
 
@@ -262,6 +282,18 @@ def _split_sections(text: str) -> tuple[list[str], list[str]]:
     return action_lines, decision_lines
 
 
+def _parse_bool_field(raw: str, field: str) -> int | None:
+    """0/1 文字列を int に変換する。空欄は None（スキップ）、不正値は警告して None を返す"""
+    if not raw:
+        return None
+    if raw == "0":
+        return 0
+    if raw == "1":
+        return 1
+    print(f"[WARN] {field} の値が不正です（0 または 1 を指定）: {raw!r}", file=sys.stderr)
+    return None
+
+
 def _parse_action_rows(lines: list[str]) -> dict[int, dict[str, str | None]]:
     data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
     reader = csv.DictReader(data_lines)
@@ -277,7 +309,11 @@ def _parse_action_rows(lines: list[str]) -> dict[int, dict[str, str | None]]:
             if field not in row:
                 continue
             raw = row[field].strip()
-            if field in AI_NULLABLE_FIELDS:
+            if field in AI_BOOL_FIELDS:
+                val = _parse_bool_field(raw, field)
+                if val is not None:
+                    values[field] = val
+            elif field in AI_NULLABLE_FIELDS:
                 values[field] = raw or None
             else:
                 if raw:
@@ -301,7 +337,11 @@ def _parse_decision_rows(lines: list[str]) -> dict[int, dict[str, str]]:
             if field not in row:
                 continue
             raw = row[field].strip()
-            if raw:  # 空欄はスキップ
+            if field in DEC_BOOL_FIELDS:
+                val = _parse_bool_field(raw, field)
+                if val is not None:
+                    values[field] = val
+            elif raw:  # 空欄はスキップ
                 values[field] = raw
         result[dec_id] = values
     return result
@@ -411,18 +451,20 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
 # リスト表示
 # --------------------------------------------------------------------------- #
 
-def cmd_list(conn, all_items: bool, since: str | None = None):
-    items = fetch_action_items(conn, all_items, since=since)
+def cmd_list(conn, all_items: bool, since: str | None = None, include_deleted: bool = False):
+    items = fetch_action_items(conn, all_items, since=since, include_deleted=include_deleted)
     label = "全件" if all_items else "milestone_id IS NULL のみ"
+    del_msg = "（削除済み含む）" if include_deleted else ""
     since_msg = f"（since={since}）" if since else ""
 
-    print(f"【アクションアイテム】（{label}{since_msg}）")
-    print("─" * 120)
-    print(f"{'ID':>4}  {'担当者':<12}  {'期限':<12}  {'MS':<4}  {'状況':<6}  {'出典':<28}  {'内容':<40}  対応状況")
-    print("-" * 120)
+    print(f"【アクションアイテム】（{label}{del_msg}{since_msg}）")
+    print("─" * 125)
+    print(f"{'ID':>4}  {'Del':>3}  {'担当者':<12}  {'期限':<12}  {'MS':<4}  {'状況':<6}  {'出典':<28}  {'内容':<40}  対応状況")
+    print("-" * 125)
     for item in items:
+        del_mark = "  1" if item.get("deleted") else "  0"
         print(
-            f"{item['id']:>4}  "
+            f"{item['id']:>4}  {del_mark}  "
             f"{(item['assignee'] or '(未定)')[:12]:<12}  "
             f"{(item['due_date'] or '(なし)')[:12]:<12}  "
             f"{(item['milestone_id'] or '-')[:4]:<4}  "
@@ -433,15 +475,16 @@ def cmd_list(conn, all_items: bool, since: str | None = None):
         )
     print(f"\n合計: {len(items)} 件")
 
-    decisions = fetch_decisions(conn, since=since)
+    decisions = fetch_decisions(conn, since=since, include_deleted=include_deleted)
     print()
-    print(f"【決定事項】{since_msg}")
-    print("─" * 120)
-    print(f"{'ID':>4}  {'決定日':<12}  {'出典':<30}  {'内容'}")
-    print("-" * 120)
+    print(f"【決定事項】{del_msg}{since_msg}")
+    print("─" * 125)
+    print(f"{'ID':>4}  {'Del':>3}  {'決定日':<12}  {'出典':<30}  {'内容'}")
+    print("-" * 125)
     for d in decisions:
+        del_mark = "  1" if d.get("deleted") else "  0"
         print(
-            f"{d['id']:>4}  "
+            f"{d['id']:>4}  {del_mark}  "
             f"{(d['decided_at'] or '')[:12]:<12}  "
             f"{format_dec_source(d)[:30]:<30}  "
             f"{(d['content'] or '')[:60]}"
@@ -467,6 +510,8 @@ def main():
 
     parser.add_argument("--all", action="store_true",
                         help="--export / --list 時に全アイテム対象（デフォルトは milestone_id IS NULL のみ）")
+    parser.add_argument("--include-deleted", action="store_true",
+                        help="--export / --list 時に削除済みアイテムも対象に含める")
     parser.add_argument("--output", default="relink.csv", metavar="PATH",
                         help="--export 時の出力ファイルパス（デフォルト: relink.csv）")
     parser.add_argument("--db", default=None, metavar="PATH",
@@ -489,9 +534,10 @@ def main():
     conn = open_db(args.db, encrypt=not args.no_encrypt, migrations=[_AUDIT_LOG_DDL])
 
     if args.export:
-        cmd_export(conn, args.all, Path(args.output), since=args.since)
+        cmd_export(conn, args.all, Path(args.output), since=args.since,
+                   include_deleted=args.include_deleted)
     elif args.list:
-        cmd_list(conn, args.all, since=args.since)
+        cmd_list(conn, args.all, since=args.since, include_deleted=args.include_deleted)
     else:
         cmd_import(conn, Path(args.import_path), args.dry_run)
 

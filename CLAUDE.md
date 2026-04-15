@@ -78,9 +78,12 @@ slack/
 │   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿（SlackリンクはクリッカブルURL形式）。--show-workload で担当者別負荷セクションを追加出力
 │   ├── pm_sync_canvas.py            # Canvas → pm.db 同期（担当者・期限・マイルストーン・状況・内容・対応状況・決定事項内容）。open/close判定は「状況」列のみ
-│   ├── pm_relink.py                 # アクションアイテムの各フィールド（担当者・期限・内容・マイルストーン等）をCSV経由で一括編集（LLM不使用）。note列は参照用として出力
+│   ├── pm_relink.py                 # アクションアイテム・決定事項の各フィールドをCSV経由で一括編集（LLM不使用）。deleted(0/1)でアイテムの有効化/削除も可能。--include-deleted で削除済みアイテムを対象に含める
 │   ├── pm_insight.py                # pm.db → LLMによるプロジェクト健全性評価・リスク特定・改善提案を生成・Canvas投稿
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
+│   ├── pm_web.py                    # pm.db ローカル編集 Web UI（NiceGUI + AG Grid）。ブラウザでアクションアイテム・決定事項を編集。source列からSlackリンク・議事録ポップアップ表示。楽観的排他制御付き。起動: bash scripts/pm_web_start.sh（port 8501）
+│   ├── pm_web_start.sh              # pm_web.py をバックグラウンドで起動（nohup + PIDファイル管理）
+│   ├── pm_web_stop.sh               # pm_web.py を停止（PIDファイルでプロセス管理）
 │   ├── canvas_utils.py              # Slack Canvas 操作の共通ユーティリティ（sanitize_for_canvas・post_to_canvas・セクション削除ロジック）
 │   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload も提供
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用（call_local_llm 経由）
@@ -137,7 +140,17 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 要約用（pm_extr
 - `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。各スクリプトはClaude Codeの外のターミナルから実行すること。ローカルLLM（`OPENAI_API_BASE` 設定時）はこの制限を受けない。
 - `call_claude()` 内で `CLAUDECODE` 環境変数を子プロセスから除外する処理を実装済み。
 - `slack-mcp-server` は不要（`slack_pipeline.py` が Slack SDK に移行済み）。
-- Python仮想環境は `~/.venv_x86_64` を使用。`~/.venv_x86_64/bin/python3 scripts/xxx.py` で実行する。
+- Python仮想環境はアーキテクチャに応じて `~/.venv_aarch64`（aarch64）または `~/.venv_x86_64`（x86_64）を使用。`uname -m` で確認し適切なパスを使うこと。
+
+---
+
+## 作業環境セットアップ
+
+並列作業が必要な場合は以下のtmuxレイアウトを使用すること：
+
+- Pane 0 (左): メイン作業
+- Pane 1 (右上): ログ監視 `tail -f`
+- Pane 2 (右下): ジョブ状態監視
 
 ---
 

@@ -122,7 +122,7 @@ def transfer_meeting(
             "INSERT INTO decisions"
             " (meeting_id, content, decided_at, source, source_ref, source_context, extracted_at)"
             " VALUES (?, ?, ?, 'meeting', ?, ?, ?)",
-            (meeting_id, d["content"], held_at, source_ref, d["source_context"], now),
+            (meeting_id, d["content"], held_at, source_ref, d["source_context"], held_at),
         )
 
     for a in action_items:
@@ -131,7 +131,7 @@ def transfer_meeting(
             " (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at)"
             " VALUES (?, ?, ?, ?, 'open', 'meeting', ?, ?)",
             (meeting_id, a["content"], normalize_assignee(a["assignee"]), a["due_date"],
-             source_ref, now),
+             source_ref, held_at),
         )
 
     pm_conn.commit()

@@ -212,6 +212,8 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
             "ALTER TABLE action_items ADD COLUMN note TEXT",
             "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
             "ALTER TABLE decisions ADD COLUMN source_context TEXT",
+            "ALTER TABLE action_items ADD COLUMN deleted INTEGER DEFAULT 0",
+            "ALTER TABLE decisions ADD COLUMN deleted INTEGER DEFAULT 0",
         ],
     )
 
@@ -243,7 +245,20 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
     return open_db(
         db_path,
         encrypt=not no_encrypt,
-        migrations=["ALTER TABLE decisions ADD COLUMN acknowledged_at TEXT"],
+        migrations=[
+            "ALTER TABLE decisions ADD COLUMN acknowledged_at TEXT",
+            # extracted_at を発生日に修正: meeting は held_at、slack は変更なし
+            ("UPDATE action_items SET extracted_at = "
+             "(SELECT held_at FROM meetings WHERE meetings.meeting_id = action_items.meeting_id) "
+             "WHERE source = 'meeting' AND meeting_id IS NOT NULL "
+             "AND extracted_at LIKE '____-__-__T%'"),
+            ("UPDATE decisions SET extracted_at = "
+             "(SELECT held_at FROM meetings WHERE meetings.meeting_id = decisions.meeting_id) "
+             "WHERE source = 'meeting' AND meeting_id IS NOT NULL "
+             "AND extracted_at LIKE '____-__-__T%'"),
+            "ALTER TABLE action_items ADD COLUMN deleted INTEGER DEFAULT 0",
+            "ALTER TABLE decisions ADD COLUMN deleted INTEGER DEFAULT 0",
+        ],
     )
 
 
@@ -254,8 +269,8 @@ def fetch_milestone_progress(conn: "_sqlite3.Connection") -> list[dict]:
             """
             SELECT m.milestone_id, m.goal_id, m.name, m.due_date, m.area,
                    m.status, m.success_criteria,
-                   COUNT(DISTINCT CASE WHEN a.status='open'   THEN a.id END) AS open_count,
-                   COUNT(DISTINCT CASE WHEN a.status='closed' THEN a.id END) AS closed_count
+                   COUNT(DISTINCT CASE WHEN a.status='open'   AND COALESCE(a.deleted,0)=0 THEN a.id END) AS open_count,
+                   COUNT(DISTINCT CASE WHEN a.status='closed' AND COALESCE(a.deleted,0)=0 THEN a.id END) AS closed_count
             FROM milestones m
             LEFT JOIN action_items a ON a.milestone_id = m.milestone_id
             WHERE m.status = 'active'
@@ -272,7 +287,7 @@ def fetch_assignee_workload(conn: "_sqlite3.Connection", today: str) -> list[dic
     """担当者別の負荷（オープンアイテム数・期限超過数・期限未設定数）を取得する（LLM不使用）"""
     try:
         rows = conn.execute(
-            "SELECT assignee, due_date FROM action_items WHERE status = 'open'"
+            "SELECT assignee, due_date FROM action_items WHERE status = 'open' AND COALESCE(deleted,0)=0"
         ).fetchall()
     except Exception:
         return []

@@ -461,7 +461,7 @@ def sync_decision_acknowledgements(
     なければテキストマッチ（前方一致）にフォールバックする。
     """
     now = datetime.now(timezone.utc).isoformat()
-    rows = conn.execute("SELECT id, content, acknowledged_at FROM decisions").fetchall()
+    rows = conn.execute("SELECT id, content, acknowledged_at FROM decisions WHERE COALESCE(deleted,0)=0").fetchall()
     by_id: dict[int, dict] = {
         d["id"]: {"id": d["id"], "acknowledged_at": d["acknowledged_at"]}
         for d in rows
