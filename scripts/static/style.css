@@ -1,0 +1,31 @@
+/* AG Grid container: fill remaining flex space */
+#grid-ai, #grid-dec {
+  width: 100%;
+  min-height: 0;
+}
+
+/* Tab buttons */
+.tab-btn { border-bottom: 2px solid transparent; transition: all 0.15s; }
+.tab-btn.active { color: #1e40af; border-bottom-color: #1e40af; }
+.tab-btn:hover:not(.active) { color: #374151; background: #f3f4f6; }
+
+/* Toast */
+.toast {
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #fff;
+  max-width: 480px;
+  word-break: break-word;
+  box-shadow: 0 2px 8px rgba(0,0,0,.2);
+  animation: toast-in 0.2s ease;
+  cursor: pointer;
+}
+.toast-positive { background: #16a34a; }
+.toast-info     { background: #2563eb; }
+.toast-warning  { background: #d97706; white-space: pre-wrap; }
+.toast-negative { background: #dc2626; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* Dialog backdrop */
+dialog::backdrop { background: rgba(0,0,0,.3); }

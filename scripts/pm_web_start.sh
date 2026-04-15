@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pm_web_start.sh - pm_web.py (NiceGUI) をバックグラウンドで起動する
+# pm_web_start.sh - pm_api.py (FastAPI) をバックグラウンドで起動する
 # すでに起動中の場合は何もしない
 
 set -euo pipefail
@@ -46,7 +46,7 @@ fi
 mkdir -p "$LOG_DIR"
 
 PM_WEB_PORT="$PORT" \
-nohup "$PYTHON3" "$SCRIPT_DIR/pm_web.py" >> "$LOG_FILE" 2>&1 &
+nohup "$PYTHON3" "$SCRIPT_DIR/pm_api.py" --port "$PORT" >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 echo "pm_web を起動しました (PID $(cat "$PID_FILE"), port $PORT)"
 echo "URL:  http://localhost:$PORT"
