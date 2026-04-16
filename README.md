@@ -1,478 +1,244 @@
 # ProjectManagement
 
-プロジェクトマネジメント支援システム。
+富岳NEXT アプリケーション開発エリアのプロジェクトマネジメント支援システム。
 
 ---
 
-## 設計思想
+## このシステムが解決する問題
 
-### 目指すプロマネの姿
+大規模プロジェクトでは、会議・Slack・資料に**情報が分散**し、以下の問題が起きる。
 
-このシステムが目指すのは、**「議事録係＋ToDoリスト管理」ではなく、プロジェクトのゴールへの到達を管理するプロジェクトマネジメント**である。
+| PM課題 | 放置するとどうなるか |
+|--------|----------------------|
+| 会議の決定事項が記憶頼みで流れる | 同じ議論が繰り返され、合意が形骸化する |
+| アクションアイテムの担当・期限が曖昧 | 「誰がやるのか」が不明なまま期限を超過する |
+| ゴールとタスクが紐づいていない | 忙しいが前進していない状態に陥る |
+| 状況把握に毎回手作業が必要 | PMが情報収集に追われ、判断に集中できない |
+| 機密情報を外部サービスに送れない | 市販PMツールが使えず、手運用に逆戻りする |
 
-一般的なAI活用PMツールは、発言・議事録・Slackから決定事項やアクションアイテムを拾い上げることに終始しがちである。それは情報の整理には役立つが、「プロジェクトが今どこにいるのか」「ゴールに向けて前進しているのか」を答えることができない。
+本システムは、**ローカルLLM**で情報を自動収集・構造化し、人間がゴールの定義と最終判断に集中できる環境を提供する。
 
-本システムは以下の2層構造でこの問題に対処する。
+---
+
+## 設計思想：2層構造
 
 ```
-【トップダウン層】 ゴール・マイルストーン（人間が定義・承認、goals.yamlで管理）
+【トップダウン層】 ゴール・マイルストーン
+                  └─ goals.yaml に人間が定義・承認（gitで変更履歴管理）
                           ↓ 評価の軸を与える
-【ボトムアップ層】 アクションアイテム・決定事項（LLMが自動抽出・マイルストーンに紐づけ）
+【ボトムアップ層】 アクションアイテム・決定事項
+                  └─ 会議議事録・Slackから LLM が自動抽出・マイルストーンに紐づけ
 ```
-
-**トップダウン層**: プロジェクトのゴールと主要マイルストーンは `goals.yaml` に人手で定義し、意思決定者が承認する。LLMによる自動抽出に頼らない。gitで管理することでマイルストーン変更の意思決定履歴も残る。
-
-**ボトムアップ層**: 会議議事録・Slackの膨大な情報からアクションアイテム・決定事項をLLMが自動抽出する。各アイテムはマイルストーンに紐づけられ、「このタスクはどのゴールに向けた作業か」が明確になる。
-
-### LLMと人間の役割分担
 
 | 役割 | 担当 |
 |------|------|
 | ゴール・マイルストーンの定義・承認 | 人間（意思決定者） |
-| 情報の収集・整理・抽出 | LLM |
-| アイテムのマイルストーンへの紐づけ推定 | LLM |
-| 誤りの修正・最終判断 | 人間（Canvas上で編集） |
-| 達成状況の計算・レポート生成 | システム |
-
-LLMは「情報処理の自動化」に使い、「何を目指すか」「どこまで達成したか」の判断は人間が行う。
-
-### 現在の実装状況
-
-フェーズ1〜5が実装済み。`goals.yaml` にゴール・マイルストーンを定義し、`pm_goals_import.py` でDBに同期することで、レポートに「プロジェクトの現在地」セクションが自動追加される。
+| 情報の収集・整理・抽出・紐づけ推定 | LLM |
+| 誤りの修正・最終判断 | 人間（Canvas / Web UI で編集） |
+| 達成状況の計算・レポート・リスク検知 | システム |
 
 ---
 
-## 概要
+## 機能マップ
 
-会議議事録（Whisper文字起こし）とSlackチャンネルの投稿から、**ローカルLLM**（OpenAI互換API経由）を使って決定事項とアクションアイテムを自動抽出し、SQLiteデータベース（pm.db）に蓄積する。情報セキュリティ上の理由から、議事録・Slackメッセージ等の機密情報は外部サービスに送出せず、組織内で稼働するローカルLLM（vLLMサーバ）で処理する。`OPENAI_API_BASE` 未設定時は Claude CLI（`claude -p`）にフォールバックする。蓄積した情報を週次進捗レポートとしてSlack Canvasに投稿し、Canvas上で対応状況を記入することでDBを更新するワークフローを提供する。
+本システムの機能を、解決するPM課題ごとに整理する。
 
----
+### 1. 情報の自動収集 — 「手作業で情報を集めなくて済む」
 
-## 情報の流れ
+週次会議・Slackの投稿から、決定事項・アクションアイテム・担当者・期限をLLMが自動抽出して pm.db に蓄積する。
 
-![情報の流れ](minutes.png)
+**会議録音 → 議事録 → pm.db**（録音を置くだけで完結）
 
----
+```sh
+# data/ に .m4a を置いて実行するだけ
+bash scripts/pm_from_recording_auto.sh
 
-## スクリプト構成
+# Slack投稿も自動化
+bash scripts/pm_from_recording_auto.sh -c C08SXA4M7JT
+```
 
-| スクリプト | 役割 |
-|---|---|
-| `pm_from_slack.sh` | Slack Channel から投稿を取得、スレッド単位で要約し pm.db へ登録 |
-| `pm_from_recording_auto.sh` | 会議録音データ(m4aフォーマット)から文字起こしを行い、議事録を作成し pm.db へ登録 |
-| `pm_from_recording.sh` | 会議録音データ(m4aフォーマット)から文字起こしを実施し、ローカルLLMで議事録を生成して pm.db へ登録 |
-| `canvas_report.sh` | Canvas同期 → PMレポート生成・Canvas投稿（上書き事故防止のため同期が先に実行される） |
-| `slack_post_minutes.sh` | 議事録DBの内容をSlackチャンネルに投稿 |
-| `pm_goals_import.py` | `goals.yaml` を pm.db に完全同期（ゴール・マイルストーン管理） |
-| `slack_pipeline.py` | Slackメッセージを差分取得・スレッド単位で要約して `{channel_id}.db` に蓄積し、DB内の全要約を統合した全体要約を生成して Canvas に投稿する。`--canvas-id` で Canvas 投稿、`--output` でファイル保存、`--skip-fetch` でDB既存要約から全体要約のみ生成、`--skip-llm` でLLMスキップ、`--list` でスレッド一覧表示 |
-| `whisper_vad.py` | 会議録音をSlurmジョブとしてWhisperで文字起こし |
-| `pm_minutes_import.py` | 文字起こし議事録をLLMで解析して `data/minutes/{kind}.db` に詳細保存（担当者・期限・出典付き）。`--export` でDB内容を修正用Markdownにエクスポート、`--no-llm` で人間修正済みMarkdownをLLM不使用で再インポート。`--post-to-slack` でSlackにファイル投稿。`--delete` で削除 |
-| `pm_minutes_to_pm.py` | `data/minutes/{kind}.db` の内容をLLM不使用でpm.dbに転記。`--delete` で削除 |
-| `pm_extractor.py` | Slack DB内のスレッド要約からアクションアイテム・決定事項を抽出してpm.dbに保存。`--list` で抽出済みスレッド一覧表示 |
-| `pm_report.py` | pm.dbから週次進捗レポートを生成してSlack Canvasに投稿。SlackリンクはクリッカブルURL形式で出力。`--show-workload` で担当者別負荷セクションを追加出力 |
-| `pm_insight.py` | pm.dbの統計データをLLMで分析し、プロジェクト健全性評価（A/B/C/D）・リスク特定・改善提案を生成してCanvas投稿。`pm_report.py` が定型の進捗一覧を出力するのに対し、本スクリプトは「なぜ遅れているか」「次に何をすべきか」を解釈・洞察として生成する |
-| `pm_argus.py` | **Argus AI秘書システム**。Slack生メッセージ・議事録・pm.db統計を統合分析し、デイリーブリーフィング・文書草案・リスク分析を生成する。`pm_qa_server.py` 経由でSlackスラッシュコマンド（`/argus-brief`, `/argus-draft`, `/argus-risk`）として提供。`--brief-to-canvas` でCanvas直接投稿、cron から毎朝自動実行 |
-| `pm_sync_canvas.py` | Canvas上の編集内容（担当者・内容・期限・マイルストーン・状況・対応状況・決定事項内容）をpm.dbに同期 |
-| `pm_relink.py` | アクションアイテム・決定事項の各フィールド（担当者・期限・内容・マイルストーン・status・deleted）をCSV経由で一括編集（LLM不使用）。`note`列は参照用として出力。`--include-deleted` で削除済みアイテムも対象にできる |
-| `pm_api.py` | FastAPI REST API + 静的フロントエンド配信。pm.db のアクションアイテム・決定事項・議事録・ファイル一覧を提供。`web_utils.py` を使用 |
-| `pm_web.py` | **[非推奨]** pm.db 編集 Web UI（NiceGUI）。現用は `pm_api.py`（FastAPI） |
-| `pm_web_start.sh` | `pm_web.py` をバックグラウンドデーモンとして起動（port 8501、nohup + PIDファイル管理） |
-| `pm_web_stop.sh` | `pm_web.py` を停止 |
-| `pm_qa_server.py` | Slack Socket Mode デーモン。`/ask`（議事録QA）と `/argus-*`（Argus）を統合して提供。`pm_qa_start.sh` で起動 |
-| `pm_qa_start.sh` | `pm_qa_server.py` をバックグラウンドデーモンとして起動（nohup + PIDファイル管理）。Slack・RiVaultトークンを自動読み込み |
-| `pm_qa_stop.sh` | `pm_qa_server.py` を停止 |
-| `pm_embed.py` | QAインデックス構築（`qa_config.yaml` に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む） |
-| `canvas_utils.py` | Slack Canvas 操作の共通ユーティリティ（`sanitize_for_canvas`・`post_to_canvas`・セクション削除ロジック）。各スクリプトから内部利用 |
-| `db_utils.py` | DB接続の一元管理・統計クエリ・平文DB暗号化変換（SQLCipher対応）。`open_pm_db`・`fetch_milestone_progress`・`fetch_assignee_workload`・`fetch_overdue_items`・`fetch_weekly_trends`・`fetch_summary_stats` 等を提供 |
-| `cli_utils.py` | 共通CLIユーティリティ（argparse ヘルパー・`make_logger`・`call_claude`・`call_local_llm`・`strip_think_blocks`）。`OPENAI_API_BASE` が設定されている場合はローカルLLMにルーティング。各スクリプトから内部利用 |
-| `format_utils.py` | Markdownテーブル整形の共通ユーティリティ。マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項の表を生成。`pm_insight.py`・`pm_argus.py` から利用 |
-| `web_utils.py` | `pm_api.py` / `pm_web.py` 共通のDB読み書き・楽観的排他制御（`scan_pm_dbs`・`get_conn`・`load_action_items`・`do_save_action_items` 等） |
-| `generate_minutes_local.py` | ローカルLLMを使った高品質議事録生成（ストリーミング・CoT除去・多段階処理対応）。`cli_utils.py` の `call_local_llm` を使用。`pm_from_recording.sh` から呼び出される |
+処理フロー: 音声 → Whisper文字起こし → ローカルLLMで議事録生成 → 議事録DB保存 → pm.db転記（平文ファイルはディスクに残らない）
 
----
-
-## 日常の運用フロー
-
-### 1. Slack Channel の投稿から情報抽出
-
-#### 1.1. `pm_from_slack.sh` でChannelの投稿を取得し、要約を pm.db へ登録
+**Slack → 要約 → pm.db**
 
 ```sh
 bash scripts/pm_from_slack.sh -c C08SXA4M7JT
 ```
 
-#### 1.2. 個別のスクリプトで実行する場合 ※通常は1.1.の手順で実施する
+処理フロー: Slackメッセージ差分取得 → スレッド単位で要約 → 決定事項・アクションアイテム抽出 → pm.db保存
 
-* Slack APIを使いChannelの投稿を取得し、要約をChannelごとのDBへ登録
+### 2. ゴール管理 — 「今どこにいるかが分かる」
 
-```sh
-source ~/.secrets/slack_tokens.sh
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db
-```
-
-* 差分取得・スレッド要約 → 全体要約を生成して Canvas に投稿
+マイルストーンを定義し、全アクションアイテムを紐づけることで、プロジェクトの現在地を定量的に把握する。
 
 ```sh
-source ~/.secrets/slack_tokens.sh
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --canvas-id F0AAD2494VB
-
-# 全体要約のみ再生成（Slack APIの取得・スレッド再要約をスキップ）
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch --canvas-id F0AAD2494VB
-
-# --since で期間を絞ってファイルにも保存
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch \
-    --since 2026-03-01 --canvas-id F0AAD2494VB --output overall.md
-```
-
-* チャンネルごとのDBからアクションアイテムを抽出し pm.db へ登録
-
-```sh
-source ~/.secrets/slack_tokens.sh
-python3 scripts/pm_extractor.py -c C08SXA4M7JT
-
-# 抽出済みスレッドの一覧確認
-python3 scripts/pm_extractor.py -c C08SXA4M7JT --list
-```
-
-### 2. 会議議事録の処理：録音を文字起こし → pm.db へ登録
-
-#### 2.1. `pm_from_recording_auto.sh` を使い会議録音データ(m4aフォーマット)から文字起こしを行い、議事録を作成し pm.db へ登録
-
-```sh
-# 文字起こし → 議事録DB → pm.db 転記まで自動実行
-bash scripts/pm_from_recording_auto.sh
-
-# Slackへのファイル投稿も自動化する場合（-c でチャンネルIDを指定）
-bash scripts/pm_from_recording_auto.sh -c C08SXA4M7JT
-```
-
-注意事項:
-- 録音データのフォーマットは `m4a` であること
-- 録音データは `data` に配置すること
-- 録音データのファイル名は `YYYY-MM-DD_{meeting-name}.m4a` の書式とし、 `YYYY-MM-DD` は会議開催日、`meeting-name` は `project.md` の「会議の種類と頻度」に書かれた名前であること
-- 一連の処理は R-CCS Cloud のGPUサーバ (L40S, GH200) へバッチジョブとして投入、実行される
-- `-c CHANNEL_ID` を指定した場合の Slack 投稿の挙動:
-  - 未インポートファイル: 文字起こし成功後に `--post-to-slack` を自動実行
-  - 議事録DBにインポート済み・Slack未投稿: GPU不要のため sbatch を介さず直接投稿
-  - 議事録DBにインポート済み・Slack投稿済み: スキップ（再投稿するには手動で `--force`）
-  - `~/.secrets/slack_tokens.sh` が自動的に読み込まれる
-
-#### 2.2. 個別のスクリプトで実行する場合 ※通常は2.1.の手順で実施する
-
-* 会議録音データ(m4aフォーマット)から文字起こしを実施
-
-```sh
-bash scripts/pm_from_recording.sh file1.m4a [file2.mp4 ...] [--meeting-name NAME]
-```
-
-注意事項:
-- `--meeting-name` を指定すると文字起こし後に `generate_minutes_local.py`（ローカルLLMで議事録生成）→ `pm_minutes_import.py --no-llm`（議事録DB保存）→ `pm_minutes_to_pm.py`（pm.db転記）の順で自動実行し、.md ファイルを削除する（平文ファイルがディスクに残らない）。
-- ローカルLLMのエンドポイントは環境変数 `OPENAI_API_BASE`・`OPENAI_API_KEY`・`OPENAI_MODEL` で指定（`~/.secrets/slack_tokens.sh` に記載推奨）。
-- 推奨: 議事録DBとpm.dbの両方に保存（.md は削除）
-```sh
-bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
-```
-- 日付を明示する場合（省略時はファイル名のGMTタイムスタンプをJSTに自動変換）
-```sh
-bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting --held-at 2026-03-10
-```
-- 冒頭スキップ
-```sh
-bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
-```
-- インポート後の確認・削除:
-```sh
-# 議事録DBの一覧確認
-python3 scripts/pm_minutes_import.py --list --meeting-name Leader_Meeting
-
-# 特定会議の詳細確認（決定事項・AI・議事内容・Slack投稿状況）
-python3 scripts/pm_minutes_import.py --show GMT20260316-035529_Recording
-
-# pm.dbの転記内容確認
-python3 scripts/pm_minutes_to_pm.py --list --meeting-name Leader_Meeting
-
-# 削除（両DBから個別に実行）
-python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
-python3 scripts/pm_minutes_to_pm.py --delete 2026-03-10_Leader_Meeting
-```
-- LLM生成議事録を人間が修正して再インポート:
-```sh
-# 1. DB内容を修正用Markdownにエクスポート（MEETING_ID で一意に特定できるため --meeting-name 不要）
-python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting --output corrected.md
-
-# 2. corrected.md をエディタで修正（決定事項・担当者・期限等を確認・修正）
-
-# 3. 修正版をLLM不使用で再インポート（--force で上書き）
-python3 scripts/pm_minutes_import.py corrected.md \
-    --meeting-name Leader_Meeting --held-at 2026-03-10 --no-llm --force
-
-# 4. pm.db にも再転記（--force で上書き）
-python3 scripts/pm_minutes_to_pm.py --meeting-name Leader_Meeting \
-    --since 2026-03-10 --force
-```
-- 議事録を Slack にアップロード:
-```sh
-source ~/.secrets/slack_tokens.sh
-
-# チャンネルに直接投稿（Files タブに表示）
-python3 scripts/pm_minutes_import.py \
-    --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-16 -c C08SXA4M7JT
-
-# 特定スレッドにリプライとして投稿（スレッドに集約、Files タブには表示されない）
-python3 scripts/pm_minutes_import.py \
-    --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-16 \
-    -c C08SXA4M7JT --thread-ts 1773791072.043109
-```
-  - `SLACK_USER_TOKEN`（xoxp-）でユーザーとして投稿（本人が削除可能）。
-  - ファイルが削除済みの場合（録音→自動インポートフロー）は DB から議事録を再構築してアップロード。
-  - 二重投稿防止あり（再投稿するには `--force`）。
-- .md ファイルを後から一括登録する場合:
-```sh
-# 議事録DB（data/minutes/）に保存
-python3 scripts/pm_minutes_import.py --bulk
-python3 scripts/pm_minutes_import.py --bulk --since 2026-01-01
-
-# pm.db に転記
-python3 scripts/pm_minutes_to_pm.py
-python3 scripts/pm_minutes_to_pm.py --since 2026-01-01
-```
-
-### 3. プロジェクトのゴール・マイルストーンの更新
-
-`goals.yaml` を編集・承認後に pm.db へ同期
-
-```sh
-# 変更内容の確認（DB操作なし）
-python3 scripts/pm_goals_import.py --dry-run
-
-# 同期実行（追加・更新・削除を完全同期）
+# goals.yaml を編集後に同期
 python3 scripts/pm_goals_import.py
 
-# 登録済み一覧・達成状況の確認
+# 達成状況を確認
 python3 scripts/pm_goals_import.py --list
 ```
 
-### 4. Canvasで進捗を管理
+`goals.yaml` はgit管理。マイルストーンの変更理由・経緯がコミット履歴として残る。
 
-#### 4.1. 会議前: 週次レポートをCanvasに投稿
+### 3. 進捗の可視化とレビュー — 「会議で使えるレポートが自動で出る」
 
-Canvas同期（`pm_sync_canvas.py`）→ レポート生成・投稿（`pm_report.py`）を順次実行する。Canvas上の編集を先に取り込むことで上書き事故を防ぐ。
+pm.db から週次進捗レポートを自動生成し、Slack Canvas に投稿する。会議中にCanvas上で直接編集でき、変更はDBに同期される。
+
+**会議前: レポート投稿**
 
 ```sh
 source ~/.secrets/slack_tokens.sh
 bash scripts/canvas_report.sh --db data/pm.db --canvas-id F0ALP1XQJHL
-
-# 確認済み決定事項も含めて表示する場合
-bash scripts/canvas_report.sh --db data/pm.db --canvas-id F0ALP1XQJHL --show-acknowledged
-
-# Canvas投稿せずに内容確認のみ
-bash scripts/canvas_report.sh --db data/pm.db --canvas-id F0ALP1XQJHL --dry-run
 ```
 
 レポート構成:
-1. プロジェクトの現在地（マイルストーン達成率・状況、DBから直接計算）
-2. サマリー（LLM生成）
-3. 直近の決定事項（確認済みはデフォルト非表示）
-4. 要注意事項
-5. 未完了アクションアイテム（表形式: ID・担当者・期限・マイルストーン・状況・内容・対応状況・出典）
+1. **プロジェクトの現在地** — マイルストーン達成率・残日数（DBから自動計算）
+2. **サマリー** — LLMによる全体概況
+3. **直近の決定事項** — 未確認はチェックボックスで管理
+4. **要注意事項** — 期限超過・担当者不明のアイテム
+5. **未完了アクションアイテム** — 表形式（Canvas上で各列を直接編集可能）
 
-#### 4.2. 会議中: Canvas上でアクションアイテムの各列を編集
+**会議中: Canvas上で編集**
 
 Canvas上で編集可能な列: **担当者・内容・期限・マイルストーン・状況・対応状況**
 
-- **状況** 列: open/close の判定に使用。Canvas上のチェックボックス（`- [ ]`）にチェックを入れると `[x]` として検出され `status='closed'` に更新される。テキストで完了キーワード（`完了` `done` `済` `対応済` `解決` `close` `closed` `finish` `finished` `[x]`）を入力しても同様。`open` で再開。
-- **対応状況** 列: メモとして `note` 列に保存（`status` の変更には影響しない）。
-- **決定事項のチェックボックス**: Canvas上の決定事項にチェックを入れると、`pm_sync_canvas.py` 実行時に「確認済み」として記録される。次回レポートからデフォルトで非表示になる。チェックを外すと確認取り消し。チェック直後は Slack の更新遅延があるため、数分待ってから `pm_sync_canvas.py` を実行すること。
+- **状況** 列にチェックを入れる or 「完了」「done」等を記入 → 完了扱い
+- **決定事項** のチェックボックスにチェック → 確認済みとして次回レポートから非表示
 
-#### 4.3. 会議後: Canvas上の変更内容を pm.db に反映
-
-通常は次回の `canvas_report.sh` 実行時に自動的に同期される。単独で実行する場合:
+**会議後: DB同期**（次回レポート投稿時に自動実行。単独実行も可能）
 
 ```sh
-source ~/.secrets/slack_tokens.sh
-python3 scripts/pm_sync_canvas.py --db data/pm.db --canvas-id F0AAD2494VB
+python3 scripts/pm_sync_canvas.py --db data/pm.db --canvas-id F0ALP1XQJHL
 ```
 
-アクションアイテムの各列の変更に加え、決定事項チェックボックスの確認状態（`acknowledged_at`）も同期される。
+### 4. リスク検知とインサイト — 「問題に気づくのが遅れない」
 
----
+**Argus AI秘書** — 毎朝のブリーフィングを自動生成（cron 平日8:57）
 
-### 5. Argus AI秘書システム
+Slack生メッセージ・議事録・pm.db統計を統合分析し、今日やるべきことを優先度順に提示する。Slackスラッシュコマンドで誰でも利用可能。
 
-Slack生メッセージ・議事録・pm.db統計を統合分析するAI秘書。誰でも利用可能（実行者のSlack表示名を自動取得して文脈に反映する）。
+```
+/argus-brief                 ← 今日の状況サマリーと優先アクション（最大5件）
+/argus-brief @西澤            ← 特定担当者にフォーカス
+/argus-draft agenda 次回リーダー会議  ← 会議アジェンダ草案
+/argus-risk                  ← リスク一覧と予兆の検知
+```
 
-#### 5.1. デーモン起動
-
-`/ask` QAサーバーと統合されているため、`pm_qa_start.sh` を起動するだけで Argus のスラッシュコマンドも有効になる。
+**LLMインサイト** — プロジェクト健全性のA/B/C/D評価
 
 ```sh
-bash scripts/pm_qa_start.sh
-
-# 状態確認
-cat logs/pm_qa_server.pid | xargs kill -0 && echo 起動中 || echo 停止中
-
-# ログ確認
-tail -f logs/pm_qa_server.log
-```
-
-#### 5.2. Slackスラッシュコマンド
-
-すべてのコマンドは ephemeral（自分にだけ見える）で返答する。
-
-| コマンド | 説明 |
-|---|---|
-| `/argus-brief` | 今日の状況サマリーと優先アクション（最大5件） |
-| `/argus-draft agenda \|report\|request <件名>` | 会議アジェンダ・進捗報告・確認依頼の草案生成 |
-| `/argus-risk` | リスク一覧と予兆の検知 |
-
-**引数**（`/argus-brief` と `/argus-risk` で共通）:
-
-```
-/argus-brief 60                 ← 直近60日分を分析（デフォルト: 30日）
-/argus-brief @西澤               ← 西澤さんの担当事項にフォーカス
-/argus-brief Benchpark           ← Benchpark 話題にフォーカス
-/argus-brief 60 @西澤 GPU性能    ← 全オプション組み合わせ
-```
-
-#### 5.3. CLIモード（手動実行・cron）
-
-```sh
-source ~/.secrets/slack_tokens.sh
-
-# ブリーフィング確認（Canvas投稿なし）
-~/.venv_aarch64/bin/python3 scripts/pm_argus.py --brief-to-canvas --dry-run
-
-# ブリーフィング → Canvas（F0AT4N36TFF）に投稿
-~/.venv_aarch64/bin/python3 scripts/pm_argus.py --brief-to-canvas
-
-# リスク分析確認
-~/.venv_aarch64/bin/python3 scripts/pm_argus.py --risk --dry-run
-
-# フォーカス指定（スラッシュコマンドと同等）
-~/.venv_aarch64/bin/python3 scripts/pm_argus.py --brief-to-canvas --dry-run \
-    --days 60 --assignee 西澤 --topic Benchpark
-```
-
-cron による毎朝 8:57 の自動実行はすでに設定済み（平日のみ）。詳細: `docs/argus_system.md`
-
----
-
-### 6. LLMインサイト生成（pm_insight）
-
-pm.db を分析してプロジェクトの健全性評価・リスク・改善提案を生成する。
-
-```sh
-# 確認用（Canvas投稿なし）
 python3 scripts/pm_insight.py --db data/pm.db --dry-run
-
-# ファイルに保存
-python3 scripts/pm_insight.py --db data/pm.db --dry-run --output insight.md
-
-# Canvas に投稿
-source ~/.secrets/slack_tokens.sh
-python3 scripts/pm_insight.py --db data/pm.db --canvas-id F0ALP1XQJHL
-
-# 直近1ヶ月のデータのみ対象
-python3 scripts/pm_insight.py --db data/pm.db --since 2026-02-01 --dry-run
 ```
 
-生成内容:
-1. **総合評価** — ヘルススコア（A/B/C/D）とプロジェクト全体の現状説明
-2. **マイルストーン別評価** — 各マイルストーンの進捗評価と懸念事項
-3. **リスク・課題** — 優先度（高/中/低）別のリスクと推奨対応
-4. **改善提案** — 具体的なアクションと根拠
+期限超過・担当者負荷・完了速度の推移等を統計集計し、LLMが「なぜ遅れているか」「次に何をすべきか」を解釈・提案する。
 
----
+### 5. 過去の議論を検索 — 「あの話どこで決まったっけ？」
 
-### 7. Web UI で pm.db を編集
+`/ask` コマンドで議事録本文・Slack生メッセージを自然言語検索できる。SudachiPy形態素解析 + FTS5 + LLM re-ranking による日本語検索。
 
-ブラウザ上でアクションアイテム・決定事項を閲覧・編集できる Web UI。
-現用は `pm_api.py`（FastAPI REST API + 静的HTML/JSフロントエンド）。旧 `pm_web.py`（NiceGUI）は非推奨。
+```
+/ask GPU性能の評価方針について
+/ask Benchparkハッカソンの内容を教えて
+```
+
+### 6. データの編集と修正 — 「LLMの誤りを人間が正せる」
+
+LLMの抽出は完璧ではない。誤った担当者・期限・マイルストーン紐づけを人間が修正できる手段を複数提供する。
+
+**Web UI**（ブラウザで編集）
 
 ```sh
-# 起動（FastAPI版）
 python3 scripts/pm_api.py --port 8501 --db data/pm.db
-# → http://localhost:8501 をブラウザで開く
-
-# 旧版（NiceGUI、非推奨）
-bash scripts/pm_web_start.sh
-bash scripts/pm_web_stop.sh
+# → http://localhost:8501
 ```
 
-主な機能:
-- アクションアイテム・決定事項の各フィールドをセル上で直接編集・保存
-- `source` 列クリックで Slack スレッドを新規タブで開く / 議事録をポップアップ表示
-- Box ファイルリンク一覧の表示
-- フィルタ（status / マイルストーン / 発生日 / 削除状態）で絞り込み
-- 楽観的排他制御（複数タブ・複数ユーザーが同時編集しても上書き事故を防止）
+**CLI一括編集**（CSV経由）
+
+```sh
+python3 scripts/pm_relink.py --export          # CSVにエクスポート
+# CSVを編集...
+python3 scripts/pm_relink.py --import relink.csv  # DBに反映
+```
+
+**議事録の修正と再インポート**
+
+```sh
+python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting -o corrected.md
+# corrected.md を修正...
+python3 scripts/pm_minutes_import.py corrected.md --meeting-name Leader_Meeting \
+    --held-at 2026-03-10 --no-llm --force
+```
 
 ---
 
-### 8. pm.db の一括編集（CLI）
+## 情報の流れ
 
-アクションアイテム・決定事項の各フィールドをCSVを介して手動で編集する。`assignee`・`due_date`・`milestone_id`・`content`・`status`・`deleted`(0/1) を一括変更できる。
-
-```sh
-# milestone_id が未設定のアイテムをCSVにエクスポート
-python3 scripts/pm_relink.py --export
-
-# 全件エクスポート
-python3 scripts/pm_relink.py --export --all --output relink_all.csv
-
-# 日付フィルタ付きエクスポート
-python3 scripts/pm_relink.py --export --since 2026-02-01
-
-# 変更内容を確認（DB更新なし）
-python3 scripts/pm_relink.py --import relink.csv --dry-run
-
-# DBに反映（確認プロンプトあり）
-python3 scripts/pm_relink.py --import relink.csv
-
-# アクションアイテムをターミナルに一覧表示
-python3 scripts/pm_relink.py --list
-python3 scripts/pm_relink.py --list --all --since 2026-02-01
-
-# 削除済みアイテムも含めて表示
-python3 scripts/pm_relink.py --list --include-deleted
+```
+[Slack] ─── slack_pipeline.py ───→ {channel_id}.db
+                                          ↓
+[会議録音]                          pm.db ←─ pm_extractor.py
+  data/*.m4a           │          (決定事項・               ↑
+                       │        アクションアイテム)   {channel_id}.db
+                       │                  ↓
+                       │            pm_report.py → Slack Canvas
+                       │            pm_insight.py → 健全性評価
+                       │            pm_argus.py → ブリーフィング
+                       │
+                       └─ pm_minutes_import.py ──→ data/minutes/{kind}.db
+                                    ↓          （詳細議事録・担当者・期限）
+                         pm_minutes_to_pm.py ──→ pm.db
 ```
 
-`assignee`・`due_date`・`milestone_id` は空欄 → NULL（解除）。`content`・`status` は空欄の場合スキップ（変更なし）。`deleted` 列で 0=有効 / 1=削除済みを切り替えられる（`--include-deleted` で削除済みアイテムも対象に含める）。
+![情報の流れ](minutes.png)
 
 ---
 
 ## データベース構成
 
-### `{channel_id}.db` - Slackデータ
+| DB | 役割 | 単位 |
+|----|------|------|
+| `data/{channel_id}.db` | Slackメッセージ・スレッド要約 | チャンネルごとに独立 |
+| `data/minutes/{kind}.db` | 議事録詳細（議事内容・決定事項・AI） | 会議名ごとに独立 |
+| `data/pm.db` | PM統合データ（全チャンネル・全会議を横断） | 1ファイル |
+| `data/qa_pm*.db` | QA検索インデックス（FTS5） | インデックスごとに独立 |
 
-- `messages`: 親メッセージ
-- `replies`: 返信メッセージ
-- `summaries`: LLMによるスレッド要約
+### pm.db のテーブル
 
-### `data/minutes/{kind}.db` - 詳細議事録データ
-
-会議名ごとに独立したDBファイル（例: `Leader_Meeting.db`）。`pm_minutes_import.py` が生成する。
-
-- `instances`: 会議開催記録（開催日・ファイルパス・Slack投稿日時・チャンネル・スレッドTS）
-- `minutes_content`: 議事内容（Markdown形式）
-- `decisions`: 決定事項（出典付き）
-- `action_items`: アクションアイテム（担当者・期限付き）
-
-### `pm.db` - PM統合データ
-
-- `meetings`: 会議情報（開催日・種別・要約）
-- `action_items`: アクションアイテム（担当者・期限・status・note・milestone_id）
-- `decisions`: 決定事項
-- `slack_extractions`: 抽出済みスレッド管理（差分処理用）
-- `goals` / `milestones`: goals.yaml から同期したゴール・マイルストーン
-- `audit_log`: action_items の変更履歴（Canvas同期・relink 実行時に記録）
+| テーブル | 内容 |
+|---------|------|
+| `action_items` | アクションアイテム（担当者・期限・status・note・milestone_id） |
+| `decisions` | 決定事項（確認済み管理付き） |
+| `goals` / `milestones` | goals.yaml から同期したゴール・マイルストーン |
+| `meetings` | 会議情報（開催日・種別・要約） |
+| `slack_extractions` | 抽出済みスレッド管理（差分処理用） |
+| `audit_log` | 全変更履歴（Canvas同期・relink・Web UI操作を記録） |
 
 変更履歴の確認:
 ```sh
 python3 scripts/db_utils.py --audit-log
 python3 scripts/db_utils.py --audit-log --source canvas_sync --limit 50
-python3 scripts/db_utils.py --audit-log --id 98        # 特定アイテムの履歴
-python3 scripts/db_utils.py --audit-log --output audit.txt  # ファイルにも保存
 ```
+
+---
+
+## セキュリティ
+
+### 機密情報の保護方針
+
+- **LLM処理は全てローカル**: 議事録・Slackメッセージ等の機密情報は外部サービスに送出しない。組織内で稼働するローカルLLM（vLLMサーバ）で処理する
+- **DB暗号化**: 全DBにSQLCipher AES-256暗号化を適用。ファイルが漏洩しても鍵なしでは内容を読めない
+- **議事録の平文残存防止**: `--meeting-name` 指定時は処理完了後に .md ファイルを自動削除
+- **トークン管理**: `~/.secrets/` 配下にファイルとして保管（`chmod 600`）。`.bashrc` への直書き禁止
+
+### DB暗号化の初回セットアップ
+
+```sh
+python3 scripts/db_utils.py --gen-key                    # 鍵生成
+python3 scripts/db_utils.py --migrate data/pm.db data/C*.db  # 平文→暗号化変換
+```
+
+**鍵を紛失すると暗号化済みDBは復元不可能。** パスワードマネージャー等に必ずバックアップすること。
 
 ---
 
@@ -481,59 +247,15 @@ python3 scripts/db_utils.py --audit-log --output audit.txt  # ファイルにも
 ### 動作要件
 
 - Python 3.10 以上
-- **ローカルLLM（推奨）**: OpenAI互換APIサーバ（vLLM等）を `http://localhost:8000/v1` 等で起動し、環境変数 `OPENAI_API_BASE`・`OPENAI_API_KEY`・`OPENAI_MODEL` を設定する。機密情報を外部送信しないために必須。
-- **Claude CLI（フォールバック）**: `OPENAI_API_BASE` 未設定時のみ使用。Claude Code（`claude` コマンド）が必要: [インストール手順](https://docs.anthropic.com/en/docs/claude-code)
-- 文字起こし機能（`whisper_vad.py`）を使用する場合: GPU環境（NVIDIA L40S / GH200 等）および Singularity コンテナ
+- **ローカルLLM（推奨）**: OpenAI互換APIサーバ（vLLM等）を起動し、環境変数で接続先を設定
+- 文字起こし機能を使用する場合: GPU環境（NVIDIA L40S / GH200 等）
 
-### Python環境
-
-```sh
-# Python仮想環境を使用（アーキテクチャに応じてパスを選択）
-# aarch64: ~/.venv_aarch64 / x86_64: ~/.venv_x86_64
-~/.venv_aarch64/bin/python3 scripts/pm_report.py ...
-# または
-source ~/.venv_aarch64/bin/activate
-python3 scripts/pm_report.py ...
-```
-
-### 必要パッケージ
-
-```sh
-pip install -r requirements.txt
-```
-
-主な依存パッケージ（`requirements.txt`）:
-
-```
-slack-sdk    # Slack API（メッセージ取得・ファイル投稿・Canvas操作等）
-```
-
-文字起こし機能の依存パッケージは `requirements-whisper.txt` を参照（Singularity コンテナ内で使用）。
-
-### Slack User Token の取得
-
-以下のスクリプトの実行には Slack User Token（`xoxp-...`）が必要。
-
-Slack の「Settings & administration」→「Manage apps」または [api.slack.com/apps](https://api.slack.com/apps) でアプリを確認し、「OAuth & Permissions」の **User Token Scopes** に以下を付与する:
-
-- `channels:history` - メッセージ取得
-- `channels:read` - チャンネル情報取得
-- `users:read` - ユーザー名取得
-- `files:read` - Canvas（ファイル）取得
-- `files:write` - ファイルアップロード（議事録Slack投稿）
-- `canvases:read` - Canvas内容読み取り
-- `canvases:write` - Canvas編集
-
-「OAuth & Permissions」の **OAuth Tokens** セクションから「User OAuth Token」（`xoxp-`）をコピーする。
-
-### トークン設定（安全な方法）
+### トークン設定
 
 ```sh
 mkdir -p ~/.secrets && chmod 700 ~/.secrets
 cat > ~/.secrets/slack_tokens.sh << 'EOF'
-export SLACK_USER_TOKEN="xoxp-..."   # 全スクリプト共通（xoxp- ユーザートークン）
-
-# ローカルLLM設定（OPENAI_API_BASE を設定するとローカルLLMを使用）
+export SLACK_USER_TOKEN="xoxp-..."
 export OPENAI_API_BASE="http://localhost:8000/v1"
 export OPENAI_API_KEY="dummy"
 export OPENAI_MODEL="google/gemma-4-26B-A4B-it"
@@ -541,44 +263,74 @@ EOF
 chmod 600 ~/.secrets/slack_tokens.sh
 ```
 
-- `SLACK_USER_TOKEN`: 全スクリプト共通（Canvas投稿・Slack取得・ファイルアップロード）。xoxp- ユーザートークンを使用する。
-- `OPENAI_API_BASE`: ローカルLLMのエンドポイント。設定するとすべての LLM 呼び出しがローカルLLMにルーティングされる（未設定時は Claude CLI フォールバック）。
-- `OPENAI_API_KEY`: ローカルLLMのAPIキー（vLLMは認証不要なため `dummy` で可）。
-- `OPENAI_MODEL`: 使用するモデル名（vLLM の場合はモデルのパスまたは HuggingFace モデルID）。
+### Slack User Token のスコープ
 
----
+`channels:history`, `channels:read`, `users:read`, `files:read`, `files:write`, `canvases:read`, `canvases:write`
 
-## セキュリティ
-
-### DBの暗号化（SQLCipher AES-256）
-
-`pm.db`（決定事項・アクションアイテム・会議情報）および `{channel_id}.db`（Slackメッセージ・要約）の全DBに SQLCipher による AES-256 暗号化を採用している。ファイルが漏洩しても鍵なしでは内容を読めない。
-
-暗号化鍵は `~/.secrets/pm_db_key.txt`（`chmod 600`）または環境変数 `PM_DB_KEY` から読み込む。すべてのスクリプトで DB 接続を `scripts/db_utils.py` に一元管理することで、暗号化を透過的に適用している。
-
-#### 初回セットアップ
+### QAサーバー・Argus の起動
 
 ```sh
-# 鍵を生成
-python3 scripts/db_utils.py --gen-key
-
-# 既存の平文DBを暗号化DBに変換（バックアップを自動作成）
-python3 scripts/db_utils.py --migrate data/pm.db data/C08SXA4M7JT.db data/C0A9KG036CS.db
-
-# 変換内容を確認のみ（変換しない）
-python3 scripts/db_utils.py --migrate data/pm.db --dry-run
-
-# バックアップなしで変換
-python3 scripts/db_utils.py --migrate data/pm.db --no-backup
+bash scripts/pm_qa_start.sh    # /ask・/argus-* が有効になる
+bash scripts/pm_qa_stop.sh     # 停止
 ```
-
-生成した鍵はパスワードマネージャー等に必ずバックアップすること。**鍵を紛失すると暗号化済みDBは復元不可能。**
 
 ---
 
-## 注意事項
+## スクリプト一覧
 
-- ローカルLLMモード（`OPENAI_API_BASE` 設定時）は Claude Code セッション内からも実行可能。Claude CLI フォールバックモード（`OPENAI_API_BASE` 未設定時）は `claude -p` を使うためネストセッション制限があり、`pm_minutes_import.py`・`pm_extractor.py`・`pm_report.py` は**Claude Codeの外のターミナル**から実行すること。
-- Slack Canvasは表示できない文字（特殊Unicode）を含むとAPIエラーになる。スクリプト内で`sanitize_for_canvas()`による除去処理を実施済み。
-- `pm_report.py` および `slack_pipeline.py --canvas-id` は実行のたびにCanvasを全置換する（`url_private` のHTMLからセクションIDを全件取得→全削除→新規挿入）。手動での事前削除は不要。
-- Slack DBはチャンネルごとに独立（`data/{channel_id}.db`）。pm.dbは複数チャンネル・複数会議を横断して統合する。
+詳細なオプションは `CLAUDE.md` の[コマンドリファレンス](docs/commands.md)を参照。
+
+### 日常運用（シェルスクリプト）
+
+| スクリプト | 用途 |
+|-----------|------|
+| `pm_from_recording_auto.sh` | 録音ファイルの自動検出・文字起こし・議事録生成・pm.db登録 |
+| `pm_from_recording.sh` | 録音ファイルを指定して文字起こし・議事録生成 |
+| `pm_from_slack.sh` | Slack取得・要約・pm.db抽出を一括実行 |
+| `canvas_report.sh` | Canvas同期 → レポート生成・Canvas投稿 |
+| `pm_qa_start.sh` / `pm_qa_stop.sh` | QA・Argusデーモンの起動・停止 |
+
+### 情報収集・抽出
+
+| スクリプト | 用途 |
+|-----------|------|
+| `slack_pipeline.py` | Slack差分取得・スレッド要約・Canvas投稿 |
+| `pm_extractor.py` | Slack要約からアクションアイテム・決定事項を抽出 |
+| `pm_minutes_import.py` | 議事録をLLM解析して議事録DBに保存 |
+| `pm_minutes_to_pm.py` | 議事録DBからpm.dbに転記（LLM不使用） |
+| `generate_minutes_local.py` | ローカルLLMで高品質議事録を生成 |
+| `whisper_vad.py` | VAD+Whisperによる話者分離・文字起こし |
+
+### レポート・分析
+
+| スクリプト | 用途 |
+|-----------|------|
+| `pm_report.py` | 週次進捗レポート生成・Canvas投稿 |
+| `pm_insight.py` | プロジェクト健全性評価・リスク特定・改善提案 |
+| `pm_argus.py` | Argus AI秘書（ブリーフィング・草案・リスク分析） |
+
+### データ編集・同期
+
+| スクリプト | 用途 |
+|-----------|------|
+| `pm_sync_canvas.py` | Canvas上の編集内容をpm.dbに同期 |
+| `pm_relink.py` | CSV経由でアクションアイテム・決定事項を一括編集 |
+| `pm_goals_import.py` | goals.yaml → pm.db 完全同期 |
+| `pm_api.py` | Web UI（FastAPI REST API + フロントエンド） |
+
+### QA・検索
+
+| スクリプト | 用途 |
+|-----------|------|
+| `pm_qa_server.py` | Slack Socket Modeデーモン（/ask・/argus-*を統合処理） |
+| `pm_embed.py` | QAインデックス構築（SudachiPy+FTS5） |
+
+### 共通ライブラリ
+
+| モジュール | 用途 |
+|-----------|------|
+| `db_utils.py` | DB接続・統計クエリ・暗号化（全スクリプト共通） |
+| `cli_utils.py` | LLM呼び出し・ログ・argparse（全スクリプト共通） |
+| `web_utils.py` | Web UI用DB読み書き・楽観的排他制御 |
+| `format_utils.py` | Markdownテーブル整形 |
+| `canvas_utils.py` | Slack Canvas操作 |
