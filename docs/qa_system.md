@@ -111,7 +111,7 @@ default_index: pm
 ```sql
 CREATE TABLE chunks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_type TEXT NOT NULL,   -- 'minutes_content' | 'slack_summary'
+    source_type TEXT NOT NULL,   -- 'minutes_content' | 'slack_raw'
     source_db   TEXT NOT NULL,   -- 'minutes/Leader_Meeting.db' | 'C08SXA4M7JT.db'
     record_id   TEXT,
     held_at     TEXT,            -- YYYY-MM-DD

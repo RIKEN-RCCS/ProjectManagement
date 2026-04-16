@@ -396,9 +396,6 @@ def index_slack_raw(
     return count
 
 
-# 後方互換のエイリアス
-index_slack_summaries = index_slack_raw
-
 
 # --- メイン ---
 

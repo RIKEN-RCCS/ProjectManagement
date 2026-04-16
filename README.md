@@ -59,13 +59,13 @@ bash scripts/pm_from_recording_auto.sh -c C08SXA4M7JT
 
 処理フロー: 音声 → Whisper文字起こし → ローカルLLMで議事録生成 → 議事録DB保存 → pm.db転記（平文ファイルはディスクに残らない）
 
-**Slack → 要約 → pm.db**
+**Slack → pm.db**
 
 ```sh
 bash scripts/pm_from_slack.sh -c C08SXA4M7JT
 ```
 
-処理フロー: Slackメッセージ差分取得 → スレッド単位で要約 → 決定事項・アクションアイテム抽出 → pm.db保存
+処理フロー: Slackメッセージ差分取得 → 生メッセージから決定事項・アクションアイテム抽出 → pm.db保存
 
 ### 2. ゴール管理 — 「今どこにいるかが分かる」
 
@@ -198,7 +198,7 @@ python3 scripts/pm_minutes_import.py corrected.md --meeting-name Leader_Meeting 
 
 | DB | 役割 | 単位 |
 |----|------|------|
-| `data/{channel_id}.db` | Slackメッセージ・スレッド要約 | チャンネルごとに独立 |
+| `data/{channel_id}.db` | Slackメッセージ（親メッセージ・返信） | チャンネルごとに独立 |
 | `data/minutes/{kind}.db` | 議事録詳細（議事内容・決定事項・AI） | 会議名ごとに独立 |
 | `data/pm.db` | PM統合データ（全チャンネル・全会議を横断） | 1ファイル |
 | `data/qa_pm*.db` | QA検索インデックス（FTS5） | インデックスごとに独立 |
@@ -286,7 +286,7 @@ bash scripts/pm_qa_stop.sh     # 停止
 |-----------|------|
 | `pm_from_recording_auto.sh` | 録音ファイルの自動検出・文字起こし・議事録生成・pm.db登録 |
 | `pm_from_recording.sh` | 録音ファイルを指定して文字起こし・議事録生成 |
-| `pm_from_slack.sh` | Slack取得・要約・pm.db抽出を一括実行 |
+| `pm_from_slack.sh` | Slack取得・pm.db抽出を一括実行 |
 | `canvas_report.sh` | Canvas同期 → レポート生成・Canvas投稿 |
 | `pm_qa_start.sh` / `pm_qa_stop.sh` | QA・Argusデーモンの起動・停止 |
 
@@ -294,8 +294,8 @@ bash scripts/pm_qa_stop.sh     # 停止
 
 | スクリプト | 用途 |
 |-----------|------|
-| `slack_pipeline.py` | Slack差分取得・スレッド要約・Canvas投稿 |
-| `pm_extractor.py` | Slack要約からアクションアイテム・決定事項を抽出 |
+| `slack_pipeline.py` | Slack差分取得・DB保存 |
+| `pm_extractor.py` | Slack生メッセージからアクションアイテム・決定事項を抽出 |
 | `pm_minutes_import.py` | 議事録をLLM解析して議事録DBに保存 |
 | `pm_minutes_to_pm.py` | 議事録DBからpm.dbに転記（LLM不使用） |
 | `generate_minutes_local.py` | ローカルLLMで高品質議事録を生成 |

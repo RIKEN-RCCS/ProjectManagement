@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pm_from_slack.sh
 #
-# Slack取得・要約 (slack_pipeline.py) → pm.db抽出 (pm_extractor.py) を連続実行する。
+# Slack取得 (slack_pipeline.py) → pm.db抽出 (pm_extractor.py) を連続実行する。
 #
 # Usage:
 #   bash scripts/pm_from_slack.sh -c C08SXA4M7JT
@@ -14,7 +14,6 @@
 #   --dry-run             DB保存なし・確認のみ（両スクリプトに渡す）
 #   --no-encrypt          平文モード（両スクリプトに渡す）
 #   --skip-fetch          Slack API取得をスキップ（slack_pipeline.py のみ）
-#   --force-resummary     全スレッドを強制再要約（slack_pipeline.py のみ）
 #   --force-reextract     抽出済みスレッドも再処理（pm_extractor.py のみ）
 #   --db-slack PATH       {channel_id}.db のパス
 #   --db-pm PATH          pm.db のパス
@@ -47,7 +46,6 @@ SINCE=""
 DRY_RUN=""
 NO_ENCRYPT=""
 SKIP_FETCH=""
-FORCE_RESUMMARY=""
 FORCE_REEXTRACT=""
 DB_SLACK=""
 DB_PM=""
@@ -59,7 +57,6 @@ while [[ $# -gt 0 ]]; do
         --dry-run)            DRY_RUN="--dry-run";  shift   ;;
         --no-encrypt)         NO_ENCRYPT="--no-encrypt"; shift ;;
         --skip-fetch)         SKIP_FETCH="--skip-fetch"; shift ;;
-        --force-resummary)    FORCE_RESUMMARY="--force-resummary"; shift ;;
         --force-reextract)    FORCE_REEXTRACT="--force-reextract"; shift ;;
         --db-slack)           DB_SLACK="$2";        shift 2 ;;
         --db-pm)              DB_PM="$2";           shift 2 ;;
@@ -86,7 +83,6 @@ COMMON_OPTS=()
 
 PIPELINE_OPTS=("${COMMON_OPTS[@]}")
 [[ -n "$SKIP_FETCH" ]]       && PIPELINE_OPTS+=("$SKIP_FETCH")
-[[ -n "$FORCE_RESUMMARY" ]]  && PIPELINE_OPTS+=("$FORCE_RESUMMARY")
 
 EXTRACTOR_OPTS=("${COMMON_OPTS[@]}")
 [[ -n "$FORCE_REEXTRACT" ]]  && EXTRACTOR_OPTS+=("$FORCE_REEXTRACT")
@@ -95,7 +91,7 @@ EXTRACTOR_OPTS=("${COMMON_OPTS[@]}")
 # 実行
 # --------------------------------------------------------------------------- #
 echo "================================================================"
-echo "ステップ1-2: Slack取得・要約 (slack_pipeline.py)"
+echo "ステップ1: Slack取得 (slack_pipeline.py)"
 echo "  チャンネル : $CHANNEL"
 echo "  Slack DB   : $DB_SLACK"
 [[ -n "$SINCE" ]]      && echo "  since      : $SINCE"
@@ -109,7 +105,7 @@ echo "================================================================"
 
 echo ""
 echo "================================================================"
-echo "ステップ3: pm.db抽出 (pm_extractor.py)"
+echo "ステップ2: pm.db抽出 (pm_extractor.py)"
 echo "  チャンネル : $CHANNEL"
 echo "  Slack DB   : $DB_SLACK"
 echo "  pm.db      : $DB_PM"

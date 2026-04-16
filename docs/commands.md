@@ -1,24 +1,17 @@
 ## 主なコマンド
 
-### 1. Slack取得・要約（slack_pipeline.py）
+### 1. Slack差分取得（slack_pipeline.py）
 
 ```sh
-# 通常運用: 差分のみ取得・要約
+# 通常運用: 差分のみ取得
 python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db
 
 # 初回・過去分の取り込み（oldest をAPIに渡してページネーション全件取得）
 python3 scripts/slack_pipeline.py -c C08SXA4M7JT --db data/C08SXA4M7JT.db \
     --since 2025-04-01
 
-# 差分取得・要約 → 全体要約を生成して Canvas に投稿
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --canvas-id F0AAD2494VB
-
-# DBの既存要約から全体要約のみ生成（Slack API呼び出しなし）
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch --output overall.md
-
-# 全体要約を生成してファイル保存 & Canvas 投稿
-python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch \
-    --canvas-id F0AAD2494VB --output overall.md
+# DB内のスレッド一覧を表示
+python3 scripts/slack_pipeline.py -c C08SXA4M7JT --list
 ```
 
 | オプション | デフォルト | 説明 |
@@ -27,19 +20,14 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --skip-fetch \
 | `--db PATH` | `data/{channel_id}.db` | SQLite DBファイルパス |
 | `--since YYYY-MM-DD` | なし（全件） | この日付以降のメッセージのみ取得（APIに oldest として渡す） |
 | `-l N` | `100` | 1ページあたりの取得件数上限（最大999） |
-| `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用）。全体要約のみ生成したい場合にも使用 |
-| `--force-resummary` | - | 全スレッドを強制再要約 |
-| `--skip-llm` | - | LLM呼び出しをスキップ（取得・DB保存は実行される）。全体要約もスキップ |
-| `--list` | - | DB内のスレッド要約一覧を表示して終了（`--since` 併用可） |
+| `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用） |
+| `--list` | - | DB内のスレッド一覧を表示して終了（`--since` 併用可） |
 | `--no-permalink` | - | パーマリンク取得を無効化 |
-| `--canvas-id ID` | なし | Canvas ID（指定時のみ全体要約を Canvas に投稿） |
-| `--skip-canvas` | - | Canvas 投稿をスキップ（全体要約は生成する） |
-| `--output PATH` | なし | 全体要約をファイルにも保存 |
-| `--dry-run` | - | LLM呼び出しをスキップ（Slack API・DB書き込みは実行される）。全体要約もスキップ |
+| `--dry-run` | - | Slack API取得のみ実行（DB書き込みなし） |
 
-### 1b. Slack取得・要約→pm.db抽出 一括実行（pm_from_slack.sh）
+### 1b. Slack取得→pm.db抽出 一括実行（pm_from_slack.sh）
 
-`slack_pipeline.py`（取得・要約）→ `pm_extractor.py`（pm.db抽出）を連続実行する。
+`slack_pipeline.py`（取得）→ `pm_extractor.py`（pm.db抽出）を連続実行する。
 
 ```sh
 # 通常運用
@@ -61,7 +49,6 @@ bash scripts/pm_from_slack.sh -c C08SXA4M7JT --dry-run
 | `--db-slack PATH` | `data/{channel_id}.db` | Slack DBパス |
 | `--db-pm PATH` | `data/pm.db` | pm.db パス |
 | `--skip-fetch` | - | Slack API取得をスキップ（`slack_pipeline.py` のみ） |
-| `--force-resummary` | - | 全スレッドを強制再要約（`slack_pipeline.py` のみ） |
 | `--force-reextract` | - | 抽出済みスレッドも再処理（`pm_extractor.py` のみ） |
 
 ### 2. 会議録文字起こし（pm_from_recording.sh + whisper_vad.py）
@@ -201,7 +188,7 @@ python3 scripts/pm_minutes_to_pm.py --delete 2026-03-10_Leader_Meeting
 | `--no-encrypt` | - | 平文モード |
 | `--delete MEETING_ID` | - | 指定した meeting_id を pm.db から削除して終了 |
 
-### 4. Slack要約 → pm.db（pm_extractor.py）
+### 4. Slack生メッセージ → pm.db（pm_extractor.py）
 
 ```sh
 # 通常運用: 未処理スレッドのみ抽出
@@ -220,7 +207,7 @@ python3 scripts/pm_extractor.py -c C08SXA4M7JT --list --since 2026-02-01
 | `-c CHANNEL_ID` | `C0A9KG036CS` | 対象チャンネルID |
 | `--db-slack PATH` | `data/{channel_id}.db` | Slack DBのパス |
 | `--db-pm PATH` | `data/pm.db` | pm.db のパス |
-| `--since YYYY-MM-DD` | なし（全件） | この日付以降の要約のみ対象 |
+| `--since YYYY-MM-DD` | なし（全件） | この日付以降のスレッドのみ対象 |
 | `--force-reextract` | - | 抽出済みスレッドも再処理 |
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
 | `--output PATH` | - | 標準出力の内容をファイルにも保存 |
