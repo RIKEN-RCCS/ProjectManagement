@@ -80,14 +80,22 @@ slack/
 │   ├── pm_sync_canvas.py            # Canvas → pm.db 同期（担当者・期限・マイルストーン・状況・内容・対応状況・決定事項内容）。open/close判定は「状況」列のみ
 │   ├── pm_relink.py                 # アクションアイテム・決定事項の各フィールドをCSV経由で一括編集（LLM不使用）。deleted(0/1)でアイテムの有効化/削除も可能。--include-deleted で削除済みアイテムを対象に含める
 │   ├── pm_insight.py                # pm.db → LLMによるプロジェクト健全性評価・リスク特定・改善提案を生成・Canvas投稿
+│   ├── pm_argus.py                  # Argus AI — Slack・議事録・pm.db統合分析（ブリーフィング・リスク分析・草案生成）
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
-│   ├── pm_web.py                    # pm.db ローカル編集 Web UI（NiceGUI + AG Grid）。ブラウザでアクションアイテム・決定事項を編集。source列からSlackリンク・議事録ポップアップ表示。楽観的排他制御付き。起動: bash scripts/pm_web_start.sh（port 8501）
+│   ├── pm_api.py                    # FastAPI REST API + 静的フロントエンド配信。pm.db のアクションアイテム・決定事項・議事録・ファイル一覧を提供。web_utils.py を使用
+│   ├── pm_web.py                    # [非推奨] pm.db 編集 Web UI（NiceGUI）。現用は pm_api.py（FastAPI）
 │   ├── pm_web_start.sh              # pm_web.py をバックグラウンドで起動（nohup + PIDファイル管理）
 │   ├── pm_web_stop.sh               # pm_web.py を停止（PIDファイルでプロセス管理）
 │   ├── canvas_utils.py              # Slack Canvas 操作の共通ユーティリティ（sanitize_for_canvas・post_to_canvas・セクション削除ロジック）
-│   ├── db_utils.py                  # DB接続の一元管理・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload も提供
-│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用（call_local_llm 経由）
-│   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理・CoT除去・ストリーミング対応。../Minutes/scripts/ からコピー
+│   ├── db_utils.py                  # DB接続の一元管理・統計クエリ・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload・fetch_overdue_items 等も提供
+│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
+│   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
+│   ├── web_utils.py                 # pm_api.py / pm_web.py 共通のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
+│   ├── pm_embed.py                  # QAインデックス構築（qa_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む）
+│   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/ask QA・/argus-* コマンドを統合処理）
+│   ├── pm_qa_start.sh               # pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
+│   ├── pm_qa_stop.sh                # pm_qa_server.py を停止（PIDファイルでプロセス管理）
+│   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。cli_utils.py の call_local_llm を使用
 │   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
 │   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。文字起こし後 generate_minutes_local.py → pm_minutes_import.py --no-llm → pm_minutes_to_pm.py を自動実行
 │   ├── pm_from_slack.sh             # Slack取得・要約 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）
@@ -99,6 +107,10 @@ slack/
     ├── pm.db                        # PM統合データ
     ├── minutes/                     # 詳細議事録DB（会議名ごとに独立）
     │   └── {kind}.db                # 例: Leader_Meeting.db
+    ├── qa_config.yaml               # QAインデックス定義・チャンネルマッピング
+    ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立）
+    ├── secretary_channels.txt       # Argus が生メッセージを収集するチャンネルID一覧
+    ├── secretary_canvas_id.txt      # Argus の Canvas 投稿先ID
     └── slack_summarize_*.md         # 全体要約（デバッグ・履歴用）
 ```
 
