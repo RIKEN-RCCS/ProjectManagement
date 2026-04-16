@@ -35,6 +35,7 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_local_llm, load_claude_md_context
+from pm_argus import _run_brief, _run_draft, _run_risk
 
 logging.basicConfig(
     level=logging.INFO,
@@ -501,6 +502,37 @@ def build_app():
             response_type="ephemeral",
         )
         executor.submit(_run_qa, question, respond, index_name, index_db)
+
+    # --- Argus コマンドハンドラ ---
+
+    @app.command("/argus-brief")
+    def handle_argus_brief(ack, respond, command):
+        ack()
+        respond(text=":hourglass_flowing_sand: Argus 分析中...", response_type="ephemeral")
+        executor.submit(_run_brief, respond, command)
+
+    @app.command("/argus-draft")
+    def handle_argus_draft(ack, respond, command):
+        ack()
+        text = (command.get("text") or "").strip()
+        if not text:
+            respond(
+                text=(
+                    "用途と件名を指定してください。\n"
+                    "例: `/argus-draft agenda 次回リーダー会議`\n"
+                    "用途: `agenda`(会議アジェンダ), `report`(進捗報告), `request`(確認依頼)"
+                ),
+                response_type="ephemeral",
+            )
+            return
+        respond(text=":hourglass_flowing_sand: Argus 草案生成中...", response_type="ephemeral")
+        executor.submit(_run_draft, respond, command)
+
+    @app.command("/argus-risk")
+    def handle_argus_risk(ack, respond, command):
+        ack()
+        respond(text=":hourglass_flowing_sand: Argus リスク分析中...", response_type="ephemeral")
+        executor.submit(_run_risk, respond, command)
 
     def _shutdown(signum, frame):
         logger.info("シャットダウン中...")
