@@ -72,10 +72,10 @@ slack/
 ├── meetings/                        # 議事録の一次着地点（Markdown形式）
 │   ├── YYYY-MM-DD_会議名.md
 ├── scripts/                         # スクリプト一式
-│   ├── slack_pipeline.py            # Slack取得・要約・Canvas投稿（統合版）。--canvas-id でCanvas投稿、--skip-fetch でDB既存要約から全体要約のみ生成、--skip-llm でLLMスキップ、--list でスレッド一覧表示
+│   ├── slack_pipeline.py            # Slack差分取得（SDK経由）。新規・更新スレッドのみ取得してDBに保存。--skip-fetch でAPI取得スキップ、--list でスレッド一覧表示
 │   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存）。--export でDB内容をMarkdownにエクスポート、--no-llm で人間修正済みMarkdownをLLM不使用で再インポート。--post-to-slack でSlack投稿。--delete で削除
 │   ├── pm_minutes_to_pm.py          # data/minutes/{kind}.db → pm.db 転記（LLM不使用。--delete で削除）
-│   ├── pm_extractor.py              # Slack DB → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
+│   ├── pm_extractor.py              # Slack DB生メッセージ → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿（SlackリンクはクリッカブルURL形式）。--show-workload で担当者別負荷セクションを追加出力
 │   ├── pm_sync_canvas.py            # Canvas → pm.db 同期（担当者・期限・マイルストーン・状況・内容・対応状況・決定事項内容）。open/close判定は「状況」列のみ
 │   ├── pm_relink.py                 # アクションアイテム・決定事項の各フィールドをCSV経由で一括編集（LLM不使用）。deleted(0/1)でアイテムの有効化/削除も可能。--include-deleted で削除済みアイテムを対象に含める
@@ -98,7 +98,7 @@ slack/
 │   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。cli_utils.py の call_local_llm を使用
 │   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
 │   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。文字起こし後 generate_minutes_local.py → pm_minutes_import.py --no-llm → pm_minutes_to_pm.py を自動実行
-│   ├── pm_from_slack.sh             # Slack取得・要約 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）
+│   ├── pm_from_slack.sh             # Slack取得 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）
 │   ├── canvas_report.sh             # Canvas同期 → PMレポート生成・Canvas投稿（pm_sync_canvas.py + pm_report.py）
 │   ├── slack_post_minutes.sh        # 議事録DBの内容をSlackチャンネルに投稿（pm_minutes_import.py --post-to-slack）
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
@@ -138,12 +138,12 @@ python3 scripts/slack_pipeline.py ...
 export OPENAI_API_BASE="http://localhost:8000/v1"   # vLLM エンドポイント
 export OPENAI_API_KEY="dummy"                        # 認証不要のローカルサーバは "dummy" で可
 export OPENAI_MODEL="google/gemma-4-26B-A4B-it"     # サーバに読み込まれているモデル名
-export OPENAI_MAX_TOKENS="8192"                      # Slack 要約用（pm_extractor・slack_pipeline）
+export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_extractor）
 ```
 
 `OPENAI_API_BASE` が設定されている場合、`call_claude()` は Claude CLI の代わりにローカルLLMを呼び出す（`cli_utils.py` の `call_local_llm()` 経由）。会議録音処理（`pm_from_recording.sh`）はこれらの変数をスクリプト内でハードコードしているため、別途設定は不要。
 
-`OPENAI_MAX_TOKENS` は Slack 要約・抽出（`pm_extractor.py`・`slack_pipeline.py`）の最大出力トークン数。会議録音処理では `generate_minutes_local.py` の `--max-tokens 16384` が使われるため本変数は影響しない。
+`OPENAI_MAX_TOKENS` は Slack 抽出（`pm_extractor.py`）の最大出力トークン数。会議録音処理では `generate_minutes_local.py` の `--max-tokens 16384` が使われるため本変数は影響しない。
 
 ---
 

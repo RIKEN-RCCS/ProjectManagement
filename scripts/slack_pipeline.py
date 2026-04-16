@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
 """
-Slack要約パイプライン
+Slack差分取得パイプライン
 
 処理フロー:
   1. Slack SDK でチャンネル履歴を取得
      - DBに存在しない新規スレッドのみ全取得
      - DBに存在するが返信が増えたスレッドのみ再取得
      - 変化のないスレッドはスキップ（API呼び出しなし）
-  2. 新規・更新スレッドのみ Claude CLI で要約しDBに蓄積
-     - 変化のないスレッドはDBの要約をそのまま利用（LLM呼び出しなし）
-  3. DB内の全要約（--since フィルタ適用）を統合して全体要約を生成
-     - --canvas-id 指定時: Canvas に投稿
-     - --output 指定時: ファイルに保存
+  2. 取得したメッセージを {channel_id}.db に保存
+     - pm_extractor.py が生メッセージから決定事項・AIを直接抽出
 """
 
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_no_encrypt_arg, add_output_arg, call_claude
-from canvas_utils import sanitize_for_canvas, post_to_canvas
+from cli_utils import add_no_encrypt_arg
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -62,15 +57,13 @@ def parse_date_arg(date_str: str) -> datetime:
 def parse_args():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Slack チャンネル履歴の差分取得・要約を一括実行",
+        description="Slack チャンネル履歴の差分取得",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
-  %(prog)s                              # 差分のみ取得・要約
+  %(prog)s                              # 差分のみ取得
   %(prog)s --since 2026-01-01 -l 200   # 初回: 範囲を絞って全件取得
-  %(prog)s --skip-fetch                 # DBの既存データから要約のみ
-  %(prog)s --force-resummary            # 全スレッドを強制的に再要約
-  %(prog)s --skip-llm                   # 取得・DB保存のみ（LLM呼び出しなし）
+  %(prog)s --list                       # DB内のスレッド一覧を表示
         """,
     )
     parser.add_argument("-c", "--channel", default=DEFAULT_CHANNEL,
@@ -85,20 +78,11 @@ def parse_args():
                         help="パーマリンク取得を無効化")
     parser.add_argument("--skip-fetch", action="store_true", default=False,
                         help="Slack API 取得をスキップ（DB のみ使用）")
-    parser.add_argument("--force-resummary", action="store_true", default=False,
-                        help="全スレッドを強制的に再要約（差分無視）")
-    parser.add_argument("--skip-llm", action="store_true", default=False,
-                        help="LLM呼び出し（スレッド要約・全体要約）をスキップ")
     parser.add_argument("--list", action="store_true", default=False,
-                        help="DB内のスレッド要約一覧を表示して終了（--since 併用可）")
-    parser.add_argument("--canvas-id", default=None,
-                        help="Canvas ID（指定時のみ Canvas に全体要約を投稿）")
-    parser.add_argument("--skip-canvas", action="store_true", default=False,
-                        help="Canvas 投稿をスキップ（全体要約は生成する）")
-    add_output_arg(parser)
+                        help="DB内のスレッド一覧を表示して終了（--since 併用可）")
     add_no_encrypt_arg(parser)
     parser.add_argument("--dry-run", action="store_true", default=False,
-                        help="LLM呼び出しをスキップ（Slack API・DB書き込みは実行される）")
+                        help="Slack API 取得のみ実行（DB書き込みなし）")
     return parser.parse_args()
 
 
@@ -130,15 +114,6 @@ CREATE TABLE IF NOT EXISTS replies (
     permalink   TEXT,
     fetched_at  TEXT NOT NULL,
     PRIMARY KEY (msg_ts, channel_id)
-);
-
-CREATE TABLE IF NOT EXISTS summaries (
-    thread_ts       TEXT NOT NULL,
-    channel_id      TEXT NOT NULL,
-    summary         TEXT NOT NULL,
-    summarized_at   TEXT NOT NULL,
-    last_reply_ts   TEXT,
-    PRIMARY KEY (thread_ts, channel_id)
 );
 """
 
@@ -182,62 +157,6 @@ def db_upsert_reply(conn: sqlite3.Connection, channel_id: str,
             datetime.now().isoformat(),
         ),
     )
-
-
-def db_upsert_summary(conn: sqlite3.Connection, channel_id: str,
-                      thread_ts: str, summary: str, last_reply_ts: str | None) -> None:
-    conn.execute(
-        """INSERT INTO summaries (thread_ts, channel_id, summary, summarized_at, last_reply_ts)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(thread_ts, channel_id) DO UPDATE SET
-               summary=excluded.summary, summarized_at=excluded.summarized_at,
-               last_reply_ts=excluded.last_reply_ts""",
-        (thread_ts, channel_id, summary, datetime.now().isoformat(), last_reply_ts),
-    )
-
-
-def db_get_summary(conn: sqlite3.Connection, channel_id: str,
-                   thread_ts: str) -> dict | None:
-    row = conn.execute(
-        "SELECT summary, last_reply_ts FROM summaries WHERE thread_ts=? AND channel_id=?",
-        (thread_ts, channel_id),
-    ).fetchone()
-    return dict(row) if row else None
-
-
-def db_get_thread(conn: sqlite3.Connection, channel_id: str, thread_ts: str) -> dict:
-    """DBからスレッド（親＋返信）を取得して要約用のchunk形式で返す"""
-    parent_row = conn.execute(
-        "SELECT * FROM messages WHERE thread_ts=? AND channel_id=?",
-        (thread_ts, channel_id),
-    ).fetchone()
-    if not parent_row:
-        return {}
-
-    parent = dict(parent_row)
-    reply_rows = conn.execute(
-        "SELECT * FROM replies WHERE thread_ts=? AND channel_id=? ORDER BY msg_ts ASC",
-        (thread_ts, channel_id),
-    ).fetchall()
-
-    def row_to_msg(row: dict, is_reply: bool) -> dict:
-        return {
-            "timestamp_unix": row.get("msg_ts") or row.get("thread_ts"),
-            "timestamp": row["timestamp"] or "",
-            "user_id": row["user_id"] or "",
-            "user_name": row["user_name"] or "不明",
-            "message": row["text"] or "",
-            "permalink": row["permalink"] or "",
-            "is_reply": is_reply,
-            "thread_ts": thread_ts,
-        }
-
-    replies = [row_to_msg(dict(r), True) for r in reply_rows]
-    return {
-        "parent": row_to_msg(parent, False),
-        "replies": replies,
-        "type": "thread" if replies else "single",
-    }
 
 
 def db_get_max_reply_ts(conn: sqlite3.Connection, channel_id: str,
@@ -286,6 +205,15 @@ def resolve_username(client: WebClient, user_id: str) -> str:
     return user_cache[user_id]
 
 
+def expand_user_mentions(client: WebClient, text: str) -> str:
+    """テキスト中の <@UXXX> を表示名に展開する"""
+    import re
+    def _replace(m):
+        uid = m.group(1)
+        return resolve_username(client, uid)
+    return re.sub(r"<@([A-Z0-9]+)>", _replace, text)
+
+
 def build_permalink_fallback(channel_id: str, message_ts: str,
                               thread_ts: str = None) -> str:
     ts_no_dot = message_ts.replace(".", "")
@@ -326,7 +254,7 @@ def format_message(client: WebClient, msg: dict, channel_id: str,
     user_id = msg.get("user", "") or msg.get("bot_id", "")
     # ボットメッセージは username フィールドを優先
     user_name = msg.get("username") or resolve_username(client, user_id) if user_id else "不明"
-    text = msg.get("text", "")
+    text = expand_user_mentions(client, msg.get("text", ""))
     ts = msg.get("ts", "")
     thread_ts = msg.get("thread_ts", ts)
 
@@ -368,7 +296,7 @@ def fetch_thread_replies(client: WebClient, channel_id: str,
 
 
 # ==================================================================
-# ステップ1: 差分取得 & DB保存
+# 差分取得 & DB保存
 # ==================================================================
 
 def fetch_and_store(
@@ -377,17 +305,15 @@ def fetch_and_store(
     limit: int,
     since_date: datetime | None,
     fetch_permalink: bool,
-    force_resummary: bool,
-) -> list[str]:
+) -> int:
     """
-    Slack から履歴を取得してDBに保存し、要約が必要なスレッドの thread_ts リストを返す。
+    Slack から履歴を取得してDBに保存する。取得したスレッド数を返す。
 
     差分ロジック:
-    - DBに存在しない thread_ts → 新規: 返信を取得してDBに保存、要約対象に追加
+    - DBに存在しない thread_ts → 新規: 返信を取得してDBに保存
     - DBに存在する thread_ts:
-        - conversations_history の latest_reply > DB保存済み last_reply_ts → 更新あり
-        - 変化なし → スキップ（API・LLM呼び出しなし）
-    - force_resummary=True → 全スレッドを要約対象に追加（取得は差分のみ）
+        - conversations_history の latest_reply > DB保存済み max(replies.msg_ts) → 更新あり
+        - 変化なし → スキップ（API呼び出しなし）
     """
     client = _make_client()
     oldest_ts = str(since_date.timestamp()) if since_date else None
@@ -437,23 +363,25 @@ def fetch_and_store(
     print(f"処理対象の親メッセージ: {len(parent_messages)}件", file=sys.stderr)
 
     stats = {"new": 0, "updated": 0, "skipped": 0}
-    needs_summarize: list[str] = []
 
     for msg in parent_messages:
         ts = msg["ts"]
         thread_ts = ts
         latest_reply = msg.get("latest_reply")  # SDK が返す最新返信 ts
 
-        existing_summary = db_get_summary(conn, channel_id, thread_ts)
+        # 差分検出: messages テーブルの存在 + replies の最新 msg_ts で判定
+        existing = conn.execute(
+            "SELECT 1 FROM messages WHERE thread_ts=? AND channel_id=?",
+            (thread_ts, channel_id),
+        ).fetchone()
 
-        is_new = existing_summary is None
-        is_updated = (
-            not is_new
-            and latest_reply is not None
-            and latest_reply > (existing_summary.get("last_reply_ts") or "0")
-        )
+        is_new = existing is None
+        is_updated = False
+        if not is_new and latest_reply:
+            db_max = db_get_max_reply_ts(conn, channel_id, thread_ts)
+            is_updated = latest_reply > (db_max or "0")
 
-        if not is_new and not is_updated and not force_resummary:
+        if not is_new and not is_updated:
             stats["skipped"] += 1
             continue
 
@@ -488,7 +416,6 @@ def fetch_and_store(
             f"({fmt_parent.get('user_name', '?')}, 返信{len(reply_msgs)}件)",
             file=sys.stderr,
         )
-        needs_summarize.append(thread_ts)
 
     print(
         f"\n取得結果: 新規={stats['new']} 更新={stats['updated']} "
@@ -496,129 +423,19 @@ def fetch_and_store(
         file=sys.stderr,
     )
 
-    return needs_summarize
+    return stats["new"] + stats["updated"]
 
 
 # ==================================================================
-# ステップ2: 差分要約
-# ==================================================================
-
-def extract_urls_from_message(text: str) -> list:
-    return re.findall(r"https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]", text)
-
-
-def format_chunk_for_summary(chunk: dict) -> str:
-    parent = chunk["parent"]
-    replies = chunk.get("replies", [])
-    all_urls = list(dict.fromkeys(
-        extract_urls_from_message(parent["message"])
-        + [u for r in replies for u in extract_urls_from_message(r["message"])]
-    ))
-
-    text = "=== メッセージ ===\n"
-    text += f"投稿者: {parent['user_name']}\n"
-    text += f"日時: {parent['timestamp']}\n"
-    text += f"内容: {parent['message']}\n"
-    pl = parent.get("permalink", "")
-    if pl:
-        text += f"permalink: {pl}\n"
-    if replies:
-        text += f"\n--- 返信 ({len(replies)}件) ---\n"
-        for i, r in enumerate(replies, 1):
-            text += (f"\n[返信 {i}]\n投稿者: {r['user_name']}\n"
-                     f"日時: {r['timestamp']}\n内容: {r['message']}\n")
-    if all_urls:
-        text += "\n【重要: 以下のURLを要約に含める場合は完全な形で一字一句そのまま記載すること】\n"
-        for url in all_urls:
-            text += f"- {url}\n"
-    return text
-
-
-def remove_thinking_tags(text: str) -> str:
-    if "<think>" in text and "</think>" in text:
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    elif "</think>" in text:
-        text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"</?answer>", "", text)
-    text = re.sub(r"\n\n+", "\n\n", text)
-    return text.strip()
-
-
-def summarize_chunk(chunk_text: str) -> str:
-    system_prompt = (
-        "Slackのメッセージとスレッドを冗長な表現を控え端的に要約してください。"
-        "推測を含めず、書かれていることを忠実に要約してください。"
-        "要点、決定事項、アクションアイテムを抽出してください。"
-        "メッセージにpermalinkが含まれている場合は、要約の末尾にpermalinkのURLのみを"
-        "出力してください。「permalink:」等のラベルは付けないでください。"
-        "スレッドの場合は親メッセージのpermalinkのみ出力してください。"
-        "メッセージにURLが含まれる場合は、完全なURL（https://から最後まで）を"
-        "一字一句正確に省略せずそのまま記載してください。"
-        "URLの途中で改行したり、括弧を挿入したりしないでください。"
-        "URLを出力する際にはその前後に必ず半角の空白を追加してください。"
-        "決定事項・アクションアイテムがない場合は言及不要です。言語は日本語としてください。"
-    )
-    try:
-        summary = remove_thinking_tags(call_claude(f"{system_prompt}\n\n{chunk_text}", timeout=300))
-        print(summary)
-        return summary
-    except subprocess.TimeoutExpired:
-        print("  タイムアウト")
-        return "[要約失敗: タイムアウト]"
-    except Exception as e:
-        print(f"  エラー: {e}")
-        return f"[要約失敗: {e}]"
-
-
-def summarize_updated_threads(
-    conn: sqlite3.Connection,
-    channel_id: str,
-    thread_ts_list: list[str],
-) -> int:
-    """
-    指定スレッドのみ要約してDBに保存する。
-    返値: 実際に要約したスレッド数
-    """
-    if not thread_ts_list:
-        print("要約対象スレッドなし（全て最新）", file=sys.stderr)
-        return 0
-
-    print(f"要約対象: {len(thread_ts_list)}スレッド", file=sys.stderr)
-    count = 0
-    for i, thread_ts in enumerate(thread_ts_list, 1):
-        chunk = db_get_thread(conn, channel_id, thread_ts)
-        if not chunk:
-            print(f"  警告: thread_ts={thread_ts} がDBに見つかりません", file=sys.stderr)
-            continue
-
-        parent = chunk["parent"]
-        print(f"\n[{i}/{len(thread_ts_list)}] {parent['user_name']} "
-              f"({parent['timestamp']})")
-
-        summary = summarize_chunk(format_chunk_for_summary(chunk))
-
-        last_reply_ts = db_get_max_reply_ts(conn, channel_id, thread_ts)
-        db_upsert_summary(conn, channel_id, thread_ts, summary, last_reply_ts)
-        conn.commit()
-        count += 1
-
-        if i % 10 == 0:
-            print(f"  → {i}/{len(thread_ts_list)} 完了")
-
-    print(f"\n✓ {count}スレッドの要約をDBに保存しました")
-    return count
-
-
-# ==================================================================
-# --list: DB内スレッド要約一覧
+# --list: DB内スレッド一覧
 # ==================================================================
 
 def cmd_list(conn: sqlite3.Connection, channel_id: str, since: datetime | None) -> None:
     query = """
         SELECT m.thread_ts, m.timestamp, m.user_name, m.permalink,
-               s.summarized_at, s.last_reply_ts, s.summary
+               (SELECT COUNT(*) FROM replies r
+                WHERE r.thread_ts = m.thread_ts AND r.channel_id = m.channel_id) AS reply_count
         FROM messages m
-        LEFT JOIN summaries s ON m.thread_ts = s.thread_ts AND s.channel_id = m.channel_id
         WHERE m.channel_id = ?
     """
     params: list = [channel_id]
@@ -632,79 +449,22 @@ def cmd_list(conn: sqlite3.Connection, channel_id: str, since: datetime | None) 
     print(f"スレッド一覧（チャンネル: {channel_id}）")
     if since:
         print(f"（{since.strftime('%Y-%m-%d')} 以降）")
-    print("─" * 80)
-    summarized = unsummarized = 0
+    print("─" * 70)
     for i, row in enumerate(rows, 1):
         ts = (row["timestamp"] or "")[:16]
         user = (row["user_name"] or "")[:12]
-        if row["summarized_at"]:
-            summarized += 1
-            summary_head = (row["summary"] or "").replace("\n", " ")[:60]
-            has_replies = "↩" if row["last_reply_ts"] else " "
-            print(f"[{i:4d}] {ts}  {user:<12}  {has_replies}  要約:{row['summarized_at'][:10]}  {summary_head}…")
-        else:
-            unsummarized += 1
-            print(f"[{i:4d}] {ts}  {user:<12}     （未要約）")
-    print(f"\n合計: {len(rows)} 件（要約済み: {summarized}, 未要約: {unsummarized}）")
-
-
-# ==================================================================
-# ステップ3: 全体要約 & Canvas投稿
-# ==================================================================
-
-def fetch_summaries_for_overall(
-    conn: sqlite3.Connection,
-    channel_id: str,
-    since_date: datetime | None,
-) -> list[dict]:
-    """DB から全スレッド要約と親メッセージ permalink を取得（全体要約用）"""
-    query = """
-        SELECT m.timestamp, m.user_name, m.permalink, s.summary
-        FROM messages m
-        JOIN summaries s ON m.thread_ts = s.thread_ts AND s.channel_id = m.channel_id
-        WHERE m.channel_id = ?
-    """
-    params: list = [channel_id]
-    if since_date:
-        query += " AND m.timestamp >= ?"
-        params.append(since_date.strftime("%Y-%m-%d"))
-    query += " ORDER BY m.timestamp ASC"
-    return [dict(r) for r in conn.execute(query, params).fetchall()]
-
-
-def summarize_overall(entries: list[dict]) -> str:
-    """全スレッド要約を統合してチャンネル全体の総合要約を生成する（LLM使用）"""
-    if not entries:
-        return "（要約対象なし）"
-
-    items = []
-    for e in entries:
-        item = f"- {e['summary']}"
-        if e.get("permalink"):
-            item += f"\n  (元投稿: {e['permalink']})"
-        items.append(item)
-
-    system_prompt = (
-        "以下はSlackチャンネルの個別メッセージ・スレッドごとの要約です。"
-        "これらを統合して、チャンネル全体の活動を俯瞰できる総合要約を作成してください。"
-        "主要なトピック、共有されたリソース（URL含む）を整理して記載してください。"
-        "URLは共有されたリソースにまとめてください。"
-        "URLが含まれる場合は完全な形で記載してください。"
-        "極力、表形式は使わずに文章で表現してください。"
-        "推測を含めず、要約に基づいた内容のみを記載してください。"
-        "\n\n"
-        "【重要】各要約には元のSlack投稿のpermalinkが付記されています。"
-        "全体要約の各トピックや要点の末尾に、参照元の投稿permalinkのURLのみを記載してください。「permalink:」等のラベルは付けないでください。"
-        "言語は日本語としてください。"
-    )
-    print("\n全体要約を生成中...", file=sys.stderr)
-    try:
-        return remove_thinking_tags(call_claude(f"{system_prompt}\n\n" + "\n\n".join(items), timeout=600))
-    except subprocess.TimeoutExpired:
-        return "[全体要約失敗: タイムアウト]"
-    except Exception as e:
-        return f"[全体要約失敗: {e}]"
-
+        rc = row["reply_count"]
+        replies_str = f"↩{rc}" if rc else " "
+        text_head = ""
+        # 親メッセージのテキスト先頭を表示
+        text_row = conn.execute(
+            "SELECT text FROM messages WHERE thread_ts=? AND channel_id=?",
+            (row["thread_ts"], channel_id),
+        ).fetchone()
+        if text_row and text_row["text"]:
+            text_head = text_row["text"].replace("\n", " ")[:50]
+        print(f"[{i:4d}] {ts}  {user:<12}  {replies_str:<4}  {text_head}")
+    print(f"\n合計: {len(rows)} 件")
 
 
 # ==================================================================
@@ -726,78 +486,28 @@ def main():
         conn.close()
         return
 
-    # ---- ステップ1: 差分取得 & DB保存 ----
+    # ---- 差分取得 & DB保存 ----
     if not args.skip_fetch:
         print(f"\n{'='*60}")
-        print(f"ステップ1: 差分取得 (チャンネル: {channel_id})")
+        print(f"差分取得 (チャンネル: {channel_id})")
         print(f"{'='*60}")
-        needs_summarize = fetch_and_store(
+        fetched = fetch_and_store(
             conn=conn,
             channel_id=channel_id,
             limit=args.limit,
             since_date=args.since,
             fetch_permalink=not args.no_permalink,
-            force_resummary=args.force_resummary,
         )
+        print(f"\n取得・保存: {fetched} スレッド")
     else:
-        print(f"\nステップ1: スキップ（DB のみ使用）")
-        if args.force_resummary:
-            # DB内の全スレッドを再要約対象にする（--since フィルタを適用）
-            query = "SELECT thread_ts FROM messages WHERE channel_id=?"
-            params: list = [channel_id]
-            if args.since:
-                query += " AND timestamp >= ?"
-                params.append(args.since.strftime("%Y-%m-%d"))
-            query += " ORDER BY thread_ts ASC"
-            rows = conn.execute(query, params).fetchall()
-            needs_summarize = [r["thread_ts"] for r in rows]
-            print(f"  → force-resummary: {len(needs_summarize)}スレッドを対象")
-        else:
-            needs_summarize = []
+        print(f"\nスキップ（DB のみ使用）")
 
-    # ---- ステップ2: 差分要約 & DB保存 ----
-    print(f"\n{'='*60}")
-    print("ステップ2: 差分要約")
-    print(f"{'='*60}")
-    if args.dry_run or args.skip_llm:
-        reason = "--dry-run" if args.dry_run else "--skip-llm"
-        print(f"[INFO] {reason} のため LLM呼び出し・DB保存をスキップしました（対象: {len(needs_summarize)}スレッド）")
-    else:
-        summarize_updated_threads(conn, channel_id, needs_summarize)
-
-    total_summaries = conn.execute(
-        "SELECT COUNT(*) FROM summaries WHERE channel_id=?", (channel_id,)
+    total_threads = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE channel_id=?", (channel_id,)
     ).fetchone()[0]
-    print(f"\nDB内サマリー総数: {total_summaries}スレッド")
-
-    # ---- ステップ3: 全体要約 & Canvas投稿 ----
-    print(f"\n{'='*60}")
-    print("ステップ3: 全体要約")
-    print(f"{'='*60}")
-
-    overall_summary = None
-    if args.dry_run or args.skip_llm:
-        reason = "--dry-run" if args.dry_run else "--skip-llm"
-        print(f"[INFO] {reason} のため全体要約をスキップしました")
-    else:
-        entries = fetch_summaries_for_overall(conn, channel_id, args.since)
-        print(f"全体要約対象: {len(entries)}スレッド", file=sys.stderr)
-        if entries:
-            overall_summary = summarize_overall(entries)
-            overall_summary = sanitize_for_canvas(overall_summary)
-            print(overall_summary)
+    print(f"DB内スレッド総数: {total_threads}件")
 
     conn.close()
-
-    if overall_summary and args.output:
-        Path(args.output).write_text(overall_summary, encoding="utf-8")
-        print(f"✓ 全体要約を {args.output} に保存しました")
-
-    if overall_summary and args.canvas_id and not args.skip_canvas:
-        post_to_canvas(args.canvas_id, overall_summary)
-    elif args.canvas_id:
-        print("[INFO] Canvas 投稿をスキップしました")
-
     print("\n✓ パイプライン完了")
 
 

@@ -358,7 +358,7 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
 
 _SOURCE_TYPE_LABEL = {
     "minutes_content": "議事録本文",
-    "slack_summary": "Slack要約",
+    "slack_raw": "Slackメッセージ",
 }
 
 _CHANNEL_NAMES: dict[str, str] = {
@@ -379,7 +379,7 @@ def _format_source_label(chunk: dict) -> str:
     label = _SOURCE_TYPE_LABEL.get(chunk["source_type"], chunk["source_type"])
     db_name = chunk["source_db"].replace("minutes/", "").replace(".db", "")
     # Slack チャンネルIDを人名称に変換
-    if chunk["source_type"] == "slack_summary":
+    if chunk["source_type"] == "slack_raw":
         db_name = _CHANNEL_NAMES.get(db_name, db_name)
     held_at = chunk["held_at"] or "日付不明"
     return f"{db_name} / {label} ({held_at})"
