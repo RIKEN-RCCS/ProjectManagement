@@ -33,16 +33,13 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from db_utils import open_db, open_pm_db, fetch_milestone_progress, fetch_assignee_workload
-from cli_utils import call_argus_llm, load_claude_md_context
-from pm_insight import (
-    fetch_overdue_items,
-    fetch_unacknowledged_decisions,
-    fetch_unlinked_items_count,
-    fetch_no_assignee_count,
-    fetch_weekly_trends,
-    fetch_summary_stats,
+from db_utils import (
+    open_db, open_pm_db, fetch_milestone_progress, fetch_assignee_workload,
+    fetch_overdue_items, fetch_unacknowledged_decisions,
+    fetch_unlinked_items_count, fetch_no_assignee_count,
+    fetch_weekly_trends, fetch_summary_stats,
 )
+from cli_utils import call_argus_llm, load_claude_md_context
 
 # --------------------------------------------------------------------------- #
 # 設定
