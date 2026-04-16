@@ -271,16 +271,20 @@ def index_minutes_content(
     return count
 
 
-# --- {channel_id}.db からの抽出（slack_summary のみ）---
+# --- {channel_id}.db からの抽出（生メッセージ: スレッド単位でまとめて索引化）---
 
-def index_slack_summaries(
+def index_slack_raw(
     index_conn: sqlite3.Connection,
     db_path: Path,
     full_rebuild: bool,
     dry_run: bool,
     logger: logging.Logger,
 ) -> int:
-    """Slack チャンネルDBの summaries テーブルのみを索引化する。"""
+    """Slack チャンネルDBの messages + replies テーブルをスレッド単位で索引化する。
+
+    差分更新: index_state の last_indexed より新しい fetched_at を持つ
+    スレッド（messages.thread_ts）のみ再処理する。
+    """
     source_db = db_path.name
     last_indexed = None if full_rebuild else get_last_indexed(index_conn, source_db)
 
@@ -293,34 +297,94 @@ def index_slack_summaries(
     chunk_rows: list[dict] = []
     now = now_iso()
 
-    where_clause = "WHERE s.summarized_at > ?" if last_indexed else ""
-    params = (last_indexed,) if last_indexed else ()
+    # 差分対象スレッドを特定: last_indexed 以降に fetch されたスレッド
+    if last_indexed:
+        target_threads = {
+            row[0] for row in src_conn.execute(
+                """SELECT DISTINCT thread_ts FROM messages WHERE fetched_at > ?
+                   UNION
+                   SELECT DISTINCT thread_ts FROM replies WHERE fetched_at > ?""",
+                (last_indexed, last_indexed),
+            )
+        }
+        if not target_threads:
+            src_conn.close()
+            logger.info(f"    slack_raw {source_db}: 差分なし")
+            return 0
+        # 差分対象スレッドの古いチャンクを削除（再生成するため）
+        if not dry_run:
+            for ts in target_threads:
+                index_conn.execute(
+                    "DELETE FROM chunks WHERE source_db = ? AND record_id = ?",
+                    (source_db, ts),
+                )
+    else:
+        target_threads = None  # 全件対象
 
+    # スレッドごとにメッセージを集約
+    # messages: 親投稿（thread_ts が PK）
+    if target_threads is not None:
+        placeholders = ",".join("?" * len(target_threads))
+        where_msg = f"WHERE thread_ts IN ({placeholders})"
+        where_rep = f"WHERE thread_ts IN ({placeholders})"
+        params_msg = list(target_threads)
+        params_rep = list(target_threads)
+    else:
+        where_msg = ""
+        where_rep = ""
+        params_msg = []
+        params_rep = []
+
+    # 親メッセージを取得
+    parents: dict[str, dict] = {}
     for row in src_conn.execute(
-        f"""SELECT s.thread_ts, s.summary, s.summarized_at, m.timestamp, m.permalink
-            FROM summaries s
-            LEFT JOIN messages m ON s.thread_ts = m.thread_ts AND s.channel_id = m.channel_id
-            {where_clause}
-            ORDER BY s.summarized_at""",
-        params,
+        f"""SELECT thread_ts, user_name, text, timestamp, permalink
+            FROM messages {where_msg} ORDER BY timestamp ASC""",
+        params_msg,
     ):
-        text = (row["summary"] or "").strip()
-        if not text:
+        parents[row["thread_ts"]] = {
+            "user_name": row["user_name"] or "unknown",
+            "text": (row["text"] or "").replace("\n", " "),
+            "timestamp": row["timestamp"] or "",
+            "permalink": row["permalink"],
+            "lines": [],
+        }
+
+    # 返信を取得してスレッドに付加
+    for row in src_conn.execute(
+        f"""SELECT thread_ts, user_name, text, timestamp
+            FROM replies {where_rep} ORDER BY timestamp ASC""",
+        params_rep,
+    ):
+        ts = row["thread_ts"]
+        if ts not in parents:
             continue
-        held_at = (row["timestamp"] or "")[:10] if row["timestamp"] else None
-        chunk_rows.append({
-            "source_type": "slack_summary",
-            "source_db": source_db,
-            "record_id": row["thread_ts"],
-            "held_at": held_at,
-            "content": text,
-            "tokens": sudachi_tokenize(text),
-            "source_ref": row["permalink"],
-            "indexed_at": now,
-        })
+        parents[ts]["lines"].append(
+            f"  {row['user_name'] or 'unknown'}: {(row['text'] or '').replace(chr(10), ' ')}"
+        )
 
     src_conn.close()
-    logger.info(f"    slack_summary {source_db}: {len(chunk_rows)} チャンク")
+
+    # スレッド単位でテキストを組み立てチャンク化
+    for thread_ts, p in parents.items():
+        held_at = p["timestamp"][:10] if p["timestamp"] else None
+        header = f"[{p['timestamp'][:16]}] {p['user_name']}: {p['text']}"
+        body = header
+        if p["lines"]:
+            body += "\n" + "\n".join(p["lines"])
+        for chunk in split_into_chunks(body):
+            chunk_rows.append({
+                "source_type": "slack_raw",
+                "source_db": source_db,
+                "record_id": thread_ts,
+                "held_at": held_at,
+                "content": chunk,
+                "tokens": sudachi_tokenize(chunk),
+                "source_ref": p["permalink"],
+                "indexed_at": now,
+            })
+
+    logger.info(f"    slack_raw {source_db}: {len(chunk_rows)} チャンク（{len(parents)} スレッド）")
 
     if dry_run:
         return len(chunk_rows)
@@ -330,6 +394,10 @@ def index_slack_summaries(
     count = insert_chunks(index_conn, chunk_rows)
     set_last_indexed(index_conn, source_db, now)
     return count
+
+
+# 後方互換のエイリアス
+index_slack_summaries = index_slack_raw
 
 
 # --- メイン ---
@@ -373,13 +441,13 @@ def build_index(
             continue
         total += index_minutes_content(index_conn, minutes_path, full_rebuild, dry_run, logger)
 
-    # slack_summary
+    # slack_raw（生メッセージ）
     for channel_id in channel_ids:
         channel_path = data_dir / f"{channel_id}.db"
         if not channel_path.exists():
             logger.warning(f"  {channel_path} が見つかりません")
             continue
-        total += index_slack_summaries(index_conn, channel_path, full_rebuild, dry_run, logger)
+        total += index_slack_raw(index_conn, channel_path, full_rebuild, dry_run, logger)
 
     if not dry_run:
         index_conn.commit()

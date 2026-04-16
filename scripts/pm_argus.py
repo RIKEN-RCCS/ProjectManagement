@@ -206,7 +206,7 @@ def fetch_pm_stats(conn, today: str, since: str | None = None) -> dict:
 # --------------------------------------------------------------------------- #
 
 _BRIEF_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIプロジェクトインテリジェンスシステム「Argus」です。
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
 以下のデータを分析し、**{requester}が今日 {today} 中に優先的に対応すべきこと**を
 最大5件、優先度順にリストアップしてください。
 
@@ -265,7 +265,7 @@ _BRIEF_PROMPT = """\
 
 
 _DRAFT_AGENDA_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIプロジェクトインテリジェンスシステム「Argus」です。
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
 以下のデータを基に、**次回「{subject}」のための会議アジェンダ草案**を生成してください。
 
 ## プロジェクト文脈
@@ -308,7 +308,7 @@ _Argus 生成: {today}_
 """
 
 _DRAFT_REPORT_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIプロジェクトインテリジェンスシステム「Argus」です。
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
 以下のデータを基に、**進捗報告「{subject}」の草案**を生成してください。
 
 ## プロジェクト文脈
@@ -358,7 +358,7 @@ _Argus 生成: {today}_
 """
 
 _DRAFT_REQUEST_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIプロジェクトインテリジェンスシステム「Argus」です。
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
 以下のデータを基に、**確認依頼「{subject}」のメッセージ草案**を生成してください。
 
 ## プロジェクト文脈
@@ -388,7 +388,7 @@ _Argus 生成: {today}_
 """
 
 _RISK_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIプロジェクトインテリジェンスシステム「Argus」です。
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
 以下のデータを分析し、**顕在化しているリスクと放置すると問題になりうる予兆**を列挙してください。
 
 各リスクの形式:
@@ -773,7 +773,7 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
             assignee=assignee, topic=topic, requester=requester,
         )
         logger.info("[argus-brief] LLM 呼び出し中...")
-        result = call_argus_llm(prompt, system="あなたはAIプロジェクトインテリジェンスシステムArgusです。")
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         header = f"*Argus ブリーフィング ({today})*"
         if assignee:
             header += f"  担当者フォーカス: {assignee}"
@@ -829,7 +829,7 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
         conn.close()
 
         logger.info("[argus-draft] RiVault 呼び出し中...")
-        result = call_argus_llm(prompt, system="あなたはAIプロジェクトインテリジェンスシステムArgusです。")
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         respond(
             text=f"*Argus 草案 ({purpose}: {subject})*\n\n{result}",
             response_type="ephemeral",
@@ -874,7 +874,7 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
             assignee=assignee, topic=topic,
         )
         logger.info("[argus-risk] LLM 呼び出し中...")
-        result = call_argus_llm(prompt, system="あなたはAIプロジェクトインテリジェンスシステムArgusです。")
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         header = f"*Argus リスク分析 ({today})*"
         if assignee:
             header += f"  担当者フォーカス: {assignee}"
@@ -906,7 +906,7 @@ def main() -> None:
     parser.add_argument("--brief-to-canvas", action="store_true",
                         help="ブリーフィングを生成して Canvas に投稿")
     parser.add_argument("--risk", action="store_true",
-                        help="リスク分析を生成して標準出力（--canvas-id 指定時は Canvas にも投稿）")
+                        help="リスク分析を生成して Canvas に投稿（--dry-run で投稿なし）")
     parser.add_argument("--canvas-id", default=None, metavar="ID",
                         help="投稿先 Canvas ID（省略時は secretary_canvas_id.txt を参照）")
     parser.add_argument("--dry-run", action="store_true",
@@ -949,7 +949,7 @@ def main() -> None:
             assignee=args.assignee, topic=args.topic, requester=requester,
         )
         print("[INFO] LLM に問い合わせ中（ブリーフィング）...", file=sys.stderr)
-        result = call_argus_llm(prompt, system="あなたはAIプロジェクトインテリジェンスシステムArgusです。")
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         canvas_content = f"# Argus ブリーフィング ({today})\n\n{result}\n\n---\n_生成: {today} JST_"
         print("\n" + "=" * 60)
         print(canvas_content)
@@ -979,7 +979,7 @@ def main() -> None:
             assignee=args.assignee, topic=args.topic,
         )
         print("[INFO] LLM に問い合わせ中（リスク分析）...", file=sys.stderr)
-        result = call_argus_llm(prompt, system="あなたはAIプロジェクトインテリジェンスシステムArgusです。")
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         canvas_content = f"# Argus リスク分析 ({today})\n\n{result}\n\n---\n_生成: {today} JST_"
         print("\n" + "=" * 60)
         print(canvas_content)
@@ -990,10 +990,17 @@ def main() -> None:
             return
 
         canvas_id = args.canvas_id
-        if canvas_id:
-            from canvas_utils import post_to_canvas, sanitize_for_canvas
-            post_to_canvas(canvas_id, sanitize_for_canvas(canvas_content))
-            print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
+        if not canvas_id and _SECRETARY_CANVAS_ID_FILE.exists():
+            canvas_id = _SECRETARY_CANVAS_ID_FILE.read_text(encoding="utf-8").strip()
+
+        if not canvas_id:
+            print("[ERROR] Canvas ID が不明。--canvas-id か data/secretary_canvas_id.txt を設定してください",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        from canvas_utils import post_to_canvas, sanitize_for_canvas
+        post_to_canvas(canvas_id, sanitize_for_canvas(canvas_content))
+        print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
 
     else:
         conn.close()

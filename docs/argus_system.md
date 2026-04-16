@@ -176,11 +176,11 @@ Argus とは独立した機能で、同じデーモンで動作する。
 # ブリーフィング生成 → Canvas に投稿
 ~/.venv_aarch64/bin/python3 scripts/pm_argus.py --brief-to-canvas
 
-# リスク分析 → 標準出力のみ
+# リスク分析 → 標準出力のみ（Canvas 投稿なし）
 ~/.venv_aarch64/bin/python3 scripts/pm_argus.py --risk --dry-run
 
-# リスク分析 → Canvas にも投稿
-~/.venv_aarch64/bin/python3 scripts/pm_argus.py --risk --canvas-id F0AT4N36TFF
+# リスク分析 → Canvas に投稿
+~/.venv_aarch64/bin/python3 scripts/pm_argus.py --risk
 
 # 引数指定（スラッシュコマンドと同等）
 ~/.venv_aarch64/bin/python3 scripts/pm_argus.py --brief-to-canvas --dry-run \
@@ -190,7 +190,7 @@ Argus とは独立した機能で、同じデーモンで動作する。
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--brief-to-canvas` | — | ブリーフィング生成・Canvas 投稿 |
-| `--risk` | — | リスク分析生成 |
+| `--risk` | — | リスク分析生成・Canvas 投稿 |
 | `--canvas-id ID` | `secretary_canvas_id.txt` の値 | 投稿先 Canvas ID |
 | `--dry-run` | — | Canvas 投稿なし・標準出力のみ |
 | `--since YYYY-MM-DD` | 30日前 | データ収集開始日（`--days` より優先） |
