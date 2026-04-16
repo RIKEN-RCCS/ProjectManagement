@@ -40,6 +40,10 @@ from db_utils import (
     fetch_weekly_trends, fetch_summary_stats,
 )
 from cli_utils import call_argus_llm, load_claude_md_context
+from format_utils import (
+    format_milestone_table, format_overdue_list, format_assignee_table,
+    format_weekly_trends as format_trends_table, format_decisions_list,
+)
 
 # --------------------------------------------------------------------------- #
 # 設定
@@ -443,42 +447,6 @@ _RISK_PROMPT = """\
 """
 
 
-def _fmt_milestone_table(milestones: list[dict], today: str) -> str:
-    if not milestones:
-        return "（マイルストーン未登録）"
-    lines = ["| ID | 名前 | 期限 | open | closed | 状況 |",
-             "|----|------|------|------|--------|------|"]
-    for m in milestones:
-        due = m.get("due_date") or "未定"
-        open_c = m["open_count"]
-        closed_c = m["closed_count"]
-        total = open_c + closed_c
-        if m.get("status") == "achieved":
-            st = "達成済"
-        elif m.get("due_date") and m["due_date"] < today:
-            st = "遅延"
-        elif total == 0:
-            st = "未着手"
-        else:
-            pct = closed_c / total * 100 if total else 0
-            st = f"進行中({pct:.0f}%)"
-        lines.append(f"| {m['milestone_id']} | {m['name']} | {due} | {open_c} | {closed_c} | {st} |")
-    return "\n".join(lines)
-
-
-def _fmt_overdue_list(items: list[dict], limit: int = 10) -> str:
-    if not items:
-        return "（なし）"
-    lines = []
-    for it in items[:limit]:
-        assignee = it.get("assignee") or "未定"
-        ms = it.get("milestone_id") or "-"
-        lines.append(f"- [ID:{it['id']}][期限:{it['due_date']}][担当:{assignee}][MS:{ms}] {it['content'][:80]}")
-    if len(items) > limit:
-        lines.append(f"（他 {len(items) - limit} 件）")
-    return "\n".join(lines)
-
-
 def _fmt_closed_items(conn, since_date: str, limit: int = 20) -> str:
     try:
         rows = conn.execute(
@@ -497,38 +465,6 @@ def _fmt_closed_items(conn, since_date: str, limit: int = 20) -> str:
         )
     except Exception:
         return "（取得エラー）"
-
-
-def _fmt_assignee_table(workload: list[dict]) -> str:
-    if not workload:
-        return "（データなし）"
-    lines = ["| 担当者 | open | 期限超過 | 期限未設定 |",
-             "|--------|------|----------|------------|"]
-    for w in workload:
-        lines.append(
-            f"| {w['assignee']} | {w['total_open']} | {w['overdue']} | {w['no_due_date']} |"
-        )
-    return "\n".join(lines)
-
-
-def _fmt_decisions_list(decisions: list[dict]) -> str:
-    if not decisions:
-        return "（なし）"
-    lines = []
-    for d in decisions[:10]:
-        lines.append(f"- [D:{d['id']}][{d.get('decided_at') or '日付不明'}] {d['content'][:100]}")
-    if len(decisions) > 10:
-        lines.append(f"（他 {len(decisions) - 10} 件）")
-    return "\n".join(lines)
-
-
-def _fmt_weekly_trends(trends: list[dict]) -> str:
-    if not trends:
-        return "（データなし）"
-    lines = ["| 週 | 作成 | 完了（近似）|", "|----|------|------------|"]
-    for t in trends:
-        lines.append(f"| {t['week_start']}〜{t['week_end']} | {t['created']} | {t['closed']} |")
-    return "\n".join(lines)
 
 
 def _parse_command_args(text: str) -> tuple[int | None, str | None, str | None]:
@@ -596,11 +532,11 @@ def build_brief_prompt(
         unacknowledged_decisions=s["unacknowledged_decisions"],
         unlinked_count=stats["unlinked_count"],
         no_assignee_count=stats["no_assignee_count"],
-        milestone_table=_fmt_milestone_table(stats["milestones"], today),
-        overdue_list=_fmt_overdue_list(stats["overdue_items"]),
-        assignee_table=_fmt_assignee_table(stats["assignee_workload"]),
-        decisions_list=_fmt_decisions_list(stats["unacknowledged_decisions"]),
-        weekly_trends=_fmt_weekly_trends(stats["weekly_trends"]),
+        milestone_table=format_milestone_table(stats["milestones"], today),
+        overdue_list=format_overdue_list(stats["overdue_items"]),
+        assignee_table=format_assignee_table(stats["assignee_workload"]),
+        decisions_list=format_decisions_list(stats["unacknowledged_decisions"]),
+        weekly_trends=format_trends_table(stats["weekly_trends"]),
         messages=messages or "（データなし）",
         minutes=minutes or "（データなし）",
     )
@@ -627,8 +563,8 @@ def build_draft_prompt(
         return _DRAFT_AGENDA_PROMPT.format(
             subject=subject,
             context=context,
-            decisions_list=_fmt_decisions_list(stats["unacknowledged_decisions"]),
-            overdue_list=_fmt_overdue_list(stats["overdue_items"]),
+            decisions_list=format_decisions_list(stats["unacknowledged_decisions"]),
+            overdue_list=format_overdue_list(stats["overdue_items"]),
             messages=messages or "（データなし）",
             today=today,
         )
@@ -638,18 +574,18 @@ def build_draft_prompt(
         return _DRAFT_REPORT_PROMPT.format(
             subject=subject,
             context=context,
-            milestone_table=_fmt_milestone_table(stats["milestones"], today),
+            milestone_table=format_milestone_table(stats["milestones"], today),
             closed_items=closed_items,
-            overdue_list=_fmt_overdue_list(stats["overdue_items"]),
-            assignee_table=_fmt_assignee_table(stats["assignee_workload"]),
+            overdue_list=format_overdue_list(stats["overdue_items"]),
+            assignee_table=format_assignee_table(stats["assignee_workload"]),
             today=today,
         )
     else:  # request
         return _DRAFT_REQUEST_PROMPT.format(
             subject=subject,
             context=context,
-            assignee_table=_fmt_assignee_table(stats["assignee_workload"]),
-            overdue_list=_fmt_overdue_list(stats["overdue_items"]),
+            assignee_table=format_assignee_table(stats["assignee_workload"]),
+            overdue_list=format_overdue_list(stats["overdue_items"]),
             messages=messages or "（データなし）",
             today=today,
         )
@@ -687,11 +623,11 @@ def build_risk_prompt(
         unacknowledged_decisions=s["unacknowledged_decisions"],
         unlinked_count=stats["unlinked_count"],
         no_assignee_count=stats["no_assignee_count"],
-        milestone_table=_fmt_milestone_table(stats["milestones"], today),
-        overdue_list=_fmt_overdue_list(stats["overdue_items"], limit=15),
-        assignee_table=_fmt_assignee_table(stats["assignee_workload"]),
-        decisions_list=_fmt_decisions_list(stats["unacknowledged_decisions"]),
-        weekly_trends=_fmt_weekly_trends(stats["weekly_trends"]),
+        milestone_table=format_milestone_table(stats["milestones"], today),
+        overdue_list=format_overdue_list(stats["overdue_items"], limit=15),
+        assignee_table=format_assignee_table(stats["assignee_workload"]),
+        decisions_list=format_decisions_list(stats["unacknowledged_decisions"]),
+        weekly_trends=format_trends_table(stats["weekly_trends"]),
         messages=messages or "（データなし）",
         minutes=minutes or "（データなし）",
     )
