@@ -12,19 +12,20 @@ pm_web.py — pm.db ローカル編集 Web UI（NiceGUI + AG Grid）
     PM_WEB_NO_ENCRYPT  1 を設定すると平文モード
 """
 
-import glob as _glob
+# NOTE: pm_web.py は非推奨です。現用の Web UI は pm_api.py（FastAPI）です。
 import json
 import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-import pandas as pd
 from fastapi import Request
 from nicegui import ui
 
 sys.path.insert(0, str(Path(__file__).parent))
-from db_utils import open_pm_db
+from web_utils import (
+    scan_pm_dbs, get_conn as _get_conn_raw, load_milestones, load_action_items,
+    load_decisions, load_minutes_content, do_save_action_items, do_save_decisions,
+)
 
 # --------------------------------------------------------------------------- #
 # 設定（環境変数で上書き可）
@@ -34,303 +35,9 @@ PORT       = int(os.environ.get("PM_WEB_PORT", 8501))
 DB_PATH    = Path(os.environ.get("PM_WEB_DB", _REPO / "data" / "pm.db"))
 NO_ENCRYPT = os.environ.get("PM_WEB_NO_ENCRYPT", "").lower() in ("1", "true", "yes")
 
-# --------------------------------------------------------------------------- #
-# DB ヘルパー
-# --------------------------------------------------------------------------- #
-
-def _scan_pm_dbs() -> list[str]:
-    """data/pm*.db にマッチするファイルをフルパスのリストで返す"""
-    pattern = str(_REPO / "data" / "pm*.db")
-    return sorted(_glob.glob(pattern))
-
-
-def get_conn(db_path: Path | None = None, no_encrypt: bool = NO_ENCRYPT):
-    path = db_path or DB_PATH
-    conn = open_pm_db(path, no_encrypt=no_encrypt)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            table_name TEXT,
-            record_id  TEXT,
-            field      TEXT,
-            old_value  TEXT,
-            new_value  TEXT,
-            changed_at TEXT,
-            source     TEXT
-        )
-    """)
-    conn.commit()
-    return conn
-
-
-def load_milestones(conn):
-    try:
-        rows = conn.execute(
-            "SELECT milestone_id, name FROM milestones WHERE status='active' ORDER BY milestone_id"
-        ).fetchall()
-        return {r[0]: f"{r[0]}: {r[1]}" for r in rows}
-    except Exception:
-        return {}
-
-
-def load_action_items(conn, status_f, ms_f, since, del_f="非削除"):
-    q = ("SELECT a.id, a.content, a.assignee, a.due_date, a.milestone_id, a.status, a.note,"
-         " a.extracted_at, a.source, COALESCE(a.deleted,0) AS deleted,"
-         " COALESCE(a.source_ref,'') AS source_ref,"
-         " COALESCE(a.meeting_id,'') AS meeting_id,"
-         " COALESCE(m.kind,'') AS meeting_kind"
-         " FROM action_items a"
-         " LEFT JOIN meetings m ON a.meeting_id = m.meeting_id"
-         " WHERE 1=1")
-    p = []
-    if del_f == "非削除":
-        q += " AND COALESCE(a.deleted,0)=0"
-    elif del_f == "削除のみ":
-        q += " AND a.deleted=1"
-    if status_f != "すべて":
-        q += " AND a.status=?"; p.append(status_f)
-    if ms_f and ms_f != "すべて":
-        q += " AND a.milestone_id=?"; p.append(ms_f)
-    if since:
-        q += " AND a.extracted_at >= ?"; p.append(since)
-    q += " ORDER BY a.id DESC"
-    df = pd.DataFrame(conn.execute(q, p).fetchall(),
-                      columns=["id", "content", "assignee", "due_date",
-                               "milestone_id", "status", "note",
-                               "extracted_at", "source", "deleted",
-                               "source_ref", "meeting_id", "meeting_kind"])
-    df = df.fillna("")
-    df["extracted_at"] = df["extracted_at"].str[:10]  # YYYY-MM-DD のみ
-    df["done"] = df["status"] == "closed"  # チェックボックス用
-    df["deleted"] = df["deleted"].apply(lambda v: bool(int(v)) if v != "" else False)
-    return df
-
-
-def load_decisions(conn, ack_f, since, del_f="非削除"):
-    q = ("SELECT id, content, decided_at, acknowledged_at, extracted_at, source,"
-         " COALESCE(deleted,0) AS deleted,"
-         " COALESCE(source_ref,'') AS source_ref"
-         " FROM decisions WHERE 1=1")
-    p = []
-    if del_f == "非削除":
-        q += " AND COALESCE(deleted,0)=0"
-    elif del_f == "削除のみ":
-        q += " AND deleted=1"
-    if ack_f == "未確認のみ":
-        q += " AND (acknowledged_at IS NULL OR acknowledged_at='')"
-    elif ack_f == "確認済みのみ":
-        q += " AND acknowledged_at IS NOT NULL AND acknowledged_at!=''"
-    if since:
-        q += " AND extracted_at >= ?"; p.append(since)
-    q += " ORDER BY id DESC"
-    df = pd.DataFrame(conn.execute(q, p).fetchall(),
-                      columns=["id", "content", "decided_at", "acknowledged_at",
-                               "extracted_at", "source", "deleted", "source_ref"])
-    df = df.fillna("")
-    df["extracted_at"] = df["extracted_at"].str[:10]  # YYYY-MM-DD のみ
-    df["deleted"] = df["deleted"].apply(lambda v: bool(int(v)) if v != "" else False)
-    return df
-
-
-def load_minutes_content(meeting_id: str, kind: str = "") -> str:
-    """meeting_id と kind から議事録DBの内容を Markdown 文字列として返す。
-    kind が空の場合は meeting_id から推定するが、meetings テーブルで解決済みの
-    kind を渡すほうが確実（GMT形式の meeting_id でも動作する）。
-    """
-    if not meeting_id and not kind:
-        return "（meeting_id が設定されていません）"
-    from db_utils import open_db
-
-    # kind が渡されている場合はそれを優先。なければ meeting_id から推定
-    if not kind and meeting_id:
-        underscore_pos = meeting_id.find("_")
-        if underscore_pos >= 4:
-            kind = meeting_id[underscore_pos + 1:]
-
-    # kind が特定できた場合はそのDBを直接検索
-    if kind:
-        db_path = _REPO / "data" / "minutes" / f"{kind}.db"
-        if db_path.exists():
-            try:
-                conn = open_db(str(db_path), encrypt=not NO_ENCRYPT)
-                rows = conn.execute(
-                    "SELECT content FROM minutes_content WHERE meeting_id=? ORDER BY id",
-                    (meeting_id,)
-                ).fetchall()
-                if not rows and meeting_id and len(meeting_id) >= 10:
-                    # held_at でフォールバック検索
-                    held_at = meeting_id[:10]
-                    rows = conn.execute(
-                        "SELECT mc.content FROM minutes_content mc"
-                        " JOIN instances i ON mc.meeting_id=i.meeting_id"
-                        " WHERE i.held_at=? ORDER BY mc.id",
-                        (held_at,)
-                    ).fetchall()
-                conn.close()
-                if rows:
-                    return "\n\n---\n\n".join(r[0] for r in rows)
-            except Exception as e:
-                return f"（読み込みエラー: {e}）"
-
-    # kind が不明またはDBが見つからない場合は全minutes DBを横断検索
-    minutes_dir = _REPO / "data" / "minutes"
-    for db_path in sorted(minutes_dir.glob("*.db")):
-        try:
-            conn = open_db(str(db_path), encrypt=not NO_ENCRYPT)
-            rows = conn.execute(
-                "SELECT content FROM minutes_content WHERE meeting_id=? ORDER BY id",
-                (meeting_id,)
-            ).fetchall()
-            conn.close()
-            if rows:
-                return "\n\n---\n\n".join(r[0] for r in rows)
-        except Exception:
-            continue
-
-    return f"（議事録が見つかりません: {meeting_id}）"
-
-
-def _nv(val):
-    if val is None:
-        return None
-    if isinstance(val, float) and pd.isna(val):
-        return None
-    s = str(val).strip()
-    return s if s else None
-
-
-def _audit(conn, table, record_id, field, old_val, new_val):
-    conn.execute(
-        "INSERT INTO audit_log (table_name,record_id,field,old_value,new_value,changed_at,source)"
-        " VALUES(?,?,?,?,?,?,'web_ui')",
-        (table, str(record_id), field,
-         str(old_val) if old_val is not None else None,
-         str(new_val) if new_val is not None else None,
-         datetime.now(timezone.utc).isoformat()),
-    )
-
-
-def _to_bool(val) -> bool:
-    if val is None:
-        return False
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, (int, float)):
-        return bool(int(val))
-    if isinstance(val, str):
-        return val.lower() in ("true", "1", "yes")
-    return False
-
-
-def do_save_action_items(conn, original_df, edited_rows):
-    """保存処理（オプティミスティック同時実行制御付き）。
-    返り値: (更新件数, 競合リスト)
-    競合リスト要素: {"id": int, "field": str, "yours": val, "db": val}
-    """
-    editable = ["content", "assignee", "due_date", "milestone_id", "note"]
-    count = 0
-    conflicts = []
-    for row in edited_rows:
-        ai_id = int(row["id"])
-        orig_rows = original_df[original_df["id"] == ai_id]
-        if orig_rows.empty:
-            continue
-        orig = orig_rows.iloc[0]
-        # 保存直前にDBの現在値を再読み込みして競合を検出する
-        db_row = conn.execute(
-            "SELECT status, deleted, content, assignee, due_date, milestone_id, note"
-            " FROM action_items WHERE id=?", (ai_id,)
-        ).fetchone()
-        if db_row is None:
-            continue
-        db = dict(db_row)
-        # done (bool) → status ("open"/"closed") に変換
-        done_val = row.get("done")
-        if done_val is not None:
-            new_status = "closed" if _to_bool(done_val) else "open"
-            old_status = "closed" if orig["done"] else "open"
-            if new_status != old_status:
-                if db["status"] != old_status:
-                    conflicts.append({"id": ai_id, "field": "status",
-                                      "yours": new_status, "db": db["status"]})
-                else:
-                    _audit(conn, "action_items", ai_id, "status", old_status, new_status)
-                    conn.execute("UPDATE action_items SET status=? WHERE id=?", (new_status, ai_id))
-                    count += 1
-        # deleted フラグ
-        new_del = 1 if _to_bool(row.get("deleted")) else 0
-        old_del = 1 if orig["deleted"] else 0
-        if new_del != old_del:
-            db_del = 1 if db["deleted"] else 0
-            if db_del != old_del:
-                conflicts.append({"id": ai_id, "field": "deleted",
-                                  "yours": new_del, "db": db_del})
-            else:
-                _audit(conn, "action_items", ai_id, "deleted", old_del, new_del)
-                conn.execute("UPDATE action_items SET deleted=? WHERE id=?", (new_del, ai_id))
-                count += 1
-        for col in editable:
-            new_val = _nv(row.get(col))
-            old_val = _nv(orig[col])
-            if new_val != old_val:
-                db_val = _nv(db.get(col))
-                if db_val != old_val:
-                    conflicts.append({"id": ai_id, "field": col,
-                                      "yours": new_val, "db": db_val})
-                else:
-                    _audit(conn, "action_items", ai_id, col, old_val, new_val)
-                    conn.execute(f"UPDATE action_items SET {col}=? WHERE id=?", (new_val, ai_id))
-                    count += 1
-    conn.commit()
-    return count, conflicts
-
-
-def do_save_decisions(conn, original_df, edited_rows):
-    """保存処理（オプティミスティック同時実行制御付き）。
-    返り値: (更新件数, 競合リスト)
-    """
-    count = 0
-    conflicts = []
-    for row in edited_rows:
-        dec_id = int(row["id"])
-        orig_rows = original_df[original_df["id"] == dec_id]
-        if orig_rows.empty:
-            continue
-        orig = orig_rows.iloc[0]
-        # 保存直前にDBの現在値を再読み込みして競合を検出する
-        db_row = conn.execute(
-            "SELECT deleted, content, decided_at, acknowledged_at"
-            " FROM decisions WHERE id=?", (dec_id,)
-        ).fetchone()
-        if db_row is None:
-            continue
-        db = dict(db_row)
-        # deleted フラグ
-        new_del = 1 if _to_bool(row.get("deleted")) else 0
-        old_del = 1 if orig["deleted"] else 0
-        if new_del != old_del:
-            db_del = 1 if db["deleted"] else 0
-            if db_del != old_del:
-                conflicts.append({"id": dec_id, "field": "deleted",
-                                  "yours": new_del, "db": db_del})
-            else:
-                _audit(conn, "decisions", dec_id, "deleted", old_del, new_del)
-                conn.execute("UPDATE decisions SET deleted=? WHERE id=?", (new_del, dec_id))
-                count += 1
-        for col in ("content", "decided_at", "acknowledged_at"):
-            new_val = _nv(row.get(col))
-            old_val = _nv(orig[col])
-            if new_val != old_val:
-                db_val = _nv(db.get(col))
-                if db_val != old_val:
-                    conflicts.append({"id": dec_id, "field": col,
-                                      "yours": new_val, "db": db_val})
-                else:
-                    _audit(conn, "decisions", dec_id, col, old_val, new_val)
-                    conn.execute(f"UPDATE decisions SET {col}=? WHERE id=?", (new_val, dec_id))
-                    count += 1
-    conn.commit()
-    return count, conflicts
+def get_conn(db_path: Path | None = None):
+    """モジュールレベルの DB_PATH/NO_ENCRYPT を使って接続を返す薄いラッパー。"""
+    return _get_conn_raw(db_path or DB_PATH, no_encrypt=NO_ENCRYPT)
 
 
 # --------------------------------------------------------------------------- #
@@ -354,13 +61,13 @@ def page():
     ui.add_head_html("""
     <style>
       body, .nicegui-content { height: 100vh; overflow: hidden; }
-      .q-tab-panels { flex: 1; min-height: 0; overflow: hidden; }
-      .q-tab-panel  { height: 100%; }
+      .q-tab-panels { flex: 1; min-height: 0; }
+      .q-tab-panels > .q-panel { height: 100%; overflow-y: auto; }
     </style>
     """)
 
     # --- DB切り替え ---
-    db_candidates = _scan_pm_dbs()
+    db_candidates = scan_pm_dbs()
     # 現在のDB_PATHが候補に含まれなければ先頭に追加
     if str(DB_PATH) not in db_candidates:
         db_candidates.insert(0, str(DB_PATH))
@@ -403,7 +110,7 @@ def page():
         tab_ai  = ui.tab("アクションアイテム")
         tab_dec = ui.tab("決定事項")
 
-    with ui.tab_panels(tabs, value=tab_ai).classes("w-full flex-1").style("min-height: 0; overflow: hidden"):
+    with ui.tab_panels(tabs, value=tab_ai).classes("w-full flex-1").style("min-height: 0"):
 
         # ================================================================
         # アクションアイテム
@@ -540,9 +247,10 @@ def page():
                     {"field": "meeting_kind", "headerName": "meeting_kind", "hide": True},
                 ],
                 "rowData": ai_df["current"].to_dict("records"),
+                "domLayout": "autoHeight",
                 "stopEditingWhenCellsLoseFocus": True,
                 "singleClickEdit": True,
-            }).classes("w-full flex-1").style("min-height: 0")
+            }).classes("w-full")
 
             async def open_minutes_for(meeting_id: str, kind: str = ""):
                 import urllib.parse
@@ -698,9 +406,10 @@ def page():
                     {"field": "source_ref", "headerName": "source_ref", "hide": True},
                 ],
                 "rowData": dec_df["current"].to_dict("records"),
+                "domLayout": "autoHeight",
                 "stopEditingWhenCellsLoseFocus": True,
                 "singleClickEdit": True,
-            }).classes("w-full flex-1").style("min-height: 0")
+            }).classes("w-full")
 
             async def on_dec_cell_clicked(e):
                 args = e.args if isinstance(e.args, dict) else {}
@@ -779,7 +488,7 @@ def minutes_page(request: Request):
             ui.label("（meeting_id が指定されていません）").classes("text-red-500")
             return
 
-        md = load_minutes_content(meeting_id, kind)
+        md = load_minutes_content(meeting_id, no_encrypt=NO_ENCRYPT, kind=kind)
         ui.markdown(md).classes("w-full")
 
 
