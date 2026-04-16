@@ -23,7 +23,8 @@ from nicegui import ui
 
 sys.path.insert(0, str(Path(__file__).parent))
 from web_utils import (
-    scan_pm_dbs, get_conn as _get_conn_raw, load_milestones, load_action_items,
+    scan_pm_dbs, get_conn as _get_conn_raw, audit as _audit,
+    load_milestones, load_action_items,
     load_decisions, load_minutes_content, do_save_action_items, do_save_decisions,
 )
 
