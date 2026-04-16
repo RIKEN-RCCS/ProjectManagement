@@ -20,6 +20,7 @@
   <nav class="flex border-b border-gray-300 bg-white flex-none">
     <button class="tab-btn active px-6 py-2 font-medium text-sm" data-tab="ai">アクションアイテム</button>
     <button class="tab-btn px-6 py-2 font-medium text-sm text-gray-500" data-tab="dec">決定事項</button>
+    <button class="tab-btn px-6 py-2 font-medium text-sm text-gray-500" data-tab="files">ファイル一覧</button>
   </nav>
 
   <!-- ================================================================ -->
@@ -101,6 +102,31 @@
 
     <!-- Grid -->
     <div id="grid-dec" class="ag-theme-quartz flex-1 min-h-0"></div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- Files Panel                                                      -->
+  <!-- ================================================================ -->
+  <div id="panel-files" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
+    <!-- Filters -->
+    <div class="flex items-end gap-3 flex-none flex-wrap">
+      <label class="flex flex-col text-xs text-gray-600">
+        チャンネル
+        <select id="f-files-ch" class="border rounded px-2 py-1 text-sm w-52">
+          <option value="">すべて</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-600">
+        日付（以降）
+        <input id="f-files-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
+      </label>
+      <button onclick="loadFiles()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
+      <button onclick="loadFiles()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">再読み込み</button>
+      <span id="files-count" class="text-xs text-gray-500 self-end pb-1"></span>
+    </div>
+
+    <!-- AG Grid -->
+    <div id="grid-files" class="ag-theme-quartz flex-1 min-h-0"></div>
   </div>
 
   <!-- ================================================================ -->

@@ -1,9 +1,5 @@
 # Slack data / PM DB (contains confidential messages)
-data/*.db
-data/minutes/
-data/processing/
-data/*.log
-data/*.md
+data/
 logs/
 
 # Meeting transcripts and audio (機密性2)

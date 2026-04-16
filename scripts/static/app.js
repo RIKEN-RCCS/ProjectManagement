@@ -4,6 +4,8 @@
 
 let aiGrid = null;
 let decGrid = null;
+let filesGrid = null;
+let _filesLoaded = false;
 let milestones = {};
 let bulkState = { ai: { done: false, deleted: false } };
 
@@ -44,6 +46,15 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
     document.getElementById('panel-' + btn.dataset.tab).classList.remove('hidden');
+    // ファイルタブを開いた時: グリッドサイズ再計算
+    if (btn.dataset.tab === 'files') {
+      if (!_filesLoaded) {
+        _filesLoaded = true;
+        loadFiles();
+      } else if (filesGrid) {
+        setTimeout(() => filesGrid.sizeColumnsToFit(), 0);
+      }
+    }
   });
 });
 
@@ -350,6 +361,85 @@ document.getElementById('form-dec-new').addEventListener('submit', async (e) => 
 });
 
 // ----------------------------------------------------------------
+// Files (AG Grid)
+// ----------------------------------------------------------------
+const FILES_CHANNEL_NAMES = {
+  'C08M0249GRL': '20_アプリケーション開発エリア',
+  'C08SXA4M7JT': '20_1_リーダ会議メンバ',
+  'C08LSJP4R6K': '21_hpcアプリケーションwg',
+  'C093DQFSCRH': '21_1_hpcアプリケーションwg_ブロック1',
+  'C093LP1J15G': '21_2_hpcアプリケーションwg_ブロック2',
+  'C08MJ0NF5UZ': '22_ベンチマークwg',
+  'C096ER1A0LU': '23_benchmark_framework',
+  'C0A6AC59AHM': '24_ai-hpc-application',
+  'C0A9KG036CS': 'personal',
+  'C08PE3K9N72': 'pmo',
+};
+
+function initFilesChannelFilter() {
+  const sel = document.getElementById('f-files-ch');
+  sel.innerHTML = '<option value="">すべて</option>';
+  Object.entries(FILES_CHANNEL_NAMES).forEach(([id, name]) => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+}
+
+const filesColumnDefs = [
+  { field: 'date',         headerName: '日付',     width: 110, editable: false },
+  { field: 'label',        headerName: 'ファイル名', width: 280, editable: false,
+    cellRenderer: (params) => {
+      const url = (params.data || {}).url || '';
+      const label = params.value || '';
+      const s = 'cursor:pointer;color:#1565c0;text-decoration:underline';
+      const sf = 'cursor:pointer;color:#9ca3af;font-style:italic';
+      if (label) return `<a href="${url}" target="_blank" rel="noopener noreferrer" style="${s}">${label}</a>`;
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer" style="${sf}">(リンク)</a>`;
+    }},
+  { field: 'context',      headerName: '投稿内容',  width: 320, editable: false },
+  { field: 'channel_name', headerName: 'チャンネル', width: 200, editable: false },
+  { field: 'permalink',    headerName: '投稿',      width: 70,  editable: false,
+    cellRenderer: (params) => {
+      const permalink = params.value || '';
+      if (!permalink) return '';
+      return `<a href="${permalink}" target="_blank" rel="noopener noreferrer" style="cursor:pointer;color:#1565c0;text-decoration:underline">Slack</a>`;
+    }},
+  { field: 'url', hide: true },
+];
+
+function initFilesGrid() {
+  const el = document.getElementById('grid-files');
+  filesGrid = agGrid.createGrid(el, {
+    columnDefs: filesColumnDefs,
+    defaultColDef: {
+      editable: false,
+      resizable: true,
+      sortable: true,
+      filter: true,
+      wrapText: true,
+      autoHeight: true,
+    },
+    rowData: [],
+  });
+}
+
+async function loadFiles() {
+  const ch = document.getElementById('f-files-ch').value;
+  const since = document.getElementById('f-files-since').value;
+  const qs = new URLSearchParams({ channel: ch, since });
+  const data = await api('GET', '/files?' + qs);
+  const rows = data.files || [];
+  filesGrid.setGridOption('rowData', rows);
+  document.getElementById('files-count').textContent = `${rows.length} 件`;
+  // パネルが表示されている場合のみ列幅を調整
+  if (!document.getElementById('panel-files').classList.contains('hidden')) {
+    setTimeout(() => filesGrid.sizeColumnsToFit(), 0);
+  }
+}
+
+// ----------------------------------------------------------------
 // Initialization
 // ----------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
@@ -357,6 +447,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadMilestones();
   initAiGrid();
   initDecGrid();
+  initFilesGrid();
+  initFilesChannelFilter();
   await loadActionItems();
   await loadDecisions();
+  // ファイルグリッドも初期データ取得（domLayout:autoHeight はデータがないと高さ0になるため）
+  _filesLoaded = true;
+  loadFiles();
 });
