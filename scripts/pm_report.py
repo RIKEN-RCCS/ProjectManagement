@@ -62,7 +62,7 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
     if since:
         query += " AND COALESCE(m.held_at, a.extracted_at) >= ?"
         params.append(since)
-    query += " ORDER BY a.due_date ASC NULLS LAST, a.extracted_at ASC"
+    query += " ORDER BY a.extracted_at DESC NULLS LAST, a.due_date ASC NULLS LAST"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 

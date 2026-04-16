@@ -2,7 +2,7 @@
 """
 pm_extractor.py
 
-{channel_id}.db のスレッド要約を読み込み、LLMで決定事項・アクションアイテムを抽出して
+{channel_id}.db の生メッセージを読み込み、LLMで決定事項・アクションアイテムを抽出して
 pm.db に保存する。
 
 Usage:
@@ -16,7 +16,7 @@ Options:
     -c CHANNEL_ID       対象チャンネルID（デフォルト: C0A9KG036CS）
     --db-slack PATH     {channel_id}.db のパス（省略時は data/{channel_id}.db）
     --db-pm PATH        pm.db のパス（デフォルト: data/pm.db）
-    --since YYYY-MM-DD  この日付以降の要約のみ対象
+    --since YYYY-MM-DD  この日付以降のスレッドのみ対象
     --force-reextract   既に抽出済みのスレッドも再抽出
     --dry-run           DB保存なし・結果を標準出力のみ
     --output PATH       標準出力の内容をファイルにも保存
@@ -148,27 +148,47 @@ def load_context_from_claude_md() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Slack DB からスレッド要約を取得
+# Slack DB からスレッド（生メッセージ）を取得
 # --------------------------------------------------------------------------- #
-def fetch_summaries(
+def fetch_threads(
     slack_conn: sqlite3.Connection,
     channel_id: str,
     since: str | None,
 ) -> list[dict]:
+    """Slack DB からスレッド（親+返信テキスト結合）一覧を返す"""
     query = """
-        SELECT s.thread_ts, s.summary, s.summarized_at,
-               m.timestamp, m.permalink, m.user_name
-        FROM summaries s
-        JOIN messages m ON s.thread_ts = m.thread_ts AND s.channel_id = m.channel_id
-        WHERE s.channel_id = ?
+        SELECT m.thread_ts, m.timestamp, m.permalink, m.user_name, m.text
+        FROM messages m
+        WHERE m.channel_id = ?
     """
     params: list = [channel_id]
     if since:
         query += " AND m.timestamp >= ?"
         params.append(since)
     query += " ORDER BY m.timestamp ASC"
-    rows = slack_conn.execute(query, params).fetchall()
-    return [dict(r) for r in rows]
+    parents = slack_conn.execute(query, params).fetchall()
+
+    results = []
+    for p in parents:
+        thread_ts = p["thread_ts"]
+        # 親メッセージ
+        lines = [f"[{(p['timestamp'] or '')[:16]}] {p['user_name'] or '不明'}: {p['text'] or ''}"]
+        # 返信
+        replies = slack_conn.execute(
+            "SELECT timestamp, user_name, text FROM replies"
+            " WHERE thread_ts=? AND channel_id=? ORDER BY msg_ts ASC",
+            (thread_ts, channel_id),
+        ).fetchall()
+        for r in replies:
+            lines.append(f"  [{(r['timestamp'] or '')[:16]}] {r['user_name'] or '不明'}: {r['text'] or ''}")
+        results.append({
+            "thread_ts": thread_ts,
+            "thread_text": "\n".join(lines),
+            "timestamp": p["timestamp"],
+            "permalink": p["permalink"],
+            "user_name": p["user_name"],
+        })
+    return results
 
 
 def is_already_extracted(pm_conn: sqlite3.Connection, thread_ts: str, channel_id: str) -> bool:
@@ -191,11 +211,11 @@ def mark_extracted(pm_conn: sqlite3.Connection, thread_ts: str, channel_id: str)
 # --------------------------------------------------------------------------- #
 EXTRACT_PROMPT = """
 あなたは富岳NEXTプロジェクトのプロジェクトマネージャーです。
-以下のSlackスレッド要約を読み、決定事項とアクションアイテムを抽出してください。
+以下のSlackスレッドのメッセージを読み、決定事項とアクションアイテムを抽出してください。
 
 ## 指示
 
-1. **明示されたものだけ抽出**: 要約に明示されていない内容を推測・補完しないこと
+1. **明示されたものだけ抽出**: メッセージに明示されていない内容を推測・補完しないこと
 2. **出力形式**: 必ず以下のJSON形式のみ出力すること（前後の説明テキスト不要）
 3. 決定事項・アクションアイテムがない場合は空配列 `[]` を返すこと
 4. **マイルストーン紐づけ**: 各アクションアイテムについて、下記「マイルストーン一覧」の
@@ -209,11 +229,11 @@ EXTRACT_PROMPT = """
 
 {context}
 
-## Slackスレッド要約
+## Slackスレッド
 
 投稿日時: {timestamp}
 投稿者: {user_name}
-{summary}
+{thread_text}
 
 ## 出力JSON形式
 
@@ -248,12 +268,12 @@ def extract_json(text: str) -> dict:
     raise ValueError(f"JSON not found:\n{text[:300]}")
 
 
-def extract_from_summary(row: dict, context: str, milestones: list[dict]) -> dict:
+def extract_from_thread(row: dict, context: str, milestones: list[dict]) -> dict:
     prompt = EXTRACT_PROMPT.format(
         context=context,
         timestamp=row.get("timestamp", "不明"),
         user_name=row.get("user_name", "不明"),
-        summary=row["summary"],
+        thread_text=row["thread_text"],
         milestones=format_milestones_for_prompt(milestones),
     )
     raw = call_claude(prompt)
@@ -355,11 +375,11 @@ def cmd_list_extractions(
 # メイン
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Slack要約 → pm.db への決定事項・アクションアイテム抽出")
+    parser = argparse.ArgumentParser(description="Slack生メッセージ → pm.db への決定事項・アクションアイテム抽出")
     parser.add_argument("-c", "--channel", default=DEFAULT_CHANNEL, help="対象チャンネルID")
     parser.add_argument("--db-slack", default=None, help="{channel_id}.db のパス")
     parser.add_argument("--db-pm", default=None, help="pm.db のパス")
-    add_since_arg(parser, "（要約のみ対象）")
+    add_since_arg(parser, "（スレッドのみ対象）")
     parser.add_argument("--force-reextract", action="store_true", help="抽出済みスレッドも再処理")
     add_dry_run_arg(parser)
     add_output_arg(parser)
@@ -395,18 +415,18 @@ def main() -> None:
     milestones = fetch_milestones(pm_conn)
     log(f"[INFO] マイルストーン: {len(milestones)} 件")
 
-    summaries = fetch_summaries(slack_conn, channel_id, args.since)
-    log(f"[INFO] 対象スレッド: {len(summaries)} 件")
+    threads = fetch_threads(slack_conn, channel_id, args.since)
+    log(f"[INFO] 対象スレッド: {len(threads)} 件")
 
     total_d = total_a = skipped = 0
 
-    for i, row in enumerate(summaries, 1):
+    for i, row in enumerate(threads, 1):
         ts = row["thread_ts"]
         if not args.force_reextract and is_already_extracted(pm_conn, ts, channel_id):
             skipped += 1
             continue
 
-        log(f"\n[{i}/{len(summaries)}] {row.get('user_name')} ({row.get('timestamp', '')[:16]})")
+        log(f"\n[{i}/{len(threads)}] {row.get('user_name')} ({row.get('timestamp', '')[:16]})")
 
         if args.dry_run:
             log("  [INFO] --dry-run のため LLM呼び出し・DB保存をスキップしました")
@@ -414,7 +434,7 @@ def main() -> None:
             continue
 
         try:
-            extracted = extract_from_summary(row, context, milestones)
+            extracted = extract_from_thread(row, context, milestones)
         except Exception as e:
             log(f"  [WARN] 抽出失敗: {e}")
             continue
