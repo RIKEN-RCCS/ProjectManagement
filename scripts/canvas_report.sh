@@ -24,7 +24,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON3="${HOME}/.venv_x86_64/bin/python3"
+PYTHON3="${HOME}/.venv_aarch64/bin/python3"
 
 # --------------------------------------------------------------------------- #
 # 引数パース

@@ -29,23 +29,13 @@
 | `permalink` | TEXT | Slack上の投稿URL |
 | `fetched_at` | TEXT | DBへの保存日時（ISO8601） |
 
-#### summaries（スレッド要約）
-
-| カラム | 型 | 説明 |
-|---|---|---|
-| `thread_ts` | TEXT | スレッドタイムスタンプ（PK） |
-| `channel_id` | TEXT | SlackチャンネルID（PK） |
-| `summary` | TEXT | Claude CLIが生成した要約テキスト |
-| `summarized_at` | TEXT | 要約生成日時（ISO8601） |
-| `last_reply_ts` | TEXT | 要約時点での最新返信の `msg_ts`（返信なしは NULL） |
-
 #### 差分判定ロジック
 
 ```
-Slack から取得した最新返信 msg_ts  vs  summaries.last_reply_ts
-  新規（thread_ts が DB に存在しない） → 取得・要約
-  更新（最新 msg_ts > last_reply_ts）  → 返信再取得・再要約
-  変化なし                             → スキップ（API・LLM呼び出しなし）
+Slack API の latest_reply  vs  MAX(replies.msg_ts)
+  新規（thread_ts が messages に存在しない） → 取得
+  更新（latest_reply > MAX(msg_ts)）         → 返信再取得
+  変化なし                                   → スキップ（API呼び出しなし）
 ```
 
 ### pm.db（PM統合データ）
