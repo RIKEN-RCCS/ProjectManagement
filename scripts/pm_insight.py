@@ -25,14 +25,18 @@ import argparse
 import json
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import (
-    open_pm_db, fetch_milestone_progress, fetch_assignee_workload, normalize_assignee,
+    open_pm_db, fetch_milestone_progress, fetch_assignee_workload,
     fetch_overdue_items, fetch_unlinked_items_count, fetch_no_assignee_count,
     fetch_weekly_trends, fetch_unacknowledged_decisions, fetch_summary_stats,
+)
+from format_utils import (
+    format_milestone_table, format_overdue_list, format_assignee_table,
+    format_weekly_trends as format_trends_table, format_decisions_list,
 )
 from cli_utils import (
     add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
@@ -67,85 +71,6 @@ def load_context_from_claude_md() -> str:
         if capture:
             sections.append(line)
     return "\n".join(sections) if sections else text[:3000]
-
-
-def _format_milestone_table(milestones: list[dict], today: str) -> str:
-    if not milestones:
-        return "（マイルストーン未登録）"
-    lines = [
-        "| ID | 名前 | 期限 | 残日数 | open | closed | 状況 |",
-        "|----|------|------|--------|------|--------|------|",
-    ]
-    for m in milestones:
-        due = m.get("due_date") or "未定"
-        if m.get("due_date"):
-            delta = (date.fromisoformat(m["due_date"]) - date.fromisoformat(today)).days
-            remaining = f"{delta}日" if delta >= 0 else f"{abs(delta)}日超過"
-        else:
-            remaining = "-"
-        open_c   = m["open_count"]
-        closed_c = m["closed_count"]
-        total    = open_c + closed_c
-        if m.get("status") == "achieved":
-            st = "達成済"
-        elif m.get("due_date") and m["due_date"] < today:
-            st = "遅延"
-        elif total == 0:
-            st = "未着手"
-        else:
-            pct = closed_c / total * 100 if total else 0
-            st = f"進行中({pct:.0f}%)"
-        lines.append(f"| {m['milestone_id']} | {m['name']} | {due} | {remaining} | {open_c} | {closed_c} | {st} |")
-    return "\n".join(lines)
-
-
-def _format_overdue_list(items: list[dict]) -> str:
-    if not items:
-        return "（なし）"
-    lines = []
-    for it in items[:15]:
-        assignee = normalize_assignee(it.get("assignee")) or "未定"
-        ms = it.get("milestone_id") or "-"
-        lines.append(f"- [ID:{it['id']}][期限:{it['due_date']}][担当:{assignee}][MS:{ms}] {it['content'][:80]}")
-    if len(items) > 15:
-        lines.append(f"（他 {len(items) - 15} 件）")
-    return "\n".join(lines)
-
-
-def _format_assignee_table(workload: list[dict]) -> str:
-    if not workload:
-        return "（データなし）"
-    lines = [
-        "| 担当者 | open件数 | 期限超過 | 期限未設定 |",
-        "|--------|----------|----------|------------|",
-    ]
-    for w in workload:
-        overdue_str = str(w["overdue"]) if w["overdue"] == 0 else f"{w['overdue']}件(超過)"
-        lines.append(f"| {w['assignee']} | {w['total_open']} | {overdue_str} | {w['no_due_date']} |")
-    return "\n".join(lines)
-
-
-def _format_weekly_trends(trends: list[dict]) -> str:
-    if not trends:
-        return "（データなし）"
-    lines = [
-        "| 週 | 作成件数 | 完了件数（近似） |",
-        "|----|----------|-----------------|",
-    ]
-    for t in trends:
-        lines.append(f"| {t['week_start']}〜{t['week_end']} | {t['created']} | {t['closed']} |")
-    return "\n".join(lines)
-
-
-def _format_decisions_list(decisions: list[dict]) -> str:
-    if not decisions:
-        return "（なし）"
-    lines = []
-    for d in decisions[:10]:
-        lines.append(f"- [D:{d['id']}][{d.get('decided_at') or '日付不明'}] {d['content'][:100]}")
-    if len(decisions) > 10:
-        lines.append(f"（他 {len(decisions) - 10} 件）")
-    return "\n".join(lines)
 
 
 INSIGHT_PROMPT = """\
@@ -241,11 +166,11 @@ def build_analysis_prompt(
         unacknowledged_decisions=stats["unacknowledged_decisions"],
         unlinked_count=data["unlinked_count"],
         no_assignee_count=data["no_assignee_count"],
-        milestone_table=_format_milestone_table(data["milestones"], today),
-        overdue_list=_format_overdue_list(data["overdue_items"]),
-        assignee_table=_format_assignee_table(data["assignee_workload"]),
-        weekly_trends=_format_weekly_trends(data["weekly_trends"]),
-        decisions_list=_format_decisions_list(data["unacknowledged_decisions"]),
+        milestone_table=format_milestone_table(data["milestones"], today),
+        overdue_list=format_overdue_list(data["overdue_items"]),
+        assignee_table=format_assignee_table(data["assignee_workload"]),
+        weekly_trends=format_trends_table(data["weekly_trends"]),
+        decisions_list=format_decisions_list(data["unacknowledged_decisions"]),
     )
 
 
