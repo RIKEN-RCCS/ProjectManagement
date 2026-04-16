@@ -32,6 +32,12 @@ if [[ -f "$HOME/.secrets/slack_tokens.sh" ]]; then
     source "$HOME/.secrets/slack_tokens.sh"
 fi
 
+# RiVault トークンの読み込み（Argus コマンド用）
+if [[ -f "$HOME/.secrets/rivault_tokens.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.secrets/rivault_tokens.sh"
+fi
+
 # ローカルLLM設定（デフォルト値、.secrets/slack_tokens.sh での上書き可）
 export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"

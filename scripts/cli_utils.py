@@ -279,6 +279,114 @@ def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int =
     )
 
 
+def call_argus_llm(
+    prompt: str,
+    *,
+    timeout: int = 300,
+    max_tokens: int = 4096,
+    system: str = "",
+) -> str:
+    """
+    Argus 用 LLM 呼び出し。gemma4（localhost）優先、未起動なら RiVault にフォールバック。
+
+    優先順位:
+        1. OPENAI_API_BASE（gemma4 等のローカル vLLM）— 128K 対応済みなら十分
+        2. RIVAULT_URL（RiVault GLM-4.7-Flash）— ローカルが使えない場合のフォールバック
+    """
+    local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+    model = os.environ.get("OPENAI_MODEL", "google/gemma-4-26B-A4B-it")
+
+    # ローカル vLLM（gemma4）が起動しているか確認
+    import requests as _req
+    try:
+        _req.get(local_base.rstrip("/v1").rstrip("/") + "/health", timeout=3)
+        local_ok = True
+    except Exception:
+        local_ok = False
+
+    if local_ok:
+        return call_local_llm(
+            prompt,
+            model=model,
+            base_url=local_base,
+            api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+            timeout=timeout,
+            max_tokens=max_tokens,
+            system=system,
+            no_stream=True,
+        )
+    # フォールバック: RiVault
+    print("[INFO] ローカル LLM に接続できません。RiVault にフォールバックします。", file=sys.stderr)
+    return call_rivault(prompt, timeout=timeout, max_tokens=max_tokens, system=system)
+
+
+def call_rivault(
+    prompt: str,
+    *,
+    model: str = "zai-org/GLM-4.7-Flash",
+    timeout: int = 300,
+    max_tokens: int = 8192,
+    system: str = "",
+) -> str:
+    """
+    RiVault (GLM-4.7-Flash, 200k context) を呼び出す。
+    環境変数:
+        RIVAULT_URL   — エンドポイント URL（末尾に /v1 を含む形式。例: https://rivault.example/v1）
+        RIVAULT_TOKEN — API トークン
+    call_local_llm() が base_url + "/chat/completions" でURLを組み立てるため、
+    RIVAULT_URL に /v1 が含まれていれば正しく /v1/chat/completions になる。
+    """
+    base_url = os.environ.get("RIVAULT_URL")
+    if not base_url:
+        raise RuntimeError(
+            "RIVAULT_URL が未設定。source ~/.secrets/rivault_tokens.sh を実行してください"
+        )
+    api_key = os.environ.get("RIVAULT_TOKEN", "dummy")
+    # GLM-4.7-Flash は thinking モデルのため enable_thinking=False で thinking を無効化する。
+    # 非ストリーミングはゲートウェイタイムアウト(504)が発生するためストリーミングを使用する。
+    import requests as _requests
+    import json as _json
+    messages: list = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    url = base_url.rstrip("/") + "/chat/completions"
+    resp = _requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+    resp.raise_for_status()
+    parts: list[str] = []
+    print("[INFO] Argus 生成中 ", end="", flush=True, file=sys.stderr)
+    for raw_line in resp.iter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:]
+        if data_str.strip() == "[DONE]":
+            break
+        try:
+            chunk = _json.loads(data_str)
+            token_text = (chunk.get("choices", [{}])[0].get("delta", {}).get("content") or "")
+            if token_text:
+                parts.append(token_text)
+                print(".", end="", flush=True, file=sys.stderr)
+        except _json.JSONDecodeError:
+            continue
+    print(" 完了", flush=True, file=sys.stderr)
+    return "".join(parts).strip()
+
+
 # --------------------------------------------------------------------------- #
 # CLAUDE.md ローダー
 # --------------------------------------------------------------------------- #

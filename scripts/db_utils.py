@@ -219,12 +219,32 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
 
 
 def normalize_assignee(name: str | None) -> str | None:
-    """日本語を含む担当者名の姓名間スペース（半角・全角）を除去する"""
+    """担当者名を正規化する。
+    - 未展開の Slack メンション ID (<@UXXX> / @UXXX / 生の UXXX) を除去
+    - 複数担当者（カンマ区切り）の場合は各要素を処理してIDのみのものを除外
+    - 日本語を含む姓名間スペース（半角・全角）を除去
+    """
     if not name:
         return name
-    if _re.search(r"[\u3040-\u9fff]", name):
-        name = name.replace(" ", "").replace("\u3000", "")
-    return name
+    # <@UXXX> 形式を除去
+    name = _re.sub(r"<@([A-Z0-9]+)>", "", name)
+    # 後置の「氏」「さん」を除去
+    name = _re.sub(r"(?<=[A-Za-z0-9\u3040-\u9fff])[氏さん]", "", name)
+    # カンマ・読点区切りで複数担当者に分割して各要素を処理
+    parts = _re.split(r"[,、]\s*", name)
+    cleaned = []
+    for p in parts:
+        p = p.strip()
+        # 生のユーザーID（U で始まる英数字8文字以上）のみの要素は除外
+        if _re.fullmatch(r"U[A-Z0-9]{8,}", p):
+            continue
+        if p:
+            # 日本語名のスペース除去
+            if _re.search(r"[\u3040-\u9fff]", p):
+                p = p.replace(" ", "").replace("\u3000", "")
+            cleaned.append(p)
+    result = ", ".join(cleaned) if cleaned else None
+    return result
 
 
 # --------------------------------------------------------------------------- #
