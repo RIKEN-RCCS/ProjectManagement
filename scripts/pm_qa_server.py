@@ -109,7 +109,6 @@ SYSTEM_PROMPT_TEMPLATE = """\
 - 以下の「取得した関連情報」のみを根拠として、日本語で回答してください
 - 情報が見つからない場合は「記録が見つかりません」とだけ回答してください
 - 推測・創作はしないでください
-- 回答末尾に出典（会議名・日付・Slack URL）を箇条書きで記載してください
 - 回答全体は500字以内を目安にしてください（長い場合は要点を箇条書きに）
 
 【プロジェクト文脈】
@@ -425,22 +424,6 @@ def generate_answer(question: str, chunks: list[dict]) -> str:
 def format_slack_response(question: str, chunks: list[dict], answer: str, index_name: str) -> str:
     header = f"*Q: {question}*\n\n"
     body = answer
-
-    refs = []
-    seen = set()
-    for chunk in chunks:
-        ref = chunk.get("source_ref")
-        label = _format_source_label(chunk)
-        key = ref or label
-        if key not in seen:
-            seen.add(key)
-            if ref:
-                refs.append(f"• <{ref}|{label}>")
-            else:
-                refs.append(f"• {label}")
-
-    if refs and "出典" not in answer:
-        body += "\n\n*出典:*\n" + "\n".join(refs[:5])
 
     # 使用インデックスをフッターに表示（デバッグ・確認用）
     body += f"\n\n_（検索対象: {index_name}）_"
