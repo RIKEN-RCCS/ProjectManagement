@@ -73,6 +73,10 @@ def sanitize_for_canvas(text: str) -> str:
     text = re.sub(r"(?<![<(\[])https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]",
                   lambda m: f"<{m.group(0)}>", text)
 
+    # Markdownリンク構文でない単体の [テキスト] をエスケープ（Canvasが "Unsupported target for link" エラーになるのを防ぐ）
+    # [text](url) や [text][ref] の形はそのまま残し、単体の [...] のみ \[...\] に変換する
+    text = re.sub(r"\[([^\]]*)\](?!\s*[\(\[])", r"\\[\1\\]", text)
+
     # h4以下の見出しはh3に統一（Canvasで未サポート）
     text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
     # インデントされた番号リストをリストに変換
