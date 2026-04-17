@@ -883,7 +883,7 @@ def main() -> None:
         )
         print("[INFO] LLM に問い合わせ中（ブリーフィング）...", file=sys.stderr)
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
-        canvas_content = f"# Argus ブリーフィング ({today})\n\n{result}\n\n---\n_生成: {today} JST_"
+        canvas_content = f"# Argus ブリーフィング ({today})\n\n{result}\n\n_生成: {today} JST_"
         print("\n" + "=" * 60)
         print(canvas_content)
         print("=" * 60)
@@ -913,7 +913,7 @@ def main() -> None:
         )
         print("[INFO] LLM に問い合わせ中（リスク分析）...", file=sys.stderr)
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
-        canvas_content = f"# Argus リスク分析 ({today})\n\n{result}\n\n---\n_生成: {today} JST_"
+        canvas_content = f"# Argus リスク分析 ({today})\n\n{result}\n\n_生成: {today} JST_"
         print("\n" + "=" * 60)
         print(canvas_content)
         print("=" * 60)

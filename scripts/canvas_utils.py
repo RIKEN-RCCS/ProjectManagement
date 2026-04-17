@@ -35,7 +35,14 @@ def get_slack_client() -> WebClient:
 # --------------------------------------------------------------------------- #
 
 def sanitize_for_canvas(text: str) -> str:
-    """Canvas 向け Markdown 変換（特殊文字置換・見出しレベル正規化・URL クリッカブル化）"""
+    """Canvas 向け Markdown 変換。
+
+    Slack Canvas の Markdown パーサーは以下を特殊解釈するため無害化する:
+      - [text] → リンクと解釈 → "Unsupported target for link" エラー
+      - :code: → 絵文字と解釈 → <control> タグに変換される
+      - ---    → <hr> (id属性なし) → Canvas API で削除不可能
+    """
+    # ── Step 1: Unicode 特殊文字を ASCII に正規化 ──
     replacements = {
         # ダッシュ・ハイフン類
         "\u2013": "-", "\u2014": "-", "\u2015": "-",
@@ -69,50 +76,79 @@ def sanitize_for_canvas(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    # 裸のURLを <URL> 形式でラップしてクリッカブルにする（既にラップ済みはスキップ）
-    text = re.sub(r"(?<![<(\[])https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]",
-                  lambda m: f"<{m.group(0)}>", text)
+    # ── Step 2: URL を <URL> でラップ（角括弧除去の前に保護） ──
+    text = re.sub(
+        r"(?<![<(\[])https?://[^\s<>）」\]]+[^\s<>）」\].,;:!?、。]",
+        lambda m: f"<{m.group(0)}>", text,
+    )
 
-    # Markdownリンク構文でない単体の [テキスト] をエスケープ（Canvasが "Unsupported target for link" エラーになるのを防ぐ）
-    # [text](url) や [text][ref] の形はそのまま残し、単体の [...] のみ \[...\] に変換する
-    text = re.sub(r"\[([^\]]*)\](?!\s*[\(\[])", r"\\[\1\\]", text)
+    # ── Step 3: [text](http...) のリンクだけ一時退避、他の [...] は全角括弧に変換 ──
+    _link_placeholders: list[str] = []
 
-    # h4以下の見出しはh3に統一（Canvasで未サポート）
+    def _protect_link(m: re.Match) -> str:
+        _link_placeholders.append(m.group(0))
+        return f"\x00LINK{len(_link_placeholders) - 1}\x00"
+
+    # 正規 Markdown リンク [text](http...) を退避
+    text = re.sub(r"\[([^\]]*)\]\(https?://[^)]*\)", _protect_link, text)
+
+    # 残った全ての [ ] を全角に変換
+    text = text.replace("[", "【").replace("]", "】")
+
+    # 退避したリンクを復元
+    for i, link in enumerate(_link_placeholders):
+        text = text.replace(f"\x00LINK{i}\x00", link)
+
+    # ── Step 4: --- (水平線) を除去 ──
+    text = re.sub(r"^-{3,}\s*$", "", text, flags=re.MULTILINE)
+
+    # ── Step 5: :code: 形式の絵文字コードを無効化 ──
+    # 時刻パターン (13:00, 14:30, 13:00-14:00) を先に退避して保護
+    _time_placeholders: list[str] = []
+
+    def _protect_time(m: re.Match) -> str:
+        _time_placeholders.append(m.group(0))
+        return f"\x00TIME{len(_time_placeholders) - 1}\x00"
+
+    text = re.sub(r"\d{1,2}:\d{2}(?:-\d{1,2}:\d{2})?", _protect_time, text)
+
+    # 残った :code: を全角コロンに変換
+    text = re.sub(r":([A-Za-z0-9][A-Za-z0-9_-]*):", r"：\1：", text)
+
+    # 時刻を復元
+    for i, t in enumerate(_time_placeholders):
+        text = text.replace(f"\x00TIME{i}\x00", t)
+
+    # ── Step 6: 見出し・リスト正規化 ──
     text = re.sub(r"^#{4,6}\s+", "### ", text, flags=re.MULTILINE)
-    # インデントされた番号リストをリストに変換
     text = re.sub(r"^(\s+)\d+\.\s+", r"\1- ", text, flags=re.MULTILINE)
-    # ブロッククオート内のリスト項目からブロッククオートを除去
-    # (Slack Canvas は blockquote 内の List ブロックをサポートしない)
     text = re.sub(r"^> (-|\*|\d+\.)\s+", r"\1 ", text, flags=re.MULTILINE)
 
-    # 上記で対処できなかった非ASCII・非日本語の特殊記号を除去
+    # ── Step 7: 非ASCII・非日本語の特殊記号を除去 ──
     def keep_char(c: str) -> str:
         cp = ord(c)
-        if 0x20 <= cp <= 0x7E:
+        if 0x20 <= cp <= 0x7E:      # ASCII 印字可能
             return c
         if c in ("\n", "\t"):
             return c
-        if 0x3000 <= cp <= 0x9FFF:
+        if 0x3000 <= cp <= 0x9FFF:   # CJK
             return c
-        if 0xF900 <= cp <= 0xFAFF:
+        if 0xF900 <= cp <= 0xFAFF:   # CJK互換漢字
             return c
-        if 0xFF00 <= cp <= 0xFFEF:
+        if 0xFF00 <= cp <= 0xFFEF:   # 半角・全角形
             return c
-        if 0x00C0 <= cp <= 0x024F:
+        if 0x00C0 <= cp <= 0x024F:   # Latin Extended
             return c
         return ""
 
     text = "".join(keep_char(c) for c in text)
 
-    # 連続する空行を1行に圧縮
+    # ── Step 8: 空行圧縮・URL再ラップ ──
     text = re.sub(r"\n{3,}", "\n\n", text)
-
-    # 裸のURLを <URL> 形式に変換してクリッカブルにする
-    url_pattern = r'(?<!\[)(?<!\()(?<!\<)https?://[^\s\)>\]]+(?!\))(?!\>)'
-    def replace_url(match: re.Match) -> str:
-        url = match.group(0).rstrip(".,;:!?、。")
-        return f"<{url}>"
-    text = re.sub(url_pattern, replace_url, text)
+    text = re.sub(
+        r"(?<!\[)(?<!\()(?<!\<)https?://[^\s\)>\]]+(?!\))(?!\>)",
+        lambda m: f"<{m.group(0).rstrip('.,;:!?、。')}>", text,
+    )
 
     return text
 
