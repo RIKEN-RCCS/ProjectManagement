@@ -91,8 +91,9 @@ slack/
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
 │   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
 │   ├── web_utils.py                 # pm_api.py / pm_web.py 共通のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
-│   ├── pm_embed.py                  # QAインデックス構築（qa_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む）
-│   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/argus-ask QA・/argus-* コマンドを統合処理）
+│   ├── pm_document_extract.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
+│   ├── pm_embed.py                  # QAインデックス構築（qa_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db のドキュメントも索引化）
+│   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/argus-ask QA・/argus-* コマンドを統合処理）。ハイブリッド検索対応（Intent分類→構造化SQL+FTS5）
 │   ├── pm_qa_start.sh               # pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
 │   ├── pm_qa_stop.sh                # pm_qa_server.py を停止（PIDファイルでプロセス管理）
 │   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。cli_utils.py の call_local_llm を使用
@@ -107,8 +108,9 @@ slack/
     ├── pm.db                        # PM統合データ
     ├── minutes/                     # 詳細議事録DB（会議名ごとに独立）
     │   └── {kind}.db                # 例: Leader_Meeting.db
+    ├── docs_*.db                     # ドキュメントレジストリDB（BOXリンクのメタデータ、暗号化）
     ├── qa_config.yaml               # QAインデックス定義・チャンネルマッピング
-    ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立）
+    ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。docs_*.db のドキュメントも含む）
     ├── secretary_channels.txt       # Argus が生メッセージを収集するチャンネルID一覧
     ├── secretary_canvas_id.txt      # Argus の Canvas 投稿先ID
     └── slack_summarize_*.md         # 全体要約（デバッグ・履歴用）

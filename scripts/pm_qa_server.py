@@ -35,6 +35,7 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_local_llm, load_claude_md_context
+from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
 from pm_argus import _run_brief, _run_draft, _run_risk, _run_transcribe, _transcribe_jobs, _transcribe_lock
 
 logging.basicConfig(
@@ -107,6 +108,8 @@ SYSTEM_PROMPT_TEMPLATE = """\
 
 【回答ルール】
 - 以下の「取得した関連情報」のみを根拠として、日本語で回答してください
+- 構造化データ検索結果がある場合、そこに含まれるID・担当者・期限・件数は正確に記載してください
+- テキスト検索結果がある場合、出典の日付・会議名を可能な限り含めてください
 - 情報が見つからない場合は「記録が見つかりません」とだけ回答してください
 - 推測・創作はしないでください
 - 回答全体は500字以内を目安にしてください（長い場合は要点を箇条書きに）
@@ -396,11 +399,207 @@ def format_context(chunks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def generate_answer(question: str, chunks: list[dict]) -> str:
+# --- Hybrid検索: Intent分類 + 構造化クエリ ---
+
+_CLASSIFY_PROMPT = """\
+あなたはクエリ分類器です。質問がどの種類のデータを必要としているか判定してください。
+
+カテゴリ:
+- "structured": 担当者・期限・ステータス・マイルストーン・件数など構造化データで回答可能
+- "text": 議事録内容・議論の詳細・経緯などテキスト検索が必要
+- "hybrid": 両方が必要
+
+構造化データの例:
+- 「西澤さんの担当タスクは？」→ structured, query_type=tasks, assignee=西澤
+- 「期限超過しているアクションアイテムは？」→ structured, query_type=overdue
+- 「M1マイルストーンの進捗は？」→ structured, query_type=milestones, milestone=M1
+- 「決定事項の一覧」→ structured, query_type=decisions
+- 「オープンなタスクは何件？」→ structured, query_type=stats
+
+テキスト検索の例:
+- 「GPU性能の評価方針について」→ text
+- 「前回の会議で何が議論された？」→ text
+
+両方の例:
+- 「GPU性能に関する決定事項は？」→ hybrid, query_type=decisions, keyword=GPU
+- 「西澤さんが議論していた内容は？」→ hybrid, query_type=tasks, assignee=西澤
+
+JSONのみ出力:
+{"intent": "structured"|"text"|"hybrid", "entities": {"assignee": null, "milestone": null, "status": null, "keyword": null, "query_type": null}}
+
+質問: """
+
+_PM_DB_PATH = _REPO_ROOT / "data" / "pm.db"
+
+
+def classify_intent(question: str) -> dict:
+    """質問の意図を分類し、エンティティを抽出する。失敗時はFTSフォールバック。"""
+    if not _OPENAI_BASE:
+        return {"intent": "text", "entities": {}}
+
+    prompt = _CLASSIFY_PROMPT + question
+    try:
+        result = call_local_llm(
+            prompt=prompt,
+            model=_OPENAI_MODEL,
+            base_url=_OPENAI_BASE,
+            api_key=_OPENAI_KEY,
+            max_tokens=80,
+            no_stream=True,
+            timeout=15,
+            temperature=0.1,
+        )
+        result = result.strip()
+        if result.startswith("```"):
+            result = re.sub(r"^```\w*\n?", "", result)
+            result = re.sub(r"\n?```$", "", result)
+        import json
+        parsed = json.loads(result)
+        if isinstance(parsed, dict) and "intent" in parsed:
+            parsed.setdefault("entities", {})
+            return parsed
+    except Exception as e:
+        logger.warning(f"Intent分類失敗: {e} → FTSフォールバック")
+
+    return {"intent": "text", "entities": {}}
+
+
+def _query_action_items(conn, *, assignee=None, status=None, milestone=None, keyword=None, limit=20) -> list[dict]:
+    clauses = ["COALESCE(deleted,0)=0"]
+    params: list = []
+    if assignee:
+        clauses.append("assignee LIKE ?")
+        params.append(f"%{assignee}%")
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if milestone:
+        clauses.append("milestone_id = ?")
+        params.append(milestone)
+    if keyword:
+        clauses.append("content LIKE ?")
+        params.append(f"%{keyword}%")
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        f"""SELECT id, content, assignee, due_date, status, milestone_id, source_ref
+            FROM action_items WHERE {where}
+            ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, due_date ASC NULLS LAST
+            LIMIT ?""",
+        params + [limit],
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _query_decisions(conn, *, keyword=None, limit=20) -> list[dict]:
+    clauses = ["COALESCE(deleted,0)=0"]
+    params: list = []
+    if keyword:
+        clauses.append("content LIKE ?")
+        params.append(f"%{keyword}%")
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        f"""SELECT id, content, decided_at, source, source_ref
+            FROM decisions WHERE {where}
+            ORDER BY decided_at DESC LIMIT ?""",
+        params + [limit],
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def run_structured_query(entities: dict) -> str:
+    """entities に基づき pm.db を構造化クエリし、整形済みテキストを返す。"""
+    query_type = entities.get("query_type") or "tasks"
+    assignee = entities.get("assignee")
+    milestone = entities.get("milestone")
+    status = entities.get("status")
+    keyword = entities.get("keyword")
+
+    try:
+        conn = open_pm_db(_PM_DB_PATH, no_encrypt=False)
+    except Exception as e:
+        logger.warning(f"pm.db接続エラー: {e}")
+        return ""
+
+    try:
+        from datetime import date
+        today = date.today().isoformat()
+
+        if query_type == "tasks":
+            rows = _query_action_items(conn, assignee=assignee, status=status, milestone=milestone, keyword=keyword)
+            if not rows:
+                return ""
+            lines = [f"【アクションアイテム検索結果: {len(rows)}件】"]
+            for r in rows:
+                a = r.get("assignee") or "未定"
+                d = r.get("due_date") or "期限なし"
+                ms = r.get("milestone_id") or "-"
+                lines.append(f"- [ID:{r['id']}] {r['content'][:100]} (担当:{a}, 期限:{d}, 状態:{r['status']}, MS:{ms})")
+            return "\n".join(lines)
+
+        elif query_type == "decisions":
+            rows = _query_decisions(conn, keyword=keyword)
+            if not rows:
+                return ""
+            lines = [f"【決定事項検索結果: {len(rows)}件】"]
+            for r in rows:
+                lines.append(f"- [D:{r['id']}][{r.get('decided_at') or '日付不明'}] {r['content'][:120]}")
+            return "\n".join(lines)
+
+        elif query_type == "milestones":
+            milestones = fetch_milestone_progress(conn)
+            if milestone:
+                milestones = [m for m in milestones if m.get("milestone_id") == milestone]
+            if not milestones:
+                return ""
+            lines = ["【マイルストーン進捗】"]
+            for m in milestones:
+                total = m.get("total", 0)
+                closed = m.get("closed", 0)
+                pct = f"{closed}/{total}" if total > 0 else "0/0"
+                lines.append(f"- {m['milestone_id']}: {m['name']} (期限:{m.get('due_date') or '-'}, 完了:{pct})")
+            return "\n".join(lines)
+
+        elif query_type == "overdue":
+            items = fetch_overdue_items(conn, today, since=None)
+            if assignee:
+                items = [i for i in items if assignee in (i.get("assignee") or "")]
+            if not items:
+                return ""
+            lines = [f"【期限超過アイテム: {len(items)}件】"]
+            for r in items[:20]:
+                a = r.get("assignee") or "未定"
+                lines.append(f"- [ID:{r['id']}] {r['content'][:80]} (担当:{a}, 期限:{r['due_date']})")
+            return "\n".join(lines)
+
+        elif query_type == "stats":
+            stats = fetch_summary_stats(conn, since=None, today=today)
+            lines = ["【統計情報】"]
+            lines.append(f"- オープンAI: {stats.get('total_open', 0)}件")
+            lines.append(f"- 完了AI: {stats.get('total_closed', 0)}件")
+            lines.append(f"- 期限超過: {stats.get('overdue_count', 0)}件")
+            return "\n".join(lines)
+
+    except Exception as e:
+        logger.warning(f"構造化クエリエラー: {e}")
+        return ""
+    finally:
+        conn.close()
+
+    return ""
+
+
+def generate_answer(question: str, chunks: list[dict], *, structured_context: str = "") -> str:
     if not _OPENAI_BASE:
         return ":warning: OPENAI_API_BASE が設定されていません。`pm_qa_start.sh` 経由で起動してください。"
 
-    context_str = format_context(chunks)
+    parts = []
+    if structured_context:
+        parts.append(f"## 構造化データ検索結果\n\n{structured_context}")
+    if chunks:
+        parts.append(f"## テキスト検索結果\n\n{format_context(chunks)}")
+    if not parts:
+        return "記録が見つかりません。"
+    context_str = "\n\n---\n\n".join(parts)
     system = SYSTEM_PROMPT_TEMPLATE.format(project_context=_PROJECT_CONTEXT)
     user_prompt = f"## 取得した関連情報\n\n{context_str}\n---\n\n## 質問\n\n{question}"
 
@@ -421,13 +620,11 @@ def generate_answer(question: str, chunks: list[dict]) -> str:
         return f":warning: LLMエラー: {e}"
 
 
-def format_slack_response(question: str, chunks: list[dict], answer: str, index_name: str) -> str:
+def format_slack_response(question: str, chunks: list[dict], answer: str,
+                          index_name: str, *, search_mode: str = "テキスト検索") -> str:
     header = f"*Q: {question}*\n\n"
     body = answer
-
-    # 使用インデックスをフッターに表示（デバッグ・確認用）
-    body += f"\n\n_（検索対象: {index_name}）_"
-
+    body += f"\n\n_（検索対象: {index_name} / {search_mode}）_"
     return header + body
 
 
@@ -436,14 +633,44 @@ def format_slack_response(question: str, chunks: list[dict], answer: str, index_
 def _run_qa(question: str, respond, index_name: str, index_db: Path) -> None:
     try:
         logger.info(f"QA開始: [{index_name}] {question[:60]}")
-        chunks = retrieve_chunks(question, index_db)
-        logger.info(f"  {len(chunks)} チャンク取得")
-        chunks = rerank_chunks(question, chunks)
-        logger.info(f"  re-rank後: {len(chunks)} チャンク")
-        answer = generate_answer(question, chunks)
-        response_text = format_slack_response(question, chunks, answer, index_name)
+
+        # Step 1: Intent分類
+        intent_result = classify_intent(question)
+        intent = intent_result.get("intent", "text")
+        entities = intent_result.get("entities", {})
+        logger.info(f"  Intent: {intent}, entities: {entities}")
+
+        structured_context = ""
+        chunks: list[dict] = []
+        search_mode = "テキスト検索"
+
+        # Step 2: Intent に基づく検索
+        if intent in ("structured", "hybrid"):
+            structured_context = run_structured_query(entities)
+            if structured_context:
+                logger.info(f"  構造化クエリ: {len(structured_context)} 文字")
+            else:
+                logger.info("  構造化クエリ: 結果なし")
+
+        if intent in ("text", "hybrid") or (intent == "structured" and not structured_context):
+            chunks = retrieve_chunks(question, index_db)
+            logger.info(f"  {len(chunks)} チャンク取得")
+            chunks = rerank_chunks(question, chunks)
+            logger.info(f"  re-rank後: {len(chunks)} チャンク")
+
+        # 検索モード判定
+        if structured_context and chunks:
+            search_mode = "ハイブリッド検索"
+        elif structured_context:
+            search_mode = "構造化検索"
+
+        # Step 3: 回答生成
+        answer = generate_answer(question, chunks, structured_context=structured_context)
+        response_text = format_slack_response(
+            question, chunks, answer, index_name, search_mode=search_mode,
+        )
         respond(text=response_text, response_type="ephemeral", replace_original=True)
-        logger.info("QA完了")
+        logger.info(f"QA完了 ({search_mode})")
     except Exception as e:
         logger.exception("QA処理エラー")
         respond(
@@ -558,22 +785,14 @@ def build_app():
     return app, executor
 
 
-def main() -> None:
+def _init_common() -> None:
+    """main / test-hybrid 共通の初期化処理。"""
     global _PROJECT_CONTEXT
-
-    logger.info("pm_qa_server 起動中...")
 
     if _init_sudachi():
         logger.info("SudachiPy: 初期化完了（形態素解析検索を使用します）")
     else:
         logger.warning("SudachiPy: 利用不可（trigram検索のみで動作します）")
-
-    if not os.environ.get("SLACK_BOT_TOKEN"):
-        logger.error("SLACK_BOT_TOKEN が未設定です")
-    if not os.environ.get("SLACK_APP_TOKEN"):
-        logger.error("SLACK_APP_TOKEN が未設定です")
-    if not _OPENAI_BASE:
-        logger.warning("OPENAI_API_BASE が未設定です（QA実行時にエラーになります）")
 
     config_path = _REPO_ROOT / os.environ.get("QA_CONFIG", "data/qa_config.yaml")
     if config_path.exists():
@@ -581,7 +800,6 @@ def main() -> None:
     else:
         logger.warning(f"qa_config.yaml が見つかりません: {config_path}")
 
-    # インデックスDB の存在確認
     for name, db_path in _index_db_map.items():
         if db_path.exists():
             count = sqlite3.connect(str(db_path)).execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
@@ -595,6 +813,81 @@ def main() -> None:
     except Exception as e:
         logger.warning(f"CLAUDE.md ロード失敗: {e}")
         _PROJECT_CONTEXT = ""
+
+
+def test_hybrid(question: str) -> None:
+    """CLIテストモード: Slackデーモン不要でハイブリッド検索をテストする。"""
+    _init_common()
+
+    if not _OPENAI_BASE:
+        logger.warning("OPENAI_API_BASE が未設定です")
+
+    index_name, index_db = resolve_index_db("")
+    print(f"\n質問: {question}")
+    print(f"インデックス: [{index_name}] {index_db}")
+    print("-" * 60)
+
+    # Intent分類
+    intent_result = classify_intent(question)
+    intent = intent_result.get("intent", "text")
+    entities = intent_result.get("entities", {})
+    print(f"Intent: {intent}")
+    print(f"Entities: {entities}")
+    print("-" * 60)
+
+    structured_context = ""
+    chunks: list[dict] = []
+
+    if intent in ("structured", "hybrid"):
+        structured_context = run_structured_query(entities)
+        if structured_context:
+            print(f"\n[構造化クエリ結果]\n{structured_context}")
+        else:
+            print("\n[構造化クエリ結果] なし")
+
+    if intent in ("text", "hybrid") or (intent == "structured" and not structured_context):
+        chunks = retrieve_chunks(question, index_db)
+        print(f"\n[FTS検索] {len(chunks)} チャンク取得")
+        chunks = rerank_chunks(question, chunks)
+        print(f"[re-rank後] {len(chunks)} チャンク")
+        for i, c in enumerate(chunks, 1):
+            print(f"  [{i}] {_format_source_label(c)}: {c['content'][:80]}...")
+
+    if structured_context and chunks:
+        search_mode = "ハイブリッド検索"
+    elif structured_context:
+        search_mode = "構造化検索"
+    else:
+        search_mode = "テキスト検索"
+
+    print(f"\n検索モード: {search_mode}")
+    print("-" * 60)
+
+    answer = generate_answer(question, chunks, structured_context=structured_context)
+    print(f"\n[回答]\n{answer}")
+    print(f"\n_（検索対象: {index_name} / {search_mode}）_")
+
+
+def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Slack QA Server (Socket Mode)")
+    parser.add_argument("--test-hybrid", metavar="QUESTION",
+                        help="CLIテストモード: ハイブリッド検索をテスト（Slack不要）")
+    args = parser.parse_args()
+
+    if args.test_hybrid:
+        test_hybrid(args.test_hybrid)
+        return
+
+    logger.info("pm_qa_server 起動中...")
+    _init_common()
+
+    if not _OPENAI_BASE:
+        logger.warning("OPENAI_API_BASE が未設定です（QA実行時にエラーになります）")
+    if not os.environ.get("SLACK_BOT_TOKEN"):
+        logger.error("SLACK_BOT_TOKEN が未設定です")
+    if not os.environ.get("SLACK_APP_TOKEN"):
+        logger.error("SLACK_APP_TOKEN が未設定です")
 
     app, executor = build_app()
 

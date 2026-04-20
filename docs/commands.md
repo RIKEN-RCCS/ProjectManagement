@@ -502,3 +502,60 @@ tail -f logs/pm_web.log
 - `source` 列: `Slack` クリック → 投稿をブラウザの新規タブで開く / `minutes` クリック → 議事録をポップアップ表示
 - フィルタ: status（open/closed/すべて）・マイルストーン・発生日・削除状態（非削除/削除済み/すべて）
 - 楽観的排他制御: 別タブや他ユーザーが先に保存した場合はエラーを表示し上書きを防止
+
+### 12. ドキュメントレジストリ（pm_document_extract.py）
+
+Slack投稿中のBOXリンクを収集し、ローカルLLMで構造化メタデータを抽出して `docs_{index_name}.db` に保存する。情報の散逸に対処するための機能。
+
+```sh
+# 全インデックス対象に抽出
+python3 scripts/pm_document_extract.py
+
+# 特定インデックスのみ
+python3 scripts/pm_document_extract.py --index-name pm
+
+# 確認のみ（DB保存なし）
+python3 scripts/pm_document_extract.py --dry-run
+
+# 登録済みドキュメント一覧
+python3 scripts/pm_document_extract.py --list
+python3 scripts/pm_document_extract.py --list --index-name pm-bmt
+
+# Canvas に投稿
+python3 scripts/pm_document_extract.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--index-name NAME` | 全インデックス | 特定インデックスのみ処理 |
+| `--config PATH` | `data/qa_config.yaml` | 設定ファイルのパス |
+| `--data-dir PATH` | `data` | ソースDBのディレクトリ |
+| `--dry-run` | - | DB保存なし・結果を標準出力のみ |
+| `--list` | - | 登録済みドキュメント一覧を表示して終了 |
+| `--post-to-canvas` | - | ドキュメント一覧を Canvas に投稿 |
+| `--canvas-id ID` | - | 投稿先 Canvas ID（`--post-to-canvas` 時に必須） |
+
+**セキュリティ注意**: ローカルLLM（`OPENAI_API_BASE`）のみを使用。外部APIには情報を送出しない。`OPENAI_API_BASE` 未設定時はエラーで停止する。
+
+**抽出済み管理**: `extract_state` テーブルで処理済み `thread_ts` を記録し、再実行時に重複処理を防止する。
+
+**FTS5連携**: 抽出後に `pm_embed.py` を実行すると、`docs_{index_name}.db` のドキュメントが FTS5 インデックスに組み込まれ `/argus-ask` で検索可能になる。
+
+### 13. ハイブリッド検索テスト（pm_qa_server.py --test-hybrid）
+
+`/argus-ask` のハイブリッド検索をSlackデーモン不要でCLIテストする。
+
+```sh
+# 構造化クエリ
+python3 scripts/pm_qa_server.py --test-hybrid "西澤さんの担当タスクは？"
+python3 scripts/pm_qa_server.py --test-hybrid "M1マイルストーンの進捗は？"
+python3 scripts/pm_qa_server.py --test-hybrid "期限超過アイテムは？"
+
+# テキスト検索（既存動作）
+python3 scripts/pm_qa_server.py --test-hybrid "設計方針について"
+
+# ハイブリッド検索
+python3 scripts/pm_qa_server.py --test-hybrid "GPU性能に関する決定事項は？"
+```
+
+出力: Intent分類結果 → 構造化クエリ結果 → FTS検索結果 → LLM回答 を順に表示する。

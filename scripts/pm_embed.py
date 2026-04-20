@@ -397,6 +397,71 @@ def index_slack_raw(
 
 
 
+# --- docs_{index_name}.db からの抽出（ドキュメントレジストリ）---
+
+def index_docs(
+    index_conn: sqlite3.Connection,
+    db_path: Path,
+    full_rebuild: bool,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """docs_{name}.db の documents テーブルを索引化する。"""
+    source_db = db_path.name
+
+    if not db_path.exists():
+        return 0
+
+    try:
+        src_conn = open_db(db_path, encrypt=True)
+    except Exception as e:
+        logger.warning(f"    {source_db}: 開けませんでした - {e}")
+        return 0
+
+    chunk_rows: list[dict] = []
+    now = now_iso()
+
+    for row in src_conn.execute(
+        "SELECT id, title, type, description, shared_by, shared_at, url, related_topic, permalink FROM documents"
+    ):
+        text_parts = []
+        if row["title"]:
+            text_parts.append(row["title"])
+        if row["type"]:
+            text_parts.append(f"種別: {row['type']}")
+        if row["description"]:
+            text_parts.append(row["description"])
+        if row["shared_by"]:
+            text_parts.append(f"共有者: {row['shared_by']}")
+        if row["related_topic"]:
+            text_parts.append(f"トピック: {row['related_topic']}")
+        if row["url"]:
+            text_parts.append(f"URL: {row['url']}")
+
+        content = "\n".join(text_parts)
+        chunk_rows.append({
+            "source_type": "document",
+            "source_db": source_db,
+            "record_id": str(row["id"]),
+            "held_at": row["shared_at"],
+            "content": content,
+            "tokens": sudachi_tokenize(content),
+            "source_ref": row["permalink"],
+            "indexed_at": now,
+        })
+
+    src_conn.close()
+    logger.info(f"    documents {db_path.stem}: {len(chunk_rows)} チャンク")
+
+    if dry_run:
+        return len(chunk_rows)
+
+    delete_source_chunks(index_conn, source_db)
+    count = insert_chunks(index_conn, chunk_rows)
+    set_last_indexed(index_conn, source_db, now)
+    return count
+
+
 # --- メイン ---
 
 def build_index(
@@ -445,6 +510,11 @@ def build_index(
             logger.warning(f"  {channel_path} が見つかりません")
             continue
         total += index_slack_raw(index_conn, channel_path, full_rebuild, dry_run, logger)
+
+    # documents（ドキュメントレジストリ）
+    docs_path = data_dir / f"docs_{index_name}.db"
+    if docs_path.exists():
+        total += index_docs(index_conn, docs_path, full_rebuild, dry_run, logger)
 
     if not dry_run:
         index_conn.commit()
