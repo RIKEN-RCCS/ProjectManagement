@@ -135,11 +135,35 @@ python3 scripts/pm_insight.py --db data/pm.db --dry-run
 
 ### 5. 過去の議論を検索 — 「あの話どこで決まったっけ？」
 
-`/argus-ask` コマンドで議事録本文・Slack生メッセージを自然言語検索できる。SudachiPy形態素解析 + FTS5 + LLM re-ranking による日本語検索。
+`/argus-ask` コマンドで議事録本文・Slack生メッセージ・ドキュメント・構造化データを横断検索できる。
+
+**ハイブリッド検索**: 質問の種類をLLMが自動分類し、最適な検索戦略を選択する。
 
 ```
-/argus-ask GPU性能の評価方針について
-/argus-ask Benchparkハッカソンの内容を教えて
+/argus-ask GPU性能の評価方針について          ← テキスト検索（議事録・Slack）
+/argus-ask 西澤さんの担当タスクは？          ← 構造化検索（pm.db SQL）
+/argus-ask GPU性能に関する決定事項は？        ← ハイブリッド（SQL + FTS5）
+/argus-ask Benchparkの資料はどこ？           ← ドキュメントレジストリも検索
+```
+
+テキスト検索: SudachiPy形態素解析 + FTS5 + LLM re-ranking。構造化検索: pm.db の担当者・期限・マイルストーン・統計を直接SQLクエリ。
+
+### 5b. ドキュメントレジストリ — 「あの資料どこにあったっけ？」
+
+Slack上に散在するBOXリンク（ファイル共有URL）を自動収集し、ローカルLLMでメタデータ（タイトル・種別・説明・トピック）を構造化して保存する。
+
+```sh
+# BOXリンクを収集・構造化
+python3 scripts/pm_document_extract.py
+
+# FTS5インデックスに組み込み（/argus-ask で検索可能に）
+python3 scripts/pm_embed.py --full-rebuild
+
+# 一覧表示
+python3 scripts/pm_document_extract.py --list
+
+# Canvas に投稿
+python3 scripts/pm_document_extract.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
 ```
 
 ### 6. データの編集と修正 — 「LLMの誤りを人間が正せる」
@@ -201,7 +225,8 @@ python3 scripts/pm_minutes_import.py corrected.md --meeting-name Leader_Meeting 
 | `data/{channel_id}.db` | Slackメッセージ（親メッセージ・返信） | チャンネルごとに独立 |
 | `data/minutes/{kind}.db` | 議事録詳細（議事内容・決定事項・AI） | 会議名ごとに独立 |
 | `data/pm.db` | PM統合データ（全チャンネル・全会議を横断） | 1ファイル |
-| `data/qa_pm*.db` | QA検索インデックス（FTS5） | インデックスごとに独立 |
+| `data/docs_*.db` | ドキュメントレジストリ（BOXリンクのメタデータ） | インデックスごとに独立 |
+| `data/qa_pm*.db` | QA検索インデックス（FTS5、ドキュメント含む） | インデックスごとに独立 |
 
 ### pm.db のテーブル
 
@@ -322,8 +347,9 @@ bash scripts/pm_qa_stop.sh     # 停止
 
 | スクリプト | 用途 |
 |-----------|------|
-| `pm_qa_server.py` | Slack Socket Modeデーモン（/argus-ask・/argus-*を統合処理） |
-| `pm_embed.py` | QAインデックス構築（SudachiPy+FTS5） |
+| `pm_qa_server.py` | Slack Socket Modeデーモン（/argus-ask・/argus-*を統合処理）。ハイブリッド検索対応 |
+| `pm_embed.py` | QAインデックス構築（SudachiPy+FTS5、ドキュメントレジストリも索引化） |
+| `pm_document_extract.py` | Slack BOXリンク収集・ローカルLLMで構造化 → docs_*.db に保存 |
 
 ### 共通ライブラリ
 
