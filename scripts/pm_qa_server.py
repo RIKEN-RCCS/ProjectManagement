@@ -2,7 +2,7 @@
 """
 pm_qa_server.py - Slack Slash Command QA サーバー（Socket Mode）
 
-/ask <質問> を受け取り、実行チャンネルに対応するインデックスDB (FTS5) で
+/argus-ask <質問> を受け取り、実行チャンネルに対応するインデックスDB (FTS5) で
 関連情報を検索し、ローカルLLMで回答を生成してSlackにephemeralで返す。
 
 起動方法:
@@ -35,7 +35,7 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_local_llm, load_claude_md_context
-from pm_argus import _run_brief, _run_draft, _run_risk
+from pm_argus import _run_brief, _run_draft, _run_risk, _run_transcribe, _transcribe_jobs, _transcribe_lock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -464,7 +464,7 @@ def build_app():
     app = App(token=bot_token)
     executor = ThreadPoolExecutor(max_workers=4)
 
-    @app.command("/ask")
+    @app.command("/argus-ask")
     def handle_ask(ack, respond, command):
         ack()
         question = (command.get("text") or "").strip()
@@ -472,7 +472,7 @@ def build_app():
 
         if not question:
             respond(
-                text="質問を入力してください。例: `/ask 設計方針について`",
+                text="質問を入力してください。例: `/argus-ask 設計方針について`",
                 response_type="ephemeral",
             )
             return
@@ -516,6 +516,36 @@ def build_app():
         ack()
         respond(text=":hourglass_flowing_sand: Argus リスク分析中...", response_type="ephemeral")
         executor.submit(_run_risk, respond, command)
+
+    @app.command("/argus-transcribe")
+    def handle_argus_transcribe(ack, respond, command):
+        ack()
+        filename = (command.get("text") or "").strip()
+        if not filename:
+            respond(
+                text=(
+                    "ファイル名を指定してください。\n"
+                    "例: `/argus-transcribe GMT20260302-032528_Recording.mp4`"
+                ),
+                response_type="ephemeral",
+            )
+            return
+        with _transcribe_lock:
+            if _transcribe_jobs:
+                running = ", ".join(
+                    f"`{fname}` (ch={chid})"
+                    for _, (fname, chid) in _transcribe_jobs.items()
+                )
+                respond(
+                    text=f":warning: 現在処理中のジョブがあります。完了後に再実行してください。\n処理中: {running}",
+                    response_type="ephemeral",
+                )
+                return
+        respond(
+            text=f":hourglass_flowing_sand: `{filename}` の文字起こし・議事録生成を開始します...",
+            response_type="ephemeral",
+        )
+        executor.submit(_run_transcribe, respond, command)
 
     def _shutdown(signum, frame):
         logger.info("シャットダウン中...")
@@ -574,7 +604,7 @@ def main() -> None:
         logger.error("SLACK_APP_TOKEN が未設定です")
         sys.exit(1)
 
-    logger.info("Socket Mode で接続中... /ask コマンドを待機します")
+    logger.info("Socket Mode で接続中... /argus-ask コマンドを待機します")
     handler = SocketModeHandler(app, app_token)
     handler.start()
 
