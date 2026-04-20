@@ -878,11 +878,12 @@ def _run_transcribe(respond, command):
         )
         return
 
-    # Slack WebClient（チャンネル投稿・ファイルアップロード用）
-    bot_token = os.environ.get("SLACK_BOT_TOKEN")
-    if not bot_token:
+    # Slack WebClient（チャンネル投稿・ファイルダウンロード・アップロード用）
+    # files:read / files:write スコープが必要なため User Token (xoxp-) を使用
+    user_token = os.environ.get("SLACK_USER_TOKEN")
+    if not user_token:
         respond(
-            text=":warning: SLACK_BOT_TOKEN が設定されていません。",
+            text=":warning: SLACK_USER_TOKEN が設定されていません。",
             response_type="ephemeral",
             replace_original=True,
         )
@@ -890,7 +891,7 @@ def _run_transcribe(respond, command):
 
     try:
         from slack_sdk import WebClient
-        client = WebClient(token=bot_token)
+        client = WebClient(token=user_token)
     except ImportError:
         respond(
             text=":warning: slack_sdk がインストールされていません。",
@@ -938,6 +939,9 @@ def _run_transcribe(respond, command):
 
     try:
         logger.info(f"[argus-transcribe] 開始: filename={filename} channel={channel_id}")
+        # pipeline.py 内部の requests.get が SLACK_BOT_TOKEN をヘッダーに使うため
+        # User Token で一時上書きする
+        os.environ["SLACK_BOT_TOKEN"] = user_token
         pipeline.run_pipeline(client, channel_id, filename, thread_ts)
         logger.info(f"[argus-transcribe] 完了: filename={filename}")
         respond(
