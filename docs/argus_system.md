@@ -37,7 +37,7 @@ pm_qa_server.py（常駐デーモン）
 ```
 scripts/
 ├── pm_argus.py          # データ収集・プロンプト構築・コマンドハンドラ
-└── pm_qa_server.py      # Slack Socket Mode デーモン（/ask・/argus-* を統合）
+└── pm_qa_server.py      # Slack Socket Mode デーモン（/argus-ask・/argus-* を統合）
                          # ← pm_qa_start.sh で起動
 
 data/
@@ -45,7 +45,7 @@ data/
 └── secretary_canvas_id.txt   # --brief-to-canvas の投稿先 Canvas ID（F0AT4N36TFF）
 
 logs/
-├── pm_qa_server.log     # サーバーログ（/ask・/argus-* 両方）
+├── pm_qa_server.log     # サーバーログ（/argus-ask・/argus-* 両方）
 ├── pm_qa_server.pid     # PIDファイル（起動中のみ存在）
 └── pm_argus_cron.log    # cron 自動実行ログ
 ```
@@ -55,7 +55,7 @@ logs/
 ## 起動・停止
 
 Argus のスラッシュコマンド（`/argus-brief` 等）は `pm_qa_server.py` に統合されているため、
-**`pm_qa_start.sh` を起動するだけで `/ask` と `/argus-*` の両方が有効になる**。
+**`pm_qa_start.sh` を起動するだけで `/argus-ask` と `/argus-*` の両方が有効になる**。
 専用の別デーモンは不要。
 
 ```bash
@@ -137,14 +137,44 @@ tail -f logs/pm_qa_server.log
 
 ---
 
-### `/ask <質問>` — 議事録・Slack 要約の QA（既存機能）
+### `/argus-transcribe <ファイル名>` — 会議録音の文字起こし・議事録生成
+
+Slack チャンネルにアップロードされた音声・動画ファイルをダウンロードし、
+Whisper による文字起こし → LLM による議事録生成 を実行してスレッドに投稿する。
+
+```
+/argus-transcribe GMT20260302-032528_Recording.mp4
+/argus-transcribe 2026-04-20_Leader_Meeting.m4a
+```
+
+**処理フロー**:
+1. ファイルをチャンネルから検索・ダウンロード
+2. Singularity コンテナ内で FFmpeg 変換（16kHz mono WAV） + Whisper large-v3 文字起こし
+3. `generate_minutes_local.py` で LLM 議事録生成（マルチステージ: チャンク抽出 → 統合 → 決定事項・AI 抽出）
+4. 完成した議事録ファイルをスレッドにアップロード
+
+**進捗通知**:
+- 処理開始・ダウンロード完了・文字起こし完了・Stage 1/2/3 進捗をスレッドに随時投稿（チャンネル全員に可視）
+- 最終完了・エラーは実行者のみに ephemeral で通知
+
+**排他制御**: 同時実行は 1 ジョブのみ。処理中に再実行すると現在のジョブ情報を表示してエラーを返す。
+
+**前提条件**:
+- `../Minutes` リポジトリが同一ホストに存在し、Singularity コンテナ（`whisper.sif`）が利用可能であること
+- `VLLM_API_BASE` が設定され、ローカル LLM サーバーが起動していること
+- `HUGGING_FACE_TOKEN` が `~/.secrets/hf_tokens.sh` または環境変数に設定されていること
+- `AUDIO_SAVE_DIR` に十分なディスク空き容量があること（デフォルト: `/tmp/whisper_audio`）
+
+---
+
+### `/argus-ask <質問>` — 議事録・Slack 要約の QA（既存機能）
 
 実行チャンネルに対応するインデックスDB（FTS5）を検索して回答する。
 Argus とは独立した機能で、同じデーモンで動作する。
 
 ```
-/ask 設計方針に関する最近の議論は？
-/ask Benchparkハッカソンの内容を教えて
+/argus-ask 設計方針に関する最近の議論は？
+/argus-ask Benchparkハッカソンの内容を教えて
 ```
 
 ---
@@ -248,15 +278,16 @@ C0A6AC59AHM    # 24_ai-hpc-application
 
 ### 1. Slack アプリへのコマンド登録
 
-[api.slack.com/apps](https://api.slack.com/apps) で `/ask` を登録済みのアプリに以下を追加:
+[api.slack.com/apps](https://api.slack.com/apps) で `/argus-ask` を登録済みのアプリに以下を追加:
 
 - `/argus-brief` — Short Description: 今日の状況サマリーと優先アクション
 - `/argus-draft` — Short Description: 草案生成（`agenda`/`report`/`request`）
 - `/argus-risk` — Short Description: リスク一覧と対応提案
+- `/argus-transcribe` — Short Description: 会議録音の文字起こし・議事録生成
 
 Request URL は Socket Mode では無視されるため任意の HTTPS URL でよい。
 
-### 2. QA インデックスの構築（`/ask` 用。Argus には不要）
+### 2. QA インデックスの構築（`/argus-ask` 用。Argus には不要）
 
 ```bash
 ~/.venv_aarch64/bin/python3 scripts/pm_embed.py --full-rebuild
@@ -295,3 +326,12 @@ crontab -l | grep argus
 **`/argus-draft` で「用途を指定してください」と返ってくる:**
 - 第1引数に `agenda` / `report` / `request` のいずれかを指定すること
 - 例: `/argus-draft agenda 次回リーダー会議`
+
+**`/argus-transcribe` で「pipeline モジュールの読み込みに失敗」と返ってくる:**
+- `../Minutes/slack_bot/pipeline.py` が存在するか確認
+- `../Minutes/slack_bot/config.py` の `AUDIO_SAVE_DIR`・`VLLM_API_BASE`・`VLLM_MODEL` が正しく設定されているか確認
+
+**`/argus-transcribe` で「現在処理中のジョブがあります」と返ってくる:**
+- 前のジョブが完了または失敗するまで待つ
+- `tail -f logs/pm_qa_server.log` で進捗を確認する
+- デーモンを再起動すればジョブロックはリセットされる（処理中のジョブは中断される）

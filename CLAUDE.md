@@ -92,7 +92,7 @@ slack/
 │   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
 │   ├── web_utils.py                 # pm_api.py / pm_web.py 共通のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
 │   ├── pm_embed.py                  # QAインデックス構築（qa_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む）
-│   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/ask QA・/argus-* コマンドを統合処理）
+│   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/argus-ask QA・/argus-* コマンドを統合処理）
 │   ├── pm_qa_start.sh               # pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
 │   ├── pm_qa_stop.sh                # pm_qa_server.py を停止（PIDファイルでプロセス管理）
 │   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。cli_utils.py の call_local_llm を使用

@@ -135,11 +135,11 @@ python3 scripts/pm_insight.py --db data/pm.db --dry-run
 
 ### 5. 過去の議論を検索 — 「あの話どこで決まったっけ？」
 
-`/ask` コマンドで議事録本文・Slack生メッセージを自然言語検索できる。SudachiPy形態素解析 + FTS5 + LLM re-ranking による日本語検索。
+`/argus-ask` コマンドで議事録本文・Slack生メッセージを自然言語検索できる。SudachiPy形態素解析 + FTS5 + LLM re-ranking による日本語検索。
 
 ```
-/ask GPU性能の評価方針について
-/ask Benchparkハッカソンの内容を教えて
+/argus-ask GPU性能の評価方針について
+/argus-ask Benchparkハッカソンの内容を教えて
 ```
 
 ### 6. データの編集と修正 — 「LLMの誤りを人間が正せる」
@@ -270,7 +270,7 @@ chmod 600 ~/.secrets/slack_tokens.sh
 ### QAサーバー・Argus の起動
 
 ```sh
-bash scripts/pm_qa_start.sh    # /ask・/argus-* が有効になる
+bash scripts/pm_qa_start.sh    # /argus-ask・/argus-* が有効になる
 bash scripts/pm_qa_stop.sh     # 停止
 ```
 
@@ -322,7 +322,7 @@ bash scripts/pm_qa_stop.sh     # 停止
 
 | スクリプト | 用途 |
 |-----------|------|
-| `pm_qa_server.py` | Slack Socket Modeデーモン（/ask・/argus-*を統合処理） |
+| `pm_qa_server.py` | Slack Socket Modeデーモン（/argus-ask・/argus-*を統合処理） |
 | `pm_embed.py` | QAインデックス構築（SudachiPy+FTS5） |
 
 ### 共通ライブラリ

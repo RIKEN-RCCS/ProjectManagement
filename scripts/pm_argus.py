@@ -26,6 +26,7 @@ Usage:
 import argparse
 import os
 import sys
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -56,6 +57,16 @@ _SECRETARY_CANVAS_ID_FILE = _DATA_DIR / "secretary_canvas_id.txt"
 
 _DEFAULT_SINCE_DAYS = 30
 _DRAFT_REPORT_SINCE_DAYS = 14
+
+# --------------------------------------------------------------------------- #
+# /argus-transcribe ジョブ排他制御
+# --------------------------------------------------------------------------- #
+_transcribe_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, channel_id)
+_transcribe_lock = threading.Lock()
+
+# Minutes リポジトリのパス（同一ホスト上の兄弟ディレクトリ）
+_MINUTES_REPO = _REPO_ROOT.parent / "Minutes"
+_MINUTES_PIPELINE = _MINUTES_REPO / "slack_bot" / "pipeline.py"
 
 
 # --------------------------------------------------------------------------- #
@@ -208,14 +219,16 @@ def fetch_pm_stats(conn, today: str, since: str | None = None) -> dict:
 
 _BRIEF_PROMPT = """\
 あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下のデータを分析し、**{requester}が今日 {today} 中に優先的に対応すべきこと**を
+以下のデータを分析し、**プロジェクト全体として今日 {today} 中に優先的に対応すべきこと**を
 最大5件、優先度順にリストアップしてください。
+個人の担当タスク管理ではなく、プロジェクトのゴール達成・マイルストーン進捗・
+リスク軽減の観点からプロジェクト全体を俯瞰してください。
 
 各項目の形式:
 - **[優先度: 高/中/低]** タイトル
-  - 状況: （現状の簡潔な説明）
-  - 次の一手: （具体的にやること。誰に何を確認/依頼するかまで）
-  - 根拠: （データ上の根拠: アイテムID・人名・期限など）
+  - 状況: （プロジェクト全体での現状の簡潔な説明）
+  - 次の一手: （誰が何を確認/決定/依頼すべきかを含む具体的なアクション）
+  - 根拠: （データ上の根拠: マイルストーン名・アイテムID・担当者名・期限など）
 
 ## プロジェクト文脈
 
@@ -260,8 +273,10 @@ _BRIEF_PROMPT = """\
 
 ---
 
-上記データを踏まえ、プロジェクトマネージャーが今日取るべきアクションを5件以内で提示してください。
-データが示す具体的な懸案（期限超過のID・担当者名・マイルストーン名）を必ず引用してください。
+上記データを踏まえ、富岳NEXTプロジェクト全体として今日取るべきアクションを5件以内で提示してください。
+特定の個人のタスク管理ではなく、プロジェクトのゴール達成・マイルストーン到達・リスク軽減に
+直結する事項を優先してください。
+データが示す具体的な懸案（マイルストーン名・期限超過のID・担当者名）を必ず引用してください。
 """
 
 
@@ -441,8 +456,9 @@ _RISK_PROMPT = """\
 
 ---
 
-定量データと会話の文脈から、顕在化しているリスクだけでなく、
-放置すると問題になりうる予兆も含めて列挙してください。
+定量データと会話の文脈から、富岳NEXTプロジェクト全体に影響するリスクを分析してください。
+特定の個人の作業遅延ではなく、マイルストーン達成・プロジェクトゴールへの影響度を軸に、
+顕在化しているリスクと放置すると問題になりうる予兆の両方を列挙してください。
 各リスクに優先度（高/中/低）と推奨対応を付けてください。
 """
 
@@ -525,7 +541,6 @@ def build_brief_prompt(
         today=today,
         days=days,
         context=context,
-        requester=requester,
         total_open=s["total_open"],
         total_closed=s["total_closed"],
         overdue_count=s["overdue_count"],
@@ -826,6 +841,120 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
             response_type="ephemeral",
             replace_original=True,
         )
+
+
+def _run_transcribe(respond, command):
+    """Slack /argus-transcribe のバックグラウンド処理。
+
+    Minutes リポジトリの pipeline.py を使い、
+    ダウンロード → Whisper文字起こし → LLM議事録生成 を実行する。
+    進捗はスレッドへの chat_postMessage で可視投稿し、
+    完了・エラー通知は respond() で ephemeral 返信する。
+    """
+    import logging
+    logger = logging.getLogger("pm_argus")
+
+    filename = (command.get("text") or "").strip()
+    channel_id = command.get("channel_id", "")
+    thread_ts = None
+
+    if not filename:
+        respond(
+            text=(
+                "ファイル名を指定してください。\n"
+                "例: `/argus-transcribe GMT20260302-032528_Recording.mp4`"
+            ),
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    # Minutes pipeline モジュールが利用可能か確認
+    if not _MINUTES_PIPELINE.exists():
+        respond(
+            text=f":warning: Minutes リポジトリが見つかりません: `{_MINUTES_PIPELINE}`",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    # Slack WebClient（チャンネル投稿・ファイルアップロード用）
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not bot_token:
+        respond(
+            text=":warning: SLACK_BOT_TOKEN が設定されていません。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    try:
+        from slack_sdk import WebClient
+        client = WebClient(token=bot_token)
+    except ImportError:
+        respond(
+            text=":warning: slack_sdk がインストールされていません。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    # pipeline モジュールを動的 import
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pipeline", str(_MINUTES_PIPELINE))
+        pipeline = importlib.util.module_from_spec(spec)
+        # Minutes の config.py 参照のため sys.path を一時追加
+        slack_bot_dir = str(_MINUTES_PIPELINE.parent)
+        if slack_bot_dir not in sys.path:
+            sys.path.insert(0, slack_bot_dir)
+        spec.loader.exec_module(pipeline)
+    except Exception as e:
+        respond(
+            text=f":warning: pipeline モジュールの読み込みに失敗しました: {e}",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    # スレッドを作成して進捗投稿先にする
+    try:
+        post = client.chat_postMessage(
+            channel=channel_id,
+            text=f":hourglass_flowing_sand: `{filename}` の処理を開始します...",
+        )
+        thread_ts = post["ts"]
+    except Exception as e:
+        respond(
+            text=f":warning: Slack メッセージ投稿に失敗しました: {e}",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    # ジョブ登録
+    with _transcribe_lock:
+        _transcribe_jobs[thread_ts] = (filename, channel_id)
+
+    try:
+        logger.info(f"[argus-transcribe] 開始: filename={filename} channel={channel_id}")
+        pipeline.run_pipeline(client, channel_id, filename, thread_ts)
+        logger.info(f"[argus-transcribe] 完了: filename={filename}")
+        respond(
+            text=f":white_check_mark: `{filename}` の議事録生成が完了しました。スレッドをご確認ください。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+    except Exception as e:
+        logger.exception("[argus-transcribe] エラー")
+        respond(
+            text=f":warning: 議事録生成エラー: {e}",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+    finally:
+        with _transcribe_lock:
+            _transcribe_jobs.pop(thread_ts, None)
 
 
 # --------------------------------------------------------------------------- #
