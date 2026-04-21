@@ -1,5 +1,7 @@
 # Slack data / PM DB (contains confidential messages)
-data/
+data/*
+!data/web_sources.yaml
+!data/qa_config.yaml
 logs/
 
 # Meeting transcripts and audio (機密性2)
