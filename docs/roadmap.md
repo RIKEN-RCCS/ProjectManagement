@@ -101,7 +101,7 @@ python3 scripts/pm_minutes_to_pm.py --list --since 2026-02-01
 - RIKEN公式サイト・HPC系ニュース（Top500/HPCwire/insideHPC）・NVIDIAブログなどの公開情報を定期取得し `/argus-ask` で検索可能にする
 - `data/web_sources.yaml` でソース・キーワードフィルタ・対象インデックスを定義し、`pm_web_fetch.py` が `data/web_articles.db` に保存する
 - `pm_embed.py --web-only` で高速に FTS5 インデックスに組み込み（議事録・Slack処理をスキップ）
-- `pm_web_update.sh` + cron（毎朝03:30 JST）で完全自動化
+- `pm_web_fetch.py` を cron（毎朝03:30 JST）で定期実行。FTS5 組み込みは `pm_document_update.sh`（`pm_embed.py`）が自動で行う
 - 出典は `top500.org / Web記事 (2025-11-15)` 形式で表示される
 
 ---

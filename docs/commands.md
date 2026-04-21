@@ -560,10 +560,11 @@ python3 scripts/pm_qa_server.py --test-hybrid "GPU性能に関する決定事項
 
 出力: Intent分類結果 → 構造化クエリ結果 → FTS検索結果 → LLM回答 を順に表示する。
 
-### 14. 外部Web情報取得（pm_web_fetch.py / pm_web_update.sh）
+### 14. 外部Web情報取得（pm_web_fetch.py）
 
 RIKEN公式サイト・HPCニュースサイト・NVIDIAブログなどの外部公開情報を取得し `data/web_articles.db` に保存する。
 取得対象・キーワードフィルタ・対象インデックスは `data/web_sources.yaml` で定義する。
+FTS5インデックスへの組み込みは `pm_document_update.sh`（`pm_embed.py`）が自動的に行う。
 
 ```sh
 # 全ソースの差分取得（新規URLのみ保存）
@@ -580,12 +581,6 @@ python3 scripts/pm_web_fetch.py --full-refetch
 
 # 保存済み記事一覧
 python3 scripts/pm_web_fetch.py --list
-
-# 取得 → FTS5インデックス更新を連続実行（cronで利用）
-bash scripts/pm_web_update.sh
-bash scripts/pm_web_update.sh --source "Top500"
-bash scripts/pm_web_update.sh --dry-run
-bash scripts/pm_web_update.sh --full-refetch --full-rebuild
 ```
 
 | オプション | デフォルト | 説明 |
@@ -600,13 +595,12 @@ bash scripts/pm_web_update.sh --full-refetch --full-rebuild
 
 **cron設定（毎朝03:30 JST）**:
 ```sh
-# 定期実行ジョブの登録
 crontab -e
 # 以下を追加:
-# 30 3 * * * /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/pm_web_update.sh >> /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/logs/pm_web_cron.log 2>&1
+# 30 3 * * * cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && ~/.venv_aarch64/bin/python3 scripts/pm_web_fetch.py >> logs/pm_web_cron.log 2>&1
 ```
 
-**FTS5連携**: `pm_web_update.sh` は `pm_embed.py --web-only` を呼び出し、`web_articles.db` の記事を FTS5 インデックスに組み込む。`/argus-ask` で即座に検索可能になる。
+**FTS5連携**: `web_articles.db` が存在すれば `pm_embed.py`（`pm_document_update.sh` 経由）実行時に自動で FTS5 インデックスに組み込まれ `/argus-ask` で検索可能になる。
 
 **web_sources.yaml の構造**:
 ```yaml

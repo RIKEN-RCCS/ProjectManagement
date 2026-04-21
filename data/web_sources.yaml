@@ -13,12 +13,12 @@
 sources:
 
   - name: "RIKEN 富岳NEXT"
-    url: "https://www.r-ccs.riken.jp/topics/"
+    url: "https://www.r-ccs.riken.jp/fugaku-next/"
     type: html_index
     link_pattern: "/topics/\\d+"
     keywords: [富岳NEXT, 富岳, MONAKA, 次世代計算基盤, 富岳後継]
     max_articles: 30
-    target_indices: [pm, pm-hpc, pm-pmo, pm-all]
+    target_indices: [pm, pm-hpc, pm-bmt, pm-pmo, pm-all]
     enabled: true
 
   - name: "Top500"
@@ -26,7 +26,7 @@ sources:
     type: rss
     keywords: [富岳, Fugaku, MONAKA, RIKEN, Japan, HPC, NVLink, Benchpark, supercomputer]
     max_articles: 50
-    target_indices: [pm, pm-hpc, pm-all]
+    target_indices: [pm, pm-hpc, pm-bmt, pm-all]
     enabled: true
 
   - name: "HPCwire"
@@ -34,15 +34,7 @@ sources:
     type: rss
     keywords: [Fugaku, RIKEN, Japan, TOP500, supercomputer, HPC, exascale, benchmark]
     max_articles: 50
-    target_indices: [pm, pm-hpc, pm-all]
-    enabled: true
-
-  - name: "insideHPC"
-    url: "https://insidehpc.com/feed/"
-    type: rss
-    keywords: [Fugaku, RIKEN, TOP500, Japan, HPC, supercomputer, benchmark]
-    max_articles: 50
-    target_indices: [pm, pm-hpc, pm-all]
+    target_indices: [pm, pm-hpc, pm-bmt, pm-all]
     enabled: true
 
   - name: "NVIDIA Developer Blog"
@@ -50,5 +42,5 @@ sources:
     type: rss
     keywords: [NVLink, NVSwitch, Hopper, Blackwell, HPC, supercomputer, Japan, MLPerf, benchmark]
     max_articles: 30
-    target_indices: [pm, pm-hpc, pm-all]
+    target_indices: [pm, pm-hpc, pm-bmt, pm-all]
     enabled: true
