@@ -464,6 +464,74 @@ def index_docs(
 
 # --- メイン ---
 
+# --- web_articles.db からの抽出 ---
+
+def index_web(
+    index_conn: sqlite3.Connection,
+    articles_db_path: Path,
+    index_name: str,
+    full_rebuild: bool,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """data/web_articles.db の記事を索引化する。
+    target_indices JSON配列に index_name が含まれる記事のみ対象とする。
+    """
+    import json as _json
+
+    source_db = "web_articles.db"
+
+    try:
+        src_conn = sqlite3.connect(str(articles_db_path))
+        src_conn.row_factory = sqlite3.Row
+    except Exception as e:
+        logger.warning(f"  {source_db}: 開けませんでした - {e}")
+        return 0
+
+    chunk_rows: list[dict] = []
+    now = now_iso()
+
+    for row in src_conn.execute(
+        "SELECT id, source_name, url, title, published_at, content, summary, target_indices FROM articles"
+    ):
+        try:
+            targets = _json.loads(row["target_indices"] or "[]")
+        except Exception:
+            targets = []
+        if index_name not in targets:
+            continue
+
+        body = ""
+        if row["title"]:
+            body += row["title"] + "\n\n"
+        body += (row["content"] or row["summary"] or "")
+
+        for chunk in split_into_chunks(body):
+            chunk_rows.append({
+                "source_type": "web",
+                "source_db": source_db,
+                "record_id": str(row["id"]),
+                "held_at": (row["published_at"] or "")[:10] or None,
+                "content": chunk,
+                "tokens": sudachi_tokenize(chunk),
+                "source_ref": row["url"],
+                "indexed_at": now,
+            })
+
+    src_conn.close()
+    logger.info(f"    web {index_name}: {len(chunk_rows)} チャンク")
+
+    if dry_run:
+        return len(chunk_rows)
+
+    delete_source_chunks(index_conn, source_db)
+    count = insert_chunks(index_conn, chunk_rows)
+    set_last_indexed(index_conn, source_db, now)
+    return count
+
+
+# --- メイン ---
+
 def build_index(
     index_name: str,
     index_cfg: dict,
@@ -471,6 +539,8 @@ def build_index(
     full_rebuild: bool,
     dry_run: bool,
     logger: logging.Logger,
+    *,
+    web_only: bool = False,
 ) -> int:
     """1つのインデックスを構築する。追加したチャンク数を返す。"""
     db_path = Path(index_cfg["db"])
@@ -478,16 +548,18 @@ def build_index(
     channel_ids = index_cfg.get("channels") or []
 
     logger.info(f"[{index_name}] → {db_path}")
-    logger.info(f"  minutes: {minutes_kinds or '(なし)'}")
-    logger.info(f"  channels: {channel_ids or '(なし)'}")
 
-    if not minutes_kinds and not channel_ids:
-        logger.warning(f"  ソースが未設定です。qa_config.yaml を編集してください。")
-        return 0
+    if not web_only:
+        logger.info(f"  minutes: {minutes_kinds or '(なし)'}")
+        logger.info(f"  channels: {channel_ids or '(なし)'}")
+
+        if not minutes_kinds and not channel_ids:
+            logger.warning(f"  ソースが未設定です。qa_config.yaml を編集してください。")
+            return 0
 
     index_conn = open_index_db(db_path)
 
-    if full_rebuild and not dry_run:
+    if full_rebuild and not dry_run and not web_only:
         logger.info(f"  全件再構築: 既存インデックスをクリア")
         index_conn.execute("DELETE FROM chunks")
         index_conn.execute("DELETE FROM index_state")
@@ -495,26 +567,32 @@ def build_index(
 
     total = 0
 
-    # minutes_content
-    for kind in minutes_kinds:
-        minutes_path = data_dir / "minutes" / f"{kind}.db"
-        if not minutes_path.exists():
-            logger.warning(f"  {minutes_path} が見つかりません")
-            continue
-        total += index_minutes_content(index_conn, minutes_path, full_rebuild, dry_run, logger)
+    if not web_only:
+        # minutes_content
+        for kind in minutes_kinds:
+            minutes_path = data_dir / "minutes" / f"{kind}.db"
+            if not minutes_path.exists():
+                logger.warning(f"  {minutes_path} が見つかりません")
+                continue
+            total += index_minutes_content(index_conn, minutes_path, full_rebuild, dry_run, logger)
 
-    # slack_raw（生メッセージ）
-    for channel_id in channel_ids:
-        channel_path = data_dir / f"{channel_id}.db"
-        if not channel_path.exists():
-            logger.warning(f"  {channel_path} が見つかりません")
-            continue
-        total += index_slack_raw(index_conn, channel_path, full_rebuild, dry_run, logger)
+        # slack_raw（生メッセージ）
+        for channel_id in channel_ids:
+            channel_path = data_dir / f"{channel_id}.db"
+            if not channel_path.exists():
+                logger.warning(f"  {channel_path} が見つかりません")
+                continue
+            total += index_slack_raw(index_conn, channel_path, full_rebuild, dry_run, logger)
 
-    # documents（ドキュメントレジストリ）
-    docs_path = data_dir / f"docs_{index_name}.db"
-    if docs_path.exists():
-        total += index_docs(index_conn, docs_path, full_rebuild, dry_run, logger)
+        # documents（ドキュメントレジストリ）
+        docs_path = data_dir / f"docs_{index_name}.db"
+        if docs_path.exists():
+            total += index_docs(index_conn, docs_path, full_rebuild, dry_run, logger)
+
+    # web（外部記事）
+    web_articles_path = data_dir / "web_articles.db"
+    if web_articles_path.exists():
+        total += index_web(index_conn, web_articles_path, index_name, full_rebuild, dry_run, logger)
 
     if not dry_run:
         index_conn.commit()
@@ -531,6 +609,8 @@ def build_index(
 def main() -> None:
     parser = argparse.ArgumentParser(description="QAインデックスDB (FTS5) を構築する")
     parser.add_argument("--full-rebuild", action="store_true", help="全件再構築（差分なし）")
+    parser.add_argument("--web-only", action="store_true",
+                        help="web_articles.db のみ再インデックス（minutes/slack/docs をスキップ）")
     parser.add_argument("--index-name", help="特定インデックスのみ処理（qa_config.yaml のキー名）")
     parser.add_argument("--config", default="data/qa_config.yaml", help="設定ファイルのパス")
     parser.add_argument("--data-dir", default="data", help="data/ ディレクトリのパス")
@@ -555,6 +635,8 @@ def main() -> None:
 
     if args.dry_run:
         logger.info("[DRY-RUN] 書き込みは行いません")
+    if args.web_only:
+        logger.info("[WEB-ONLY] web_articles.db のみ処理します")
 
     indices = config.get("indices", {})
     if args.index_name:
@@ -566,7 +648,11 @@ def main() -> None:
 
     total = 0
     for index_name, index_cfg in indices.items():
-        total += build_index(index_name, index_cfg, data_dir, args.full_rebuild, args.dry_run, logger)
+        total += build_index(
+            index_name, index_cfg, data_dir,
+            args.full_rebuild, args.dry_run, logger,
+            web_only=args.web_only,
+        )
 
     if args.dry_run:
         logger.info(f"\n[DRY-RUN] 合計 {total} チャンク（書き込みなし）")

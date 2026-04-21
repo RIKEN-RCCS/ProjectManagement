@@ -1,0 +1,54 @@
+# web_sources.yaml — 外部Webソース定義
+#
+# フィールド:
+#   name          : 表示名（/argus-ask レスポンスに使用）
+#   url           : フェッチ対象URL（RSSフィードまたはHTMLインデックスページ）
+#   type          : "rss" | "html_index"
+#   link_pattern  : (html_index のみ) 記事リンクを絞り込む正規表現
+#   keywords      : コンテンツフィルタ — いずれか1つを含む記事のみ保存
+#   max_articles  : このソースから1回の実行で最大何件保存するか
+#   target_indices: 記事を組み込む qa_pm*.db インデックス名のリスト
+#   enabled       : false にするとスキップ
+
+sources:
+
+  - name: "RIKEN 富岳NEXT"
+    url: "https://www.r-ccs.riken.jp/topics/"
+    type: html_index
+    link_pattern: "/topics/\\d+"
+    keywords: [富岳NEXT, 富岳, MONAKA, 次世代計算基盤, 富岳後継]
+    max_articles: 30
+    target_indices: [pm, pm-hpc, pm-pmo, pm-all]
+    enabled: true
+
+  - name: "Top500"
+    url: "https://top500.org/news/feed/"
+    type: rss
+    keywords: [富岳, Fugaku, MONAKA, RIKEN, Japan, HPC, NVLink, Benchpark, supercomputer]
+    max_articles: 50
+    target_indices: [pm, pm-hpc, pm-all]
+    enabled: true
+
+  - name: "HPCwire"
+    url: "https://www.hpcwire.com/feed/"
+    type: rss
+    keywords: [Fugaku, RIKEN, Japan, TOP500, supercomputer, HPC, exascale, benchmark]
+    max_articles: 50
+    target_indices: [pm, pm-hpc, pm-all]
+    enabled: true
+
+  - name: "insideHPC"
+    url: "https://insidehpc.com/feed/"
+    type: rss
+    keywords: [Fugaku, RIKEN, TOP500, Japan, HPC, supercomputer, benchmark]
+    max_articles: 50
+    target_indices: [pm, pm-hpc, pm-all]
+    enabled: true
+
+  - name: "NVIDIA Developer Blog"
+    url: "https://developer.nvidia.com/blog/feed/"
+    type: rss
+    keywords: [NVLink, NVSwitch, Hopper, Blackwell, HPC, supercomputer, Japan, MLPerf, benchmark]
+    max_articles: 30
+    target_indices: [pm, pm-hpc, pm-all]
+    enabled: true

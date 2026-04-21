@@ -361,6 +361,8 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
 _SOURCE_TYPE_LABEL = {
     "minutes_content": "議事録本文",
     "slack_raw": "Slackメッセージ",
+    "document": "資料",
+    "web": "Web記事",
 }
 
 _CHANNEL_NAMES: dict[str, str] = {
@@ -379,9 +381,16 @@ _CHANNEL_NAMES: dict[str, str] = {
 
 def _format_source_label(chunk: dict) -> str:
     label = _SOURCE_TYPE_LABEL.get(chunk["source_type"], chunk["source_type"])
+    source_type = chunk["source_type"]
+    if source_type == "web":
+        from urllib.parse import urlparse
+        ref = chunk.get("source_ref") or ""
+        domain = urlparse(ref).netloc.replace("www.", "") if ref else "web"
+        held_at = chunk["held_at"] or "日付不明"
+        return f"{domain} / {label} ({held_at})"
     db_name = chunk["source_db"].replace("minutes/", "").replace(".db", "")
     # Slack チャンネルIDを人名称に変換
-    if chunk["source_type"] == "slack_raw":
+    if source_type == "slack_raw":
         db_name = _CHANNEL_NAMES.get(db_name, db_name)
     held_at = chunk["held_at"] or "日付不明"
     return f"{db_name} / {label} ({held_at})"

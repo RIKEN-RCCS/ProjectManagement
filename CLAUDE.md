@@ -92,7 +92,10 @@ slack/
 │   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
 │   ├── web_utils.py                 # pm_api.py / pm_web.py 共通のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
 │   ├── pm_document_extract.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
-│   ├── pm_embed.py                  # QAインデックス構築（qa_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db のドキュメントも索引化）
+│   ├── pm_document_update.sh        # BOXリンク抽出（pm_document_extract.py）→ FTS5更新（pm_embed.py）を連続実行
+│   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）
+│   ├── pm_web_update.sh             # Web記事取得（pm_web_fetch.py）→ FTS5更新（pm_embed.py --web-only）を連続実行。cron毎朝03:30で自動実行
+│   ├── pm_embed.py                  # QAインデックス構築（qa_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化。--web-only で高速web再インデックス）
 │   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/argus-ask QA・/argus-* コマンドを統合処理）。ハイブリッド検索対応（Intent分類→構造化SQL+FTS5）
 │   ├── pm_qa_start.sh               # pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
 │   ├── pm_qa_stop.sh                # pm_qa_server.py を停止（PIDファイルでプロセス管理）
@@ -109,8 +112,10 @@ slack/
     ├── minutes/                     # 詳細議事録DB（会議名ごとに独立）
     │   └── {kind}.db                # 例: Leader_Meeting.db
     ├── docs_*.db                     # ドキュメントレジストリDB（BOXリンクのメタデータ、暗号化）
+    ├── web_articles.db              # 外部Web記事DB（平文sqlite3、公開情報なので暗号化不要）
+    ├── web_sources.yaml             # 外部Webソース定義（URL・キーワードフィルタ・対象インデックス）
     ├── qa_config.yaml               # QAインデックス定義・チャンネルマッピング
-    ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。docs_*.db のドキュメントも含む）
+    ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。議事録・Slack・docs・web記事を含む）
     ├── secretary_channels.txt       # Argus が生メッセージを収集するチャンネルID一覧
     ├── secretary_canvas_id.txt      # Argus の Canvas 投稿先ID
     └── slack_summarize_*.md         # 全体要約（デバッグ・履歴用）

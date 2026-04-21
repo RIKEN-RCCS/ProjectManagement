@@ -96,6 +96,14 @@ python3 scripts/pm_minutes_to_pm.py --list --since 2026-02-01
 - LLMによるIntent分類で質問を `structured` / `text` / `hybrid` に自動分類
 - 「西澤さんの担当タスクは？」「期限超過アイテムは？」のような構造化質問に直接回答可能
 
+#### 5.7 外部Web情報の取り込み（pm_web_fetch.py、実装済み）
+
+- RIKEN公式サイト・HPC系ニュース（Top500/HPCwire/insideHPC）・NVIDIAブログなどの公開情報を定期取得し `/argus-ask` で検索可能にする
+- `data/web_sources.yaml` でソース・キーワードフィルタ・対象インデックスを定義し、`pm_web_fetch.py` が `data/web_articles.db` に保存する
+- `pm_embed.py --web-only` で高速に FTS5 インデックスに組み込み（議事録・Slack処理をスキップ）
+- `pm_web_update.sh` + cron（毎朝03:30 JST）で完全自動化
+- 出典は `top500.org / Web記事 (2025-11-15)` 形式で表示される
+
 ---
 
 ## 今後の課題（PMフレームワーク観点での欠落領域）

@@ -71,6 +71,8 @@ logs/
 |---|---|---|
 | `minutes_content` | 議事録本文（段落単位チャンク） | 生の議事内容を参照するため |
 | `slack_raw` | Slack生メッセージ（スレッド単位でまとめたチャンク） | 要約で失われるニュアンス・文脈を保持するため |
+| `document` | BOXドキュメントメタデータ（タイトル・説明・種別） | Slack上で共有された資料の発見可能性向上のため |
+| `web` | 外部Web記事（RIKEN公式・HPC系ニュース・NVIDIAブログ等） | プロジェクト関連の公開情報を `/argus-ask` で参照するため |
 
 LLM抽出の `decisions`・`action_items` は**索引対象外**。
 抽出精度の問題で誤情報を提示するリスクがあるため、議事録本文とSlack生メッセージのみを使用する。
@@ -111,8 +113,8 @@ default_index: pm
 ```sql
 CREATE TABLE chunks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_type TEXT NOT NULL,   -- 'minutes_content' | 'slack_raw'
-    source_db   TEXT NOT NULL,   -- 'minutes/Leader_Meeting.db' | 'C08SXA4M7JT.db'
+    source_type TEXT NOT NULL,   -- 'minutes_content' | 'slack_raw' | 'document' | 'web'
+    source_db   TEXT NOT NULL,   -- 'minutes/Leader_Meeting.db' | 'C08SXA4M7JT.db' | 'docs_pm.db' | 'web_articles.db'
     record_id   TEXT,
     held_at     TEXT,            -- YYYY-MM-DD
     content     TEXT NOT NULL,   -- 原文チャンク（最大1000文字）
