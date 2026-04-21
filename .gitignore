@@ -26,6 +26,10 @@ __pycache__/
 .venv/
 venv/
 
+# Claude Code internal files
+.claude/
+PLAN.md
+
 # Secrets
 .secrets/
 *.secrets
