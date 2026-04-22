@@ -188,6 +188,10 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_extr
 
 ---
 
+@docs/ingest_plugin.md
+
+---
+
 @docs/qa_system.md
 
 ---
