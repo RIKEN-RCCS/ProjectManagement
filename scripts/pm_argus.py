@@ -878,8 +878,9 @@ def _run_transcribe(respond, command):
         )
         return
 
-    # Slack WebClient（チャンネル投稿・ファイルダウンロード・アップロード用）
-    # files:read / files:write スコープが必要なため User Token (xoxp-) を使用
+    # Slack WebClient を2種類用意する:
+    #   user_client (xoxp-): files:read / files:write（ファイル操作）
+    #   bot_client  (xoxb-): chat:write（チャンネルへのメッセージ投稿）
     user_token = os.environ.get("SLACK_USER_TOKEN")
     if not user_token:
         respond(
@@ -889,9 +890,19 @@ def _run_transcribe(respond, command):
         )
         return
 
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not bot_token:
+        respond(
+            text=":warning: SLACK_BOT_TOKEN が設定されていません。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
     try:
         from slack_sdk import WebClient
-        client = WebClient(token=user_token)
+        user_client = WebClient(token=user_token)
+        bot_client  = WebClient(token=bot_token)
     except ImportError:
         respond(
             text=":warning: slack_sdk がインストールされていません。",
@@ -918,9 +929,9 @@ def _run_transcribe(respond, command):
         )
         return
 
-    # スレッドを作成して進捗投稿先にする
+    # スレッドを作成して進捗投稿先にする（chat:write は Bot Token で実行）
     try:
-        post = client.chat_postMessage(
+        post = bot_client.chat_postMessage(
             channel=channel_id,
             text=f":hourglass_flowing_sand: `{filename}` の処理を開始します...",
         )
@@ -939,10 +950,9 @@ def _run_transcribe(respond, command):
 
     try:
         logger.info(f"[argus-transcribe] 開始: filename={filename} channel={channel_id}")
-        # pipeline.py 内部の requests.get が SLACK_BOT_TOKEN をヘッダーに使うため
-        # User Token で一時上書きする
-        os.environ["SLACK_BOT_TOKEN"] = user_token
-        pipeline.run_pipeline(client, channel_id, filename, thread_ts)
+        # user_client (xoxp-): ファイルダウンロード・アップロード（files:read / files:write）
+        # pipeline.py 内部でチャンネル投稿が必要な場合は SLACK_BOT_TOKEN を参照する
+        pipeline.run_pipeline(user_client, channel_id, filename, thread_ts)
         logger.info(f"[argus-transcribe] 完了: filename={filename}")
         respond(
             text=f":white_check_mark: `{filename}` の議事録生成が完了しました。スレッドをご確認ください。",
