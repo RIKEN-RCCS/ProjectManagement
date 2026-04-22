@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-pm_extractor.py
+pm_extractor.py — 後方互換 CLI ラッパー
 
-{channel_id}.db の生メッセージを読み込み、LLMで決定事項・アクションアイテムを抽出して
-pm.db に保存する。
+Slack {channel_id}.db の生メッセージから決定事項・アクションアイテムを抽出して pm.db に保存する。
+実装は ingest_slack.py に集約済み。新規利用は pm_ingest.py slack を推奨。
 
 Usage:
     python3 scripts/pm_extractor.py
@@ -11,371 +11,44 @@ Usage:
     python3 scripts/pm_extractor.py -c C08SXA4M7JT --since 2026-01-01
     python3 scripts/pm_extractor.py --force-reextract
     python3 scripts/pm_extractor.py --dry-run
+    python3 scripts/pm_extractor.py --list
 
 Options:
-    -c CHANNEL_ID       対象チャンネルID（デフォルト: C0A9KG036CS）
+    -c / --channel ID   対象チャンネルID（デフォルト: C0A9KG036CS）
     --db-slack PATH     {channel_id}.db のパス（省略時は data/{channel_id}.db）
     --db-pm PATH        pm.db のパス（デフォルト: data/pm.db）
     --since YYYY-MM-DD  この日付以降のスレッドのみ対象
-    --force-reextract   既に抽出済みのスレッドも再抽出
+    --force-reextract   抽出済みスレッドも再抽出
     --dry-run           DB保存なし・結果を標準出力のみ
     --output PATH       標準出力の内容をファイルにも保存
+    --list              抽出済みスレッド一覧を表示して終了
 """
 
 import argparse
-import json
-import re
-import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db_utils import open_db, normalize_assignee
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger, load_claude_md, call_claude
+from db_utils import init_pm_db
+from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
+from ingest_slack import (
+    SlackIngestPlugin,
+    open_slack_db,
+    cmd_list_extractions,
+    ensure_slack_extractions,
+    DEFAULT_CHANNEL,
+)
+from ingest_plugin import IngestContext
 
 
-# --------------------------------------------------------------------------- #
-# パス解決
-# --------------------------------------------------------------------------- #
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
-DEFAULT_CHANNEL = "C0A9KG036CS"
 DEFAULT_PM_DB = REPO_ROOT / "data" / "pm.db"
 
 
-# --------------------------------------------------------------------------- #
-# pm.db スキーマ（meeting_parser.py と共通）
-# --------------------------------------------------------------------------- #
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS meetings (
-    meeting_id   TEXT PRIMARY KEY,
-    held_at      TEXT,
-    kind         TEXT,
-    file_path    TEXT,
-    summary      TEXT,
-    parsed_at    TEXT
-);
-
-CREATE TABLE IF NOT EXISTS action_items (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    meeting_id   TEXT,
-    content      TEXT,
-    assignee     TEXT,
-    due_date     TEXT,
-    status       TEXT DEFAULT 'open',
-    note         TEXT,
-    source       TEXT DEFAULT 'meeting',
-    source_ref   TEXT,
-    extracted_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS decisions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    meeting_id   TEXT,
-    content      TEXT,
-    decided_at   TEXT,
-    source       TEXT DEFAULT 'meeting',
-    source_ref   TEXT,
-    extracted_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS slack_extractions (
-    thread_ts    TEXT,
-    channel_id   TEXT,
-    extracted_at TEXT,
-    PRIMARY KEY (thread_ts, channel_id)
-);
-"""
-
-
-def init_pm_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return open_db(
-        db_path,
-        encrypt=not no_encrypt,
-        schema=SCHEMA,
-        migrations=[
-            "ALTER TABLE action_items ADD COLUMN note TEXT",
-            "ALTER TABLE action_items ADD COLUMN milestone_id TEXT",
-        ],
-    )
-
-
-def fetch_milestones(conn: sqlite3.Connection) -> list[dict]:
-    """pm.db からアクティブなマイルストーン一覧を取得する"""
-    try:
-        rows = conn.execute(
-            "SELECT milestone_id, name, due_date, area FROM milestones WHERE status='active' ORDER BY due_date"
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def format_milestones_for_prompt(milestones: list[dict]) -> str:
-    if not milestones:
-        return "（マイルストーン未登録）"
-    lines = ["| ID | マイルストーン名 | 期限 | エリア |",
-             "|----|----------------|------|--------|"]
-    for m in milestones:
-        lines.append(f"| {m['milestone_id']} | {m['name']} | {m.get('due_date') or '未定'} | {m.get('area') or ''} |")
-    return "\n".join(lines)
-
-
-def open_slack_db(db_path: Path, no_encrypt: bool = False) -> sqlite3.Connection:
-    if not db_path.exists():
-        print(f"ERROR: Slack DBが見つかりません: {db_path}", file=sys.stderr)
-        sys.exit(1)
-    return open_db(db_path, encrypt=not no_encrypt)
-
-
-# --------------------------------------------------------------------------- #
-# CLAUDE.md 読み込み（コンテキスト用）
-# --------------------------------------------------------------------------- #
-def load_context_from_claude_md() -> str:
-    text = load_claude_md(CLAUDE_MD)
-    sections = []
-    capture = False
-    for line in text.splitlines():
-        if re.match(r"^###\s+(ステークホルダー|主なプロジェクト参加者|プロジェクト固有の用語|会議の種類)", line):
-            capture = True
-        elif re.match(r"^---", line) and capture:
-            capture = False
-        if capture:
-            sections.append(line)
-    return "\n".join(sections) if sections else text[:3000]
-
-
-# --------------------------------------------------------------------------- #
-# Slack DB からスレッド（生メッセージ）を取得
-# --------------------------------------------------------------------------- #
-def fetch_threads(
-    slack_conn: sqlite3.Connection,
-    channel_id: str,
-    since: str | None,
-) -> list[dict]:
-    """Slack DB からスレッド（親+返信テキスト結合）一覧を返す"""
-    query = """
-        SELECT m.thread_ts, m.timestamp, m.permalink, m.user_name, m.text
-        FROM messages m
-        WHERE m.channel_id = ?
-    """
-    params: list = [channel_id]
-    if since:
-        query += " AND m.timestamp >= ?"
-        params.append(since)
-    query += " ORDER BY m.timestamp ASC"
-    parents = slack_conn.execute(query, params).fetchall()
-
-    results = []
-    for p in parents:
-        thread_ts = p["thread_ts"]
-        # 親メッセージ
-        lines = [f"[{(p['timestamp'] or '')[:16]}] {p['user_name'] or '不明'}: {p['text'] or ''}"]
-        # 返信
-        replies = slack_conn.execute(
-            "SELECT timestamp, user_name, text FROM replies"
-            " WHERE thread_ts=? AND channel_id=? ORDER BY msg_ts ASC",
-            (thread_ts, channel_id),
-        ).fetchall()
-        for r in replies:
-            lines.append(f"  [{(r['timestamp'] or '')[:16]}] {r['user_name'] or '不明'}: {r['text'] or ''}")
-        results.append({
-            "thread_ts": thread_ts,
-            "thread_text": "\n".join(lines),
-            "timestamp": p["timestamp"],
-            "permalink": p["permalink"],
-            "user_name": p["user_name"],
-        })
-    return results
-
-
-def is_already_extracted(pm_conn: sqlite3.Connection, thread_ts: str, channel_id: str) -> bool:
-    row = pm_conn.execute(
-        "SELECT 1 FROM slack_extractions WHERE thread_ts=? AND channel_id=?",
-        (thread_ts, channel_id),
-    ).fetchone()
-    return row is not None
-
-
-def mark_extracted(pm_conn: sqlite3.Connection, thread_ts: str, channel_id: str) -> None:
-    pm_conn.execute(
-        "INSERT OR REPLACE INTO slack_extractions (thread_ts, channel_id, extracted_at) VALUES (?,?,?)",
-        (thread_ts, channel_id, datetime.now().isoformat()),
-    )
-
-
-# --------------------------------------------------------------------------- #
-# プロンプト
-# --------------------------------------------------------------------------- #
-EXTRACT_PROMPT = """
-あなたは富岳NEXTプロジェクトのプロジェクトマネージャーです。
-以下のSlackスレッドのメッセージを読み、決定事項とアクションアイテムを抽出してください。
-
-## 指示
-
-1. **明示されたものだけ抽出**: メッセージに明示されていない内容を推測・補完しないこと
-2. **出力形式**: 必ず以下のJSON形式のみ出力すること（前後の説明テキスト不要）
-3. 決定事項・アクションアイテムがない場合は空配列 `[]` を返すこと
-4. **マイルストーン紐づけ**: 各アクションアイテムについて、下記「マイルストーン一覧」の
-   いずれかに明らかに関連する場合は milestone_id を記入すること。判断できない場合は null。
-
-## マイルストーン一覧
-
-{milestones}
-
-## プロジェクト文脈
-
-{context}
-
-## Slackスレッド
-
-投稿日時: {timestamp}
-投稿者: {user_name}
-{thread_text}
-
-## 出力JSON形式
-
-```json
-{{
-  "decisions": [
-    {{
-      "content": "決定事項の内容",
-      "decided_at": "YYYY-MM-DD または null"
-    }}
-  ],
-  "action_items": [
-    {{
-      "content": "アクションアイテムの内容",
-      "assignee": "担当者名（不明な場合は null）",
-      "due_date": "YYYY-MM-DD または null",
-      "milestone_id": "マイルストーンID（M1等）または null"
-    }}
-  ]
-}}
-```
-"""
-
-
-def extract_json(text: str) -> dict:
-    m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
-    if m:
-        return json.loads(m.group(1))
-    m = re.search(r"\{[\s\S]+\}", text)
-    if m:
-        return json.loads(m.group(0))
-    raise ValueError(f"JSON not found:\n{text[:300]}")
-
-
-def extract_from_thread(row: dict, context: str, milestones: list[dict]) -> dict:
-    prompt = EXTRACT_PROMPT.format(
-        context=context,
-        timestamp=row.get("timestamp", "不明"),
-        user_name=row.get("user_name", "不明"),
-        thread_text=row["thread_text"],
-        milestones=format_milestones_for_prompt(milestones),
-    )
-    raw = call_claude(prompt)
-    return extract_json(raw)
-
-
-# --------------------------------------------------------------------------- #
-# pm.db へ保存
-# --------------------------------------------------------------------------- #
-def save_slack_items(
-    pm_conn: sqlite3.Connection,
-    thread_ts: str,
-    channel_id: str,
-    permalink: str | None,
-    timestamp: str,
-    extracted: dict,
-) -> tuple[int, int]:
-    now = datetime.now().isoformat()
-    # Slack投稿日（フィルタ・表示用）。タイムスタンプ "2026-01-20 19:43:23" の日付部分を使用
-    post_date = timestamp[:10] if timestamp else now[:10]
-    source_ref = permalink or f"slack://{channel_id}/{thread_ts}"
-
-    d_count = 0
-    for d in extracted.get("decisions", []):
-        if not d.get("content"):
-            continue
-        decided_at = d.get("decided_at") or post_date
-        pm_conn.execute(
-            """
-            INSERT INTO decisions (meeting_id, content, decided_at, source, source_ref, extracted_at)
-            VALUES (?, ?, ?, 'slack', ?, ?)
-            """,
-            (None, d["content"], decided_at, source_ref, post_date),
-        )
-        d_count += 1
-
-    a_count = 0
-    for a in extracted.get("action_items", []):
-        if not a.get("content"):
-            continue
-        pm_conn.execute(
-            """
-            INSERT INTO action_items
-                (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at, milestone_id)
-            VALUES (?, ?, ?, ?, 'open', 'slack', ?, ?, ?)
-            """,
-            (None, a["content"], normalize_assignee(a.get("assignee")), a.get("due_date"),
-             source_ref, post_date, a.get("milestone_id")),
-        )
-        a_count += 1
-
-    return d_count, a_count
-
-
-# --------------------------------------------------------------------------- #
-# 抽出済みスレッド一覧
-# --------------------------------------------------------------------------- #
-def cmd_list_extractions(
-    slack_conn: sqlite3.Connection,
-    pm_conn: sqlite3.Connection,
-    channel_id: str,
-    since: str | None,
-    log=print,
-) -> None:
-    """抽出済みスレッドを一覧表示する"""
-    # slack_extractions は pm.db、messages は Slack DB（別接続）のため JOIN 不可
-    # → それぞれ取得してPython側で結合する
-    se_query = "SELECT thread_ts, extracted_at FROM slack_extractions WHERE channel_id = ?"
-    se_params: list = [channel_id]
-    if since:
-        se_query += " AND extracted_at >= ?"
-        se_params.append(since)
-
-    se_rows = pm_conn.execute(se_query, se_params).fetchall()
-
-    # Slack DB から投稿日時を取得（thread_ts → timestamp）
-    ts_map: dict[str, str] = {}
-    if se_rows:
-        placeholders = ",".join("?" * len(se_rows))
-        ts_rows = slack_conn.execute(
-            f"SELECT thread_ts, timestamp FROM messages WHERE channel_id = ? AND thread_ts IN ({placeholders})",
-            [channel_id] + [r["thread_ts"] for r in se_rows],
-        ).fetchall()
-        ts_map = {r["thread_ts"]: r["timestamp"] for r in ts_rows}
-
-    # 投稿日時でソート
-    sorted_rows = sorted(se_rows, key=lambda r: ts_map.get(r["thread_ts"], r["extracted_at"]))
-
-    log(f"抽出済みスレッド一覧（チャンネル: {channel_id}）")
-    log("─" * 50)
-    for i, row in enumerate(sorted_rows, 1):
-        ts = (ts_map.get(row["thread_ts"]) or "")[:19]
-        extracted = (row["extracted_at"] or "")[:19]
-        log(f"[{i:3d}] {ts}  抽出: {extracted}")
-    log(f"合計: {len(sorted_rows)} 件")
-
-
-# --------------------------------------------------------------------------- #
-# メイン
-# --------------------------------------------------------------------------- #
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Slack生メッセージ → pm.db への決定事項・アクションアイテム抽出")
+    parser = argparse.ArgumentParser(
+        description="Slack生メッセージ → pm.db への決定事項・アクションアイテム抽出"
+    )
     parser.add_argument("-c", "--channel", default=DEFAULT_CHANNEL, help="対象チャンネルID")
     parser.add_argument("--db-slack", default=None, help="{channel_id}.db のパス")
     parser.add_argument("--db-pm", default=None, help="pm.db のパス")
@@ -393,86 +66,40 @@ def main() -> None:
 
     log, close_log = make_logger(args.output)
 
-    # --list モード
+    pm_conn = init_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
+
     if args.list:
         slack_conn = open_slack_db(slack_db_path, no_encrypt=args.no_encrypt)
-        pm_conn = init_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
+        ensure_slack_extractions(pm_conn)
         cmd_list_extractions(slack_conn, pm_conn, channel_id, args.since, log=log)
         slack_conn.close()
         pm_conn.close()
         close_log()
         return
 
-    log(f"[INFO] チャンネル  : {channel_id}")
-    log(f"[INFO] Slack DB    : {slack_db_path}")
-    log(f"[INFO] PM DB       : {pm_db_path}")
-    if args.since:
-        log(f"[INFO] since       : {args.since}")
+    # 従来の -c/--channel, --db-slack, --force-reextract フラグを
+    # プラグインの --slack-* 相当の属性として設定する
+    args.slack_channel = channel_id
+    args.slack_db = args.db_slack
+    args.slack_force_reextract = args.force_reextract
+    args.slack_list = False
 
-    slack_conn = open_slack_db(slack_db_path, no_encrypt=args.no_encrypt)
-    pm_conn = init_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
-    context = load_context_from_claude_md()
-    milestones = fetch_milestones(pm_conn)
-    log(f"[INFO] マイルストーン: {len(milestones)} 件")
+    ctx = IngestContext(
+        pm_conn=pm_conn,
+        pm_db_path=pm_db_path,
+        dry_run=args.dry_run,
+        no_encrypt=args.no_encrypt,
+        since=args.since,
+        log=log,
+        repo_root=REPO_ROOT,
+    )
 
-    threads = fetch_threads(slack_conn, channel_id, args.since)
-    log(f"[INFO] 対象スレッド: {len(threads)} 件")
-
-    total_d = total_a = skipped = 0
-
-    for i, row in enumerate(threads, 1):
-        ts = row["thread_ts"]
-        if not args.force_reextract and is_already_extracted(pm_conn, ts, channel_id):
-            skipped += 1
-            continue
-
-        log(f"\n[{i}/{len(threads)}] {row.get('user_name')} ({row.get('timestamp', '')[:16]})")
-
-        if args.dry_run:
-            log("  [INFO] --dry-run のため LLM呼び出し・DB保存をスキップしました")
-            skipped += 1
-            continue
-
-        try:
-            extracted = extract_from_thread(row, context, milestones)
-        except Exception as e:
-            log(f"  [WARN] 抽出失敗: {e}")
-            continue
-
-        d_count = len(extracted.get("decisions", []))
-        a_count = len(extracted.get("action_items", []))
-
-        if d_count == 0 and a_count == 0:
-            log("  → 決定事項・アクションアイテムなし")
-        else:
-            for d in extracted.get("decisions", []):
-                log(f"  [決定] {d['content']}")
-            for a in extracted.get("action_items", []):
-                assignee = a.get("assignee") or "未定"
-                due = f" (期限: {a['due_date']})" if a.get("due_date") else ""
-                log(f"  [AI  ] [{assignee}] {a['content']}{due}")
-
-        if not args.dry_run:
-            nd, na = save_slack_items(
-                pm_conn, ts, channel_id,
-                row.get("permalink"), row.get("timestamp", ""), extracted,
-            )
-            mark_extracted(pm_conn, ts, channel_id)
-            pm_conn.commit()
-            total_d += nd
-            total_a += na
-        else:
-            total_d += d_count
-            total_a += a_count
-
-    slack_conn.close()
-    pm_conn.close()
-
-    log("\n" + "=" * 60)
-    log(f"完了: decisions={total_d}件, action_items={total_a}件, スキップ={skipped}件")
-    if args.dry_run:
-        log("[INFO] --dry-run のため DB保存をスキップしました")
-    close_log()
+    plugin = SlackIngestPlugin()
+    try:
+        plugin.run(args, ctx)
+    finally:
+        pm_conn.close()
+        close_log()
 
 
 if __name__ == "__main__":
