@@ -420,7 +420,7 @@ cat logs/pm_qa_server.pid | xargs kill -0 && echo 起動中 || echo 停止中
 | `SLACK_APP_TOKEN` | 必須 | なし | App-Level Token（`xapp-`）|
 | `OPENAI_API_BASE` | 必須 | なし | vLLMエンドポイント |
 | `OPENAI_API_KEY` | 任意 | `"dummy"` | APIキー |
-| `OPENAI_MODEL` | 任意 | `"gemma4"` | モデル名 |
+| （モデル名） | — | 自動取得 | vLLM `/v1/models` から自動検出 |
 | `QA_CONFIG` | 任意 | `data/qa_config.yaml` | 設定ファイルパス |
 
 ---

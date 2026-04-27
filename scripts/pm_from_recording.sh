@@ -35,7 +35,6 @@ export SINGULARITY_BIND=/lvs0
 
 export OPENAI_API_BASE="http://localhost:8000/v1"
 export OPENAI_API_KEY="dummy"
-export OPENAI_MODEL="google/gemma-4-26B-A4B-it"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WHISPER_VAD="$SCRIPT_DIR/whisper_vad.py"
@@ -160,7 +159,6 @@ EOF
   echo "[INFO] generate_minutes_local.py で議事録を生成中: $MEETING_NAME ($DATE_TO_USE)"
   TMPLOG=$(mktemp)
   "$PYTHON3" "$GENERATE_MINUTES_LOCAL" "$BASENAME.md" \
-    --model      "$OPENAI_MODEL" \
     --url        "$OPENAI_API_BASE" \
     --token      "$OPENAI_API_KEY" \
     --output     "$(dirname "$BASENAME")" \

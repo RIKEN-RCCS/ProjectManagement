@@ -46,7 +46,7 @@ CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 PROJECT_MD = REPO_ROOT / "docs" / "project.md"
 
 sys.path.insert(0, str(SCRIPT_DIR))
-from cli_utils import strip_think_blocks, call_local_llm, load_claude_md_context
+from cli_utils import strip_think_blocks, call_local_llm, load_claude_md_context, detect_vllm_model
 
 
 # --------------------------------------------------------------------------- #
@@ -530,7 +530,7 @@ def main() -> int:
         description="ローカルLLMを使用して文字起こしから議事録を生成する"
     )
     parser.add_argument("transcript", help="文字起こし .md/.txt ファイルのパス")
-    parser.add_argument("--model", required=True, help="使用するモデル名")
+    parser.add_argument("--model", default=None, help="使用するモデル名（省略時は vLLM /v1/models から自動取得）")
     parser.add_argument(
         "--output", "-o",
         default="minutes",
@@ -571,7 +571,11 @@ def main() -> int:
         os.environ["RIVAULT_TOKEN"] = args.token
     base_url, api_key = load_rivault_tokens()
 
-    print(f"[INFO] モデル      : {args.model}")
+    if not args.model:
+        args.model = detect_vllm_model(base_url)
+        print(f"[INFO] モデル      : {args.model}（自動取得）")
+    else:
+        print(f"[INFO] モデル      : {args.model}")
     print(f"[INFO] 思考モード  : {'有効' if args.think else '無効'}")
     if args.think and args.no_chat_template_kwargs:
         print(f"[INFO] chat_template_kwargs: 送信しない（常時 reasoning モデル）")

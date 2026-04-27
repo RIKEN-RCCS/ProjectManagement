@@ -237,7 +237,8 @@ def _get_local_llm_params() -> tuple[str, str, str]:
             "  export OPENAI_API_BASE='http://localhost:8000/v1'"
         )
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
-    model = os.environ.get("OPENAI_MODEL", "google/gemma-4-26B-A4B-it")
+    from cli_utils import detect_vllm_model
+    model = detect_vllm_model(base_url)
     return model, base_url, api_key
 
 

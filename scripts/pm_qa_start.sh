@@ -41,7 +41,6 @@ fi
 # ローカルLLM設定（デフォルト値、.secrets/slack_tokens.sh での上書き可）
 export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
-export OPENAI_MODEL="${OPENAI_MODEL:-google/gemma-4-26B-A4B-it}"
 export QA_INDEX_DB="${QA_INDEX_DB:-$REPO_ROOT/data/qa_index.db}"
 
 # 起動確認: すでに動いていれば終了
