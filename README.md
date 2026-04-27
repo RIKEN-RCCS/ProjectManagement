@@ -283,7 +283,6 @@ cat > ~/.secrets/slack_tokens.sh << 'EOF'
 export SLACK_USER_TOKEN="xoxp-..."
 export OPENAI_API_BASE="http://localhost:8000/v1"
 export OPENAI_API_KEY="dummy"
-export OPENAI_MODEL="google/gemma-4-26B-A4B-it"
 EOF
 chmod 600 ~/.secrets/slack_tokens.sh
 ```

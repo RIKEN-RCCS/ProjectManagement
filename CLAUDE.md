@@ -74,6 +74,7 @@ slack/
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack差分取得（SDK経由）。新規・更新スレッドのみ取得してDBに保存。--skip-fetch でAPI取得スキップ、--list でスレッド一覧表示
 │   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存）。--export でDB内容をMarkdownにエクスポート、--no-llm で人間修正済みMarkdownをLLM不使用で再インポート。--post-to-slack でSlack投稿。--delete で削除
+│   ├── pm_minutes_catalog.py        # 議事録一括アップロード・Canvas目録生成（minutes_channels.yaml で会議種別→チャンネルを定義）
 │   ├── pm_minutes_to_pm.py          # data/minutes/{kind}.db → pm.db 転記（LLM不使用。--delete で削除）
 │   ├── pm_extractor.py              # Slack DB生メッセージ → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿（SlackリンクはクリッカブルURL形式）。--show-workload で担当者別負荷セクションを追加出力
@@ -113,6 +114,7 @@ slack/
     ├── docs_*.db                     # ドキュメントレジストリDB（BOXリンクのメタデータ、暗号化）
     ├── web_articles.db              # 外部Web記事DB（平文sqlite3、公開情報なので暗号化不要）
     ├── web_sources.yaml             # 外部Webソース定義（URL・キーワードフィルタ・対象インデックス）
+    ├── minutes_channels.yaml         # 議事録アップロード先チャンネル・目録Canvas定義（pm_minutes_catalog.py 用）
     ├── qa_config.yaml               # QAインデックス定義・チャンネルマッピング
     ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。議事録・Slack・docs・web記事を含む）
     ├── secretary_channels.txt       # Argus が生メッセージを収集するチャンネルID一覧
@@ -143,11 +145,10 @@ python3 scripts/slack_pipeline.py ...
 ```sh
 export OPENAI_API_BASE="http://localhost:8000/v1"   # vLLM エンドポイント
 export OPENAI_API_KEY="dummy"                        # 認証不要のローカルサーバは "dummy" で可
-export OPENAI_MODEL="google/gemma-4-26B-A4B-it"     # サーバに読み込まれているモデル名
 export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_extractor）
 ```
 
-`OPENAI_API_BASE` が設定されている場合、`call_claude()` は Claude CLI の代わりにローカルLLMを呼び出す（`cli_utils.py` の `call_local_llm()` 経由）。会議録音処理（`pm_from_recording.sh`）はこれらの変数をスクリプト内でハードコードしているため、別途設定は不要。
+`OPENAI_API_BASE` が設定されている場合、`call_claude()` は Claude CLI の代わりにローカルLLMを呼び出す（`cli_utils.py` の `call_local_llm()` 経由）。モデル名は vLLM の `/v1/models` API から自動取得するため、`OPENAI_MODEL` の設定は不要。
 
 `OPENAI_MAX_TOKENS` は Slack 抽出（`pm_extractor.py`）の最大出力トークン数。会議録音処理では `generate_minutes_local.py` の `--max-tokens 16384` が使われるため本変数は影響しない。
 
