@@ -37,6 +37,9 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 from cli_utils import call_local_llm, load_claude_md_context
 from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
 from pm_argus import _run_brief, _run_draft, _run_risk, _run_transcribe, _transcribe_jobs, _transcribe_lock
+from pm_argus_agent import _run_investigate
+from patrol_confirm import handle_approve_close, handle_reject_close
+from patrol_state import PatrolState
 
 logging.basicConfig(
     level=logging.INFO,
@@ -758,6 +761,42 @@ def build_app():
         ack()
         respond(text=":hourglass_flowing_sand: Argus リスク分析中...", response_type="ephemeral")
         executor.submit(_run_risk, respond, command)
+
+    @app.command("/argus-investigate")
+    def handle_argus_investigate(ack, respond, command):
+        ack()
+        question = (command.get("text") or "").strip()
+        if not question:
+            respond(
+                text=(
+                    "調査内容を入力してください。\n"
+                    "例: `/argus-investigate M3の遅延原因を調査して`\n"
+                    "例: `/argus-investigate 先週の決定事項が実行されているか確認`"
+                ),
+                response_type="ephemeral",
+            )
+            return
+        respond(text=f":mag: `{question[:80]}`", response_type="ephemeral")
+        executor.submit(_run_investigate, respond, command)
+
+    # --- Patrol Agent Block Kit ボタンハンドラ ---
+
+    _patrol_state = PatrolState(_REPO_ROOT / "data" / "patrol_state.db")
+
+    @app.action("patrol_approve_close")
+    def on_approve_close(ack, body, client):
+        ack()
+        conn = open_pm_db(_REPO_ROOT / "data" / "pm.db")
+        try:
+            handle_approve_close(body, client, _patrol_state, conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    @app.action("patrol_reject_close")
+    def on_reject_close(ack, body, client):
+        ack()
+        handle_reject_close(body, client, _patrol_state)
 
     def _handle_transcribe_command(ack, respond, command, example_cmd):
         """共通: 文字起こしコマンドの受付・排他制御・バックグラウンド実行。"""

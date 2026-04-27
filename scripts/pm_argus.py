@@ -28,6 +28,8 @@ import logging
 import os
 import sys
 import threading
+
+import yaml
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -55,7 +57,7 @@ from format_utils import (
 _DATA_DIR = _REPO_ROOT / "data"
 _MINUTES_DIR = _DATA_DIR / "minutes"
 _PM_DB = _DATA_DIR / "pm.db"
-_SECRETARY_CHANNELS_FILE = _DATA_DIR / "secretary_channels.txt"
+_QA_CONFIG_FILE = _DATA_DIR / "qa_config.yaml"
 _SECRETARY_CANVAS_ID_FILE = _DATA_DIR / "secretary_canvas_id.txt"
 
 _DEFAULT_SINCE_DAYS = 30
@@ -74,12 +76,19 @@ from transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
 # データ収集
 # --------------------------------------------------------------------------- #
 
-def _load_channel_ids() -> list[str]:
-    """data/secretary_channels.txt からチャンネルIDリストを読み込む"""
-    if not _SECRETARY_CHANNELS_FILE.exists():
+def _load_channel_ids(index_name: str | None = None) -> list[str]:
+    """qa_config.yaml からチャンネルIDリストを読み込む。
+
+    index_name を指定すると、そのインデックスの channels のみ返す。
+    省略時は default_index のチャンネルを返す。
+    """
+    if not _QA_CONFIG_FILE.exists():
         return []
-    lines = _SECRETARY_CHANNELS_FILE.read_text(encoding="utf-8").splitlines()
-    return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+    with open(_QA_CONFIG_FILE, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    indices = cfg.get("indices") or {}
+    target = index_name or cfg.get("default_index", "pm")
+    return indices.get(target, {}).get("channels", [])
 
 
 _MAX_CHARS_PER_CHANNEL = 20000   # 1チャンネルあたりの最大文字数（最新を優先）
