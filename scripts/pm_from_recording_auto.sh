@@ -43,7 +43,7 @@ is_valid_meeting_name() {
     local name="$1"
     case "$name" in
         Leader_Meeting|Block1_Meeting|Block2_Meeting|SubWG_Meeting|\
-        BenchmarkWG_Meeting|Co-design_Review_Meeting)
+        BenchmarkWG_Meeting|Co-design_Review_Meeting|ApplicationDiscussion)
             return 0 ;;
         SubWG[0-9]*_Meeting)
             return 0 ;;
@@ -55,6 +55,7 @@ is_valid_meeting_name() {
 # --------------------------------------------------------------------------- #
 # meeting-name → pm.db パスのマッピング
 #   Leader_Meeting / Co-design_Review_Meeting → pm.db
+#   ApplicationDiscussion                      → pm-personal.db
 #   Block1/Block2/SubWG系                     → pm-hpc.db
 #   BenchmarkWG_Meeting                        → pm-bmt.db
 # --------------------------------------------------------------------------- #
@@ -63,6 +64,8 @@ get_pm_db() {
     case "$name" in
         Leader_Meeting|Co-design_Review_Meeting)
             echo "$REPO_ROOT/data/pm.db" ;;
+        ApplicationDiscussion)
+            echo "$REPO_ROOT/data/pm-personal.db" ;;
         Block1_Meeting|Block2_Meeting|SubWG_Meeting|SubWG[0-9]*_Meeting)
             echo "$REPO_ROOT/data/pm-hpc.db" ;;
         BenchmarkWG_Meeting)
@@ -225,86 +228,35 @@ if [[ ${#BATCH_FILES[@]} -eq 0 ]]; then
 fi
 
 # --------------------------------------------------------------------------- #
-# パーティション選択
+# 直接実行（全ファイルを順次処理）
 # --------------------------------------------------------------------------- #
-has_available_nodes() {
-    sinfo -p "$1" --noheader -o "%t" 2>/dev/null | grep -qE "^(idle|mix)$"
-}
-
-if has_available_nodes "ai-h100l-pu"; then
-    PARTITION="ai-h100l-pu"
-    EXTRA_OPTS=""
-    TIME_LIMIT="00:30:00"
-    log "[INFO] ai-h100l-pu に空きあり → ai-h100l-pu に投入"
-elif has_available_nodes "a100"; then
-    PARTITION="a100"
-    EXTRA_OPTS=""
-    TIME_LIMIT="24:00:00"
-    log "[INFO] a100 に空きあり → a100 に投入"
-elif has_available_nodes "ai-h200-brc"; then
-    PARTITION="ai-h200-brc"
-    EXTRA_OPTS="--gpus=1"
-    TIME_LIMIT="24:00:00"
-    log "[INFO] ai-h200-brc に空きあり → ai-h200-brc に投入"
-elif has_available_nodes "qc-a100"; then
-    PARTITION="qc-a100"
-    EXTRA_OPTS="--gpus=1"
-    TIME_LIMIT="24:00:00"
-    log "[INFO] qc-a100 に空きあり → qc-a100 に投入"
-elif has_available_nodes "ai-l40s"; then
-    PARTITION="ai-l40s"
-    EXTRA_OPTS="--gpus=1"
-    TIME_LIMIT="24:00:00"
-    log "[INFO] ai-l40s に空きあり → ai-l40s に投入"
-elif has_available_nodes "qc-gh200"; then
-    PARTITION="qc-gh200"
-    EXTRA_OPTS=""
-    TIME_LIMIT="24:00:00"
-    log "[INFO] qc-gh200 に空きあり → qc-gh200 に投入"
-else
-    PARTITION="ai-h100l-pu"
-    EXTRA_OPTS=""
-    TIME_LIMIT="00:30:00"
-    log "[INFO] 全パーティション混雑 → デフォルト ai-h100l-pu に投入"
+if [[ -n "$SLACK_CHANNEL" ]]; then
+    . ~/.secrets/slack_tokens.sh
 fi
 
-# --------------------------------------------------------------------------- #
-# 一時バッチスクリプトを生成（全ファイルを1ジョブで順次処理）
-# SLURM_JOB_ID が設定された環境で pm_from_recording.sh を呼ぶと処理モードに入る
-# --------------------------------------------------------------------------- #
-BATCH_SCRIPT=$(mktemp /tmp/auto_batch_XXXXXX.sh)
-{
-    echo "#!/bin/bash"
-    echo "#SBATCH --nodes=1"
-    echo "#SBATCH --time=${TIME_LIMIT}"
-    echo ""
-    if [[ -n "$SLACK_CHANNEL" ]]; then
-        echo ". ~/.secrets/slack_tokens.sh"
-        echo ""
-    fi
-    for i in "${!BATCH_FILES[@]}"; do
-        printf "bash '%s/pm_from_recording.sh' '%s' --held-at '%s' --meeting-name '%s' --db '%s'\n" \
-            "$SCRIPT_DIR" "${BATCH_FILES[$i]}" "${BATCH_HELD_AT[$i]}" "${BATCH_NAMES[$i]}" "${BATCH_DBS[$i]}"
+processed=0
+failed=0
+
+for i in "${!BATCH_FILES[@]}"; do
+    log "[RUN] ${BATCH_FILES[$i]} → meeting=${BATCH_NAMES[$i]}, held_at=${BATCH_HELD_AT[$i]}, db=$(basename "${BATCH_DBS[$i]}")"
+    bash "$SCRIPT_DIR/pm_from_recording.sh" \
+        "${BATCH_FILES[$i]}" \
+        --held-at "${BATCH_HELD_AT[$i]}" \
+        --meeting-name "${BATCH_NAMES[$i]}" \
+        --db "${BATCH_DBS[$i]}" \
+        2>&1 | tee -a "$LOG_FILE"
+    if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+        processed=$((processed + 1))
         if [[ -n "$SLACK_CHANNEL" ]]; then
-            printf "if [[ \$? -eq 0 ]]; then\n"
-            printf "  bash '%s/slack_post_minutes.sh' --meeting-name '%s' --held-at '%s' -c '%s'\n" \
-                "$SCRIPT_DIR" "${BATCH_NAMES[$i]}" "${BATCH_HELD_AT[$i]}" "$SLACK_CHANNEL"
-            printf "fi\n"
+            bash "$SCRIPT_DIR/slack_post_minutes.sh" \
+                --meeting-name "${BATCH_NAMES[$i]}" \
+                --held-at "${BATCH_HELD_AT[$i]}" \
+                -c "$SLACK_CHANNEL" 2>&1 | tee -a "$LOG_FILE"
         fi
-        echo ""
-    done
-} > "$BATCH_SCRIPT"
+    else
+        log "[ERROR] 処理失敗: ${BATCH_FILES[$i]}"
+        failed=$((failed + 1))
+    fi
+done
 
-# --------------------------------------------------------------------------- #
-# sbatch 投入
-# --------------------------------------------------------------------------- #
-file_list=$(printf "'%s' " "${BATCH_FILES[@]}")
-log "[SUBMIT] ${#BATCH_FILES[@]} 件を1ジョブで投入: $file_list"
-
-# shellcheck disable=SC2086
-JOB_OUTPUT=$(sbatch --partition="$PARTITION" $EXTRA_OPTS "$BATCH_SCRIPT" 2>&1)
-log "$JOB_OUTPUT"
-
-rm -f "$BATCH_SCRIPT"
-
-log "=== 完了: 投入=${#BATCH_FILES[@]} 件, スキップ=$skipped 件 ==="
+log "=== 完了: 処理=${processed} 件, 失敗=${failed} 件, スキップ=$skipped 件 ==="

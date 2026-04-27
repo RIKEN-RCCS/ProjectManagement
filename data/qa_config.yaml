@@ -51,7 +51,7 @@ indices:
 
   pm-all:
     db: data/qa_pm-all.db
-    minutes: [Leader_Meeting, Co-design_Review_Meeting, Block1_Meeting, Block2_Meeting, SubWG1_Meeting, SubWG3_Meeting, SubWG4_Meeting, SubWG6_Meeting, SubWG7_Meeting, SubWG8_Meeting, BenchmarkWG_Meeting]
+    minutes: [Leader_Meeting, Co-design_Review_Meeting, Block1_Meeting, Block2_Meeting, SubWG1_Meeting, SubWG3_Meeting, SubWG4_Meeting, SubWG6_Meeting, SubWG7_Meeting, SubWG8_Meeting, BenchmarkWG_Meeting, ApplicationDiscussion, OperationProtocol]
     channels: [C08M002D7TQ, C08PE3K9N72, C09AANCC649, C097A2P387R, C0A5MRRP268, C0AS2JKS200, C09JMEA157E, C08M0249GRL, C08SXA4M7JT, C08LSJP4R6K, C093DQFSCRH, C093LP1J15G, C08MJ0NF5UZ, C096ER1A0LU, C0A6AC59AHM]
 
 # /ask 実行チャンネル → インデックス名のマッピング
