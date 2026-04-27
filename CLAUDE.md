@@ -82,6 +82,13 @@ slack/
 │   ├── pm_relink.py                 # アクションアイテム・決定事項の各フィールドをCSV経由で一括編集（LLM不使用）。deleted(0/1)でアイテムの有効化/削除も可能。--include-deleted で削除済みアイテムを対象に含める
 │   ├── pm_insight.py                # pm.db → LLMによるプロジェクト健全性評価・リスク特定・改善提案を生成・Canvas投稿
 │   ├── pm_argus.py                  # Argus AI — Slack・議事録・pm.db統合分析（ブリーフィング・リスク分析・草案生成）
+│   ├── pm_argus_agent.py            # Argus Investigation Agent — LLM駆動マルチステップ調査（/argus-investigate）
+│   ├── pm_argus_patrol.py           # Argus Patrol Agent — 自律型PM巡回（リマインダー・完了確認・エスカレーション）。cron 30分間隔で実行
+│   ├── patrol_state.py              # Patrol 冪等性DB（patrol_state.db）・スロットリング・承認待ち管理
+│   ├── patrol_detect.py             # Patrol 検出ルール（完了シグナル・期限超過・停滞・健全性、決定論的・LLM不使用）
+│   ├── patrol_actions.py            # Patrol アクション実行（Slack投稿・Block Kit・DB書き込み・audit_log）
+│   ├── patrol_confirm.py            # Patrol Block Kit ボタンハンドラ（承認/却下、pm_qa_server.py から呼ばれる）
+│   ├── patrol_users.py              # 担当者名（日本語表示名）→ Slack user_id 解決（キャッシュ・DB マイニング・API フォールバック）
 │   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── pm_api.py                    # FastAPI REST API + 静的フロントエンド配信。pm.db のアクションアイテム・決定事項・議事録・ファイル一覧を提供。web_utils.py を使用
 │   ├── pm_web.py                    # [非推奨] pm.db 編集 Web UI（NiceGUI）。現用は pm_api.py（FastAPI）
@@ -115,10 +122,11 @@ slack/
     ├── web_articles.db              # 外部Web記事DB（平文sqlite3、公開情報なので暗号化不要）
     ├── web_sources.yaml             # 外部Webソース定義（URL・キーワードフィルタ・対象インデックス）
     ├── minutes_channels.yaml         # 議事録アップロード先チャンネル・目録Canvas定義（pm_minutes_catalog.py 用）
-    ├── qa_config.yaml               # QAインデックス定義・チャンネルマッピング
+    ├── qa_config.yaml               # QAインデックス定義・チャンネルマッピング（/argus-ask・/argus-investigate・Argus ブリーフィング共通）
     ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。議事録・Slack・docs・web記事を含む）
-    ├── secretary_channels.txt       # Argus が生メッセージを収集するチャンネルID一覧
     ├── secretary_canvas_id.txt      # Argus の Canvas 投稿先ID
+    ├── patrol_config.yaml           # Patrol Agent 設定（検出器の有効/無効・閾値・通知チャンネル）
+    ├── patrol_state.db              # Patrol Agent 冪等性DB（通知履歴・承認待ち・ユーザーキャッシュ、平文sqlite3）
     └── slack_summarize_*.md         # 全体要約（デバッグ・履歴用）
 ```
 
