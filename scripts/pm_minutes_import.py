@@ -642,7 +642,7 @@ def cmd_export(minutes_dir: Path, meeting_id: str, kind_filter: str | None,
         }
         conn.close()
 
-        md = _reconstruct_minutes_md(held_at, kind, data)
+        md = reconstruct_minutes_md(held_at, kind, data)
 
         if output_path:
             Path(output_path).write_text(md, encoding="utf-8")
@@ -1025,7 +1025,7 @@ def _get_slack_token() -> tuple[str, str]:
     return token, kind_label
 
 
-def _reconstruct_minutes_md(held_at: str, kind: str, data: dict) -> str:
+def reconstruct_minutes_md(held_at: str, kind: str, data: dict) -> str:
     """
     DB から取得した decisions・action_items・minutes_content を Markdown に再構築する。
     元の .md ファイルが削除済みの場合のフォールバック用。
@@ -1062,7 +1062,7 @@ def _reconstruct_minutes_md(held_at: str, kind: str, data: dict) -> str:
     return "\n".join(lines)
 
 
-def _upload_md_file(client, channel_id: str, md_path: Path | None,
+def upload_md_file(client, channel_id: str, md_path: Path | None,
                     held_at: str, kind: str, log,
                     fallback_content: str | None = None,
                     thread_ts: str | None = None) -> str | None:
@@ -1079,17 +1079,17 @@ def _upload_md_file(client, channel_id: str, md_path: Path | None,
 
     if md_path and md_path.exists():
         upload_path = md_path
-        filename = md_path.name
+        filename = md_path.with_suffix(".txt").name
         tmp_to_delete = None
     elif fallback_content:
         log("[INFO] 議事録 .md ファイルが見つかりません。DBから議事録を再構築してアップロードします")
         tf = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", encoding="utf-8", delete=False
+            mode="w", suffix=".txt", encoding="utf-8", delete=False
         )
         tf.write(fallback_content)
         tf.close()
         upload_path = Path(tf.name)
-        filename = f"{held_at}_{kind}.md"
+        filename = f"{held_at}_{kind}.txt"
         tmp_to_delete = upload_path
     else:
         log("[WARN] 議事録 .md ファイルも再構築コンテンツもありません。アップロードをスキップします")
@@ -1182,7 +1182,7 @@ def cmd_post_to_slack(args, minutes_dir: Path, meetings_dir: Path, log) -> None:
     thread_ts = getattr(args, "thread_ts", None)
 
     if args.dry_run:
-        fallback = _reconstruct_minutes_md(args.held_at, args.meeting_name, data)
+        fallback = reconstruct_minutes_md(args.held_at, args.meeting_name, data)
         dest = f"スレッド {thread_ts}" if thread_ts else f"チャンネル #{args.channel}"
         log("\n" + "=" * 60)
         log(f"[dry-run] アップロード先: {dest}")
@@ -1197,8 +1197,8 @@ def cmd_post_to_slack(args, minutes_dir: Path, meetings_dir: Path, log) -> None:
     log(f"[INFO] トークン種別: {token_kind}")
     client = WebClient(token=token)
 
-    fallback = _reconstruct_minutes_md(args.held_at, args.meeting_name, data) if not md_path else None
-    permalink = _upload_md_file(client, args.channel, md_path, args.held_at, args.meeting_name, log,
+    fallback = reconstruct_minutes_md(args.held_at, args.meeting_name, data) if not md_path else None
+    permalink = upload_md_file(client, args.channel, md_path, args.held_at, args.meeting_name, log,
                                 fallback_content=fallback, thread_ts=thread_ts)
 
     if permalink:
