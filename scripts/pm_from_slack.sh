@@ -36,7 +36,6 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 export OPENAI_API_BASE="http://localhost:8000/v1"
 export OPENAI_API_KEY="dummy"
-export OPENAI_MODEL="google/gemma-4-26B-A4B-it"
 
 # --------------------------------------------------------------------------- #
 # 引数パース

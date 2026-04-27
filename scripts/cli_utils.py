@@ -256,6 +256,21 @@ def call_local_llm(
     return stripped
 
 
+def detect_vllm_model(base_url: str) -> str:
+    """vLLM の /v1/models エンドポイントからモデル名を自動取得する。"""
+    import urllib.request, json  # noqa: E401
+    url = base_url.rstrip("/") + "/models"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+        models = [m["id"] for m in data.get("data", [])]
+        if not models:
+            raise RuntimeError(f"vLLM にモデルが見つかりません: {url}")
+        return models[0]
+    except Exception as e:
+        raise RuntimeError(f"vLLM モデル自動取得に失敗: {url} — {e}") from e
+
+
 def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
     """
     call_local_llm() を環境変数経由で呼び出すラッパー。

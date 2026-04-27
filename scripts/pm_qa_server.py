@@ -15,7 +15,7 @@ pm_qa_server.py - Slack Slash Command QA サーバー（Socket Mode）
   SLACK_APP_TOKEN   必須: App-Level Token (xapp-)
   OPENAI_API_BASE   必須: vLLM エンドポイント
   OPENAI_API_KEY    デフォルト: "dummy"
-  OPENAI_MODEL      デフォルト: "gemma4"
+  （モデル名は vLLM /v1/models から自動取得）
   QA_CONFIG         デフォルト: data/qa_config.yaml（スクリプト基準）
 """
 
@@ -99,7 +99,13 @@ RERANK_TIMEOUT = 30
 
 _OPENAI_BASE = os.environ.get("OPENAI_API_BASE", "")
 _OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "dummy")
-_OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gemma4")
+_OPENAI_MODEL = ""
+if _OPENAI_BASE:
+    try:
+        from cli_utils import detect_vllm_model
+        _OPENAI_MODEL = detect_vllm_model(_OPENAI_BASE)
+    except Exception as _e:
+        print(f"[WARN] vLLM モデル自動検出に失敗: {_e}", file=sys.stderr)
 
 _PROJECT_CONTEXT = ""
 
@@ -753,15 +759,15 @@ def build_app():
         respond(text=":hourglass_flowing_sand: Argus リスク分析中...", response_type="ephemeral")
         executor.submit(_run_risk, respond, command)
 
-    @app.command("/argus-transcribe")
-    def handle_argus_transcribe(ack, respond, command):
+    def _handle_transcribe_command(ack, respond, command, example_cmd):
+        """共通: 文字起こしコマンドの受付・排他制御・バックグラウンド実行。"""
         ack()
         filename = (command.get("text") or "").strip()
         if not filename:
             respond(
                 text=(
                     "ファイル名を指定してください。\n"
-                    "例: `/argus-transcribe GMT20260302-032528_Recording.mp4`"
+                    f"例: `{example_cmd} GMT20260302-032528_Recording.mp4`"
                 ),
                 response_type="ephemeral",
             )
@@ -782,6 +788,56 @@ def build_app():
             response_type="ephemeral",
         )
         executor.submit(_run_transcribe, respond, command)
+
+    @app.command("/argus-transcribe")
+    def handle_argus_transcribe(ack, respond, command):
+        _handle_transcribe_command(ack, respond, command, "/argus-transcribe")
+
+    @app.command("/transcribe")
+    def handle_transcribe(ack, respond, command):
+        _handle_transcribe_command(ack, respond, command, "/transcribe")
+
+    @app.command("/delete")
+    def handle_delete(ack, client, command):
+        filename = (command.get("text") or "").strip()
+        channel_id = command.get("channel_id", "")
+
+        if not filename:
+            ack("使い方: `/delete <ファイル名>`")
+            return
+
+        # Bold書式のアスタリスクを除去（例: *foo.md* → foo.md）
+        filename = filename.strip("*")
+        # 拡張子がなければ .md を付加
+        if "." not in filename:
+            filename += ".md"
+
+        ack(f"`{filename}` を検索して削除します...")
+
+        response = client.files_list(channel=channel_id, types="all")
+        files = response.get("files", [])
+        matched = [f for f in files if f.get("name") == filename]
+
+        if not matched:
+            client.chat_postMessage(
+                channel=channel_id,
+                text=f"`{filename}` がこのチャンネルに見つかりませんでした。",
+            )
+            return
+
+        file_id = matched[0]["id"]
+        try:
+            client.files_delete(file=file_id)
+            client.chat_postMessage(
+                channel=channel_id,
+                text=f"`{filename}` を削除しました。",
+            )
+        except Exception as e:
+            logger.error("ファイル削除に失敗: %s", e)
+            client.chat_postMessage(
+                channel=channel_id,
+                text=f"`{filename}` の削除に失敗しました: {e}",
+            )
 
     def _shutdown(signum, frame):
         logger.info("シャットダウン中...")

@@ -266,7 +266,7 @@ C0A6AC59AHM    # 24_ai-hpc-application
 | `SLACK_USER_TOKEN` | 必須 | — | User Token（`xoxp-`）— Canvas 投稿に使用 |
 | `OPENAI_API_BASE` | 推奨 | `http://localhost:8000/v1` | gemma4 vLLM エンドポイント |
 | `OPENAI_API_KEY` | 任意 | `"dummy"` | gemma4 API キー |
-| `OPENAI_MODEL` | 任意 | `google/gemma-4-26B-A4B-it` | gemma4 モデル名 |
+| （モデル名） | — | 自動取得 | vLLM `/v1/models` から自動検出 |
 | `RIVAULT_URL` | 任意 | — | RiVault エンドポイント（gemma4 未起動時のフォールバック） |
 | `RIVAULT_TOKEN` | 任意 | — | RiVault API トークン |
 
