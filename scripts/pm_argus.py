@@ -24,11 +24,14 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import sys
 import threading
 from datetime import date, timedelta
 from pathlib import Path
+
+logger = logging.getLogger("pm_argus")
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
@@ -64,9 +67,7 @@ _DRAFT_REPORT_SINCE_DAYS = 14
 _transcribe_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, channel_id)
 _transcribe_lock = threading.Lock()
 
-# Minutes リポジトリのパス（同一ホスト上の兄弟ディレクトリ）
-_MINUTES_REPO = _REPO_ROOT.parent / "Minutes"
-_MINUTES_PIPELINE = _MINUTES_REPO / "slack_bot" / "pipeline.py"
+from transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
 
 
 # --------------------------------------------------------------------------- #
@@ -844,17 +845,16 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
 
 
 def _run_transcribe(respond, command):
-    """Slack /argus-transcribe のバックグラウンド処理。
+    """Slack /argus-transcribe・/transcribe のバックグラウンド処理。
 
-    Minutes リポジトリの pipeline.py を使い、
+    transcribe_pipeline.run_pipeline() を使い、
     ダウンロード → Whisper文字起こし → LLM議事録生成 を実行する。
     進捗はスレッドへの chat_postMessage で可視投稿し、
     完了・エラー通知は respond() で ephemeral 返信する。
     """
-    import logging
-    logger = logging.getLogger("pm_argus")
-
     filename = (command.get("text") or "").strip()
+    if filename and not Path(filename).suffix:
+        filename += ".m4a"
     channel_id = command.get("channel_id", "")
     thread_ts = None
 
@@ -864,27 +864,6 @@ def _run_transcribe(respond, command):
                 "ファイル名を指定してください。\n"
                 "例: `/argus-transcribe GMT20260302-032528_Recording.mp4`"
             ),
-            response_type="ephemeral",
-            replace_original=True,
-        )
-        return
-
-    # Minutes pipeline モジュールが利用可能か確認
-    if not _MINUTES_PIPELINE.exists():
-        respond(
-            text=f":warning: Minutes リポジトリが見つかりません: `{_MINUTES_PIPELINE}`",
-            response_type="ephemeral",
-            replace_original=True,
-        )
-        return
-
-    # Slack WebClient を2種類用意する:
-    #   user_client (xoxp-): files:read / files:write（ファイル操作）
-    #   bot_client  (xoxb-): chat:write（チャンネルへのメッセージ投稿）
-    user_token = os.environ.get("SLACK_USER_TOKEN")
-    if not user_token:
-        respond(
-            text=":warning: SLACK_USER_TOKEN が設定されていません。",
             response_type="ephemeral",
             replace_original=True,
         )
@@ -901,8 +880,7 @@ def _run_transcribe(respond, command):
 
     try:
         from slack_sdk import WebClient
-        user_client = WebClient(token=user_token)
-        bot_client  = WebClient(token=bot_token)
+        bot_client = WebClient(token=bot_token)
     except ImportError:
         respond(
             text=":warning: slack_sdk がインストールされていません。",
@@ -911,25 +889,6 @@ def _run_transcribe(respond, command):
         )
         return
 
-    # pipeline モジュールを動的 import
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("pipeline", str(_MINUTES_PIPELINE))
-        pipeline = importlib.util.module_from_spec(spec)
-        # Minutes の config.py 参照のため sys.path を一時追加
-        slack_bot_dir = str(_MINUTES_PIPELINE.parent)
-        if slack_bot_dir not in sys.path:
-            sys.path.insert(0, slack_bot_dir)
-        spec.loader.exec_module(pipeline)
-    except Exception as e:
-        respond(
-            text=f":warning: pipeline モジュールの読み込みに失敗しました: {e}",
-            response_type="ephemeral",
-            replace_original=True,
-        )
-        return
-
-    # スレッドを作成して進捗投稿先にする（chat:write は Bot Token で実行）
     try:
         post = bot_client.chat_postMessage(
             channel=channel_id,
@@ -950,9 +909,7 @@ def _run_transcribe(respond, command):
 
     try:
         logger.info(f"[argus-transcribe] 開始: filename={filename} channel={channel_id}")
-        # user_client (xoxp-): ファイルダウンロード・アップロード（files:read / files:write）
-        # pipeline.py 内部でチャンネル投稿が必要な場合は SLACK_BOT_TOKEN を参照する
-        pipeline.run_pipeline(user_client, channel_id, filename, thread_ts)
+        _run_transcribe_pipeline(bot_client, channel_id, filename, thread_ts)
         logger.info(f"[argus-transcribe] 完了: filename={filename}")
         respond(
             text=f":white_check_mark: `{filename}` の議事録生成が完了しました。スレッドをご確認ください。",
