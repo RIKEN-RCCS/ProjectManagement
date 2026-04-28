@@ -102,7 +102,7 @@ slack/
 │   ├── pm_document_extract.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
 │   ├── pm_document_update.sh        # BOXリンク抽出（pm_document_extract.py）→ FTS5更新（pm_embed.py）を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
-│   ├── pm_embed.py                  # QAインデックス構築（qa_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
+│   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
 │   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/argus-ask QA・/argus-* コマンドを統合処理）。ハイブリッド検索対応（Intent分類→構造化SQL+FTS5）
 │   ├── pm_qa_start.sh               # pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
 │   ├── pm_qa_stop.sh                # pm_qa_server.py を停止（PIDファイルでプロセス管理）
@@ -122,7 +122,7 @@ slack/
     ├── web_articles.db              # 外部Web記事DB（平文sqlite3、公開情報なので暗号化不要）
     ├── web_sources.yaml             # 外部Webソース定義（URL・キーワードフィルタ・対象インデックス）
     ├── minutes_channels.yaml         # 議事録アップロード先チャンネル・目録Canvas定義（pm_minutes_catalog.py 用）
-    ├── qa_config.yaml               # QAインデックス定義・チャンネルマッピング（/argus-ask・/argus-investigate・Argus ブリーフィング共通）
+    ├── argus_config.yaml            # Argus 統合設定（インデックス定義・チャンネルマッピング・pm.dbパス。旧 qa_config.yaml）
     ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。議事録・Slack・docs・web記事を含む）
     ├── secretary_canvas_id.txt      # Argus の Canvas 投稿先ID
     ├── patrol_config.yaml           # Patrol Agent 設定（検出器の有効/無効・閾値・通知チャンネル）

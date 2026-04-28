@@ -14,7 +14,7 @@ pm_qa_server.py（常駐デーモン）
   ├─ ack()                         ← 3秒以内に即時応答
   ├─ "Argus 分析中..." を表示
   └─ executor.submit(_run_brief)   ← バックグラウンドスレッドへ
-        ├─ Slack 生メッセージ収集    ← qa_config.yaml の channels
+        ├─ Slack 生メッセージ収集    ← argus_config.yaml の channels
         ├─ 議事録本文収集            ← data/minutes/{kind}.db
         ├─ pm.db 統計収集            ← マイルストーン・期限超過AI・担当者負荷
         ├─ call_argus_llm()         ← gemma4 優先、未起動なら RiVault にフォールバック
@@ -41,7 +41,7 @@ scripts/
                          # ← pm_qa_start.sh で起動
 
 data/
-├── qa_config.yaml           # チャンネル→インデックスマッピング（/argus-ask・Argus 共通）
+├── argus_config.yaml           # チャンネル→インデックスマッピング（/argus-ask・Argus 共通）
 └── secretary_canvas_id.txt  # --brief-to-canvas の投稿先 Canvas ID（F0AT4N36TFF）
 
 logs/
@@ -349,7 +349,7 @@ data/
 
 ## 設定ファイル
 
-### `data/qa_config.yaml`
+### `data/argus_config.yaml`
 
 Argus・`/argus-ask`・`/argus-investigate` が参照するチャンネル・インデックスDBの設定。
 `indices.{name}.channels` が Argus の生メッセージ収集対象チャンネルを定義する。

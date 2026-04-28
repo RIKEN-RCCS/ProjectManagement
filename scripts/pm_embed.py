@@ -2,7 +2,7 @@
 """
 pm_embed.py - FTS5インデックス構築スクリプト
 
-qa_config.yaml の定義に従い、会議議事録本文・Slack要約を
+argus_config.yaml（旧 qa_config.yaml）の定義に従い、会議議事録本文・Slack要約を
 インデックスDB（qa_pm.db / qa_pm-hpc.db / qa_pm-bmt.db / qa_pm-pmo.db）に書き込む。
 
 使い方:
@@ -554,7 +554,7 @@ def build_index(
         logger.info(f"  channels: {channel_ids or '(なし)'}")
 
         if not minutes_kinds and not channel_ids:
-            logger.warning(f"  ソースが未設定です。qa_config.yaml を編集してください。")
+            logger.warning(f"  ソースが未設定です。argus_config.yaml を編集してください。")
             return 0
 
     index_conn = open_index_db(db_path)
@@ -611,8 +611,8 @@ def main() -> None:
     parser.add_argument("--full-rebuild", action="store_true", help="全件再構築（差分なし）")
     parser.add_argument("--web-only", action="store_true",
                         help="web_articles.db のみ再インデックス（minutes/slack/docs をスキップ）")
-    parser.add_argument("--index-name", help="特定インデックスのみ処理（qa_config.yaml のキー名）")
-    parser.add_argument("--config", default="data/qa_config.yaml", help="設定ファイルのパス")
+    parser.add_argument("--index-name", help="特定インデックスのみ処理（argus_config.yaml のキー名）")
+    parser.add_argument("--config", default=None, help="設定ファイルのパス（デフォルト: data/argus_config.yaml）")
     parser.add_argument("--data-dir", default="data", help="data/ ディレクトリのパス")
     parser.add_argument("--dry-run", action="store_true", help="書き込みなしで件数のみ表示")
     args = parser.parse_args()
@@ -625,7 +625,12 @@ def main() -> None:
     else:
         logger.warning("SudachiPy: 利用不可（trigramのみでインデックスを構築します）")
 
-    config_path = Path(args.config)
+    if args.config:
+        config_path = Path(args.config)
+    else:
+        config_path = Path("data/argus_config.yaml")
+        if not config_path.exists():
+            config_path = Path("data/qa_config.yaml")
     if not config_path.exists():
         logger.error(f"設定ファイルが見つかりません: {config_path}")
         sys.exit(1)
@@ -641,7 +646,7 @@ def main() -> None:
     indices = config.get("indices", {})
     if args.index_name:
         if args.index_name not in indices:
-            logger.error(f"インデックス '{args.index_name}' は qa_config.yaml に定義されていません")
+            logger.error(f"インデックス '{args.index_name}' は argus_config.yaml に定義されていません")
             logger.error(f"定義済み: {list(indices.keys())}")
             sys.exit(1)
         indices = {args.index_name: indices[args.index_name]}

@@ -5,13 +5,13 @@ pm_document_extract.py
 Slack メッセージ中の BOX リンクから共有ドキュメントのメタデータを LLM で抽出し、
 ドキュメントレジストリDB に保存する。
 
-DBファイルは qa_config.yaml の indices 定義に倣い4種類:
+DBファイルは argus_config.yaml の indices 定義に倣い4種類:
   data/docs_pm.db       — pm 相当（全チャンネル横断）
   data/docs_pm-hpc.db   — pm-hpc 相当
   data/docs_pm-bmt.db   — pm-bmt 相当
   data/docs_pm-pmo.db   — pm-pmo 相当
 
-各チャンネルのメッセージは qa_config.yaml の indices.{name}.channels に従って
+各チャンネルのメッセージは argus_config.yaml の indices.{name}.channels に従って
 対応するDBに格納される。1チャンネルが複数 indices に属する場合は全てに格納する。
 
 Usage:
@@ -59,7 +59,8 @@ import yaml
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-QA_CONFIG = DATA_DIR / "qa_config.yaml"
+ARGUS_CONFIG = DATA_DIR / "argus_config.yaml"
+QA_CONFIG_LEGACY = DATA_DIR / "qa_config.yaml"
 
 BOX_URL_PATTERN = re.compile(
     r"https?://[^\s<>|]*box\.(com|net)[^\s<>|]*", re.IGNORECASE
@@ -104,7 +105,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_url
 
 
 def load_config() -> dict:
-    with open(QA_CONFIG, encoding="utf-8") as f:
+    config_path = ARGUS_CONFIG if ARGUS_CONFIG.exists() else QA_CONFIG_LEGACY
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

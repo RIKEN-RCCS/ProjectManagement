@@ -578,7 +578,7 @@ python3 scripts/pm_document_extract.py --post-to-canvas --canvas-id F0XXXXXX --i
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--index-name NAME` | 全インデックス | 特定インデックスのみ処理 |
-| `--config PATH` | `data/qa_config.yaml` | 設定ファイルのパス |
+| `--config PATH` | `data/argus_config.yaml` | 設定ファイルのパス |
 | `--data-dir PATH` | `data` | ソースDBのディレクトリ |
 | `--dry-run` | - | DB保存なし・結果を標準出力のみ |
 | `--list` | - | 登録済みドキュメント一覧を表示して終了 |
