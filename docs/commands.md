@@ -70,10 +70,13 @@ sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4
 | `--skip SECONDS` | なし | 全ファイルの冒頭をスキップ |
 | `--meeting-name NAME` | なし | 指定すると文字起こし後に pm.db へ直接インポートし .md を削除 |
 | `--held-at YYYY-MM-DD` | GMT→JST変換 | `--meeting-name` と併用。省略時はファイル名のGMTタイムスタンプをJSTに変換して取得 |
+| `--vtt PATH` | 同名VTT自動検出 | Zoom VTT ファイルを明示指定。省略時は `{stem}.transcript.vtt` → `{stem}.vtt` の順で自動検出 |
 
 処理フロー: ffmpeg → WAV変換（16kHz, mono） → DeepFilterNetノイズ除去 → SileroVAD → pyannote話者分離 → Whisper large-v3 文字起こし
 
-`--meeting-name` 指定時の追加フロー: 文字起こし完了 → `pm_minutes_import.py` で議事録DBに保存 → `pm_minutes_to_pm.py` で pm.db に転記 → .md 削除
+**VTT 話者情報の活用**: Zoom の自動文字起こし VTT ファイルが存在する場合、VTT の正確な話者名を Whisper の高品質日本語文字起こしと統合する。議事録 Stage 3（決定事項・アクションアイテム抽出）で話者名をもとに担当者を推定する。VTT ファイルの検索は同名のみ（フォールバックなし）: `{stem}.transcript.vtt` → `{stem}.vtt` の順で検索し、先に見つかった方を使用する。
+
+`--meeting-name` 指定時の追加フロー: 文字起こし完了 → `generate_minutes_local.py`（VTTあれば `--vtt` 付き）で議事録生成 → `pm_minutes_import.py` で議事録DBに保存 → `pm_minutes_to_pm.py` で pm.db に転記 → .md 削除
 
 ### 3. 会議議事録 → 詳細議事録DB（pm_minutes_import.py）
 

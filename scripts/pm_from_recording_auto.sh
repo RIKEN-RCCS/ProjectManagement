@@ -209,9 +209,16 @@ for m4a_file in "${m4a_files[@]}"; do
         continue
     fi
 
-    # processing/ に移動（再投入防止）
+    # processing/ に移動（再投入防止）。同名 .vtt があれば一緒に移動
     dest="$PROCESSING_DIR/$filename"
     mv "$m4a_file" "$dest"
+    for vtt_suffix in ".transcript.vtt" ".vtt"; do
+        vtt_src="$MEETINGS_DIR/${name}${vtt_suffix}"
+        if [[ -f "$vtt_src" ]]; then
+            mv "$vtt_src" "$PROCESSING_DIR/$(basename "$vtt_src")"
+            log "[VTT] $(basename "$vtt_src") → processing/"
+        fi
+    done
     pm_db=$(get_pm_db "$meeting_name")
     log "[QUEUE] $filename → held_at=$held_at, meeting_name=$meeting_name, db=$(basename "$pm_db")"
 

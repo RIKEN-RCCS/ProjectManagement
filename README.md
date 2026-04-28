@@ -59,6 +59,8 @@ bash scripts/pm_from_recording_auto.sh -c C08SXA4M7JT
 
 処理フロー: 音声 → Whisper文字起こし → ローカルLLMで議事録生成 → 議事録DB保存 → pm.db転記（平文ファイルはディスクに残らない）
 
+**Zoom VTT による話者情報の活用**: 同名の VTT ファイル（`{stem}.transcript.vtt` または `{stem}.vtt`）が存在する場合、Zoom の正確な話者名を Whisper の高品質日本語文字起こしと統合し、アクションアイテムの担当者推定精度を向上させる。VTT がなければ従来どおり Whisper のみで動作する。
+
 **Slack → pm.db**
 
 ```sh
@@ -202,7 +204,7 @@ python3 scripts/pm_minutes_import.py corrected.md --meeting-name Leader_Meeting 
 [Slack] ─── slack_pipeline.py ───→ {channel_id}.db
                                           ↓
 [会議録音]                          pm.db ←─ pm_extractor.py
-  data/*.m4a           │          (決定事項・               ↑
+  data/*.m4a (+.vtt)   │          (決定事項・               ↑
                        │        アクションアイテム)   {channel_id}.db
                        │                  ↓
                        │            pm_report.py → Slack Canvas
@@ -308,8 +310,8 @@ bash scripts/pm_qa_stop.sh     # 停止
 
 | スクリプト | 用途 |
 |-----------|------|
-| `pm_from_recording_auto.sh` | 録音ファイルの自動検出・文字起こし・議事録生成・pm.db登録 |
-| `pm_from_recording.sh` | 録音ファイルを指定して文字起こし・議事録生成 |
+| `pm_from_recording_auto.sh` | 録音ファイルの自動検出・文字起こし・議事録生成・pm.db登録（同名VTTも自動移動） |
+| `pm_from_recording.sh` | 録音ファイルを指定して文字起こし・議事録生成（同名VTT自動検出、`--vtt` で明示指定も可） |
 | `pm_from_slack.sh` | Slack取得・pm.db抽出を一括実行 |
 | `canvas_report.sh` | Canvas同期 → レポート生成・Canvas投稿 |
 | `pm_qa_start.sh` / `pm_qa_stop.sh` | QA・Argusデーモンの起動・停止 |
@@ -322,7 +324,8 @@ bash scripts/pm_qa_stop.sh     # 停止
 | `pm_extractor.py` | Slack生メッセージからアクションアイテム・決定事項を抽出 |
 | `pm_minutes_import.py` | 議事録をLLM解析して議事録DBに保存 |
 | `pm_minutes_to_pm.py` | 議事録DBからpm.dbに転記（LLM不使用） |
-| `generate_minutes_local.py` | ローカルLLMで高品質議事録を生成 |
+| `generate_minutes_local.py` | ローカルLLMで高品質議事録を生成（`--vtt` でZoom VTT話者情報を活用） |
+| `transcribe_pipeline.py` | `/argus-transcribe` 用パイプライン（Slackからダウンロード → 文字起こし → 議事録生成。同名VTT自動検出） |
 | `whisper_vad.py` | VAD+Whisperによる話者分離・文字起こし |
 
 ### レポート・分析
@@ -355,7 +358,7 @@ bash scripts/pm_qa_stop.sh     # 停止
 | モジュール | 用途 |
 |-----------|------|
 | `db_utils.py` | DB接続・統計クエリ・暗号化（全スクリプト共通） |
-| `cli_utils.py` | LLM呼び出し・ログ・argparse（全スクリプト共通） |
+| `cli_utils.py` | LLM呼び出し・ログ・argparse・VTTパース・話者マッピング（全スクリプト共通） |
 | `web_utils.py` | Web UI用DB読み書き・楽観的排他制御 |
 | `format_utils.py` | Markdownテーブル整形 |
 | `canvas_utils.py` | Slack Canvas操作 |
