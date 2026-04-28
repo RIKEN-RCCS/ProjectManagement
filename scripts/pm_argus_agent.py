@@ -57,7 +57,8 @@ logger = logging.getLogger("pm_argus_agent")
 _DATA_DIR = _REPO_ROOT / "data"
 _MINUTES_DIR = _DATA_DIR / "minutes"
 _PM_DB = _DATA_DIR / "pm.db"
-_QA_CONFIG = _DATA_DIR / "qa_config.yaml"
+_ARGUS_CONFIG = _DATA_DIR / "argus_config.yaml"
+_QA_CONFIG_LEGACY = _DATA_DIR / "qa_config.yaml"
 _DEFAULT_SINCE_DAYS = 30
 _DEFAULT_MAX_STEPS = 5
 _DEFAULT_TIMEOUT = 180.0
@@ -65,17 +66,18 @@ _CONTEXT_CHAR_LIMIT = 100_000
 
 
 # =========================================================================== #
-#  qa_config.yaml からインデックスDB・チャンネルリスト解決
+#  argus_config.yaml からインデックスDB・チャンネルリスト解決
 # =========================================================================== #
 
 def _resolve_index_and_channels(
     channel_id: str | None = None,
-) -> tuple[Path, list[str]]:
-    """qa_config.yaml を読み、channel_id に対応する index_db と channels を返す。"""
-    if not _QA_CONFIG.exists():
-        return _DATA_DIR / "qa_pm.db", []
+) -> tuple[Path, list[str], list[Path]]:
+    """argus_config.yaml を読み、channel_id に対応する index_db, channels, pm_db_paths を返す。"""
+    config_path = _ARGUS_CONFIG if _ARGUS_CONFIG.exists() else _QA_CONFIG_LEGACY
+    if not config_path.exists():
+        return _DATA_DIR / "qa_pm.db", [], [_PM_DB]
 
-    with open(_QA_CONFIG, encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
     indices = cfg.get("indices") or {}
@@ -87,7 +89,9 @@ def _resolve_index_and_channels(
     db_rel = index_cfg.get("db", f"data/qa_{index_name}.db")
     index_db = _REPO_ROOT / db_rel
     channels = index_cfg.get("channels", [])
-    return index_db, channels
+    pm_db_list = index_cfg.get("pm_db", ["data/pm.db"])
+    pm_db_paths = [_REPO_ROOT / p for p in pm_db_list]
+    return index_db, channels, pm_db_paths
 
 
 # =========================================================================== #
@@ -96,7 +100,7 @@ def _resolve_index_and_channels(
 
 @dataclass
 class AgentContext:
-    conn: Any
+    conns: list[Any]
     today: str
     since: str
     no_encrypt: bool = False
@@ -118,15 +122,23 @@ class ToolDef:
     fn: Callable[[dict, AgentContext], str]
 
 
+def _query_all(ctx: AgentContext, fn, *args, **kwargs) -> list:
+    """全 conns に対して fn(conn, ...) を実行し結果リストを結合する。"""
+    out: list = []
+    for conn in ctx.conns:
+        out.extend(fn(conn, *args, **kwargs))
+    return out
+
+
 def _tool_get_milestone_progress(args: dict, ctx: AgentContext) -> str:
-    rows = fetch_milestone_progress(ctx.conn)
+    rows = _query_all(ctx, fetch_milestone_progress)
     if not rows:
         return "（マイルストーンが登録されていません）"
     return format_milestone_table(rows, ctx.today)
 
 
 def _tool_get_overdue_items(args: dict, ctx: AgentContext) -> str:
-    items = fetch_overdue_items(ctx.conn, ctx.today, ctx.since)
+    items = _query_all(ctx, fetch_overdue_items, ctx.today, ctx.since)
     assignee = args.get("assignee")
     milestone = args.get("milestone")
     if assignee:
@@ -146,7 +158,20 @@ def _tool_get_overdue_items(args: dict, ctx: AgentContext) -> str:
 
 
 def _tool_get_assignee_workload(args: dict, ctx: AgentContext) -> str:
-    rows = fetch_assignee_workload(ctx.conn, ctx.today)
+    from pm_argus import merge_pm_stats
+    all_rows: list = []
+    for conn in ctx.conns:
+        all_rows.extend(fetch_assignee_workload(conn, ctx.today))
+    wl_map: dict[str, dict] = {}
+    for w in all_rows:
+        name = w["assignee"]
+        if name in wl_map:
+            wl_map[name]["total_open"] += w["total_open"]
+            wl_map[name]["overdue"] += w["overdue"]
+            wl_map[name]["no_due_date"] += w.get("no_due_date", 0)
+        else:
+            wl_map[name] = {**w}
+    rows = sorted(wl_map.values(), key=lambda x: (-x["overdue"], -x["total_open"]))
     if not rows:
         return "（担当者データなし）"
     return format_assignee_table(rows)
@@ -154,7 +179,16 @@ def _tool_get_assignee_workload(args: dict, ctx: AgentContext) -> str:
 
 def _tool_get_weekly_trends(args: dict, ctx: AgentContext) -> str:
     weeks = int(args.get("weeks", 4))
-    rows = fetch_weekly_trends(ctx.conn, weeks=weeks)
+    trend_map: dict[str, dict] = {}
+    for conn in ctx.conns:
+        for t in fetch_weekly_trends(conn, weeks=weeks):
+            k = t["week_start"]
+            if k in trend_map:
+                trend_map[k]["created"] += t["created"]
+                trend_map[k]["closed"] += t["closed"]
+            else:
+                trend_map[k] = {**t}
+    rows = sorted(trend_map.values(), key=lambda x: x["week_start"])
     if not rows:
         return "（トレンドデータなし）"
     return format_trends_table(rows)
@@ -162,7 +196,7 @@ def _tool_get_weekly_trends(args: dict, ctx: AgentContext) -> str:
 
 def _tool_get_unacknowledged_decisions(args: dict, ctx: AgentContext) -> str:
     since = args.get("since", ctx.since)
-    rows = fetch_unacknowledged_decisions(ctx.conn, since)
+    rows = _query_all(ctx, fetch_unacknowledged_decisions, since)
     if not rows:
         return "（未確認決定事項なし）"
     return format_decisions_list(rows)
@@ -170,14 +204,16 @@ def _tool_get_unacknowledged_decisions(args: dict, ctx: AgentContext) -> str:
 
 def _tool_search_action_items(args: dict, ctx: AgentContext) -> str:
     from pm_qa_server import _query_action_items
-    items = _query_action_items(
-        ctx.conn,
-        assignee=args.get("assignee"),
-        status=args.get("status"),
-        milestone=args.get("milestone"),
-        keyword=args.get("keyword"),
-        limit=int(args.get("limit", 20)),
-    )
+    items: list = []
+    for conn in ctx.conns:
+        items.extend(_query_action_items(
+            conn,
+            assignee=args.get("assignee"),
+            status=args.get("status"),
+            milestone=args.get("milestone"),
+            keyword=args.get("keyword"),
+            limit=int(args.get("limit", 20)),
+        ))
     if not items:
         return "（該当するアクションアイテムなし）"
     lines = []
@@ -199,11 +235,13 @@ def _tool_search_action_items(args: dict, ctx: AgentContext) -> str:
 
 def _tool_search_decisions(args: dict, ctx: AgentContext) -> str:
     from pm_qa_server import _query_decisions
-    items = _query_decisions(
-        ctx.conn,
-        keyword=args.get("keyword"),
-        limit=int(args.get("limit", 20)),
-    )
+    items: list = []
+    for conn in ctx.conns:
+        items.extend(_query_decisions(
+            conn,
+            keyword=args.get("keyword"),
+            limit=int(args.get("limit", 20)),
+        ))
     if not items:
         return "（該当する決定事項なし）"
     lines = []
@@ -427,9 +465,25 @@ M3には西澤さん担当の期限超過が集中しています。関連議論
 # =========================================================================== #
 
 def build_seed_data(ctx: AgentContext) -> str:
-    stats = fetch_summary_stats(ctx.conn, since=ctx.since, today=ctx.today)
-    milestones = fetch_milestone_progress(ctx.conn)
-    workload = fetch_assignee_workload(ctx.conn, ctx.today)
+    all_stats = [fetch_summary_stats(c, since=ctx.since, today=ctx.today) for c in ctx.conns]
+    stats: dict = {}
+    for s in all_stats:
+        for k, v in s.items():
+            stats[k] = stats.get(k, 0) + v
+    milestones = _query_all(ctx, fetch_milestone_progress)
+    all_wl: list = []
+    for c in ctx.conns:
+        all_wl.extend(fetch_assignee_workload(c, ctx.today))
+    wl_map: dict[str, dict] = {}
+    for w in all_wl:
+        name = w["assignee"]
+        if name in wl_map:
+            wl_map[name]["total_open"] += w["total_open"]
+            wl_map[name]["overdue"] += w["overdue"]
+            wl_map[name]["no_due_date"] += w.get("no_due_date", 0)
+        else:
+            wl_map[name] = {**w}
+    workload = sorted(wl_map.values(), key=lambda x: (-x["overdue"], -x["total_open"]))
 
     parts = [
         "## プロジェクト概況\n",
@@ -651,12 +705,11 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
 
-        conn = open_pm_db(_PM_DB, no_encrypt=no_encrypt)
-
-        index_db, channels = _resolve_index_and_channels(channel_id)
+        index_db, channels, pm_db_paths = _resolve_index_and_channels(channel_id)
+        conns = [open_pm_db(p, no_encrypt=no_encrypt) for p in pm_db_paths]
 
         ctx = AgentContext(
-            conn=conn,
+            conns=conns,
             today=today,
             since=since_date,
             no_encrypt=no_encrypt,
@@ -674,7 +727,8 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             ctx=ctx,
         )
 
-        conn.close()
+        for c in conns:
+            c.close()
 
         # Slack ephemeral は約 3000 文字が実用上限
         _SLACK_MAX_CHARS = 2900
@@ -729,12 +783,13 @@ def main():
     today = date.today().isoformat()
     since_date = (date.today() - timedelta(days=args.days)).isoformat()
 
-    conn = open_pm_db(Path(args.db), no_encrypt=args.no_encrypt)
-
-    index_db, channels = _resolve_index_and_channels()
+    index_db, channels, pm_db_paths = _resolve_index_and_channels()
+    if args.db != str(_PM_DB):
+        pm_db_paths = [Path(args.db)]
+    conns = [open_pm_db(p, no_encrypt=args.no_encrypt) for p in pm_db_paths]
 
     ctx = AgentContext(
-        conn=conn,
+        conns=conns,
         today=today,
         since=since_date,
         no_encrypt=args.no_encrypt,
@@ -751,7 +806,8 @@ def main():
         print(seed_data)
         print(f"\n=== 調査質問 ===\n{args.investigate}")
         print(f"\n=== ツール一覧 ===\n{_build_tool_descriptions()}")
-        conn.close()
+        for c in conns:
+            c.close()
         return
 
     result = run_agent(
@@ -763,7 +819,8 @@ def main():
         timeout=args.timeout,
     )
 
-    conn.close()
+    for c in conns:
+        c.close()
 
     print("\n=== Argus 調査結果 ===\n")
     print(result)

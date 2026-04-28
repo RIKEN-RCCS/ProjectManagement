@@ -60,8 +60,26 @@ logger = logging.getLogger("argus_patrol")
 
 _DATA_DIR = _REPO_ROOT / "data"
 _PM_DB = _DATA_DIR / "pm.db"
+_ARGUS_CONFIG = _DATA_DIR / "argus_config.yaml"
+_QA_CONFIG_LEGACY = _DATA_DIR / "qa_config.yaml"
 _STATE_DB = _DATA_DIR / "patrol_state.db"
 _CONFIG_FILE = _DATA_DIR / "patrol_config.yaml"
+
+
+def _load_pm_db_paths() -> list[Path]:
+    """argus_config.yaml の pm-all インデックスから pm_db パスリストを取得する。"""
+    config_path = _ARGUS_CONFIG if _ARGUS_CONFIG.exists() else _QA_CONFIG_LEGACY
+    if not config_path.exists():
+        return [_PM_DB]
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        indices = cfg.get("indices") or {}
+        all_cfg = indices.get("pm-all") or indices.get("pm") or {}
+        pm_db_list = all_cfg.get("pm_db", ["data/pm.db"])
+        return [_REPO_ROOT / p for p in pm_db_list]
+    except Exception:
+        return [_PM_DB]
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +87,7 @@ _CONFIG_FILE = _DATA_DIR / "patrol_config.yaml"
 # --------------------------------------------------------------------------- #
 @dataclass
 class PatrolContext:
-    conn: Any                    # pm.db sqlite3.Connection
+    conns: list[Any]             # pm.db sqlite3.Connection のリスト
     state: PatrolState
     slack: Any                   # WebClient | None
     user_resolver: UserResolver
@@ -77,6 +95,11 @@ class PatrolContext:
     today: str
     config: dict
     data_dir: Path = field(default=_DATA_DIR)
+
+    @property
+    def conn(self) -> Any:
+        """後方互換: patrol_detect.py / patrol_actions.py が ctx.conn で参照する。"""
+        return self.conns[0] if self.conns else None
 
 
 # --------------------------------------------------------------------------- #
@@ -102,13 +125,15 @@ def run_patrol(
     no_encrypt: bool = False,
     only: list[str] | None = None,
 ) -> None:
-    """全検出器を順に実行する。"""
+    """全検出器を順に実行する。複数 pm.db を巡回する。"""
     config = _load_config()
     if not config.get("patrol", {}).get("enabled", True):
         logger.info("Patrol は無効化されています (patrol.enabled=false)")
         return
 
-    conn = open_pm_db(_PM_DB, no_encrypt=no_encrypt)
+    pm_db_paths = _load_pm_db_paths()
+    conns = [open_pm_db(p, no_encrypt=no_encrypt) for p in pm_db_paths]
+    logger.info("Patrol 対象 pm.db: %s", [str(p) for p in pm_db_paths])
     state = PatrolState(_STATE_DB)
 
     slack = None
@@ -126,17 +151,6 @@ def run_patrol(
     user_resolver = UserResolver(state, slack, _DATA_DIR)
     today = date.today().isoformat()
 
-    ctx = PatrolContext(
-        conn=conn,
-        state=state,
-        slack=slack,
-        user_resolver=user_resolver,
-        dry_run=dry_run,
-        today=today,
-        config=config,
-        data_dir=_DATA_DIR,
-    )
-
     detectors_to_run = DETECTORS
     if only:
         detectors_to_run = {
@@ -148,24 +162,41 @@ def run_patrol(
                 only,
                 list(DETECTORS.keys()),
             )
-            conn.close()
+            for c in conns:
+                c.close()
             state.close()
             return
 
     total = 0
-    for name, detector_fn in detectors_to_run.items():
-        try:
-            count = detector_fn(ctx)
-            if count:
-                logger.info("[%s] %d 件検出", name, count)
-            total += count
-        except Exception as e:
-            logger.exception("[%s] エラー: %s", name, e)
+    for ci, conn in enumerate(conns):
+        db_label = pm_db_paths[ci].name
+        logger.info("Patrol 巡回: %s", db_label)
 
-    if not dry_run and total > 0:
-        conn.commit()
+        ctx = PatrolContext(
+            conns=[conn],
+            state=state,
+            slack=slack,
+            user_resolver=user_resolver,
+            dry_run=dry_run,
+            today=today,
+            config=config,
+            data_dir=_DATA_DIR,
+        )
 
-    conn.close()
+        for name, detector_fn in detectors_to_run.items():
+            try:
+                count = detector_fn(ctx)
+                if count:
+                    logger.info("[%s][%s] %d 件検出", db_label, name, count)
+                total += count
+            except Exception as e:
+                logger.exception("[%s][%s] エラー: %s", db_label, name, e)
+
+        if not dry_run and total > 0:
+            conn.commit()
+
+    for c in conns:
+        c.close()
     state.close()
 
     logger.info("Patrol 完了: %d 件のアクション (%s)", total, "dry-run" if dry_run else "実行")

@@ -16,7 +16,7 @@ pm_qa_server.py - Slack Slash Command QA サーバー（Socket Mode）
   OPENAI_API_BASE   必須: vLLM エンドポイント
   OPENAI_API_KEY    デフォルト: "dummy"
   （モデル名は vLLM /v1/models から自動取得）
-  QA_CONFIG         デフォルト: data/qa_config.yaml（スクリプト基準）
+  ARGUS_CONFIG      デフォルト: data/argus_config.yaml（旧 QA_CONFIG / qa_config.yaml にフォールバック）
 """
 
 import logging
@@ -131,12 +131,13 @@ SYSTEM_PROMPT_TEMPLATE = """\
 
 _channel_index_map: dict[str, str] = {}   # channel_id → index_name
 _index_db_map: dict[str, Path] = {}       # index_name → Path
+_pm_db_map: dict[str, list[Path]] = {}    # index_name → [pm.db Paths]
 _default_index: str = "pm"
 
 
 def load_qa_config(config_path: Path) -> None:
-    """qa_config.yaml を読み込み、グローバルマップを初期化する。"""
-    global _channel_index_map, _index_db_map, _default_index
+    """argus_config.yaml（旧 qa_config.yaml）を読み込み、グローバルマップを初期化する。"""
+    global _channel_index_map, _index_db_map, _pm_db_map, _default_index
 
     with open(config_path) as f:
         cfg = yaml.safe_load(f) or {}
@@ -147,23 +148,25 @@ def load_qa_config(config_path: Path) -> None:
     for name, index_cfg in (cfg.get("indices") or {}).items():
         db_path = _REPO_ROOT / index_cfg["db"]
         _index_db_map[name] = db_path
+        pm_db_list = index_cfg.get("pm_db", [])
+        _pm_db_map[name] = [_REPO_ROOT / p for p in pm_db_list]
 
-    logger.info(f"qa_config.yaml ロード: {len(_index_db_map)} インデックス, "
+    logger.info(f"argus_config ロード: {len(_index_db_map)} インデックス, "
                 f"{len(_channel_index_map)} チャンネルマッピング, "
                 f"デフォルト={_default_index}")
 
 
-def resolve_index_db(channel_id: str) -> tuple[str, Path]:
-    """チャンネルIDからインデックス名とDBパスを返す。"""
+def resolve_index_db(channel_id: str) -> tuple[str, Path, list[Path]]:
+    """チャンネルIDからインデックス名・FTS DBパス・pm.dbパスリストを返す。"""
     index_name = _channel_index_map.get(channel_id, _default_index)
     db_path = _index_db_map.get(index_name)
     if db_path is None:
-        # デフォルトもなければ最初に見つかったDBを使う
         if _index_db_map:
             index_name, db_path = next(iter(_index_db_map.items()))
         else:
-            return index_name, Path("data/qa_pm.db")
-    return index_name, db_path
+            return index_name, Path("data/qa_pm.db"), []
+    pm_db_paths = _pm_db_map.get(index_name, [])
+    return index_name, db_path, pm_db_paths
 
 
 # --- FTS5検索 ---
@@ -447,9 +450,6 @@ JSONのみ出力:
 
 質問: """
 
-_PM_DB_PATH = _REPO_ROOT / "data" / "pm.db"
-
-
 def classify_intent(question: str) -> dict:
     """質問の意図を分類し、エンティティを抽出する。失敗時はFTSフォールバック。"""
     if not _OPENAI_BASE:
@@ -524,7 +524,7 @@ def _query_decisions(conn, *, keyword=None, limit=20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def run_structured_query(entities: dict) -> str:
+def run_structured_query(entities: dict, pm_db_paths: list[Path] | None = None) -> str:
     """entities に基づき pm.db を構造化クエリし、整形済みテキストを返す。"""
     query_type = entities.get("query_type") or "tasks"
     assignee = entities.get("assignee")
@@ -532,10 +532,16 @@ def run_structured_query(entities: dict) -> str:
     status = entities.get("status")
     keyword = entities.get("keyword")
 
-    try:
-        conn = open_pm_db(_PM_DB_PATH, no_encrypt=False)
-    except Exception as e:
-        logger.warning(f"pm.db接続エラー: {e}")
+    if not pm_db_paths:
+        pm_db_paths = _pm_db_map.get(_default_index, [_REPO_ROOT / "data" / "pm.db"])
+
+    conns: list = []
+    for p in pm_db_paths:
+        try:
+            conns.append(open_pm_db(p, no_encrypt=False))
+        except Exception as e:
+            logger.warning(f"pm.db接続エラー ({p}): {e}")
+    if not conns:
         return ""
 
     try:
@@ -543,7 +549,9 @@ def run_structured_query(entities: dict) -> str:
         today = date.today().isoformat()
 
         if query_type == "tasks":
-            rows = _query_action_items(conn, assignee=assignee, status=status, milestone=milestone, keyword=keyword)
+            rows: list[dict] = []
+            for c in conns:
+                rows.extend(_query_action_items(c, assignee=assignee, status=status, milestone=milestone, keyword=keyword))
             if not rows:
                 return ""
             lines = [f"【アクションアイテム検索結果: {len(rows)}件】"]
@@ -555,7 +563,9 @@ def run_structured_query(entities: dict) -> str:
             return "\n".join(lines)
 
         elif query_type == "decisions":
-            rows = _query_decisions(conn, keyword=keyword)
+            rows = []
+            for c in conns:
+                rows.extend(_query_decisions(c, keyword=keyword))
             if not rows:
                 return ""
             lines = [f"【決定事項検索結果: {len(rows)}件】"]
@@ -564,7 +574,9 @@ def run_structured_query(entities: dict) -> str:
             return "\n".join(lines)
 
         elif query_type == "milestones":
-            milestones = fetch_milestone_progress(conn)
+            milestones: list = []
+            for c in conns:
+                milestones.extend(fetch_milestone_progress(c))
             if milestone:
                 milestones = [m for m in milestones if m.get("milestone_id") == milestone]
             if not milestones:
@@ -578,7 +590,9 @@ def run_structured_query(entities: dict) -> str:
             return "\n".join(lines)
 
         elif query_type == "overdue":
-            items = fetch_overdue_items(conn, today, since=None)
+            items: list = []
+            for c in conns:
+                items.extend(fetch_overdue_items(c, today, since=None))
             if assignee:
                 items = [i for i in items if assignee in (i.get("assignee") or "")]
             if not items:
@@ -590,18 +604,22 @@ def run_structured_query(entities: dict) -> str:
             return "\n".join(lines)
 
         elif query_type == "stats":
-            stats = fetch_summary_stats(conn, since=None, today=today)
+            from pm_argus import merge_pm_stats, fetch_pm_stats
+            stats_list = [fetch_pm_stats(c, today) for c in conns]
+            merged = merge_pm_stats(stats_list)
+            s = merged["stats"]
             lines = ["【統計情報】"]
-            lines.append(f"- オープンAI: {stats.get('total_open', 0)}件")
-            lines.append(f"- 完了AI: {stats.get('total_closed', 0)}件")
-            lines.append(f"- 期限超過: {stats.get('overdue_count', 0)}件")
+            lines.append(f"- オープンAI: {s.get('total_open', 0)}件")
+            lines.append(f"- 完了AI: {s.get('total_closed', 0)}件")
+            lines.append(f"- 期限超過: {s.get('overdue_count', 0)}件")
             return "\n".join(lines)
 
     except Exception as e:
         logger.warning(f"構造化クエリエラー: {e}")
         return ""
     finally:
-        conn.close()
+        for c in conns:
+            c.close()
 
     return ""
 
@@ -648,7 +666,8 @@ def format_slack_response(question: str, chunks: list[dict], answer: str,
 
 # --- Slack Bolt ハンドラ ---
 
-def _run_qa(question: str, respond, index_name: str, index_db: Path) -> None:
+def _run_qa(question: str, respond, index_name: str, index_db: Path,
+            pm_db_paths: list[Path] | None = None) -> None:
     try:
         logger.info(f"QA開始: [{index_name}] {question[:60]}")
 
@@ -664,7 +683,7 @@ def _run_qa(question: str, respond, index_name: str, index_db: Path) -> None:
 
         # Step 2: Intent に基づく検索
         if intent in ("structured", "hybrid"):
-            structured_context = run_structured_query(entities)
+            structured_context = run_structured_query(entities, pm_db_paths=pm_db_paths)
             if structured_context:
                 logger.info(f"  構造化クエリ: {len(structured_context)} 文字")
             else:
@@ -711,25 +730,17 @@ def build_app():
 
     @app.command("/argus-ask")
     def handle_ask(ack, respond, command):
+        """互換性のため残存。内部は argus-investigate に転送する。"""
         ack()
         question = (command.get("text") or "").strip()
-        channel_id = command.get("channel_id", "")
-
         if not question:
             respond(
                 text="質問を入力してください。例: `/argus-ask 設計方針について`",
                 response_type="ephemeral",
             )
             return
-
-        index_name, index_db = resolve_index_db(channel_id)
-        logger.info(f"チャンネル {channel_id} → インデックス [{index_name}] ({index_db.name})")
-
-        respond(
-            text=f":hourglass_flowing_sand: 検索中... `{question[:50]}`",
-            response_type="ephemeral",
-        )
-        executor.submit(_run_qa, question, respond, index_name, index_db)
+        respond(text=f":mag: `{question[:80]}`", response_type="ephemeral")
+        executor.submit(_run_investigate, respond, command)
 
     # --- Argus コマンドハンドラ ---
 
@@ -786,12 +797,25 @@ def build_app():
     @app.action("patrol_approve_close")
     def on_approve_close(ack, body, client):
         ack()
-        conn = open_pm_db(_REPO_ROOT / "data" / "pm.db")
+        pm_paths = _pm_db_map.get(_default_index, [_REPO_ROOT / "data" / "pm.db"])
+        action = (body.get("actions") or [{}])[0]
+        pending_id = int(action.get("value", 0))
+        pending = _patrol_state.get_pending(pending_id)
+        ai_id = pending["target_id"] if pending else None
+
+        conns = [open_pm_db(p) for p in pm_paths]
+        target_conn = conns[0]
+        if ai_id is not None:
+            for c in conns:
+                if c.execute("SELECT id FROM action_items WHERE id=?", (ai_id,)).fetchone():
+                    target_conn = c
+                    break
         try:
-            handle_approve_close(body, client, _patrol_state, conn)
-            conn.commit()
+            handle_approve_close(body, client, _patrol_state, target_conn)
+            target_conn.commit()
         finally:
-            conn.close()
+            for c in conns:
+                c.close()
 
     @app.action("patrol_reject_close")
     def on_reject_close(ack, body, client):
@@ -898,11 +922,17 @@ def _init_common() -> None:
     else:
         logger.warning("SudachiPy: 利用不可（trigram検索のみで動作します）")
 
-    config_path = _REPO_ROOT / os.environ.get("QA_CONFIG", "data/qa_config.yaml")
+    env_config = os.environ.get("ARGUS_CONFIG") or os.environ.get("QA_CONFIG")
+    if env_config:
+        config_path = _REPO_ROOT / env_config
+    else:
+        config_path = _REPO_ROOT / "data/argus_config.yaml"
+        if not config_path.exists():
+            config_path = _REPO_ROOT / "data/qa_config.yaml"
     if config_path.exists():
         load_qa_config(config_path)
     else:
-        logger.warning(f"qa_config.yaml が見つかりません: {config_path}")
+        logger.warning(f"argus_config.yaml が見つかりません: {config_path}")
 
     for name, db_path in _index_db_map.items():
         if db_path.exists():

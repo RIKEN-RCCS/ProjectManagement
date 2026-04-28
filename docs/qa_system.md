@@ -13,7 +13,7 @@
 pm_qa_server.py（常駐デーモン）
   ├─ ack()                          ← 3秒以内に即時応答
   ├─ "検索中..." を表示
-  ├─ チャンネルID → インデックスDB  ← qa_config.yaml のマッピングで解決
+  ├─ チャンネルID → インデックスDB  ← argus_config.yaml のマッピングで解決
   ├─ SudachiPy形態素解析 + FTS5検索 ← 関連チャンクを最大30件取得
   ├─ LLM re-ranking                 ← 30件 → 上位5件に絞り込み
   ├─ call_local_llm()               ← vLLM (localhost:8000) で回答生成
@@ -33,13 +33,13 @@ pm_qa_server.py（常駐デーモン）
 
 ```
 scripts/
-├── pm_embed.py          # インデックス構築（qa_config.yaml に従い各DBに書き込む）
+├── pm_embed.py          # インデックス構築（argus_config.yaml に従い各DBに書き込む）
 ├── pm_qa_server.py      # QAサーバー本体（Slack Socket Modeデーモン）
 ├── pm_qa_start.sh       # デーモン起動スクリプト（nohup + PIDファイル管理）
 └── pm_qa_stop.sh        # デーモン停止スクリプト
 
 data/
-├── qa_config.yaml       # インデックス定義・チャンネルマッピング（ユーザーが編集）
+├── argus_config.yaml       # インデックス定義・チャンネルマッピング（ユーザーが編集）
 ├── qa_pm.db             # リーダー会議など汎用インデックス（平文sqlite3）
 ├── qa_pm-hpc.db         # HPCアプリWGインデックス
 ├── qa_pm-bmt.db         # ベンチマークWGインデックス
@@ -63,7 +63,7 @@ logs/
 | `pm-bmt` | `data/qa_pm-bmt.db` | BenchmarkWG_Meeting + ベンチマークWGチャンネル |
 | `pm-pmo` | `data/qa_pm-pmo.db` | Co-design_Review等 + PMO系チャンネル |
 
-実際のマッピングは `data/qa_config.yaml` で定義する。
+実際のマッピングは `data/argus_config.yaml` で定義する。
 
 ### 索引対象コンテンツ
 
@@ -77,7 +77,7 @@ logs/
 LLM抽出の `decisions`・`action_items` は**索引対象外**。
 抽出精度の問題で誤情報を提示するリスクがあるため、議事録本文とSlack生メッセージのみを使用する。
 
-### qa_config.yaml の構造
+### argus_config.yaml の構造
 
 ```yaml
 indices:
@@ -313,9 +313,9 @@ export SLACK_APP_TOKEN="xapp-..."   # App-Level Token（新規）
 # SLACK_USER_TOKEN は既存のまま変更なし
 ```
 
-### 4. qa_config.yaml の編集
+### 4. argus_config.yaml の編集
 
-`data/qa_config.yaml` を開き、各インデックスに対して `minutes` と `channels` を設定する。
+`data/argus_config.yaml` を開き、各インデックスに対して `minutes` と `channels` を設定する。
 
 利用可能な会議種別（`data/minutes/` 以下のファイル名から `.db` を除いたもの）:
 ```
@@ -385,7 +385,7 @@ bash scripts/pm_qa_start.sh
 |---|---|---|
 | `--full-rebuild` | なし | 既存インデックスを全削除して再構築 |
 | `--index-name NAME` | 全インデックス | 特定インデックスのみ処理 |
-| `--config PATH` | `data/qa_config.yaml` | 設定ファイルのパス |
+| `--config PATH` | `data/argus_config.yaml` | 設定ファイルのパス |
 | `--data-dir PATH` | `data` | ソースDBの検索ディレクトリ |
 | `--dry-run` | なし | 書き込みなしでチャンク数のみ表示 |
 
@@ -421,7 +421,7 @@ cat logs/pm_qa_server.pid | xargs kill -0 && echo 起動中 || echo 停止中
 | `OPENAI_API_BASE` | 必須 | なし | vLLMエンドポイント |
 | `OPENAI_API_KEY` | 任意 | `"dummy"` | APIキー |
 | （モデル名） | — | 自動取得 | vLLM `/v1/models` から自動検出 |
-| `QA_CONFIG` | 任意 | `data/qa_config.yaml` | 設定ファイルパス |
+| `ARGUS_CONFIG` | 任意 | `data/argus_config.yaml` | 設定ファイルパス（旧 `QA_CONFIG` もフォールバック対応） |
 
 ---
 
@@ -432,11 +432,11 @@ cat logs/pm_qa_server.pid | xargs kill -0 && echo 起動中 || echo 停止中
 2. Slackアプリに `commands` スコープが付与されているか確認
 
 **「記録が見つかりません」と返ってくる:**
-- 対象チャンネルに対応するインデックスに当該会議・チャンネルが含まれているか `qa_config.yaml` を確認
+- 対象チャンネルに対応するインデックスに当該会議・チャンネルが含まれているか `argus_config.yaml` を確認
 - `pm_embed.py --full-rebuild --index-name <name>` で再構築
 
 **別チャンネルのインデックスを使っているように見える:**
-- `qa_config.yaml` の `channel_map` にそのチャンネルIDが設定されているか確認
+- `argus_config.yaml` の `channel_map` にそのチャンネルIDが設定されているか確認
 - 回答末尾の `（検索対象: xxx）` でどのインデックスが使われたか確認できる
 
 **re-rankエラーがログに出る:**

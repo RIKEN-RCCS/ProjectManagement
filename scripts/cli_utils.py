@@ -96,7 +96,7 @@ def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) ->
     prompt : str
         LLM に渡すプロンプト
     model : str | None
-        使用するモデル名。OpenAI互換モード時は OPENAI_MODEL 環境変数 → "gemma4" の順で
+        使用するモデル名。OpenAI互換モード時は OPENAI_MODEL 環境変数 → vLLM 自動取得の順で
         フォールバックする。Claude CLI モード時は Claude CLI のデフォルトを使用する。
     timeout : int
         タイムアウト秒数（デフォルト: 120秒）
@@ -277,12 +277,12 @@ def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int =
     環境変数:
         OPENAI_API_BASE   — エンドポイント URL（例: http://localhost:8000/v1）
         OPENAI_API_KEY    — API キー（省略時は "dummy"）
-        OPENAI_MODEL      — モデル名（省略時は "gemma4"）
+        OPENAI_MODEL      — モデル名（省略時は vLLM /v1/models から自動取得）
         OPENAI_MAX_TOKENS — 最大出力トークン数（省略時: 8192）
     """
     base_url = os.environ["OPENAI_API_BASE"]
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
-    model_name = model or os.environ.get("OPENAI_MODEL", "gemma4")
+    model_name = model or os.environ.get("OPENAI_MODEL") or detect_vllm_model(base_url)
     max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
     return call_local_llm(
         prompt,
@@ -309,9 +309,8 @@ def call_argus_llm(
         2. RIVAULT_URL（RiVault GLM-4.7-Flash）— ローカルが使えない場合のフォールバック
     """
     local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
-    model = os.environ.get("OPENAI_MODEL", "google/gemma-4-26B-A4B-it")
 
-    # ローカル vLLM（gemma4）が起動しているか確認
+    # ローカル vLLM が起動しているか確認
     import requests as _req
     try:
         _req.get(local_base.rstrip("/v1").rstrip("/") + "/health", timeout=3)
@@ -320,6 +319,7 @@ def call_argus_llm(
         local_ok = False
 
     if local_ok:
+        model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(local_base)
         return call_local_llm(
             prompt,
             model=model,

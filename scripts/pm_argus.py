@@ -57,8 +57,9 @@ from format_utils import (
 _DATA_DIR = _REPO_ROOT / "data"
 _MINUTES_DIR = _DATA_DIR / "minutes"
 _PM_DB = _DATA_DIR / "pm.db"
-_QA_CONFIG_FILE = _DATA_DIR / "qa_config.yaml"
-_SECRETARY_CANVAS_ID_FILE = _DATA_DIR / "secretary_canvas_id.txt"
+_ARGUS_CONFIG_FILE = _DATA_DIR / "argus_config.yaml"
+_QA_CONFIG_FILE_LEGACY = _DATA_DIR / "qa_config.yaml"
+
 
 _DEFAULT_SINCE_DAYS = 30
 _DRAFT_REPORT_SINCE_DAYS = 14
@@ -76,19 +77,31 @@ from transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
 # データ収集
 # --------------------------------------------------------------------------- #
 
-def _load_channel_ids(index_name: str | None = None) -> list[str]:
-    """qa_config.yaml からチャンネルIDリストを読み込む。
+def _load_argus_config() -> dict:
+    """argus_config.yaml をパースして返す（旧 qa_config.yaml にフォールバック）。"""
+    for p in (_ARGUS_CONFIG_FILE, _QA_CONFIG_FILE_LEGACY):
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+    return {}
 
-    index_name を指定すると、そのインデックスの channels のみ返す。
-    省略時は default_index のチャンネルを返す。
-    """
-    if not _QA_CONFIG_FILE.exists():
-        return []
-    with open(_QA_CONFIG_FILE, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+
+def _load_channel_ids(index_name: str | None = None) -> list[str]:
+    """argus_config.yaml からチャンネルIDリストを読み込む。"""
+    cfg = _load_argus_config()
     indices = cfg.get("indices") or {}
     target = index_name or cfg.get("default_index", "pm")
     return indices.get(target, {}).get("channels", [])
+
+
+def load_pm_db_paths(index_name: str | None = None) -> list[Path]:
+    """argus_config.yaml の pm_db パスリストを読み込む。"""
+    cfg = _load_argus_config()
+    indices = cfg.get("indices") or {}
+    target = index_name or cfg.get("default_index", "pm")
+    pm_db_list = indices.get(target, {}).get("pm_db", ["data/pm.db"])
+    return [_REPO_ROOT / p for p in pm_db_list]
+
 
 
 _MAX_CHARS_PER_CHANNEL = 20000   # 1チャンネルあたりの最大文字数（最新を優先）
@@ -221,6 +234,62 @@ def fetch_pm_stats(conn, today: str, since: str | None = None) -> dict:
         "unacknowledged_decisions": fetch_unacknowledged_decisions(conn, since),
         "stats": fetch_summary_stats(conn, since, today),
     }
+
+
+def merge_pm_stats(stats_list: list[dict]) -> dict:
+    """複数 pm.db の統計を 1 つにマージする。"""
+    if len(stats_list) == 1:
+        return stats_list[0]
+    if not stats_list:
+        return {"milestones": [], "overdue_items": [], "assignee_workload": [],
+                "unlinked_count": 0, "no_assignee_count": 0, "weekly_trends": [],
+                "unacknowledged_decisions": [], "stats": {}}
+
+    merged: dict = {
+        "milestones": [],
+        "overdue_items": [],
+        "unacknowledged_decisions": [],
+        "unlinked_count": 0,
+        "no_assignee_count": 0,
+    }
+    for s in stats_list:
+        merged["milestones"].extend(s.get("milestones", []))
+        merged["overdue_items"].extend(s.get("overdue_items", []))
+        merged["unacknowledged_decisions"].extend(s.get("unacknowledged_decisions", []))
+        merged["unlinked_count"] += s.get("unlinked_count", 0)
+        merged["no_assignee_count"] += s.get("no_assignee_count", 0)
+
+    wl_map: dict[str, dict] = {}
+    for s in stats_list:
+        for w in s.get("assignee_workload", []):
+            name = w["assignee"]
+            if name in wl_map:
+                wl_map[name]["total_open"] += w["total_open"]
+                wl_map[name]["overdue"] += w["overdue"]
+                wl_map[name]["no_due_date"] += w.get("no_due_date", 0)
+            else:
+                wl_map[name] = {**w}
+    merged["assignee_workload"] = sorted(
+        wl_map.values(), key=lambda x: (-x["overdue"], -x["total_open"]))
+
+    trend_map: dict[str, dict] = {}
+    for s in stats_list:
+        for t in s.get("weekly_trends", []):
+            k = t["week_start"]
+            if k in trend_map:
+                trend_map[k]["created"] += t["created"]
+                trend_map[k]["closed"] += t["closed"]
+            else:
+                trend_map[k] = {**t}
+    merged["weekly_trends"] = sorted(trend_map.values(), key=lambda x: x["week_start"])
+
+    stat_keys = ["total_open", "total_closed", "overdue_count",
+                 "total_decisions", "unacknowledged_decisions"]
+    merged["stats"] = {
+        k: sum(s.get("stats", {}).get(k, 0) for s in stats_list)
+        for k in stat_keys
+    }
+    return merged
 
 
 # --------------------------------------------------------------------------- #
@@ -473,24 +542,29 @@ _RISK_PROMPT = """\
 """
 
 
-def _fmt_closed_items(conn, since_date: str, limit: int = 20) -> str:
-    try:
-        rows = conn.execute(
-            """SELECT id, content, assignee, due_date
-               FROM action_items
-               WHERE status='closed' AND COALESCE(deleted,0)=0
-               AND extracted_at >= ?
-               ORDER BY extracted_at DESC LIMIT ?""",
-            (since_date, limit),
-        ).fetchall()
-        if not rows:
-            return "（なし）"
-        return "\n".join(
-            f"- [ID:{r['id']}][担当:{r['assignee'] or '未定'}] {r['content'][:80]}"
-            for r in rows
-        )
-    except Exception:
-        return "（取得エラー）"
+def _fmt_closed_items(conns, since_date: str, limit: int = 20) -> str:
+    if not isinstance(conns, list):
+        conns = [conns]
+    all_rows: list[dict] = []
+    for conn in conns:
+        try:
+            rows = conn.execute(
+                """SELECT id, content, assignee, due_date
+                   FROM action_items
+                   WHERE status='closed' AND COALESCE(deleted,0)=0
+                   AND extracted_at >= ?
+                   ORDER BY extracted_at DESC LIMIT ?""",
+                (since_date, limit),
+            ).fetchall()
+            all_rows.extend(dict(r) for r in rows)
+        except Exception:
+            continue
+    if not all_rows:
+        return "（なし）"
+    return "\n".join(
+        f"- [ID:{r['id']}][担当:{r['assignee'] or '未定'}] {r['content'][:80]}"
+        for r in all_rows[:limit]
+    )
 
 
 def _parse_command_args(text: str) -> tuple[int | None, str | None, str | None]:
@@ -580,7 +654,7 @@ def build_draft_prompt(
     messages: str,
     stats: dict,
     context: str,
-    conn=None,
+    conns=None,
     today: str = "",
 ) -> str:
     today = today or date.today().isoformat()
@@ -595,7 +669,7 @@ def build_draft_prompt(
         )
     elif purpose == "report":
         since_14 = (date.fromisoformat(today) - timedelta(days=_DRAFT_REPORT_SINCE_DAYS)).isoformat()
-        closed_items = _fmt_closed_items(conn, since_14) if conn else "（取得不可）"
+        closed_items = _fmt_closed_items(conns, since_14) if conns else "（取得不可）"
         return _DRAFT_REPORT_PROMPT.format(
             subject=subject,
             context=context,
@@ -676,13 +750,15 @@ def _collect_all_data(
     data_dir: Path | None = None,
     minutes_dir: Path | None = None,
     pm_db_path: Path | None = None,
-) -> tuple[str, str, dict, object]:
-    """messages/minutes/stats を一括収集し (messages, minutes, stats, conn) を返す。
-    conn は呼び出し元でクローズすること。
+    pm_db_paths: list[Path] | None = None,
+) -> tuple[str, str, dict, list]:
+    """messages/minutes/stats を一括収集し (messages, minutes, stats, conns) を返す。
+    conns は呼び出し元で全てクローズすること。
     """
     data_dir = data_dir or _DATA_DIR
     minutes_dir = minutes_dir or _MINUTES_DIR
-    pm_db_path = pm_db_path or _PM_DB
+    if pm_db_paths is None:
+        pm_db_paths = [pm_db_path] if pm_db_path else load_pm_db_paths()
 
     channel_ids = _load_channel_ids()
     message_parts = []
@@ -694,10 +770,18 @@ def _collect_all_data(
 
     minutes = fetch_recent_minutes(since_date, minutes_dir=minutes_dir, no_encrypt=no_encrypt)
 
-    conn = open_pm_db(pm_db_path, no_encrypt=no_encrypt)
-    stats = fetch_pm_stats(conn, today, since=since_date)
+    conns = []
+    stats_list = []
+    for p in pm_db_paths:
+        try:
+            conn = open_pm_db(p, no_encrypt=no_encrypt)
+            conns.append(conn)
+            stats_list.append(fetch_pm_stats(conn, today, since=since_date))
+        except Exception as e:
+            print(f"[WARN] pm.db 接続スキップ ({p}): {e}", file=sys.stderr)
 
-    return messages, minutes, stats, conn
+    stats = merge_pm_stats(stats_list)
+    return messages, minutes, stats, conns
 
 
 def _run_brief(respond, command, *, no_encrypt: bool = False):
@@ -721,10 +805,11 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-brief] since={since_date}{focus_desc}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conn = _collect_all_data(
+        messages, minutes, stats, conns = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt
         )
-        conn.close()
+        for c in conns:
+            c.close()
 
         prompt = build_brief_prompt(
             messages, minutes, stats, context, today, days,
@@ -779,12 +864,13 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-draft] purpose={purpose} subject={subject}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conn = _collect_all_data(
+        messages, minutes, stats, conns = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt
         )
 
-        prompt = build_draft_prompt(purpose, subject, messages, stats, context, conn=conn, today=today)
-        conn.close()
+        prompt = build_draft_prompt(purpose, subject, messages, stats, context, conns=conns, today=today)
+        for c in conns:
+            c.close()
 
         logger.info("[argus-draft] RiVault 呼び出し中...")
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
@@ -822,10 +908,11 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-risk] since={since_date}{focus_desc}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conn = _collect_all_data(
+        messages, minutes, stats, conns = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt
         )
-        conn.close()
+        for c in conns:
+            c.close()
 
         prompt = build_risk_prompt(
             messages, minutes, stats, context, today, days,
@@ -950,7 +1037,7 @@ def main() -> None:
     parser.add_argument("--risk", action="store_true",
                         help="リスク分析を生成して Canvas に投稿（--dry-run で投稿なし）")
     parser.add_argument("--canvas-id", default=None, metavar="ID",
-                        help="投稿先 Canvas ID（省略時は secretary_canvas_id.txt を参照）")
+                        help="投稿先 Canvas ID（必須）")
     parser.add_argument("--dry-run", action="store_true",
                         help="Canvas 投稿なし・標準出力のみ")
     parser.add_argument("--no-encrypt", action="store_true",
@@ -972,20 +1059,24 @@ def main() -> None:
     today = date.today().isoformat()
     days = args.days if args.days is not None else _DEFAULT_SINCE_DAYS
     since_date = args.since or (date.today() - timedelta(days=days)).isoformat()
-    pm_db_path = Path(args.db) if args.db else _PM_DB
+    pm_db_paths_cli = [Path(args.db)] if args.db else load_pm_db_paths()
     requester = args.requester or os.environ.get("USER") or "プロジェクトメンバー"
 
     context = load_claude_md_context()
     print(f"[INFO] since: {since_date} / today: {today}", file=sys.stderr)
 
-    messages, minutes, stats, conn = _collect_all_data(
+    messages, minutes, stats, conns = _collect_all_data(
         today, since_date,
         no_encrypt=args.no_encrypt,
-        pm_db_path=pm_db_path,
+        pm_db_paths=pm_db_paths_cli,
     )
 
+    def _close_conns():
+        for c in conns:
+            c.close()
+
     if args.brief_to_canvas:
-        conn.close()
+        _close_conns()
         prompt = build_brief_prompt(
             messages, minutes, stats, context, today, days,
             assignee=args.assignee, topic=args.topic, requester=requester,
@@ -1002,11 +1093,8 @@ def main() -> None:
             return
 
         canvas_id = args.canvas_id
-        if not canvas_id and _SECRETARY_CANVAS_ID_FILE.exists():
-            canvas_id = _SECRETARY_CANVAS_ID_FILE.read_text(encoding="utf-8").strip()
-
         if not canvas_id:
-            print("[ERROR] Canvas ID が不明。--canvas-id か data/secretary_canvas_id.txt を設定してください",
+            print("[ERROR] Canvas ID が不明。--canvas-id を指定してください",
                   file=sys.stderr)
             sys.exit(1)
 
@@ -1015,7 +1103,7 @@ def main() -> None:
         print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
 
     elif args.risk:
-        conn.close()
+        _close_conns()
         prompt = build_risk_prompt(
             messages, minutes, stats, context, today, days,
             assignee=args.assignee, topic=args.topic,
@@ -1032,11 +1120,8 @@ def main() -> None:
             return
 
         canvas_id = args.canvas_id
-        if not canvas_id and _SECRETARY_CANVAS_ID_FILE.exists():
-            canvas_id = _SECRETARY_CANVAS_ID_FILE.read_text(encoding="utf-8").strip()
-
         if not canvas_id:
-            print("[ERROR] Canvas ID が不明。--canvas-id か data/secretary_canvas_id.txt を設定してください",
+            print("[ERROR] Canvas ID が不明。--canvas-id を指定してください",
                   file=sys.stderr)
             sys.exit(1)
 
