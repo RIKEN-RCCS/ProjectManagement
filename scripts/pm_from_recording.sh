@@ -12,6 +12,7 @@
 #                        省略すると .md ファイルが平文で残る（セキュリティリスクあり）
 #   --held-at YYYY-MM-DD 開催日（省略時はファイル名の GMT タイムスタンプを JST 変換して使用）
 #   --db PATH            pm.db のパス（省略時はデフォルト）
+#   --vtt PATH           Zoom VTT ファイル（省略時は同日の VTT を data/ から自動検出）
 #
 # 例:
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
@@ -37,6 +38,8 @@ export OPENAI_API_BASE="http://localhost:8000/v1"
 export OPENAI_API_KEY="dummy"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DATA_DIR="$REPO_ROOT/data"
 WHISPER_VAD="$SCRIPT_DIR/whisper_vad.py"
 PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
 PM_MINUTES_TO_PM="$SCRIPT_DIR/pm_minutes_to_pm.py"
@@ -49,6 +52,7 @@ SKIP_SECONDS=""
 MEETING_NAME=""
 HELD_AT=""
 DB_PATH=""
+VTT_FILE_ARG=""
 FILES=()
 
 while [[ $# -gt 0 ]]; do
@@ -57,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --meeting-name) MEETING_NAME="$2"; shift 2 ;;
     --held-at)      HELD_AT="$2";      shift 2 ;;
     --db)           DB_PATH="$2";      shift 2 ;;
+    --vtt)          VTT_FILE_ARG="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
       exit 0 ;;
@@ -154,6 +159,40 @@ EOF
   fi
 
   # --------------------------------------------------------------------------- #
+  # VTT ファイルの検出（--vtt 指定 > {stem}.transcript.vtt > {stem}.vtt）
+  # 例: 2026-04-28_Leader_Meeting.m4a → .transcript.vtt → .vtt の順で検索
+  # --------------------------------------------------------------------------- #
+  VTT_FILE=""
+  if [[ -n "$VTT_FILE_ARG" ]]; then
+    if [[ -f "$VTT_FILE_ARG" ]]; then
+      VTT_FILE="$VTT_FILE_ARG"
+      echo "[INFO] VTT ファイル（引数指定）: $VTT_FILE"
+    else
+      echo "[WARN] 指定された VTT ファイルが見つかりません: $VTT_FILE_ARG"
+    fi
+  else
+    INPUT_DIR=$(dirname "$INPUT_ABS")
+    INPUT_STEM=$(basename "$INPUT_ABS" | sed 's/\.[^.]*$//')
+    for vtt_candidate in \
+        "$INPUT_DIR/${INPUT_STEM}.transcript.vtt" "$DATA_DIR/${INPUT_STEM}.transcript.vtt" \
+        "$INPUT_DIR/${INPUT_STEM}.vtt" "$DATA_DIR/${INPUT_STEM}.vtt"; do
+      if [[ -f "$vtt_candidate" ]]; then
+        VTT_FILE="$vtt_candidate"
+        echo "[INFO] VTT ファイル検出: $VTT_FILE"
+        break
+      fi
+    done
+    if [[ -z "$VTT_FILE" ]]; then
+      echo "[INFO] VTT ファイルなし（Whisper のみで担当者を推定します）"
+    fi
+  fi
+
+  VTT_OPT=""
+  if [[ -n "$VTT_FILE" ]]; then
+    VTT_OPT="--vtt $VTT_FILE"
+  fi
+
+  # --------------------------------------------------------------------------- #
   # Step 1: generate_minutes_local.py で高品質議事録を生成
   # --------------------------------------------------------------------------- #
   echo "[INFO] generate_minutes_local.py で議事録を生成中: $MEETING_NAME ($DATE_TO_USE)"
@@ -164,6 +203,7 @@ EOF
     --output     "$(dirname "$BASENAME")" \
     --max-tokens 16384 \
     --multi-stage --chunk-minutes 10 \
+    $VTT_OPT \
     2>&1 | tee "$TMPLOG"
   GEN_EXIT=${PIPESTATUS[0]}
 

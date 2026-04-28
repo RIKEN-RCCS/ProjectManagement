@@ -56,7 +56,7 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
                               （LLM不使用）      （担当者・期限を直接転記）
 ```
 
-`pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_minutes_to_pm.py`（pm.db転記）の順で呼び出す。
+`pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_minutes_to_pm.py`（pm.db転記）の順で呼び出す。Zoom VTT ファイルが同名で存在する場合は自動検出し、話者情報を議事録生成に活用する（`--vtt` オプション）。
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
@@ -96,7 +96,7 @@ slack/
 │   ├── pm_web_stop.sh               # pm_web.py を停止（PIDファイルでプロセス管理）
 │   ├── canvas_utils.py              # Slack Canvas 操作の共通ユーティリティ（sanitize_for_canvas・post_to_canvas・セクション削除ロジック）
 │   ├── db_utils.py                  # DB接続の一元管理・統計クエリ・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload・fetch_overdue_items 等も提供
-│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
+│   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks・VTTパース・話者マッピング）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
 │   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
 │   ├── web_utils.py                 # pm_api.py / pm_web.py 共通のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
 │   ├── pm_document_extract.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
@@ -106,9 +106,10 @@ slack/
 │   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/argus-ask QA・/argus-* コマンドを統合処理）。ハイブリッド検索対応（Intent分類→構造化SQL+FTS5）
 │   ├── pm_qa_start.sh               # pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
 │   ├── pm_qa_stop.sh                # pm_qa_server.py を停止（PIDファイルでプロセス管理）
-│   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。cli_utils.py の call_local_llm を使用
-│   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。-c CHANNEL_ID でSlack投稿も自動化
-│   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。文字起こし後 generate_minutes_local.py → pm_minutes_import.py --no-llm → pm_minutes_to_pm.py を自動実行
+│   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。--vtt でZoom VTTの話者情報を活用。cli_utils.py の call_local_llm を使用
+│   ├── transcribe_pipeline.py       # /argus-transcribe 用パイプライン（Slackからダウンロード → Whisper文字起こし → 議事録生成）。同名VTTの自動検出対応
+│   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。同名VTTも自動移動。-c CHANNEL_ID でSlack投稿も自動化
+│   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。同名VTT自動検出（--vtt で明示指定も可）。文字起こし後 generate_minutes_local.py → pm_minutes_import.py --no-llm → pm_minutes_to_pm.py を自動実行
 │   ├── pm_from_slack.sh             # Slack取得 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）
 │   ├── canvas_report.sh             # Canvas同期 → PMレポート生成・Canvas投稿（pm_sync_canvas.py + pm_report.py）
 │   ├── slack_post_minutes.sh        # 議事録DBの内容をSlackチャンネルに投稿（pm_minutes_import.py --post-to-slack）
@@ -198,10 +199,6 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_extr
 ---
 
 @docs/ingest_plugin.md
-
----
-
-@docs/qa_system.md
 
 ---
 
