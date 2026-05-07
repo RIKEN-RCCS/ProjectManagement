@@ -40,7 +40,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # --------------------------------------------------------------------------- #
 # パス解決
 # --------------------------------------------------------------------------- #
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPT_DIR.parent
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 PROJECT_MD = REPO_ROOT / "docs" / "project.md"

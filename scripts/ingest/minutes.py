@@ -14,9 +14,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from db_utils import open_db, init_pm_db as _init_pm_db, normalize_assignee
-from ingest_plugin import IngestContext
+from ingest.ingest_plugin import IngestContext
 
 
 # --------------------------------------------------------------------------- #

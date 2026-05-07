@@ -20,9 +20,9 @@ except ImportError:
     print("ERROR: PyYAML が必要です: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from db_utils import open_db
-from ingest_plugin import IngestContext
+from ingest.ingest_plugin import IngestContext
 
 
 # --------------------------------------------------------------------------- #

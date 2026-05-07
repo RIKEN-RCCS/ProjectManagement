@@ -75,10 +75,10 @@ bash scripts/pm_from_slack.sh -c C08SXA4M7JT
 
 ```sh
 # goals.yaml を編集後に同期
-python3 scripts/pm_ingest.py goals
+python3 scripts/ingest/pm_ingest.py goals
 
 # 達成状況を確認
-python3 scripts/pm_ingest.py goals --goals-list
+python3 scripts/ingest/pm_ingest.py goals --goals-list
 ```
 
 `goals.yaml` はgit管理。マイルストーンの変更理由・経緯がコミット履歴として残る。

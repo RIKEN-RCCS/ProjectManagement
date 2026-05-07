@@ -110,7 +110,7 @@ echo "  Slack DB   : $DB_SLACK"
 echo "  pm.db      : $DB_PM"
 echo "================================================================"
 
-"$PYTHON3" "$SCRIPT_DIR/pm_ingest.py" slack \
+"$PYTHON3" "$SCRIPT_DIR/ingest/pm_ingest.py" slack \
     --slack-channel "$CHANNEL" \
     --slack-db "$DB_SLACK" \
     --db "$DB_PM" \

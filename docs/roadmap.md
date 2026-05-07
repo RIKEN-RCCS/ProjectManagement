@@ -33,7 +33,7 @@
 python3 scripts/pm_minutes_import.py --list
 
 # pm.db 転記済み一覧
-python3 scripts/pm_ingest.py minutes --minutes-list --since 2026-02-01
+python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
 ```
 
 ### フェーズ5: ゴール・マイルストーン管理と達成状況トラッキング（実装済み）
