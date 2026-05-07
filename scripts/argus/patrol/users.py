@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from slack_sdk import WebClient
-    from patrol_state import PatrolState
+    from .state import PatrolState
 
 logger = logging.getLogger(__name__)
 

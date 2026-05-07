@@ -20,5 +20,5 @@ touch $LOGFILE
 source /home/users/hikaru.inoue/.secrets/slack_tokens.sh
 source /home/users/hikaru.inoue/.secrets/rivault_tokens.sh
 
-python3 /lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/pm_argus.py --brief-to-canvas --canvas-id <CANVAS_ID> >> $LOGFILE 2>&1
-python3 /lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/pm_argus.py --risk --canvas-id <CANVAS_ID> >> $LOGFILE 2>&1
+python3 /lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/argus/pm_argus.py --brief-to-canvas --canvas-id <CANVAS_ID> >> $LOGFILE 2>&1
+python3 /lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/argus/pm_argus.py --risk --canvas-id <CANVAS_ID> >> $LOGFILE 2>&1

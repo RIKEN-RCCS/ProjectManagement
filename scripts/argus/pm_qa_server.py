@@ -30,16 +30,16 @@ from pathlib import Path
 
 import yaml
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_local_llm, load_claude_md_context
 from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
-from pm_argus import _run_brief, _run_draft, _run_risk, _run_transcribe, _transcribe_jobs, _transcribe_lock
-from pm_argus_agent import _run_investigate
-from patrol_confirm import handle_approve_close, handle_reject_close
-from patrol_state import PatrolState
+from argus.pm_argus import _run_brief, _run_draft, _run_risk, _run_transcribe, _transcribe_jobs, _transcribe_lock
+from argus.pm_argus_agent import _run_investigate
+from argus.patrol.confirm import handle_approve_close, handle_reject_close
+from argus.patrol.state import PatrolState
 
 logging.basicConfig(
     level=logging.INFO,

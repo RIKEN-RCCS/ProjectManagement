@@ -35,7 +35,7 @@ from pathlib import Path
 
 logger = logging.getLogger("pm_argus")
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 

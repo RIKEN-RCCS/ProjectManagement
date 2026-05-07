@@ -56,7 +56,7 @@ fi
 mkdir -p "$LOG_DIR"
 
 # 起動
-nohup "$PYTHON3" "$SCRIPT_DIR/pm_qa_server.py" >> "$LOG_FILE" 2>&1 &
+nohup "$PYTHON3" "$SCRIPT_DIR/argus/pm_qa_server.py" >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 echo "pm_qa_server を起動しました (PID $(cat "$PID_FILE"))"
 echo "ログ: $LOG_FILE"
