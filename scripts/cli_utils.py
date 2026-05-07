@@ -481,6 +481,63 @@ def _expand_at_refs(text: str, base_dir: Path, depth: int) -> str:
     return "\n".join(lines)
 
 
+def retrieve_knowledge_for_extraction(
+    query_text: str,
+    qa_db_path: Path | None = None,
+    top_k: int = 3,
+    logger=None,
+) -> str:
+    """
+    抽出処理用のナレッジ検索。
+    FTS5インデックスから関連する過去議論・決定事項を取得し、
+    プロンプト注入用のフォーマット済みテキストを返す。
+
+    Args:
+        query_text: 検索クエリ（Slackスレッド本文 or 議事録本文）
+        qa_db_path: FTS5インデックスDBパス（Noneの場合は data/qa_pm-all.db）
+        top_k: 返却する最大チャンク数（デフォルト3）
+        logger: ロガー（省略時は標準出力）
+
+    Returns:
+        フォーマット済みナレッジテキスト。検索失敗時は空文字列。
+    """
+    import logging
+
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    # デフォルトDB: data/qa_pm-all.db
+    if qa_db_path is None:
+        repo_root = Path(__file__).resolve().parent.parent
+        qa_db_path = repo_root / "data" / "qa_pm-all.db"
+
+    # FTS5インデックス未構築時はスキップ
+    if not qa_db_path.exists():
+        logger.debug(f"ナレッジDB未構築: {qa_db_path}（スキップ）")
+        return ""
+
+    try:
+        # pm_qa_server.py から検索関数をインポート
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from pm_qa_server import retrieve_chunks, rerank_chunks, format_context
+
+        # FTS5検索
+        chunks = retrieve_chunks(query_text, qa_db_path, k=10)
+        if not chunks:
+            logger.debug("ナレッジ検索: 該当なし")
+            return "（該当する過去議論なし）"
+
+        # LLM re-ranking で上位top_k件に絞り込み
+        reranked = rerank_chunks(query_text, chunks)[:top_k]
+
+        # プロンプト注入用フォーマット
+        return format_context(reranked)
+
+    except Exception as e:
+        logger.warning(f"ナレッジ検索エラー（処理継続）: {e}")
+        return ""
+
+
 # --------------------------------------------------------------------------- #
 # Whisper 出力パース・整形
 # --------------------------------------------------------------------------- #
