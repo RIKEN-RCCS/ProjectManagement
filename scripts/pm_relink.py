@@ -62,12 +62,16 @@ from db_utils import open_db
 from cli_utils import add_no_encrypt_arg, add_dry_run_arg, add_since_arg
 
 # アクションアイテムの編集可能フィールド
-AI_EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status", "deleted"]
-AI_NULLABLE_FIELDS = {"assignee", "due_date", "milestone_id"}
+AI_EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status", "deleted",
+                      "requested_by", "rationale", "source_context"]
+AI_NULLABLE_FIELDS = {"assignee", "due_date", "milestone_id",
+                      "requested_by", "rationale", "source_context"}
 AI_BOOL_FIELDS     = {"deleted"}   # 0/1 整数として扱うフィールド
 
-# 決定事項の編集可能フィールド（空欄はスキップ）
-DEC_EDITABLE_FIELDS = ["content", "decided_at", "deleted"]
+# 決定事項の編集可能フィールド（空欄はスキップ。ただし NULLABLE 指定のものは空欄→NULL）
+DEC_EDITABLE_FIELDS = ["content", "decided_at", "deleted",
+                       "decided_by", "rationale", "source_context"]
+DEC_NULLABLE_FIELDS = {"decided_by", "rationale", "source_context"}
 DEC_BOOL_FIELDS     = {"deleted"}
 
 _AUDIT_LOG_DDL = """
@@ -159,7 +163,9 @@ def fetch_action_items(conn, all_items: bool, since: str | None = None,
     rows = conn.execute(f"""
         SELECT a.id, a.assignee, a.due_date, a.milestone_id, a.status, a.content,
                COALESCE(a.deleted,0) AS deleted, a.extracted_at,
-               a.note, a.source, a.source_ref, m.kind AS meeting_kind, m.held_at AS meeting_held_at
+               a.note, a.source, a.source_ref,
+               a.requested_by, a.rationale, a.source_context, a.related_ids,
+               m.kind AS meeting_kind, m.held_at AS meeting_held_at
         FROM action_items a
         LEFT JOIN meetings m ON a.meeting_id = m.meeting_id
         {where}
@@ -177,7 +183,8 @@ def fetch_decisions(conn, since: str | None = None, include_deleted: bool = Fals
         params.append(since)
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     rows = conn.execute(f"""
-        SELECT id, content, decided_at, COALESCE(deleted,0) AS deleted, extracted_at, source, source_ref
+        SELECT id, content, decided_at, COALESCE(deleted,0) AS deleted, extracted_at, source, source_ref,
+               decided_by, rationale, source_context, related_ids
         FROM decisions
         {where}
         ORDER BY decided_at IS NULL, decided_at, id
@@ -201,15 +208,18 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
 
     # --- アクションアイテムセクション ---
     lines.append(_SECTION_ACTIONS)
-    lines.append("# 編集可能: assignee / due_date / milestone_id / content / status / deleted")
-    lines.append("# assignee / due_date / milestone_id は空欄 → NULL（解除）")
-    lines.append("# content / status / deleted は空欄の場合スキップ（変更なし）")
+    lines.append("# 編集可能: assignee / due_date / milestone_id / content / status / deleted /")
+    lines.append("#          requested_by / rationale / source_context")
+    lines.append("# assignee / due_date / milestone_id / requested_by / rationale / source_context は空欄 → NULL（解除）")
+    lines.append("# content / status は空欄の場合スキップ（変更なし）")
     lines.append("# deleted: 0=有効 / 1=削除済み")
-    lines.append("# source / note は参照用（読み取り専用）")
+    lines.append("# source / note / related_ids は参照用（読み取り専用）")
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(["deleted", "extracted_at", "id", "assignee", "due_date", "milestone_id", "status", "content", "source", "note"])
+    writer.writerow(["deleted", "extracted_at", "id", "assignee", "due_date", "milestone_id",
+                     "status", "content", "requested_by", "rationale", "source_context",
+                     "related_ids", "source", "note"])
     for item in items:
         writer.writerow([
             item["deleted"],
@@ -220,6 +230,10 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
             item["milestone_id"] or "",
             item["status"] or "",
             item["content"] or "",
+            item.get("requested_by") or "",
+            item.get("rationale") or "",
+            item.get("source_context") or "",
+            item.get("related_ids") or "",
             format_ai_source(item),
             item["note"] or "",
         ])
@@ -228,13 +242,16 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
     # --- 決定事項セクション ---
     lines.append("")
     lines.append(_SECTION_DECISIONS)
-    lines.append("# 編集可能: content / decided_at / deleted（空欄はスキップ）")
+    lines.append("# 編集可能: content / decided_at / deleted / decided_by / rationale / source_context")
+    lines.append("# decided_by / rationale / source_context は空欄 → NULL（解除）")
+    lines.append("# content / decided_at は空欄の場合スキップ（変更なし）")
     lines.append("# deleted: 0=有効 / 1=削除済み")
-    lines.append("# source は参照用（読み取り専用）")
+    lines.append("# source / related_ids は参照用（読み取り専用）")
 
     buf2 = io.StringIO()
     writer2 = csv.writer(buf2, lineterminator="\n")
-    writer2.writerow(["deleted", "extracted_at", "id", "content", "decided_at", "source"])
+    writer2.writerow(["deleted", "extracted_at", "id", "content", "decided_at",
+                      "decided_by", "rationale", "source_context", "related_ids", "source"])
     for d in decisions:
         writer2.writerow([
             d["deleted"],
@@ -242,6 +259,10 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
             d["id"],
             d["content"] or "",
             d["decided_at"] or "",
+            d.get("decided_by") or "",
+            d.get("rationale") or "",
+            d.get("source_context") or "",
+            d.get("related_ids") or "",
             format_dec_source(d),
         ])
     lines.append(buf2.getvalue().rstrip("\n"))
@@ -332,7 +353,7 @@ def _parse_decision_rows(lines: list[str]) -> dict[int, dict[str, str]]:
         except (KeyError, ValueError):
             print(f"[WARN] 決定事項: id が不正な行をスキップ: {row}", file=sys.stderr)
             continue
-        values: dict[str, str] = {}
+        values: dict[str, str | None] = {}
         for field in DEC_EDITABLE_FIELDS:
             if field not in row:
                 continue
@@ -341,6 +362,8 @@ def _parse_decision_rows(lines: list[str]) -> dict[int, dict[str, str]]:
                 val = _parse_bool_field(raw, field)
                 if val is not None:
                     values[field] = val
+            elif field in DEC_NULLABLE_FIELDS:
+                values[field] = raw or None
             elif raw:  # 空欄はスキップ
                 values[field] = raw
         result[dec_id] = values
