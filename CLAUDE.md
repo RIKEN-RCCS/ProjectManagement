@@ -37,26 +37,31 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 
 ## システム概要
 
-情報の流れは以下の2系統を統合する。
+情報の流れは **2パス構造**（抽出 → エンリッチメント）で構成される。
+全体像は `docs/architecture.md` を参照。
 
 ```
-[Slack] ─── slack_pipeline.py ───→ {channel_id}.db
-                                          ↓
-[会議議事録]                        pm.db ←─ pm_extractor.py
-  meetings/*.md        │          (決定事項・               ↑
-                       │        アクションアイテム)   {channel_id}.db
-                       │                  ↓
-                       │            pm_report.py
-                       │                  ↓
-                       │           Slack Canvas / レポート
-                       │
-                       └─ pm_minutes_import.py ──→ data/minutes/{kind}.db
-                                    ↓          （詳細議事録・担当者・期限）
-                         pm_minutes_to_pm.py ──→ pm.db
-                              （LLM不使用）      （担当者・期限を直接転記）
+           [Pass 1: 抽出]                         [Pass 2: エンリッチメント]
+
+[Slack] ─→ slack_pipeline.py ─→ {channel_id}.db ─┐
+                                                   │
+[議事録]                                           ├─→ pm_ingest.py ─→ pm.db ─┐
+ meetings/*.md ─→ pm_minutes_import.py ─→ minutes/*.db                        │
+                                                   │                          │
+[goals.yaml] ────────────────────────────────────┘                          │
+                                                                              │
+  enrich_items.py (LLM + knowledge_context.py + FTS5) ←────────────────────┘
+      ↓ 判断者・根拠・関連IDを付与
+   pm.db (強化版)
+      ↓
+   pm_report.py / pm_argus.py / pm_api.py → Canvas / Slack / Web UI
 ```
 
-`pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_minutes_to_pm.py`（pm.db転記）の順で呼び出す。Zoom VTT ファイルが同名で存在する場合は自動検出し、話者情報を議事録生成に活用する（`--vtt` オプション）。
+- Pass 1 は単一スレッド・議事録から構造化データを作る
+- Pass 2 は過去ナレッジ全体から関連情報を引いて紐付ける
+- データ品質管理は `pm_screen.py`（重複検出）→ `pm_relink.py`（一括削除・編集）で行う
+
+`pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_ingest.py minutes`（pm.db転記）の順で呼び出す。Zoom VTT ファイルが同名で存在する場合は自動検出し、話者情報を議事録生成に活用する（`--vtt` オプション）。
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
@@ -75,11 +80,17 @@ slack/
 │   ├── slack_pipeline.py            # Slack差分取得（SDK経由）。新規・更新スレッドのみ取得してDBに保存。--skip-fetch でAPI取得スキップ、--list でスレッド一覧表示
 │   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存）。--export でDB内容をMarkdownにエクスポート、--no-llm で人間修正済みMarkdownをLLM不使用で再インポート。--post-to-slack でSlack投稿。--delete で削除
 │   ├── pm_minutes_catalog.py        # 議事録一括アップロード・Canvas目録生成（minutes_channels.yaml で会議種別→チャンネルを定義）
-│   ├── pm_minutes_to_pm.py          # data/minutes/{kind}.db → pm.db 転記（LLM不使用。--delete で削除）
-│   ├── pm_extractor.py              # Slack DB生メッセージ → 決定事項・アクションアイテム抽出 → pm.db（--list で抽出済み一覧）
+│   ├── pm_ingest.py                 # [Pass 1統合ランナー] slack/minutes/goals の各プラグインを呼び出して pm.db に投入。`pm_ingest.py --list` で一覧
+│   ├── ingest_slack.py              # Slack DB生メッセージ → 決定事項・アクションアイテム抽出 → pm.db（pm_ingest.py slack）
+│   ├── ingest_minutes.py            # data/minutes/{kind}.db → pm.db 転記（LLM不使用、pm_ingest.py minutes）
+│   ├── ingest_goals.py              # goals.yaml → goals/milestones テーブル完全同期（pm_ingest.py goals）
+│   ├── ingest_plugin.py             # IngestContext / IngestPlugin のプラグインインタフェース定義（docs/ingest_plugin.md 参照）
 │   ├── pm_report.py                 # pm.db → 進捗レポート生成・Canvas投稿（SlackリンクはクリッカブルURL形式）。--show-workload で担当者別負荷セクションを追加出力
 │   ├── pm_sync_canvas.py            # Canvas → pm.db 同期（担当者・期限・マイルストーン・状況・内容・対応状況・決定事項内容）。open/close判定は「状況」列のみ
 │   ├── pm_relink.py                 # アクションアイテム・決定事項の各フィールドをCSV経由で一括編集（LLM不使用）。deleted(0/1)でアイテムの有効化/削除も可能。--include-deleted で削除済みアイテムを対象に含める
+│   ├── pm_screen.py                 # pm.db の重複・類似・曖昧アイテムを検出（exact_dup/near_dup/ambiguous）。pm_relink.py 互換CSVで出力して一括削除可能
+│   ├── enrich_items.py              # [Pass 2] pm.db の decisions/action_items に過去ナレッジを参照して判断者・根拠・related_ids を補完。LLM + FTS5
+│   ├── knowledge_context.py         # enrich_items.py の共通ライブラリ（単体実行なし）。SudachiPy・FTS5検索・参加者パターン取得
 │   ├── pm_insight.py                # pm.db → LLMによるプロジェクト健全性評価・リスク特定・改善提案を生成・Canvas投稿
 │   ├── pm_argus.py                  # Argus AI — Slack・議事録・pm.db統合分析（ブリーフィング・リスク分析・草案生成）
 │   ├── pm_argus_agent.py            # Argus Investigation Agent — LLM駆動マルチステップ調査（/argus-investigate）
@@ -89,16 +100,14 @@ slack/
 │   ├── patrol_actions.py            # Patrol アクション実行（Slack投稿・Block Kit・DB書き込み・audit_log）
 │   ├── patrol_confirm.py            # Patrol Block Kit ボタンハンドラ（承認/却下、pm_qa_server.py から呼ばれる）
 │   ├── patrol_users.py              # 担当者名（日本語表示名）→ Slack user_id 解決（キャッシュ・DB マイニング・API フォールバック）
-│   ├── pm_goals_import.py           # goals.yaml → pm.db 完全同期
 │   ├── pm_api.py                    # FastAPI REST API + 静的フロントエンド配信。pm.db のアクションアイテム・決定事項・議事録・ファイル一覧を提供。web_utils.py を使用
-│   ├── pm_web.py                    # [非推奨] pm.db 編集 Web UI（NiceGUI）。現用は pm_api.py（FastAPI）
-│   ├── pm_web_start.sh              # pm_web.py をバックグラウンドで起動（nohup + PIDファイル管理）
-│   ├── pm_web_stop.sh               # pm_web.py を停止（PIDファイルでプロセス管理）
+│   ├── pm_web_start.sh              # pm_api.py をバックグラウンドで起動（nohup + PIDファイル管理、port 8501）
+│   ├── pm_web_stop.sh               # pm_api.py を停止（PIDファイルでプロセス管理）
 │   ├── canvas_utils.py              # Slack Canvas 操作の共通ユーティリティ（sanitize_for_canvas・post_to_canvas・セクション削除ロジック）
 │   ├── db_utils.py                  # DB接続の一元管理・統計クエリ・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload・fetch_overdue_items 等も提供
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks・VTTパース・話者マッピング）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
 │   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
-│   ├── web_utils.py                 # pm_api.py / pm_web.py 共通のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
+│   ├── web_utils.py                 # pm_api.py 用のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
 │   ├── pm_document_extract.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
 │   ├── pm_document_update.sh        # BOXリンク抽出（pm_document_extract.py）→ FTS5更新（pm_embed.py）を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
@@ -109,8 +118,8 @@ slack/
 │   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。--vtt でZoom VTTの話者情報を活用。cli_utils.py の call_local_llm を使用
 │   ├── transcribe_pipeline.py       # /argus-transcribe 用パイプライン（Slackからダウンロード → Whisper文字起こし → 議事録生成）。同名VTTの自動検出対応
 │   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。同名VTTも自動移動。-c CHANNEL_ID でSlack投稿も自動化
-│   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。同名VTT自動検出（--vtt で明示指定も可）。文字起こし後 generate_minutes_local.py → pm_minutes_import.py --no-llm → pm_minutes_to_pm.py を自動実行
-│   ├── pm_from_slack.sh             # Slack取得 → pm.db抽出を連続実行（slack_pipeline.py + pm_extractor.py）
+│   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。同名VTT自動検出（--vtt で明示指定も可）。文字起こし後 generate_minutes_local.py → pm_minutes_import.py --no-llm → pm_ingest.py minutes を自動実行
+│   ├── pm_from_slack.sh             # Slack取得 → pm.db抽出を連続実行（slack_pipeline.py + pm_ingest.py slack）
 │   ├── canvas_report.sh             # Canvas同期 → PMレポート生成・Canvas投稿（pm_sync_canvas.py + pm_report.py）
 │   ├── slack_post_minutes.sh        # 議事録DBの内容をSlackチャンネルに投稿（pm_minutes_import.py --post-to-slack）
 │   └── whisper_vad.py               # VAD+DeepFilterNet+Whisperによる話者分離・文字起こし
@@ -154,12 +163,12 @@ python3 scripts/slack_pipeline.py ...
 ```sh
 export OPENAI_API_BASE="http://localhost:8000/v1"   # vLLM エンドポイント
 export OPENAI_API_KEY="dummy"                        # 認証不要のローカルサーバは "dummy" で可
-export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_extractor）
+export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_ingest.py slack / ingest_slack.py）
 ```
 
 `OPENAI_API_BASE` が設定されている場合、`call_claude()` は Claude CLI の代わりにローカルLLMを呼び出す（`cli_utils.py` の `call_local_llm()` 経由）。モデル名は vLLM の `/v1/models` API から自動取得するため、`OPENAI_MODEL` の設定は不要。
 
-`OPENAI_MAX_TOKENS` は Slack 抽出（`pm_extractor.py`）の最大出力トークン数。会議録音処理では `generate_minutes_local.py` の `--max-tokens 16384` が使われるため本変数は影響しない。
+`OPENAI_MAX_TOKENS` は Slack 抽出（`pm_ingest.py slack` 経由の `ingest_slack.py`）の最大出力トークン数。会議録音処理では `generate_minutes_local.py` の `--max-tokens 16384` が使われるため本変数は影響しない。
 
 ---
 
@@ -179,6 +188,10 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_extr
 - Pane 0 (左): メイン作業
 - Pane 1 (右上): ログ監視 `tail -f`
 - Pane 2 (右下): ジョブ状態監視
+
+---
+
+@docs/architecture.md
 
 ---
 

@@ -52,7 +52,7 @@
 
 **対応**:
 1. `goals.yaml` を作成し、現在承認されているゴール・マイルストーンを記述
-2. `pm_goals_import.py` で pm.db に同期
+2. `pm_ingest.py goals` で pm.db に同期
 3. `pm_relink.py --export` で既存アクションアイテムを milestone_id に紐づけ（CSV編集）
 
 **効果**: 本システムの設計思想（2層構造）が初めて稼働する。レポートに「プロジェクトの現在地」セクションが出力される。
@@ -95,7 +95,7 @@
 **問題**: 誤抽出・漏れ抽出を確認するには pm_relink.py でCSV全件確認が必要で手間がかかる。
 
 **対応**:
-1. `pm_extractor.py` / `pm_minutes_import.py` に「低信頼度フラグ」を実装（LLMに確信度を返させる）
+1. `pm_ingest.py slack` / `pm_minutes_import.py` に「低信頼度フラグ」を実装（LLMに確信度を返させる）
 2. `pm_report.py` の要注意事項に「未確認・低信頼度アイテム」セクションを追加
 3. Canvas 上の行削除を検知して pm.db から soft delete する仕組みの検討
 

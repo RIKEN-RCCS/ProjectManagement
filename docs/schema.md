@@ -76,7 +76,7 @@ Slack API の latest_reply  vs  MAX(replies.msg_ts)
 | `decided_at` | TEXT | 決定日 |
 | `source` | TEXT | `meeting` または `slack` |
 | `source_ref` | TEXT | 背景への参照（議事録パス or Slackパーマリンク） |
-| `source_context` | TEXT | 根拠となった議論・発言の要約（`pm_minutes_to_pm.py` 経由のみ。LLMが抽出） |
+| `source_context` | TEXT | 根拠となった議論・発言の要約（`pm_ingest.py minutes` 経由のみ。LLMが抽出） |
 | `extracted_at` | TEXT | 発生日（meetingは開催日、slackは投稿日。YYYY-MM-DD） |
 | `deleted` | INTEGER | 論理削除フラグ（0=有効、1=削除済み。デフォルト0）。全クエリで `COALESCE(deleted,0)=0` でフィルタ |
 

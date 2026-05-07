@@ -8,8 +8,8 @@
 
 ### フェーズ2: 会議議事録との統合（実装済み）
 
-- `meetings/*.md` をLLMで解析し `data/minutes/{kind}.db` に詳細保存（`pm_minutes_import.py`）、その後 `pm_minutes_to_pm.py` で `pm.db` に転記
-- Slack要約から決定事項・アクションアイテムを抽出し `pm.db` に保存（`pm_extractor.py`）
+- `meetings/*.md` をLLMで解析し `data/minutes/{kind}.db` に詳細保存（`pm_minutes_import.py`）、その後 `pm_ingest.py minutes` で `pm.db` に転記
+- Slack要約から決定事項・アクションアイテムを抽出し `pm.db` に保存（`pm_ingest.py slack`）
 - `source_ref` により背景（会議議事録 or Slackスレッド）に常に遡れる設計
 - 差分処理: `slack_extractions` テーブルで抽出済みスレッドを管理、変化なしはLLM呼び出しゼロ
 
@@ -23,7 +23,7 @@
 ### フェーズ4: インポート済み議事録の記録（実装済み）
 
 - `pm_minutes_import.py --list` で議事録DBにインポート済みの一覧を表示できる
-- `pm_minutes_to_pm.py --list` で pm.db に転記済みの会議一覧を表示できる
+- `pm_ingest.py minutes --minutes-list` で pm.db に転記済みの会議一覧を表示できる
   - 開催日・決定数・AI数・登録日時・meeting_id を一覧表示
   - `--since YYYY-MM-DD` と組み合わせて期間絞り込みも可能
   - 再インポート・抜け漏れ確認・監査証跡として活用できる
@@ -33,7 +33,7 @@
 python3 scripts/pm_minutes_import.py --list
 
 # pm.db 転記済み一覧
-python3 scripts/pm_minutes_to_pm.py --list --since 2026-02-01
+python3 scripts/pm_ingest.py minutes --minutes-list --since 2026-02-01
 ```
 
 ### フェーズ5: ゴール・マイルストーン管理と達成状況トラッキング（実装済み）
@@ -63,7 +63,7 @@ python3 scripts/pm_minutes_to_pm.py --list --since 2026-02-01
       area: 全エリア
   ```
 
-#### 5.2 pm.db へのロード・完全同期（pm_goals_import.py）
+#### 5.2 pm.db へのロード・完全同期（pm_ingest.py goals）
 
 - `goals.yaml` を読み込み `goals` / `milestones` テーブルに完全同期する
   - yaml に存在するID → upsert（追加・更新）
@@ -74,7 +74,7 @@ python3 scripts/pm_minutes_to_pm.py --list --since 2026-02-01
 #### 5.3 アクションアイテムとマイルストーンの紐づけ
 
 - `action_items` テーブルに `milestone_id` 列を追加済み
-- `pm_extractor.py` / `pm_minutes_import.py` の抽出時に、マイルストーン一覧をLLMの文脈として
+- `pm_ingest.py slack` / `pm_minutes_import.py` の抽出時に、マイルストーン一覧をLLMの文脈として
   渡し、各アクションアイテムをどのマイルストーンに紐づけるかを推定させる
 - インポート済みアイテムの紐づけ修正は `pm_relink.py` でCSV経由で一括編集できる
 
@@ -132,7 +132,7 @@ PMBOKの観点から現システムを評価した結果、以下の領域が未
 
 - Slack取得・抽出・レポート投稿がすべて手動トリガーであり運用負荷がかかる
 - Slurm の定期ジョブ、または crontab で以下を自動化する
-  - 平日朝: `slack_pipeline.py` → `pm_extractor.py`
+  - 平日朝: `slack_pipeline.py` → `pm_ingest.py slack`
   - 月曜朝: `pm_report.py`（週次レポートのCanvas投稿）
 
 ### P5: 意思決定の文脈記録（運用ルール）
