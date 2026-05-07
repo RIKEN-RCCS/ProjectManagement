@@ -219,7 +219,7 @@ LLM 層
 
 ## セットアップ（最小要件）
 
-1. **pm_qa_start.sh 実行**
+1. **`bash scripts/pm_daemon.sh start qa` 実行**
    - Slack トークン読み込み（`~/.secrets/slack_tokens.sh`）
    - Socket Mode デーモン起動
    - 全スラッシュコマンド有効化
@@ -244,7 +244,7 @@ LLM 層
 ## よくある質問
 
 **Q: 何を用意すればすぐに使える？**
-A: `pm_qa_start.sh` を実行するだけ。Slack トークンと gemma4 が起動していれば全機能が動作。
+A: `pm_daemon.sh start qa` を実行するだけ。Slack トークンと gemma4 が起動していれば全機能が動作。
 
 **Q: LLM の品質が問題なら？**
 A: gemma4 が落ちるなら RiVault にフォールバック。または `call_argus_llm()` を Claude API に切り替え可能（性能・コスト トレードオフあり）。

@@ -296,8 +296,8 @@ chmod 600 ~/.secrets/slack_tokens.sh
 ### QAサーバー・Argus の起動
 
 ```sh
-bash scripts/pm_qa_start.sh    # /argus-ask・/argus-* が有効になる
-bash scripts/pm_qa_stop.sh     # 停止
+bash scripts/pm_daemon.sh start qa    # /argus-ask・/argus-* が有効になる
+bash scripts/pm_daemon.sh stop qa     # 停止
 ```
 
 ---
@@ -314,7 +314,7 @@ bash scripts/pm_qa_stop.sh     # 停止
 | `pm_from_recording.sh` | 録音ファイルを指定して文字起こし・議事録生成（同名VTT自動検出、`--vtt` で明示指定も可） |
 | `pm_from_slack.sh` | Slack取得・pm.db抽出を一括実行 |
 | `canvas_report.sh` | Canvas同期 → レポート生成・Canvas投稿 |
-| `pm_qa_start.sh` / `pm_qa_stop.sh` | QA・Argusデーモンの起動・停止 |
+| `pm_daemon.sh start qa` / `pm_daemon.sh stop qa` | QA・Argusデーモンの起動・停止 |
 
 ### 情報収集・抽出
 

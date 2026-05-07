@@ -512,13 +512,13 @@ pm.db の内容をブラウザ上で閲覧・編集できる Web UI。FastAPI + 
 
 ```sh
 # 起動（バックグラウンドデーモン）
-bash scripts/pm_web_start.sh
+bash scripts/pm_daemon.sh start web
 # → http://localhost:8501 でブラウザアクセス
 # → ログ: logs/pm_web.log
 # → PID: logs/pm_web.pid
 
 # 停止
-bash scripts/pm_web_stop.sh
+bash scripts/pm_daemon.sh stop web
 
 # 起動状態の確認
 cat logs/pm_web.pid | xargs kill -0 && echo 起動中 || echo 停止中
