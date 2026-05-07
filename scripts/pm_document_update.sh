@@ -2,8 +2,9 @@
 # pm_document_update.sh
 #
 # ドキュメントレジストリの更新と FTS5 インデックスへの組み込みを連続実行する。
-#   ステップ1: pm_document_extract.py — Slack BOXリンクを収集・LLMでメタデータ抽出
-#   ステップ2: pm_embed.py           — docs_*.db を FTS5 インデックスに組み込み
+#   ステップ1: pm_document_extract.py  — Slack BOXリンクを収集・LLMでメタデータ抽出
+#   ステップ2: pm_document_content.py  — BOXフォルダからドキュメント本文を取得・Markdown変換
+#   ステップ3: pm_embed.py            — docs_*.db + box_docs.db を FTS5 インデックスに組み込み
 #
 # Usage:
 #   bash scripts/pm_document_update.sh
@@ -13,10 +14,11 @@
 # Options:
 #   --index-name NAME     特定インデックスのみ処理（pm / pm-hpc / pm-bmt / pm-pmo）
 #   -c CHANNEL_ID         特定チャンネルのみ抽出（pm_document_extract.py のみ）
-#   --dry-run             DB保存なし・確認のみ（両スクリプトに渡す）
-#   --force               抽出済みスレッドも再処理（pm_document_extract.py のみ）
+#   --dry-run             DB保存なし・確認のみ（全スクリプトに渡す）
+#   --force               抽出済み・変換済みも再処理
 #   --full-rebuild        FTS5 インデックスを全件再構築（pm_embed.py のみ）
-#   --skip-embed          ステップ2（pm_embed.py）をスキップ
+#   --skip-embed          ステップ3（pm_embed.py）をスキップ
+#   --skip-box-content    ステップ2（pm_document_content.py）をスキップ
 #   --since YYYY-MM-DD    この日付以降のメッセージのみ対象（pm_document_extract.py のみ）
 
 set -euo pipefail
@@ -47,17 +49,19 @@ DRY_RUN=""
 FORCE=""
 FULL_REBUILD=""
 SKIP_EMBED=""
+SKIP_BOX_CONTENT=""
 SINCE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --index-name)     INDEX_NAME="$2";              shift 2 ;;
-        -c|--channel)     CHANNEL="$2";                 shift 2 ;;
-        --dry-run)        DRY_RUN="--dry-run";          shift   ;;
-        --force)          FORCE="--force";              shift   ;;
-        --full-rebuild)   FULL_REBUILD="--full-rebuild"; shift   ;;
-        --skip-embed)     SKIP_EMBED="1";               shift   ;;
-        --since)          SINCE="$2";                   shift 2 ;;
+        --index-name)        INDEX_NAME="$2";              shift 2 ;;
+        -c|--channel)        CHANNEL="$2";                 shift 2 ;;
+        --dry-run)           DRY_RUN="--dry-run";          shift   ;;
+        --force)             FORCE="--force";              shift   ;;
+        --full-rebuild)      FULL_REBUILD="--full-rebuild"; shift   ;;
+        --skip-embed)        SKIP_EMBED="1";               shift   ;;
+        --skip-box-content)  SKIP_BOX_CONTENT="1";         shift   ;;
+        --since)             SINCE="$2";                   shift 2 ;;
         -h|--help)
             sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
             exit 0 ;;
@@ -88,11 +92,32 @@ echo "================================================================"
 "$PYTHON3" "$SCRIPT_DIR/pm_document_extract.py" "${EXTRACT_OPTS[@]}"
 
 # --------------------------------------------------------------------------- #
-# ステップ2: FTS5 インデックス更新
+# ステップ2: BOXドキュメント本文抽出
+# --------------------------------------------------------------------------- #
+if [[ -n "$SKIP_BOX_CONTENT" ]]; then
+    echo ""
+    echo "ステップ2: pm_document_content.py はスキップします (--skip-box-content)"
+else
+    BOX_OPTS=(--scan --convert)
+    [[ -n "$DRY_RUN" ]] && BOX_OPTS+=("$DRY_RUN")
+    [[ -n "$FORCE" ]]   && BOX_OPTS+=(--force)
+
+    echo ""
+    echo "================================================================"
+    echo "ステップ2: BOXドキュメント本文抽出 (pm_document_content.py)"
+    [[ -n "$DRY_RUN" ]] && echo "  dry-run      : on"
+    [[ -n "$FORCE" ]]   && echo "  force        : on"
+    echo "================================================================"
+
+    "$PYTHON3" "$SCRIPT_DIR/pm_document_content.py" "${BOX_OPTS[@]}"
+fi
+
+# --------------------------------------------------------------------------- #
+# ステップ3: FTS5 インデックス更新
 # --------------------------------------------------------------------------- #
 if [[ -n "$SKIP_EMBED" ]]; then
     echo ""
-    echo "ステップ2: pm_embed.py はスキップします (--skip-embed)"
+    echo "ステップ3: pm_embed.py はスキップします (--skip-embed)"
     echo ""
     echo "✓ pm_document_update.sh 完了（FTS5未更新）"
     exit 0
@@ -105,7 +130,7 @@ EMBED_OPTS=()
 
 echo ""
 echo "================================================================"
-echo "ステップ2: FTS5インデックス更新 (pm_embed.py)"
+echo "ステップ3: FTS5インデックス更新 (pm_embed.py)"
 [[ -n "$INDEX_NAME" ]]   && echo "  インデックス : $INDEX_NAME"
 [[ -n "$FULL_REBUILD" ]] && echo "  full-rebuild : on"
 [[ -n "$DRY_RUN" ]]      && echo "  dry-run      : on"
