@@ -287,9 +287,17 @@ def _convert_docx(path: Path) -> tuple[str, str]:
 
 
 def _convert_xlsx(path: Path) -> tuple[str, str]:
+    # 最初にHTML(StarCalc)UTF8形式で試行
     md = _libreoffice_to_html_to_md(path, "html:HTML (StarCalc):UTF8")
     if md:
-        return md, "libreoffice_html"
+        return md, "libreoffice_html_starcalc_utf8"
+
+    # StarCalc UTF8失敗時は標準HTML形式で再試行（埋め込みデータが多いファイル対応）
+    logger.info(f"    StarCalc UTF8変換失敗、標準HTML形式で再試行: {path.name}")
+    md = _libreoffice_to_html_to_md(path, "html:HTML")
+    if md:
+        return md, "libreoffice_html_standard"
+
     return "", "failed"
 
 
