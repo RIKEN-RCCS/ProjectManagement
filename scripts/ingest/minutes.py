@@ -22,7 +22,7 @@ from ingest.ingest_plugin import IngestContext
 # --------------------------------------------------------------------------- #
 # 定数
 # --------------------------------------------------------------------------- #
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_MINUTES_DIR = REPO_ROOT / "data" / "minutes"
 
 

@@ -48,7 +48,7 @@ PLUGINS: dict[str, object] = {
 }
 # --------------------------------------------------------------------------- #
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_PM_DB = REPO_ROOT / "data" / "pm.db"
 
 
