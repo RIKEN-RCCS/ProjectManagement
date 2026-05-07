@@ -656,7 +656,6 @@ def _scan_single_source(
     """
     # スレッドごとに独立した DB 接続を開く
     src_conn = sqlite3.connect(db_path)
-    ensure_box_files_table(src_conn)
 
     try:
         name = src.get("name", "")
