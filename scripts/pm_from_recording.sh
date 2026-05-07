@@ -42,7 +42,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_ROOT/data"
 WHISPER_VAD="$SCRIPT_DIR/whisper_vad.py"
 PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
-PM_MINUTES_TO_PM="$SCRIPT_DIR/pm_minutes_to_pm.py"
+PM_INGEST="$SCRIPT_DIR/pm_ingest.py"
 GENERATE_MINUTES_LOCAL="$SCRIPT_DIR/generate_minutes_local.py"
 
 # --------------------------------------------------------------------------- #
@@ -233,8 +233,8 @@ EOF
   # Step 3: pm.db へ転記
   # --------------------------------------------------------------------------- #
   echo "[INFO] pm.db へ転記中: $MEETING_NAME ($DATE_TO_USE)"
-  "$PYTHON3" "$PM_MINUTES_TO_PM" \
-    --meeting-name "$MEETING_NAME" \
+  "$PYTHON3" "$PM_INGEST" minutes \
+    --minutes-name "$MEETING_NAME" \
     --since "$DATE_TO_USE" \
     --db "${DB_PATH:-data/pm.db}"
 

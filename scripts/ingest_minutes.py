@@ -3,7 +3,7 @@
 ingest_minutes.py
 
 議事録DB（data/minutes/{kind}.db）→ pm.db への転記プラグイン。
-元ロジックは pm_minutes_to_pm.py から移植。pm_minutes_to_pm.py は後方互換 CLI ラッパーとして残す。
+pm_ingest.py minutes 経由で呼び出される。
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pm_from_slack.sh
 #
-# Slack取得 (slack_pipeline.py) → pm.db抽出 (pm_extractor.py) を連続実行する。
+# Slack取得 (slack_pipeline.py) → pm.db抽出 (pm_ingest.py slack) を連続実行する。
 #
 # Usage:
 #   bash scripts/pm_from_slack.sh -c <CHANNEL_ID>
@@ -14,7 +14,7 @@
 #   --dry-run             DB保存なし・確認のみ（両スクリプトに渡す）
 #   --no-encrypt          平文モード（両スクリプトに渡す）
 #   --skip-fetch          Slack API取得をスキップ（slack_pipeline.py のみ）
-#   --force-reextract     抽出済みスレッドも再処理（pm_extractor.py のみ）
+#   --force-reextract     抽出済みスレッドも再処理（pm_ingest.py slack のみ）
 #   --db-slack PATH       {channel_id}.db のパス
 #   --db-pm PATH          pm.db のパス
 
@@ -84,7 +84,7 @@ PIPELINE_OPTS=("${COMMON_OPTS[@]}")
 [[ -n "$SKIP_FETCH" ]]       && PIPELINE_OPTS+=("$SKIP_FETCH")
 
 EXTRACTOR_OPTS=("${COMMON_OPTS[@]}")
-[[ -n "$FORCE_REEXTRACT" ]]  && EXTRACTOR_OPTS+=("$FORCE_REEXTRACT")
+[[ -n "$FORCE_REEXTRACT" ]]  && EXTRACTOR_OPTS+=("--slack-force-reextract")
 
 # --------------------------------------------------------------------------- #
 # 実行
@@ -104,16 +104,16 @@ echo "================================================================"
 
 echo ""
 echo "================================================================"
-echo "ステップ2: pm.db抽出 (pm_extractor.py)"
+echo "ステップ2: pm.db抽出 (pm_ingest.py slack)"
 echo "  チャンネル : $CHANNEL"
 echo "  Slack DB   : $DB_SLACK"
 echo "  pm.db      : $DB_PM"
 echo "================================================================"
 
-"$PYTHON3" "$SCRIPT_DIR/pm_extractor.py" \
-    -c "$CHANNEL" \
-    --db-slack "$DB_SLACK" \
-    --db-pm "$DB_PM" \
+"$PYTHON3" "$SCRIPT_DIR/pm_ingest.py" slack \
+    --slack-channel "$CHANNEL" \
+    --slack-db "$DB_SLACK" \
+    --db "$DB_PM" \
     "${EXTRACTOR_OPTS[@]}"
 
 echo ""

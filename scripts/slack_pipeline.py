@@ -8,7 +8,7 @@ Slack差分取得パイプライン
      - DBに存在するが返信が増えたスレッドのみ再取得
      - 変化のないスレッドはスキップ（API呼び出しなし）
   2. 取得したメッセージを {channel_id}.db に保存
-     - pm_extractor.py が生メッセージから決定事項・AIを直接抽出
+     - pm_ingest.py slack (ingest_slack.py) が生メッセージから決定事項・AIを直接抽出
 """
 
 import os

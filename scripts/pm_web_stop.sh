@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pm_web_stop.sh - pm_web.py (Streamlit) を停止する
+# pm_web_stop.sh - pm_api.py (FastAPI) を停止する
 
 set -euo pipefail
 

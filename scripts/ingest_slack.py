@@ -3,7 +3,7 @@
 ingest_slack.py
 
 Slack {channel_id}.db → pm.db へ決定事項・アクションアイテムを抽出するプラグイン。
-元ロジックは pm_extractor.py から移植。pm_extractor.py は後方互換 CLI ラッパーとして残す。
+pm_ingest.py slack 経由で呼び出される。
 """
 
 from __future__ import annotations
