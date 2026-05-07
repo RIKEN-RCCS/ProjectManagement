@@ -24,7 +24,7 @@ from ingest.ingest_plugin import IngestContext
 # --------------------------------------------------------------------------- #
 # 定数
 # --------------------------------------------------------------------------- #
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 DEFAULT_CHANNEL = "C0A9KG036CS"
 

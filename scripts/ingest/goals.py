@@ -28,7 +28,7 @@ from ingest.ingest_plugin import IngestContext
 # --------------------------------------------------------------------------- #
 # 定数
 # --------------------------------------------------------------------------- #
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_GOALS_FILE = REPO_ROOT / "goals.yaml"
 
 GOALS_SCHEMA = """
@@ -81,12 +81,7 @@ def load_goals_yaml(goals_file: Path) -> dict:
 # --------------------------------------------------------------------------- #
 # 一覧表示
 # --------------------------------------------------------------------------- #
-def list_registered(db_path: Path, no_encrypt: bool, log=print) -> None:
-    if not db_path.exists():
-        print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
-        sys.exit(1)
-
-    conn = open_db(db_path, encrypt=not no_encrypt)
+def list_registered(conn, log=print) -> None:
     today = date.today().isoformat()
 
     goals = conn.execute("SELECT * FROM goals ORDER BY goal_id").fetchall()
@@ -101,7 +96,6 @@ def list_registered(db_path: Path, no_encrypt: bool, log=print) -> None:
         ORDER BY m.due_date ASC NULLS LAST
         """
     ).fetchall()
-    conn.close()
 
     if not goals:
         log("登録済みゴールはありません。pm_ingest.py goals を実行してください。")
@@ -232,7 +226,8 @@ class GoalsIngestPlugin:
 
     def run(self, args: argparse.Namespace, ctx: IngestContext) -> None:
         if getattr(args, "goals_list", False):
-            list_registered(ctx.pm_db_path, ctx.no_encrypt, log=ctx.log)
+            ensure_goals_schema(ctx.pm_conn)
+            list_registered(ctx.pm_conn, log=ctx.log)
             return
 
         goals_file = (
