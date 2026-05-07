@@ -52,6 +52,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from multiprocessing import Pool
 from pathlib import Path
@@ -203,8 +204,22 @@ def _list_box_folder_inner(
 
     logger.info(f"    → ファイル {file_count} 件, サブフォルダ {len(folders)} 件 (累計 {len(out)} 件)")
 
-    for sub_id, sub_path in folders:
-        _list_box_folder_inner(sub_id, sub_path, out, recursive=recursive, exclude_folders=exclude_folders)
+    # Phase 1: サブフォルダ取得を並列化（ThreadPoolExecutor）
+    if folders:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(
+                    _list_box_folder_inner, sub_id, sub_path, out,
+                    recursive=recursive, exclude_folders=exclude_folders
+                ): sub_path
+                for sub_id, sub_path in folders
+            }
+            for future in as_completed(futures):
+                sub_path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.warning(f"[WARN] サブフォルダ取得失敗 {sub_path}: {e}")
 
 
 def download_box_file(box_file_id: str, dest_dir: Path) -> Path | None:
@@ -628,28 +643,24 @@ def _ocr_image(img_path: Path, base_url: str) -> str | None:
 # Scan: register BOX files
 # ---------------------------------------------------------------------------
 
-def scan_sources(
-    conn: sqlite3.Connection,
-    config: dict,
-    *,
-    source_filter: str | None = None,
+def _scan_single_source(
+    src: dict,
+    db_path: Path,
+    no_encrypt: bool,
     dry_run: bool = False,
     log=print,
-) -> int:
-    """box_sources.yaml の全ソースを走査して box_files に登録する。"""
-    sources = config.get("sources") or []
-    if not sources:
-        log("[WARN] box_sources.yaml に sources が定義されていません")
-        return 0
+) -> tuple[int, str]:
+    """
+    単一ソースをスキャンする（ThreadPoolExecutor で並列実行用）。
+    各スレッドで独立した DB 接続を使用。
+    """
+    # スレッドごとに独立した DB 接続を開く
+    src_conn = sqlite3.connect(db_path)
+    src_conn.execute("PRAGMA query_only = ON")
+    ensure_box_files_table(src_conn)
 
-    total = 0
-    for src in sources:
-        if not src.get("enabled", True):
-            continue
+    try:
         name = src.get("name", "")
-        if source_filter and name != source_filter:
-            continue
-
         folder_id = str(src["folder_id"])
         index_names = src.get("index_names") or [src.get("index_name", "pm")]
         if isinstance(index_names, str):
@@ -661,15 +672,12 @@ def scan_sources(
         excl_folders = src.get("exclude_folders") or []
         excl_patterns = src.get("exclude_patterns") or []
 
-        log(f"\n[SCAN] {name} (folder_id={folder_id}, recursive={recursive})")
-        if excl_folders:
-            log(f"  exclude_folders: {excl_folders}")
-        if excl_patterns:
-            log(f"  exclude_patterns: {excl_patterns}")
+        log(f"\n[SCAN] {name} (folder_id={folder_id})")
 
         files = list_box_folder(folder_id, recursive=recursive, exclude_folders=excl_folders)
         log(f"  BOXファイル数: {len(files)}")
 
+        # PDF stem セットを構築
         pdf_stems: set[str] = set()
         for f in files:
             if f["file_format"] == "pdf":
@@ -677,7 +685,10 @@ def scan_sources(
                 key = f"{f['folder_path']}/{stem}" if f["folder_path"] else stem
                 pdf_stems.add(unicodedata.normalize("NFC", key))
 
+        # Phase 3: Batch insert の準備
+        records = []
         registered = 0
+
         for f in files:
             if f["file_format"] not in extensions:
                 continue
@@ -696,11 +707,20 @@ def scan_sources(
                 continue
 
             if dry_run:
-                log(f"  [DRY] {f['file_format']:6s} {f['box_file_id']:12s} {f['folder_path']}/{f['name']}")
+                log(f"  [DRY] {f['file_format']:6s} {f['box_file_id']:12s} {full_path}")
                 registered += 1
-                continue
+            else:
+                records.append((
+                    f["box_file_id"], f["box_folder_id"], f["name"],
+                    f["file_format"], f["size_bytes"], f["modified_at"],
+                    f["folder_path"], index_names_json, name, _now_iso(),
+                ))
+                registered += 1
 
-            conn.execute(
+        # batch insert（executemany）
+        if records and not dry_run:
+            src_conn.execute("PRAGMA query_only = OFF")
+            src_conn.executemany(
                 """INSERT INTO box_files
                    (box_file_id, box_folder_id, name, file_format, size_bytes,
                     modified_at, folder_path, index_name, source_name, registered_at)
@@ -710,18 +730,63 @@ def scan_sources(
                     modified_at = excluded.modified_at,
                     folder_path = excluded.folder_path,
                     index_name = excluded.index_name""",
-                (
-                    f["box_file_id"], f["box_folder_id"], f["name"],
-                    f["file_format"], f["size_bytes"], f["modified_at"],
-                    f["folder_path"], index_names_json, name, _now_iso(),
-                ),
+                records,
             )
-            registered += 1
+            src_conn.commit()
 
-        if not dry_run:
-            conn.commit()
         log(f"  登録: {registered} 件")
-        total += registered
+        return registered, name
+
+    except Exception as e:
+        log(f"[ERROR] {name}: スキャン失敗: {e}")
+        raise
+    finally:
+        src_conn.close()
+
+
+def scan_sources(
+    conn: sqlite3.Connection,
+    config: dict,
+    *,
+    source_filter: str | None = None,
+    dry_run: bool = False,
+    log=print,
+) -> int:
+    """box_sources.yaml の全ソースを走査して box_files に登録する（並列化）。"""
+    sources = config.get("sources") or []
+    if not sources:
+        log("[WARN] box_sources.yaml に sources が定義されていません")
+        return 0
+
+    # フィルタと有効化チェック
+    filtered_sources = [
+        src for src in sources
+        if src.get("enabled", True) and (not source_filter or src.get("name") == source_filter)
+    ]
+
+    if not filtered_sources:
+        log(f"[WARN] 対象ソースなし（filter={source_filter}）")
+        return 0
+
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    total = 0
+
+    # Phase 2: ソース処理の並列化（ThreadPoolExecutor）
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(
+                _scan_single_source, src, db_path, conn.execute("PRAGMA query_only").fetchone()[0],
+                dry_run=dry_run, log=log
+            ): src.get("name", "unknown")
+            for src in filtered_sources
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                count, src_name = future.result()
+                total += count
+            except Exception as e:
+                log(f"[ERROR] {name}: スキャン失敗: {e}")
 
     _remove_duplicated_by_pdf(conn, dry_run=dry_run, log=log)
     return total
