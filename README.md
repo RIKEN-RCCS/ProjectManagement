@@ -75,10 +75,10 @@ bash scripts/pm_from_slack.sh -c C08SXA4M7JT
 
 ```sh
 # goals.yaml を編集後に同期
-python3 scripts/pm_goals_import.py
+python3 scripts/pm_ingest.py goals
 
 # 達成状況を確認
-python3 scripts/pm_goals_import.py --list
+python3 scripts/pm_ingest.py goals --goals-list
 ```
 
 `goals.yaml` はgit管理。マイルストーンの変更理由・経緯がコミット履歴として残る。
@@ -203,7 +203,7 @@ python3 scripts/pm_minutes_import.py corrected.md --meeting-name Leader_Meeting 
 ```
 [Slack] ─── slack_pipeline.py ───→ {channel_id}.db
                                           ↓
-[会議録音]                          pm.db ←─ pm_extractor.py
+[会議録音]                          pm.db ←─ pm_ingest.py slack
   data/*.m4a (+.vtt)   │          (決定事項・               ↑
                        │        アクションアイテム)   {channel_id}.db
                        │                  ↓
@@ -213,7 +213,7 @@ python3 scripts/pm_minutes_import.py corrected.md --meeting-name Leader_Meeting 
                        │
                        └─ pm_minutes_import.py ──→ data/minutes/{kind}.db
                                     ↓          （詳細議事録・担当者・期限）
-                         pm_minutes_to_pm.py ──→ pm.db
+                         pm_ingest.py minutes ──→ pm.db
 ```
 
 ![情報の流れ](minutes.png)
@@ -321,9 +321,9 @@ bash scripts/pm_qa_stop.sh     # 停止
 | スクリプト | 用途 |
 |-----------|------|
 | `slack_pipeline.py` | Slack差分取得・DB保存 |
-| `pm_extractor.py` | Slack生メッセージからアクションアイテム・決定事項を抽出 |
+| `pm_ingest.py slack` | Slack生メッセージからアクションアイテム・決定事項を抽出 |
 | `pm_minutes_import.py` | 議事録をLLM解析して議事録DBに保存 |
-| `pm_minutes_to_pm.py` | 議事録DBからpm.dbに転記（LLM不使用） |
+| `pm_ingest.py minutes` | 議事録DBからpm.dbに転記（LLM不使用） |
 | `generate_minutes_local.py` | ローカルLLMで高品質議事録を生成（`--vtt` でZoom VTT話者情報を活用） |
 | `transcribe_pipeline.py` | `/argus-transcribe` 用パイプライン（Slackからダウンロード → 文字起こし → 議事録生成。同名VTT自動検出） |
 | `whisper_vad.py` | VAD+Whisperによる話者分離・文字起こし |
@@ -342,7 +342,7 @@ bash scripts/pm_qa_stop.sh     # 停止
 |-----------|------|
 | `pm_sync_canvas.py` | Canvas上の編集内容をpm.dbに同期 |
 | `pm_relink.py` | CSV経由でアクションアイテム・決定事項を一括編集 |
-| `pm_goals_import.py` | goals.yaml → pm.db 完全同期 |
+| `pm_ingest.py goals` | goals.yaml → pm.db 完全同期 |
 | `pm_api.py` | Web UI（FastAPI REST API + フロントエンド） |
 
 ### QA・検索

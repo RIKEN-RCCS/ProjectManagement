@@ -27,7 +27,7 @@ python3 scripts/slack_pipeline.py -c C08SXA4M7JT --list
 
 ### 1b. Slack取得→pm.db抽出 一括実行（pm_from_slack.sh）
 
-`slack_pipeline.py`（取得）→ `pm_extractor.py`（pm.db抽出）を連続実行する。
+`slack_pipeline.py`（取得）→ `pm_ingest.py slack`（pm.db抽出）を連続実行する。
 
 ```sh
 # 通常運用
@@ -49,7 +49,7 @@ bash scripts/pm_from_slack.sh -c C08SXA4M7JT --dry-run
 | `--db-slack PATH` | `data/{channel_id}.db` | Slack DBパス |
 | `--db-pm PATH` | `data/pm.db` | pm.db パス |
 | `--skip-fetch` | - | Slack API取得をスキップ（`slack_pipeline.py` のみ） |
-| `--force-reextract` | - | 抽出済みスレッドも再処理（`pm_extractor.py` のみ） |
+| `--force-reextract` | - | 抽出済みスレッドも再処理（`pm_ingest.py slack` のみ） |
 
 ### 2. 会議録文字起こし（pm_from_recording.sh + whisper_vad.py）
 
@@ -76,7 +76,7 @@ sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4
 
 **VTT 話者情報の活用**: Zoom の自動文字起こし VTT ファイルが存在する場合、VTT の正確な話者名を Whisper の高品質日本語文字起こしと統合する。議事録 Stage 3（決定事項・アクションアイテム抽出）で話者名をもとに担当者を推定する。VTT ファイルの検索は同名のみ（フォールバックなし）: `{stem}.transcript.vtt` → `{stem}.vtt` の順で検索し、先に見つかった方を使用する。
 
-`--meeting-name` 指定時の追加フロー: 文字起こし完了 → `generate_minutes_local.py`（VTTあれば `--vtt` 付き）で議事録生成 → `pm_minutes_import.py` で議事録DBに保存 → `pm_minutes_to_pm.py` で pm.db に転記 → .md 削除
+`--meeting-name` 指定時の追加フロー: 文字起こし完了 → `generate_minutes_local.py`（VTTあれば `--vtt` 付き）で議事録生成 → `pm_minutes_import.py` で議事録DBに保存 → `pm_ingest.py minutes` で pm.db に転記 → .md 削除
 
 ### 3. 会議議事録 → 詳細議事録DB（pm_minutes_import.py）
 
@@ -205,66 +205,73 @@ channels:
     catalog_canvas_id: F0XXXXXXX         # 目録Canvas ID（省略可）
 ```
 
-### 3b. 議事録DB → pm.db 転記（pm_minutes_to_pm.py）
+### 3b, 4, 8. pm.db 統合インジェスト（pm_ingest.py）
 
-`pm_minutes_import.py` で作成した議事録DBの内容を **LLM不使用** で pm.db に転記する。
-担当者・期限は議事録DBから直接コピーされる。milestone_id のみ Canvas または `pm_relink.py` で補完する。
+**Pass 1（データ取り込み）は `pm_ingest.py` に一本化**されている。Slack・議事録・goals.yaml の3ソースを統一コマンドで処理する。
+プラグインアーキテクチャの詳細は `docs/ingest_plugin.md`、全体像は `docs/architecture.md` 参照。
 
 ```sh
-# 全会議名の議事録DBを pm.db に転記
-python3 scripts/pm_minutes_to_pm.py
+# ソース一覧
+python3 scripts/pm_ingest.py --list
 
-# 特定会議名のみ転記
-python3 scripts/pm_minutes_to_pm.py --meeting-name Leader_Meeting
+# Slack 生メッセージ → 決定事項・アクションアイテム抽出
+python3 scripts/pm_ingest.py slack --slack-channel C08SXA4M7JT
+python3 scripts/pm_ingest.py slack --slack-channel C08SXA4M7JT --since 2026-01-01
+python3 scripts/pm_ingest.py slack --slack-channel C08SXA4M7JT --slack-force-reextract
+python3 scripts/pm_ingest.py slack --slack-channel C08SXA4M7JT --slack-list
+python3 scripts/pm_ingest.py slack --dry-run --output result.txt
 
-# 日付フィルタを付けて転記
-python3 scripts/pm_minutes_to_pm.py --since 2026-01-01
+# 議事録DB → pm.db 転記（LLM不使用、担当者・期限を直接コピー）
+python3 scripts/pm_ingest.py minutes
+python3 scripts/pm_ingest.py minutes --minutes-name Leader_Meeting
+python3 scripts/pm_ingest.py minutes --since 2026-01-01
+python3 scripts/pm_ingest.py minutes --minutes-name Leader_Meeting --minutes-force
+python3 scripts/pm_ingest.py minutes --minutes-delete 2026-03-10_Leader_Meeting
+python3 scripts/pm_ingest.py minutes --minutes-list
 
-# 確認用（DB保存なし）
-python3 scripts/pm_minutes_to_pm.py --dry-run
-
-# 既存レコードを上書き
-python3 scripts/pm_minutes_to_pm.py --meeting-name Leader_Meeting --force
-
-# pm.db から削除
-python3 scripts/pm_minutes_to_pm.py --delete 2026-03-10_Leader_Meeting
+# goals.yaml → goals/milestones テーブル完全同期
+python3 scripts/pm_ingest.py goals
+python3 scripts/pm_ingest.py goals --dry-run
+python3 scripts/pm_ingest.py goals --goals-list
 ```
+
+**共通オプション**（全ソース共通）:
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `--meeting-name NAME` | 全DBを対象 | 特定の会議名のみ処理 |
-| `--minutes-dir DIR` | `data/minutes/` | 議事録DBのディレクトリ |
 | `--db PATH` | `data/pm.db` | pm.db のパス |
-| `--since YYYY-MM-DD` | なし | この日付以降の会議のみ転記 |
-| `--force` | - | 既存レコードを上書き |
-| `--dry-run` | - | DB保存なし・転記内容を表示のみ |
+| `--since YYYY-MM-DD` | なし | この日付以降のデータのみ対象 |
+| `--dry-run` | - | DB保存なし・結果を標準出力のみ |
+| `--output PATH` | - | 出力をファイルにも保存 |
 | `--no-encrypt` | - | 平文モード |
-| `--delete MEETING_ID` | - | 指定した meeting_id を pm.db から削除して終了 |
 
-### 4. Slack生メッセージ → pm.db（pm_extractor.py）
-
-```sh
-# 通常運用: 未処理スレッドのみ抽出
-python3 scripts/pm_extractor.py -c C08SXA4M7JT
-
-# 確認用（DB保存なし）
-python3 scripts/pm_extractor.py -c C08SXA4M7JT --dry-run --output result.txt
-
-# 抽出済みスレッドの一覧表示
-python3 scripts/pm_extractor.py -c C08SXA4M7JT --list
-python3 scripts/pm_extractor.py -c C08SXA4M7JT --list --since 2026-02-01
-```
+**slack ソース固有オプション**:
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `-c CHANNEL_ID` | `C0A9KG036CS` | 対象チャンネルID |
-| `--db-slack PATH` | `data/{channel_id}.db` | Slack DBのパス |
-| `--db-pm PATH` | `data/pm.db` | pm.db のパス |
-| `--since YYYY-MM-DD` | なし（全件） | この日付以降のスレッドのみ対象 |
-| `--force-reextract` | - | 抽出済みスレッドも再処理 |
-| `--dry-run` | - | DB保存なし・結果を標準出力のみ |
-| `--output PATH` | - | 標準出力の内容をファイルにも保存 |
-| `--list` | - | 抽出済みスレッドの一覧を表示して終了（`--since` 併用可） |
+| `--slack-channel CHANNEL_ID` | `C0A9KG036CS` | 対象チャンネルID |
+| `--slack-db PATH` | `data/{channel_id}.db` | Slack DBのパス |
+| `--slack-force-reextract` | - | 抽出済みスレッドも再処理 |
+| `--slack-list` | - | 抽出済みスレッド一覧を表示して終了 |
+
+**minutes ソース固有オプション**:
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--minutes-name NAME` | 全DBを対象 | 特定の会議名のみ処理 |
+| `--minutes-dir DIR` | `data/minutes/` | 議事録DBのディレクトリ |
+| `--minutes-force` | - | 既存レコードを上書き |
+| `--minutes-list` | - | 転記済み会議の一覧表示 |
+| `--minutes-delete MEETING_ID` | - | 指定 meeting_id を pm.db から削除 |
+
+**goals ソース固有オプション**:
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--goals-file PATH` | `goals.yaml` | goals.yaml のパス |
+| `--goals-list` | - | 登録済みゴール・マイルストーン一覧と達成状況を表示 |
+
+**minutes 転記の注意**: 担当者・期限は議事録DBから直接コピーされる。`milestone_id` のみ Canvas または `pm_relink.py` で補完する。
 
 ### 5. PMレポート生成・Canvas投稿（pm_report.py）
 
@@ -399,32 +406,9 @@ python3 scripts/pm_relink.py --list --since 2026-02-01
 | `--no-encrypt` | - | 平文モード |
 | `--dry-run` | - | DB更新なし・変更内容を表示のみ |
 
-### 8. ゴール・マイルストーン同期（pm_goals_import.py）
+### 8. ゴール・マイルストーン同期
 
-`goals.yaml` を読み込み `goals` / `milestones` テーブルに完全同期する。
-
-```sh
-# goals.yaml を編集・承認後に実行（完全同期）
-python3 scripts/pm_goals_import.py
-
-# 変更内容を確認してから実行
-python3 scripts/pm_goals_import.py --dry-run
-
-# 登録済み一覧・達成状況を確認
-python3 scripts/pm_goals_import.py --list
-
-# 一覧をファイルにも保存
-python3 scripts/pm_goals_import.py --list --output goals_status.txt
-```
-
-| オプション | デフォルト | 説明 |
-|---|---|---|
-| `--goals-file PATH` | `goals.yaml` | goals.yaml のパス |
-| `--db PATH` | `data/pm.db` | pm.db のパス |
-| `--dry-run` | - | DB保存なし・内容を表示のみ |
-| `--list` | - | 登録済みゴール・マイルストーン一覧と達成状況を表示して終了 |
-| `--no-encrypt` | - | DBを暗号化しない（平文モード） |
-| `--output PATH` | - | 出力をファイルにも保存（`--list` / 通常インポート時の標準出力を保存） |
+`pm_ingest.py goals` に統合されている。上記「3b, 4, 8. pm.db 統合インジェスト」参照。
 
 ### 9. DBユーティリティ（db_utils.py）
 
@@ -522,9 +506,9 @@ python3 scripts/db_utils.py --audit-log --output audit.txt
 | `--no-encrypt` | - | 平文モード |
 | `--output PATH` | - | 結果をファイルにも保存 |
 
-### 11. PM DB Editor Web UI（pm_web.py）
+### 11. PM DB Editor Web UI（pm_api.py）
 
-pm.db の内容をブラウザ上で閲覧・編集できる Web UI。NiceGUI + AG Grid を使用。アクションアイテム・決定事項の各フィールドをセル上で直接編集できる。`source` 列をクリックすると Slack リンク（Slackを新規タブで開く）または議事録ポップアップを表示する。
+pm.db の内容をブラウザ上で閲覧・編集できる Web UI。FastAPI + 静的フロントエンド（`scripts/static/`）を同一プロセスで配信する。アクションアイテム・決定事項の各フィールドをセル上で直接編集できる。`source` 列をクリックすると Slack リンク（Slackを新規タブで開く）または議事録ポップアップを表示する。
 
 ```sh
 # 起動（バックグラウンドデーモン）
@@ -666,3 +650,81 @@ sources:
     target_indices: [pm, pm-hpc]       # 組み込む qa_pm*.db インデックス名
     enabled: true
 ```
+
+### 15. エンリッチメント（enrich_items.py） — Pass 2
+
+pm.db の既存 `decisions` / `action_items` に対し、過去ナレッジを参照して **判断者・根拠・関連ID** を補完する。
+2パスアーキテクチャの Pass 2 に相当する（Pass 1 は `pm_ingest.py` による抽出）。全体像は `docs/architecture.md` 参照。
+
+```sh
+# dry-run（DB更新なし・結果を標準出力）
+python3 scripts/enrich_items.py --dry-run --since 2026-03-01
+
+# 特定IDのみ（d:{decision_id} / a:{action_item_id}）
+python3 scripts/enrich_items.py --id d:42 a:15 --dry-run
+
+# 全件エンリッチ実行
+python3 scripts/enrich_items.py --since 2026-03-01
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--since YYYY-MM-DD` | なし | この日付以降のアイテムのみ対象 |
+| `--id ID...` | なし | 特定アイテムのみ処理（`d:42` = decision id=42, `a:15` = action_item id=15）|
+| `--dry-run` | - | DB保存なし・結果を標準出力 |
+| `--output PATH` | - | 結果をファイルにも保存 |
+| `--config PATH` | `data/argus_config.yaml` | FTS5インデックス設定 |
+| `--no-encrypt` | - | 平文モード |
+
+**付与されるフィールド**:
+- **decisions**: `decided_by` / `decided_by_confidence` / `rationale` / `related_ids`
+- **action_items**: `requested_by` / `requested_by_confidence` / `rationale` / `source_context` / `related_ids`
+
+**ナレッジソース**（`knowledge_context.py` が取得）:
+- pm.db 構造化データ（直近の decisions / action_items）
+- FTS5 全文検索（議事録・Slack・ドキュメント・Web記事）
+- 参加者パターン（誰がよく発言しているか）
+
+`knowledge_context.py` は共通ライブラリ（単体実行なし、import して使用）。
+
+### 16. データ品質スクリーニング（pm_screen.py）
+
+pm.db のアクションアイテム・決定事項から重複・類似・曖昧アイテムを検出する。`pm_relink.py --import` 互換CSVで出力するため、`deleted=1` を立てて一括削除できる。
+
+**検出カテゴリ**:
+- `exact_dup` — 正規化後に完全一致する重複
+- `near_dup` — 先頭N文字が一致し内容が微妙に異なる類似重複
+- `ambiguous` — 短すぎて文脈なしでは意味が類推できないもの
+
+```sh
+# スクリーニング結果を画面表示
+python3 scripts/pm_screen.py
+
+# CSV にエクスポート（pm_relink.py --import で編集可能）
+python3 scripts/pm_screen.py --export
+
+# 出力先を指定
+python3 scripts/pm_screen.py --export --output screen.csv
+
+# 閾値調整
+python3 scripts/pm_screen.py --short-threshold 25 --prefix-len 20
+
+# 決定事項も対象に含める
+python3 scripts/pm_screen.py --include-decisions
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--export` | - | CSV出力モード |
+| `--output PATH` | `screen.csv` | CSV出力先 |
+| `--short-threshold N` | - | ambiguous と判定する文字数閾値 |
+| `--prefix-len N` | - | near_dup 判定の先頭一致文字数 |
+| `--include-decisions` | - | 決定事項もスクリーニング対象に含める |
+| `--no-encrypt` | - | 平文モード |
+
+**運用フロー**:
+1. `pm_screen.py --export` で重複候補をCSV出力
+2. CSVを人間が確認し、削除すべき行に `deleted=1` を立てる
+3. `pm_relink.py --import screen.csv` で一括削除を反映

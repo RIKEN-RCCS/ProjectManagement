@@ -20,12 +20,9 @@ pm_ingest.py          ← 統合ランナー（エントリポイント）
   ├─ IngestContext を構築して plugin.run() に渡す
   │
   └─ ingest_plugin.py  ← IngestContext / IngestPlugin の定義
-
-既存スクリプト（後方互換 CLI ラッパー）:
-  pm_extractor.py      → ingest_slack.py を呼び出す
-  pm_minutes_to_pm.py  → ingest_minutes.py を呼び出す
-  pm_goals_import.py   → ingest_goals.py を呼び出す
 ```
+
+すべてのインジェスト操作は `pm_ingest.py <source>` で呼び出す（旧 `pm_extractor.py` / `pm_minutes_to_pm.py` / `pm_goals_import.py` の後方互換ラッパーは 2026-05 に削除済み）。
 
 ---
 
@@ -225,7 +222,7 @@ python3 scripts/pm_ingest.py my-api --since 2026-01-01 --db data/pm.db
 python3 scripts/pm_ingest.py --list
 ```
 
-後方互換のため、既存スクリプト（`pm_extractor.py` 等）の直接呼び出しも引き続き機能する。
+後方互換ラッパー（`pm_extractor.py` / `pm_minutes_to_pm.py` / `pm_goals_import.py`）は 2026-05 に削除済み。すべて `pm_ingest.py <source>` を使用する。
 
 ---
 
