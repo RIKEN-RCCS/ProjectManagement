@@ -48,7 +48,12 @@ def format_overdue_list(items: list[dict], limit: int = 15) -> str:
     for it in items[:limit]:
         assignee = normalize_assignee(it.get("assignee")) or "未定"
         ms = it.get("milestone_id") or "-"
-        lines.append(f"- [ID:{it['id']}][期限:{it['due_date']}][担当:{assignee}][MS:{ms}] {it['content'][:80]}")
+        line = f"- [ID:{it['id']}][期限:{it['due_date']}][担当:{assignee}][MS:{ms}] {it['content'][:80]}"
+        if it.get("requested_by"):
+            line += f"（依頼者:{it['requested_by']}）"
+        if it.get("rationale"):
+            line += f"\n  背景: {it['rationale'][:120]}"
+        lines.append(line)
     if len(items) > limit:
         lines.append(f"（他 {len(items) - limit} 件）")
     return "\n".join(lines)
@@ -87,7 +92,13 @@ def format_decisions_list(decisions: list[dict], limit: int = 10) -> str:
         return "（なし）"
     lines = []
     for d in decisions[:limit]:
-        lines.append(f"- [D:{d['id']}][{d.get('decided_at') or '日付不明'}] {d['content'][:100]}")
+        line = f"- [D:{d['id']}][{d.get('decided_at') or '日付不明'}]"
+        if d.get("decided_by"):
+            line += f"[判断者:{d['decided_by']}]"
+        line += f" {d['content'][:100]}"
+        if d.get("rationale"):
+            line += f"\n  根拠: {d['rationale'][:120]}"
+        lines.append(line)
     if len(decisions) > limit:
         lines.append(f"（他 {len(decisions) - limit} 件）")
     return "\n".join(lines)

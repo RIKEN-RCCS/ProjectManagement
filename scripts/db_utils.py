@@ -214,6 +214,16 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
             "ALTER TABLE decisions ADD COLUMN source_context TEXT",
             "ALTER TABLE action_items ADD COLUMN deleted INTEGER DEFAULT 0",
             "ALTER TABLE decisions ADD COLUMN deleted INTEGER DEFAULT 0",
+            # Knowledge-Augmented Extraction: エンリッチメント用カラム
+            "ALTER TABLE decisions ADD COLUMN decided_by TEXT",
+            "ALTER TABLE decisions ADD COLUMN decided_by_confidence TEXT",
+            "ALTER TABLE decisions ADD COLUMN rationale TEXT",
+            "ALTER TABLE decisions ADD COLUMN related_ids TEXT",
+            "ALTER TABLE action_items ADD COLUMN source_context TEXT",
+            "ALTER TABLE action_items ADD COLUMN requested_by TEXT",
+            "ALTER TABLE action_items ADD COLUMN requested_by_confidence TEXT",
+            "ALTER TABLE action_items ADD COLUMN rationale TEXT",
+            "ALTER TABLE action_items ADD COLUMN related_ids TEXT",
         ],
     )
 
@@ -278,6 +288,16 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
              "AND extracted_at LIKE '____-__-__T%'"),
             "ALTER TABLE action_items ADD COLUMN deleted INTEGER DEFAULT 0",
             "ALTER TABLE decisions ADD COLUMN deleted INTEGER DEFAULT 0",
+            # Knowledge-Augmented Extraction: エンリッチメント用カラム
+            "ALTER TABLE decisions ADD COLUMN decided_by TEXT",
+            "ALTER TABLE decisions ADD COLUMN decided_by_confidence TEXT",
+            "ALTER TABLE decisions ADD COLUMN rationale TEXT",
+            "ALTER TABLE decisions ADD COLUMN related_ids TEXT",
+            "ALTER TABLE action_items ADD COLUMN source_context TEXT",
+            "ALTER TABLE action_items ADD COLUMN requested_by TEXT",
+            "ALTER TABLE action_items ADD COLUMN requested_by_confidence TEXT",
+            "ALTER TABLE action_items ADD COLUMN rationale TEXT",
+            "ALTER TABLE action_items ADD COLUMN related_ids TEXT",
         ],
     )
 
@@ -330,7 +350,8 @@ def fetch_assignee_workload(conn: "_sqlite3.Connection", today: str) -> list[dic
 def fetch_overdue_items(conn: "_sqlite3.Connection", today: str, since: str | None) -> list[dict]:
     """期限超過（status='open' かつ due_date < today）のアイテムを取得"""
     query = """
-        SELECT id, content, assignee, due_date, milestone_id
+        SELECT id, content, assignee, due_date, milestone_id,
+               requested_by, rationale
         FROM action_items
         WHERE status = 'open' AND COALESCE(deleted,0)=0 AND due_date IS NOT NULL AND due_date < ?
     """
@@ -389,7 +410,7 @@ def fetch_weekly_trends(conn: "_sqlite3.Connection", weeks: int = 4) -> list[dic
 
 def fetch_unacknowledged_decisions(conn: "_sqlite3.Connection", since: str | None) -> list[dict]:
     """未確認（acknowledged_at IS NULL）の決定事項（最大20件）"""
-    query = "SELECT id, content, decided_at FROM decisions WHERE COALESCE(deleted,0)=0 AND acknowledged_at IS NULL"
+    query = "SELECT id, content, decided_at, decided_by, rationale FROM decisions WHERE COALESCE(deleted,0)=0 AND acknowledged_at IS NULL"
     params: list = []
     if since:
         query += " AND decided_at >= ?"

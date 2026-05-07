@@ -462,7 +462,90 @@ def index_docs(
     return count
 
 
-# --- メイン ---
+# --- box_docs.db からの抽出（BOXドキュメント本文）---
+
+def index_box_doc_content(
+    index_conn: sqlite3.Connection,
+    box_docs_db_path: Path,
+    index_name: str,
+    full_rebuild: bool,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """box_docs.db の doc_content テーブル（変換済みMarkdown本文）を索引化する。
+    box_files.index_name はJSON配列（例: '["pm", "pm-hpc"]'）。
+    index_name がその配列に含まれるファイルのみ対象とする。
+    """
+    import json as _json
+
+    source_db = box_docs_db_path.name
+
+    if not box_docs_db_path.exists():
+        return 0
+
+    try:
+        src_conn = open_db(box_docs_db_path, encrypt=True)
+    except Exception as e:
+        logger.warning(f"    {source_db}: 開けませんでした - {e}")
+        return 0
+
+    chunk_rows: list[dict] = []
+    now = now_iso()
+
+    try:
+        rows = src_conn.execute(
+            "SELECT dc.box_file_id, dc.content_md, bf.name, bf.modified_at,"
+            " bf.folder_path, bf.index_name"
+            " FROM doc_content dc JOIN box_files bf ON dc.box_file_id = bf.box_file_id"
+        ).fetchall()
+    except sqlite3.OperationalError as e:
+        logger.warning(f"    {source_db}: テーブル読み込みエラー - {e}")
+        src_conn.close()
+        return 0
+
+    matched = 0
+    for row in rows:
+        idx_raw = row["index_name"] or ""
+        try:
+            targets = _json.loads(idx_raw)
+        except Exception:
+            targets = [idx_raw] if idx_raw else []
+        if index_name not in targets:
+            continue
+
+        content_md = row["content_md"] or ""
+        if not content_md.strip():
+            continue
+
+        matched += 1
+        heading = row["name"] or ""
+        if row["folder_path"]:
+            heading = f"{row['folder_path']}/{heading}"
+
+        for chunk in split_into_chunks(content_md):
+            prefixed = f"【{heading}】\n{chunk}" if heading else chunk
+            chunk_rows.append({
+                "source_type": "box_document",
+                "source_db": source_db,
+                "record_id": str(row["box_file_id"]),
+                "held_at": (row["modified_at"] or "")[:10] or None,
+                "content": prefixed,
+                "tokens": sudachi_tokenize(prefixed),
+                "source_ref": None,
+                "indexed_at": now,
+            })
+
+    src_conn.close()
+    logger.info(f"    box_documents {index_name}: {len(chunk_rows)} チャンク ({matched} ファイル)")
+
+    if dry_run:
+        return len(chunk_rows)
+
+    delete_source_chunks(index_conn, source_db)
+    count = insert_chunks(index_conn, chunk_rows)
+    set_last_indexed(index_conn, source_db, now)
+    return count
+
 
 # --- web_articles.db からの抽出 ---
 
@@ -588,6 +671,11 @@ def build_index(
         docs_path = data_dir / f"docs_{index_name}.db"
         if docs_path.exists():
             total += index_docs(index_conn, docs_path, full_rebuild, dry_run, logger)
+
+        # box_documents（BOXドキュメント本文）
+        box_docs_path = data_dir / "box_docs.db"
+        if box_docs_path.exists():
+            total += index_box_doc_content(index_conn, box_docs_path, index_name, full_rebuild, dry_run, logger)
 
     # web（外部記事）
     web_articles_path = data_dir / "web_articles.db"
