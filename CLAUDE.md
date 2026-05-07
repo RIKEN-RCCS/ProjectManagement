@@ -92,14 +92,17 @@ slack/
 │   ├── enrich_items.py              # [Pass 2] pm.db の decisions/action_items に過去ナレッジを参照して判断者・根拠・related_ids を補完。LLM + FTS5
 │   ├── knowledge_context.py         # enrich_items.py の共通ライブラリ（単体実行なし）。SudachiPy・FTS5検索・参加者パターン取得
 │   ├── pm_insight.py                # pm.db → LLMによるプロジェクト健全性評価・リスク特定・改善提案を生成・Canvas投稿
-│   ├── pm_argus.py                  # Argus AI — Slack・議事録・pm.db統合分析（ブリーフィング・リスク分析・草案生成）
-│   ├── pm_argus_agent.py            # Argus Investigation Agent — LLM駆動マルチステップ調査（/argus-investigate）
-│   ├── pm_argus_patrol.py           # Argus Patrol Agent — 自律型PM巡回（リマインダー・完了確認・エスカレーション）。cron 30分間隔で実行
-│   ├── patrol_state.py              # Patrol 冪等性DB（patrol_state.db）・スロットリング・承認待ち管理
-│   ├── patrol_detect.py             # Patrol 検出ルール（完了シグナル・期限超過・停滞・健全性、決定論的・LLM不使用）
-│   ├── patrol_actions.py            # Patrol アクション実行（Slack投稿・Block Kit・DB書き込み・audit_log）
-│   ├── patrol_confirm.py            # Patrol Block Kit ボタンハンドラ（承認/却下、pm_qa_server.py から呼ばれる）
-│   ├── patrol_users.py              # 担当者名（日本語表示名）→ Slack user_id 解決（キャッシュ・DB マイニング・API フォールバック）
+│   ├── argus/                       # Argus AI パッケージ（問い合わせ・巡回）
+│   │   ├── pm_argus.py              #   Slack・議事録・pm.db統合分析（ブリーフィング・リスク分析・草案生成）
+│   │   ├── pm_argus_agent.py        #   Investigation Agent — LLM駆動マルチステップ調査（/argus-investigate）
+│   │   ├── pm_argus_patrol.py       #   Patrol Agent — 自律型PM巡回（cron 30分間隔）
+│   │   ├── pm_qa_server.py          #   Slack Socket Modeデーモン（全 /argus-* コマンド・ハイブリッド検索）
+│   │   └── patrol/                  #   Patrol サブモジュール
+│   │       ├── state.py             #     冪等性DB（patrol_state.db）・スロットリング・承認待ち管理
+│   │       ├── detect.py            #     検出ルール（完了シグナル・期限超過・停滞・健全性）
+│   │       ├── actions.py           #     Slack投稿・Block Kit・DB書き込み・audit_log
+│   │       ├── confirm.py           #     Block Kit ボタンハンドラ（承認/却下）
+│   │       └── users.py             #     担当者名 → Slack user_id 解決
 │   ├── pm_api.py                    # FastAPI REST API + 静的フロントエンド配信。pm.db のアクションアイテム・決定事項・議事録・ファイル一覧を提供。web_utils.py を使用
 │   ├── pm_web_start.sh              # pm_api.py をバックグラウンドで起動（nohup + PIDファイル管理、port 8501）
 │   ├── pm_web_stop.sh               # pm_api.py を停止（PIDファイルでプロセス管理）
@@ -112,9 +115,9 @@ slack/
 │   ├── pm_document_update.sh        # BOXリンク抽出（pm_document_extract.py）→ FTS5更新（pm_embed.py）を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
 │   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
-│   ├── pm_qa_server.py              # Slack Socket Modeデーモン（/argus-ask QA・/argus-* コマンドを統合処理）。ハイブリッド検索対応（Intent分類→構造化SQL+FTS5）
-│   ├── pm_qa_start.sh               # pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
-│   ├── pm_qa_stop.sh                # pm_qa_server.py を停止（PIDファイルでプロセス管理）
+│   ├── pm_qa_start.sh               # argus/pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
+│   ├── pm_qa_stop.sh                # argus/pm_qa_server.py を停止（PIDファイルでプロセス管理）
+│   ├── pm_argus_daily.sh            # cron用: argus/pm_argus.py --brief-to-canvas / --risk を平日朝7:47に実行
 │   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。--vtt でZoom VTTの話者情報を活用。cli_utils.py の call_local_llm を使用
 │   ├── transcribe_pipeline.py       # /argus-transcribe 用パイプライン（Slackからダウンロード → Whisper文字起こし → 議事録生成）。同名VTTの自動検出対応
 │   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。同名VTTも自動移動。-c CHANNEL_ID でSlack投稿も自動化

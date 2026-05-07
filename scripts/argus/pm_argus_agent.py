@@ -28,7 +28,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 

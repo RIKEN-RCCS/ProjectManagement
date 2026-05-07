@@ -39,14 +39,14 @@ from typing import Any
 
 import yaml
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from db_utils import open_pm_db
-from patrol_state import PatrolState
-from patrol_users import UserResolver
-from patrol_detect import (
+from argus.patrol.state import PatrolState
+from argus.patrol.users import UserResolver
+from argus.patrol.detect import (
     detect_completion_signals,
     detect_overdue_items,
     detect_approaching_deadlines,
