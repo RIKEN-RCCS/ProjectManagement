@@ -100,7 +100,12 @@ def load_action_items(conn, status_f, ms_f, since, del_f="非削除") -> pd.Data
          " a.extracted_at, a.source, COALESCE(a.deleted,0) AS deleted,"
          " COALESCE(a.source_ref,'') AS source_ref,"
          " COALESCE(a.meeting_id,'') AS meeting_id,"
-         " COALESCE(m.kind,'') AS meeting_kind"
+         " COALESCE(m.kind,'') AS meeting_kind,"
+         " COALESCE(a.requested_by,'') AS requested_by,"
+         " COALESCE(a.requested_by_confidence,'') AS requested_by_confidence,"
+         " COALESCE(a.rationale,'') AS rationale,"
+         " COALESCE(a.source_context,'') AS source_context,"
+         " COALESCE(a.related_ids,'') AS related_ids"
          " FROM action_items a"
          " LEFT JOIN meetings m ON a.meeting_id = m.meeting_id"
          " WHERE 1=1")
@@ -120,7 +125,9 @@ def load_action_items(conn, status_f, ms_f, since, del_f="非削除") -> pd.Data
                       columns=["id", "content", "assignee", "due_date",
                                "milestone_id", "status", "note",
                                "extracted_at", "source", "deleted",
-                               "source_ref", "meeting_id", "meeting_kind"])
+                               "source_ref", "meeting_id", "meeting_kind",
+                               "requested_by", "requested_by_confidence",
+                               "rationale", "source_context", "related_ids"])
     df = df.fillna("")
     df["extracted_at"] = df["extracted_at"].str[:10]
     df["done"] = df["status"] == "closed"
@@ -132,7 +139,12 @@ def load_decisions(conn, ack_f, since, del_f="非削除") -> pd.DataFrame:
     """フィルタ条件に合う決定事項を DataFrame で返す。"""
     q = ("SELECT id, content, decided_at, acknowledged_at, extracted_at, source,"
          " COALESCE(deleted,0) AS deleted,"
-         " COALESCE(source_ref,'') AS source_ref"
+         " COALESCE(source_ref,'') AS source_ref,"
+         " COALESCE(decided_by,'') AS decided_by,"
+         " COALESCE(decided_by_confidence,'') AS decided_by_confidence,"
+         " COALESCE(rationale,'') AS rationale,"
+         " COALESCE(source_context,'') AS source_context,"
+         " COALESCE(related_ids,'') AS related_ids"
          " FROM decisions WHERE 1=1")
     p: list = []
     if del_f == "非削除":
@@ -148,7 +160,9 @@ def load_decisions(conn, ack_f, since, del_f="非削除") -> pd.DataFrame:
     q += " ORDER BY id DESC"
     df = pd.DataFrame(conn.execute(q, p).fetchall(),
                       columns=["id", "content", "decided_at", "acknowledged_at",
-                               "extracted_at", "source", "deleted", "source_ref"])
+                               "extracted_at", "source", "deleted", "source_ref",
+                               "decided_by", "decided_by_confidence", "rationale",
+                               "source_context", "related_ids"])
     df = df.fillna("")
     df["extracted_at"] = df["extracted_at"].str[:10]
     df["deleted"] = df["deleted"].apply(lambda v: bool(int(v)) if v != "" else False)
