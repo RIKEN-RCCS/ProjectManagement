@@ -654,8 +654,11 @@ def _scan_single_source(
     単一ソースをスキャンする（ThreadPoolExecutor で並列実行用）。
     各スレッドで独立した DB 接続を使用。
     """
-    # スレッドごとに独立した DB 接続を開く
-    src_conn = sqlite3.connect(db_path)
+    # スレッドごとに独立した DB 接続を開く（暗号化対応）
+    from db_utils import open_db
+    src_conn = open_db(db_path, encrypt=not no_encrypt)
+    src_conn.execute("PRAGMA journal_mode=WAL")
+    src_conn.execute("PRAGMA busy_timeout=5000")
 
     try:
         name = src.get("name", "")
