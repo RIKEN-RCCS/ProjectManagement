@@ -413,7 +413,18 @@ def format_context(chunks: list[dict]) -> str:
     for i, chunk in enumerate(chunks, 1):
         label = _format_source_label(chunk)
         ref = chunk.get("source_ref") or ""
-        ref_str = f" | {ref}" if ref else ""
+        source_type = chunk.get("source_type", "")
+
+        if source_type == "slack_raw" and ref:
+            ref_str = f" | <{ref}|スレッドを開く>"
+        elif source_type == "minutes_content" and ref:
+            held_at = chunk.get("held_at") or ""
+            ref_str = f" | {held_at} {ref}" if held_at else f" | {ref}"
+        elif source_type == "web" and ref:
+            ref_str = f" | <{ref}|リンク>"
+        else:
+            ref_str = f" | {ref}" if ref else ""
+
         lines.append(f"[{i}] 出典: {label}{ref_str}")
         lines.append(f"    {chunk['content'].strip()}")
         lines.append("")
