@@ -17,7 +17,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 
 # ---------------------------------------------------------------------------

@@ -40,10 +40,10 @@ export OPENAI_API_KEY="dummy"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_ROOT/data"
-WHISPER_VAD="$SCRIPT_DIR/whisper_vad.py"
+WHISPER_VAD="$SCRIPT_DIR/recording/whisper_vad.py"
 PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
-PM_INGEST="$SCRIPT_DIR/pm_ingest.py"
-GENERATE_MINUTES_LOCAL="$SCRIPT_DIR/generate_minutes_local.py"
+PM_INGEST="$SCRIPT_DIR/ingest/pm_ingest.py"
+GENERATE_MINUTES_LOCAL="$SCRIPT_DIR/recording/generate_minutes_local.py"
 
 # --------------------------------------------------------------------------- #
 # 引数パース

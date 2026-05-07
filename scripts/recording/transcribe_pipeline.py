@@ -26,8 +26,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
+_RECORDING_DIR = Path(__file__).resolve().parent
 
 # アーキテクチャに応じてSIFファイルパスを選択（trans.sh準拠）
 _ARCH = platform.machine()
@@ -183,7 +184,7 @@ export LD_LIBRARY_PATH="{lib_shim_dir}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 export PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync,expandable_segments:True
 
 ffmpeg -y -i {audio_path} -ac 1 -ar 16000 -vn -af "highpass=f=1000" -sample_fmt s16 {wav_path}
-python3 {_SCRIPT_DIR}/whisper_vad.py {wav_path} {transcript_path}
+python3 {_RECORDING_DIR}/whisper_vad.py {wav_path} {transcript_path}
 """)
 
     env = os.environ.copy()
@@ -229,7 +230,7 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
     minutes_dir = Path(audio_save_dir) / "minutes"
     minutes_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [sys.executable, str(_SCRIPT_DIR / "generate_minutes_local.py"),
+    cmd = [sys.executable, str(_RECORDING_DIR / "generate_minutes_local.py"),
            str(transcript_path),
            "--model", vllm_model,
            "--url", vllm_api_base,

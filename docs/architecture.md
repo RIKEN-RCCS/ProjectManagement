@@ -45,7 +45,7 @@
 [goals.yaml] ──────────────────────────────────────┘
 ```
 
-**ファイル**: `ingest_slack.py` / `ingest_minutes.py` / `ingest_goals.py` + 統合ランナー `pm_ingest.py`
+**ファイル**: `scripts/ingest/` パッケージ配下の `slack.py` / `minutes.py` / `goals.py` + 統合ランナー `pm_ingest.py`
 **詳細**: `docs/ingest_plugin.md`
 
 ### Pass 2: エンリッチメント（Enrich）
@@ -69,7 +69,7 @@ pm.db の新規 decisions/action_items
   └─ pm.db に UPDATE（confidence スコア付き）
 ```
 
-**ファイル**: `enrich_items.py`（CLI）+ `knowledge_context.py`（共通ライブラリ）
+**ファイル**: `scripts/enrich/enrich_items.py`（CLI）+ `scripts/enrich/knowledge_context.py`（共通ライブラリ）
 
 **なぜ2パスなのか**:
 - Pass 1 は「単一のスレッド・議事録」だけを見て抽出する（LLM の context に収まる範囲）
@@ -127,16 +127,18 @@ pm.db の新規 decisions/action_items
 scripts/
 ├── 取り込み (Pass 1)
 │   ├── slack_pipeline.py              Slack差分取得
-│   ├── pm_ingest.py                   統合ランナー
-│   ├── ingest_slack.py                Slack → pm.db プラグイン
-│   ├── ingest_minutes.py              議事録DB → pm.db プラグイン
-│   ├── ingest_goals.py                goals.yaml → pm.db プラグイン
+│   ├── ingest/                        [Pass 1] 取り込みパッケージ
+│   │   ├── pm_ingest.py               統合ランナー
+│   │   ├── slack.py                   Slack → pm.db プラグイン
+│   │   ├── minutes.py                 議事録DB → pm.db プラグイン
+│   │   ├── goals.py                   goals.yaml → pm.db プラグイン
+│   │   └── ingest_plugin.py           プラグインインタフェース
 │   ├── pm_minutes_import.py           議事録MD → 議事録DB
 │   ├── pm_minutes_catalog.py          議事録 Slack 投稿
 │   ├── pm_document_extract.py         BOXリンク → docs_*.db
 │   └── pm_web_fetch.py                外部Web → web_articles.db
 │
-├── エンリッチメント (Pass 2)
+├── enrich/ (Pass 2)                   エンリッチメントパッケージ
 │   ├── enrich_items.py                CLI
 │   └── knowledge_context.py           共通ライブラリ
 │
@@ -150,15 +152,15 @@ scripts/
 │   ├── pm_insight.py                  LLM洞察
 │   └── pm_api.py                      Web UI (FastAPI)
 │
-├── Argus AI
+├── argus/                             Argus AI パッケージ
 │   ├── pm_qa_server.py                Socket Mode デーモン
 │   ├── pm_argus.py                    ブリーフィング
 │   ├── pm_argus_agent.py              Investigation Agent
 │   ├── pm_argus_patrol.py             Patrol Agent
-│   ├── pm_embed.py                    FTS5構築
-│   └── patrol_*.py                    Patrol サブモジュール (5本)
+│   └── patrol/                        Patrol サブパッケージ（state/detect/actions/confirm/users）
+│   pm_embed.py                        FTS5構築（argus/ 外、他スクリプトからも使用）
 │
-├── 会議録音処理
+├── recording/                         会議録音処理パッケージ
 │   ├── generate_minutes_local.py
 │   ├── transcribe_pipeline.py
 │   └── whisper_vad.py
@@ -168,8 +170,7 @@ scripts/
 │   ├── cli_utils.py                   LLM呼び出し・argparseヘルパ
 │   ├── format_utils.py                Markdownテーブル整形
 │   ├── canvas_utils.py                Canvas操作
-│   ├── web_utils.py                   Web UI 共通
-│   └── ingest_plugin.py               プラグインインタフェース
+│   └── web_utils.py                   Web UI 共通
 │
 └── シェルスクリプト（エントリポイント）
     ├── pm_from_slack.sh

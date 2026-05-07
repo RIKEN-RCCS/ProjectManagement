@@ -25,18 +25,18 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db_utils import init_pm_db
 from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg, add_output_arg, make_logger
-from ingest_plugin import IngestContext
+from ingest.ingest_plugin import IngestContext
 
 # --------------------------------------------------------------------------- #
 # プラグイン登録（新ソース追加はここに1行追加するだけ）
 # --------------------------------------------------------------------------- #
-from ingest_slack   import SlackIngestPlugin
-from ingest_minutes import MinutesIngestPlugin
-from ingest_goals   import GoalsIngestPlugin
+from ingest.slack   import SlackIngestPlugin
+from ingest.minutes import MinutesIngestPlugin
+from ingest.goals   import GoalsIngestPlugin
 
 PLUGINS: dict[str, object] = {
     "slack":   SlackIngestPlugin(),

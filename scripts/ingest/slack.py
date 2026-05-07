@@ -15,10 +15,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from db_utils import open_db, normalize_assignee
 from cli_utils import load_claude_md, call_claude, retrieve_knowledge_for_extraction
-from ingest_plugin import IngestContext
+from ingest.ingest_plugin import IngestContext
 
 
 # --------------------------------------------------------------------------- #

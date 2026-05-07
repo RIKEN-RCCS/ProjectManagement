@@ -70,7 +70,7 @@ _DRAFT_REPORT_SINCE_DAYS = 14
 _transcribe_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, channel_id)
 _transcribe_lock = threading.Lock()
 
-from transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
+from recording.transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
 
 
 # --------------------------------------------------------------------------- #
