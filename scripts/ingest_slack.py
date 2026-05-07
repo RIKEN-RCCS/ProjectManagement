@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db, normalize_assignee
-from cli_utils import load_claude_md, call_claude
+from cli_utils import load_claude_md, call_claude, retrieve_knowledge_for_extraction
 from ingest_plugin import IngestContext
 
 
@@ -164,17 +164,55 @@ EXTRACT_PROMPT = """
 あなたは富岳NEXTプロジェクトのプロジェクトマネージャーです。
 以下のSlackスレッドのメッセージを読み、決定事項とアクションアイテムを抽出してください。
 
-## 指示
+## アクションアイテムの定義（厳守）
+
+アクションアイテムとは **プロジェクトを推進するうえで欠かせない作業で、明確なアウトプットがあるもの** に限る。
+以下の基準を **すべて** 満たすものだけを抽出すること:
+
+1. **具体的な成果物・アウトプットがある**: 報告書、資料、設計書、コード、見積もり、提案書など、形のある成果物が生まれる作業であること
+2. **プロジェクト推進に不可欠**: その作業が完了しないと後続の意思決定やマイルストーン達成に支障が出ること
+3. **担当者が特定可能、または特定すべき**: 誰がやるかが明示されている、または組織として担当を決めるべき作業であること
+
+以下は **抽出しない**:
+- 日常的な確認作業（「確認する」「チェックする」「共有する」「展開する」「周知する」だけのもの）
+- 定期的な繰り返し作業（「スケジュールの更新」「議事録の確認」「TWIの更新」など、毎週/毎月発生するルーチン）
+- 単なる会議の開催・日程調整（「〜について議論する」「ミーティングを設定する」）
+- Slack上の連絡・伝達行為（「〜をSlackで共有する」「〜に連絡する」）
+- 一過性の事務手続き（「出席登録」「欠席連絡」「チャンネルへの追加」「アカウント削除」）
+
+## 決定事項の定義（厳守）
+
+決定事項とは **意思決定者による判断・方針決定** に限る。
+以下のいずれかに該当するものだけを抽出すること:
+
+1. **方針・戦略の決定**: プロジェクトの進め方、技術選定、開発方針に関する決定
+2. **リソース配分の決定**: 予算、人員、計算資源の割り当てに関する決定
+3. **スケジュール・スコープの変更**: マイルストーン期限の変更、機能の追加・削除
+4. **対外的な合意・承認**: 他組織との取り決め、承認事項
+
+以下は **抽出しない**:
+- 情報の共有・報告（「〜が判明した」「〜の状況を報告した」）
+- 会議運営に関する取り決め（「次回は〇月〇日に開催」「アジェンダに追加する」）
+- 既知事実の確認（「〜であることを確認した」）
+- アクションアイテムの言い換え（担当者への作業依頼を決定事項として重複記載しない）
+
+## その他の指示
 
 1. **明示されたものだけ抽出**: メッセージに明示されていない内容を推測・補完しないこと
 2. **出力形式**: 必ず以下のJSON形式のみ出力すること（前後の説明テキスト不要）
-3. 決定事項・アクションアイテムがない場合は空配列 `[]` を返すこと
+3. 決定事項・アクションアイテムがない場合は空配列 `[]` を返すこと。**大半のスレッドは空配列が正しい。**
 4. **マイルストーン紐づけ**: 各アクションアイテムについて、下記「マイルストーン一覧」の
    いずれかに明らかに関連する場合は milestone_id を記入すること。判断できない場合は null。
+5. **content は2〜3文で記述**: (1) 何をするか (2) なぜ必要か・背景 (3) 期待される成果物。
+   1文だけの曖昧な記述（例:「予算の確認」「資料の作成」）は不可。
 
 ## マイルストーン一覧
 
 {milestones}
+
+## 過去の関連議論・決定事項（参考情報）
+
+{knowledge_context}
 
 ## プロジェクト文脈
 
@@ -192,13 +230,13 @@ EXTRACT_PROMPT = """
 {{
   "decisions": [
     {{
-      "content": "決定事項の内容",
+      "content": "決定事項の内容（意思決定の結論とその理由・影響を1〜2文で）",
       "decided_at": "YYYY-MM-DD または null"
     }}
   ],
   "action_items": [
     {{
-      "content": "アクションアイテムの内容",
+      "content": "何をするか・なぜ必要か・期待される成果物を2〜3文で記述",
       "assignee": "担当者名（不明な場合は null）",
       "due_date": "YYYY-MM-DD または null",
       "milestone_id": "マイルストーンID（M1等）または null"
@@ -219,9 +257,17 @@ def extract_json(text: str) -> dict:
     raise ValueError(f"JSON not found:\n{text[:300]}")
 
 
-def extract_from_thread(row: dict, context: str, milestones: list[dict]) -> dict:
+def extract_from_thread(row: dict, context: str, milestones: list[dict], repo_root: Path = None) -> dict:
+    # ナレッジ検索（Phase 2追加）
+    knowledge_context = retrieve_knowledge_for_extraction(
+        row["thread_text"],
+        qa_db_path=(repo_root or REPO_ROOT) / "data" / "qa_pm-all.db",
+        top_k=3,
+    )
+
     prompt = EXTRACT_PROMPT.format(
         context=context,
+        knowledge_context=knowledge_context,  # 追加
         timestamp=row.get("timestamp", "不明"),
         user_name=row.get("user_name", "不明"),
         thread_text=row["thread_text"],
@@ -375,7 +421,7 @@ class SlackIngestPlugin:
                 continue
 
             try:
-                extracted = extract_from_thread(row, context, milestones)
+                extracted = extract_from_thread(row, context, milestones, ctx.repo_root)
             except Exception as e:
                 ctx.log(f"  [WARN] 抽出失敗: {e}")
                 continue
