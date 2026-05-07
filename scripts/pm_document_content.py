@@ -656,7 +656,6 @@ def _scan_single_source(
     """
     # スレッドごとに独立した DB 接続を開く
     src_conn = sqlite3.connect(db_path)
-    src_conn.execute("PRAGMA query_only = ON")
     ensure_box_files_table(src_conn)
 
     try:
@@ -719,7 +718,6 @@ def _scan_single_source(
 
         # batch insert（executemany）
         if records and not dry_run:
-            src_conn.execute("PRAGMA query_only = OFF")
             src_conn.executemany(
                 """INSERT INTO box_files
                    (box_file_id, box_folder_id, name, file_format, size_bytes,
@@ -775,7 +773,7 @@ def scan_sources(
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(
-                _scan_single_source, src, db_path, conn.execute("PRAGMA query_only").fetchone()[0],
+                _scan_single_source, src, db_path, False,
                 dry_run=dry_run, log=log
             ): src.get("name", "unknown")
             for src in filtered_sources
