@@ -48,7 +48,7 @@ PROJECT_MD = REPO_ROOT / "docs" / "project.md"
 sys.path.insert(0, str(SCRIPT_DIR))
 from cli_utils import (
     strip_think_blocks, call_local_llm, load_claude_md_context, detect_vllm_model,
-    enrich_combined_with_vtt,
+    enrich_combined_with_vtt, retrieve_knowledge_for_extraction,
 )
 
 
@@ -112,16 +112,20 @@ RULES:
 CRITICAL: "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in output.
 {vtt_speaker_instructions}
 ## 決定事項 rules:
-- **Core decisions only (3-7 items)**: Include ONLY decisions that materially affect the project — cancelled/rescheduled meetings, agreed policy or methodology, committed deliverables with scope/deadline.
+- **Decisions = judgments by decision-makers ONLY (3-7 items max)**. A decision is a choice among alternatives that changes the project's direction, resources, or commitments.
+- Include ONLY: policy/strategy decisions, resource allocation decisions, schedule/scope changes, agreements with external parties.
 - Ask yourself: "Would this item appear in a formal board-level summary?" If not, omit it.
-- Definitely omit: routine procedural confirmations ("資料を配布する", "Slackで共有する", "アジェンダを反映する", "議事録を作成する"), minor operational steps, and restatements of deadlines that are already obvious from context.
+- Definitely omit: routine procedural confirmations ("資料を配布する", "Slackで共有する", "アジェンダを反映する", "議事録を作成する"), minor operational steps, restatements of deadlines that are already obvious from context, information sharing ("〜が判明した"), and meeting scheduling ("次回は〇月〇日に開催").
+- Do NOT restate action items as decisions. If someone is assigned a task, that is an action item, not a decision.
 - Markers for explicit agreement: 〜で進める / 〜に決定 / 〜することが合意 / 〜することになった / 〜が決定した
 - Vary the ending naturally in Japanese (e.g. 〜することになった / 〜と合意した / 〜する方針となった / 〜をキャンセルした). Do NOT end every item with 〜が決定された.
 - If no significant decisions found: write a single line "（なし）"
 
 ## アクションアイテム rules:
-- List only specific tasks explicitly assigned or delegated to an identifiable person
-- Do NOT infer tasks that were not explicitly assigned in the summaries
+- An action item is a task that is **essential to project progress** and produces a **concrete deliverable** (report, design doc, code, estimate, proposal, etc.).
+- List only specific tasks explicitly assigned or delegated to an identifiable person.
+- Do NOT infer tasks that were not explicitly assigned in the summaries.
+- Definitely omit: routine check/confirm tasks ("確認する", "チェックする"), recurring tasks ("スケジュールの更新", "TWIの更新"), meeting scheduling ("ミーティングを設定する"), Slack communication ("Slackで共有する", "連絡する"), and one-off administrative tasks ("出席登録", "チャンネル追加", "アカウント削除").
 - タスク内容: Write 2-3 sentences (40-80 chars each) covering (1) what to do, (2) why it matters / background, (3) expected output. Do NOT include deadline expressions (e.g. 「26日までに」「27日までに」) — those belong in the 期限 column only.
 
 Example — follow this style:
@@ -140,6 +144,10 @@ Output format (EXACTLY 3 columns — do NOT add extra columns):
 | 担当者 | タスク内容 | 期限 |
 |---|---|---|
 | （名前または未定） | （タスクの内容・背景・成果物を2〜3文で） | （期限または未定） |
+
+## 過去の関連議論・決定事項（参考情報）
+
+{knowledge_context}
 
 ## Participant List
 {claude_md_context}
@@ -495,8 +503,17 @@ def generate_minutes(
             print(f"[WARN] VTT セグメントが見つかりません。話者情報なしで続行します")
 
     print(f"[INFO] ローカルLLM（{model}）で決定事項・アクションアイテムを生成中...")
+
+    # ナレッジ検索（Phase 3追加）
+    knowledge_context = retrieve_knowledge_for_extraction(
+        decisions_input,
+        qa_db_path=REPO_ROOT / "data" / "qa_pm-all.db",
+        top_k=3,
+    )
+
     decisions_prompt = DECISIONS_TEMPLATE.format(
         claude_md_context=claude_md_context,
+        knowledge_context=knowledge_context,  # 追加
         transcript=decisions_input,
         vtt_speaker_instructions=vtt_instructions,
     )
