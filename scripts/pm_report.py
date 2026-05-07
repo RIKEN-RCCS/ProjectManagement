@@ -111,7 +111,7 @@ def format_assignee_workload(workload: list[dict]) -> str:
 def format_milestone_progress(milestones: list[dict], today: str) -> str:
     """「プロジェクトの現在地」セクションをMarkdown形式で生成する（LLM不使用）"""
     if not milestones:
-        return "（goals.yaml が未定義です。pm_goals_import.py を実行してください）"
+        return "（goals.yaml が未定義です。pm_ingest.py goals を実行してください）"
 
     lines = []
     for m in milestones:

@@ -3,7 +3,7 @@
 ingest_goals.py
 
 goals.yaml → pm.db の goals/milestones テーブルに完全同期するプラグイン。
-元ロジックは pm_goals_import.py から移植。pm_goals_import.py は後方互換 CLI ラッパーとして残す。
+pm_ingest.py goals 経由で呼び出される。
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ def list_registered(db_path: Path, no_encrypt: bool, log=print) -> None:
     conn.close()
 
     if not goals:
-        log("登録済みゴールはありません。pm_goals_import.py を実行してください。")
+        log("登録済みゴールはありません。pm_ingest.py goals を実行してください。")
         return
 
     for g in goals:

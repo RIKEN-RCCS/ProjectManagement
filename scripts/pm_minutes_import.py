@@ -6,7 +6,7 @@ pm_minutes_import.py
 DBは会議名（--meeting-name）ごとに独立した SQLite ファイルとして
 data/minutes/{meeting_name}.db に保存される。
 
-処理後は pm_minutes_to_pm.py で pm.db に転記する（LLM不使用）。
+処理後は pm_ingest.py minutes で pm.db に転記する（LLM不使用）。
 
 各テーブル:
   instances      : 会議開催記録（開催日・ファイルパス等）

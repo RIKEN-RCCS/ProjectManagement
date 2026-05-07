@@ -1,8 +1,7 @@
 """
-web_utils.py — pm_api.py / pm_web.py 共通の DB ヘルパー・保存ロジック
+web_utils.py — pm_api.py の DB ヘルパー・保存ロジック
 
-pm_api.py（FastAPI）と pm_web.py（NiceGUI、非推奨）で重複していた
-DB操作・フィルタリング・楽観的排他制御ロジックを統合。
+DB操作・フィルタリング・楽観的排他制御ロジックを提供する。
 """
 
 import glob as _glob
