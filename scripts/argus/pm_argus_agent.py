@@ -229,7 +229,13 @@ def _tool_search_action_items(args: dict, ctx: AgentContext) -> str:
             parts.append(f"期限:{i['due_date']}")
         if i.get("milestone_id"):
             parts.append(f"MS:{i['milestone_id']}")
+        if i.get("requested_by"):
+            parts.append(f"依頼者:{i['requested_by']}")
         lines.append(" | ".join(parts))
+        if i.get("rationale"):
+            lines.append(f"  背景: {i['rationale'][:150]}")
+        if i.get("related_ids"):
+            lines.append(f"  関連: {i['related_ids']}")
     return "\n".join(lines)
 
 
@@ -246,7 +252,14 @@ def _tool_search_decisions(args: dict, ctx: AgentContext) -> str:
         return "（該当する決定事項なし）"
     lines = []
     for d in items:
-        lines.append(f"ID:{d['id']} [{d.get('decided_at', '?')}] {d.get('content', '')[:100]}")
+        header = f"ID:{d['id']} [{d.get('decided_at', '?')}]"
+        if d.get("decided_by"):
+            header += f" 判断者:{d['decided_by']}"
+        lines.append(f"{header} {d.get('content', '')[:100]}")
+        if d.get("rationale"):
+            lines.append(f"  根拠: {d['rationale'][:150]}")
+        if d.get("related_ids"):
+            lines.append(f"  関連: {d['related_ids']}")
     return "\n".join(lines)
 
 

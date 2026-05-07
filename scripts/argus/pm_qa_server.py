@@ -510,7 +510,8 @@ def _query_action_items(conn, *, assignee=None, status=None, milestone=None, key
         params.append(f"%{keyword}%")
     where = " AND ".join(clauses)
     rows = conn.execute(
-        f"""SELECT id, content, assignee, due_date, status, milestone_id, source_ref
+        f"""SELECT id, content, assignee, due_date, status, milestone_id, source_ref,
+                   requested_by, rationale, source_context, related_ids
             FROM action_items WHERE {where}
             ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, due_date ASC NULLS LAST
             LIMIT ?""",
@@ -527,7 +528,8 @@ def _query_decisions(conn, *, keyword=None, limit=20) -> list[dict]:
         params.append(f"%{keyword}%")
     where = " AND ".join(clauses)
     rows = conn.execute(
-        f"""SELECT id, content, decided_at, source, source_ref
+        f"""SELECT id, content, decided_at, source, source_ref,
+                   decided_by, rationale, source_context, related_ids
             FROM decisions WHERE {where}
             ORDER BY decided_at DESC LIMIT ?""",
         params + [limit],
