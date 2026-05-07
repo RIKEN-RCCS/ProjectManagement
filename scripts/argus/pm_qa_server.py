@@ -637,7 +637,7 @@ def run_structured_query(entities: dict, pm_db_paths: list[Path] | None = None) 
 
 def generate_answer(question: str, chunks: list[dict], *, structured_context: str = "") -> str:
     if not _OPENAI_BASE:
-        return ":warning: OPENAI_API_BASE が設定されていません。`pm_qa_start.sh` 経由で起動してください。"
+        return ":warning: OPENAI_API_BASE が設定されていません。`bash scripts/pm_daemon.sh start qa` 経由で起動してください。"
 
     parts = []
     if structured_context:

@@ -104,8 +104,7 @@ slack/
 │   │       ├── confirm.py           #     Block Kit ボタンハンドラ（承認/却下）
 │   │       └── users.py             #     担当者名 → Slack user_id 解決
 │   ├── pm_api.py                    # FastAPI REST API + 静的フロントエンド配信。pm.db のアクションアイテム・決定事項・議事録・ファイル一覧を提供。web_utils.py を使用
-│   ├── pm_web_start.sh              # pm_api.py をバックグラウンドで起動（nohup + PIDファイル管理、port 8501）
-│   ├── pm_web_stop.sh               # pm_api.py を停止（PIDファイルでプロセス管理）
+│   ├── pm_daemon.sh                 # デーモン統合管理: `start/stop/status` × `qa`（Argus）/`web`（pm_api）
 │   ├── canvas_utils.py              # Slack Canvas 操作の共通ユーティリティ（sanitize_for_canvas・post_to_canvas・セクション削除ロジック）
 │   ├── db_utils.py                  # DB接続の一元管理・統計クエリ・平文DB暗号化変換（SQLCipher対応）。open_pm_db・fetch_milestone_progress・fetch_assignee_workload・fetch_overdue_items 等も提供
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks・VTTパース・話者マッピング）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
@@ -115,8 +114,6 @@ slack/
 │   ├── pm_document_update.sh        # BOXリンク抽出（pm_document_extract.py）→ FTS5更新（pm_embed.py）を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
 │   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
-│   ├── pm_qa_start.sh               # argus/pm_qa_server.py をバックグラウンドで起動（nohup + PIDファイル管理）
-│   ├── pm_qa_stop.sh                # argus/pm_qa_server.py を停止（PIDファイルでプロセス管理）
 │   ├── pm_argus_daily.sh            # cron用: argus/pm_argus.py --brief-to-canvas / --risk を平日朝7:47に実行
 │   ├── generate_minutes_local.py    # ローカルLLMを使って文字起こしから高品質議事録を生成。マルチステージ処理。--vtt でZoom VTTの話者情報を活用。cli_utils.py の call_local_llm を使用
 │   ├── transcribe_pipeline.py       # /argus-transcribe 用パイプライン（Slackからダウンロード → Whisper文字起こし → 議事録生成）。同名VTTの自動検出対応

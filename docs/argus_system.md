@@ -49,8 +49,7 @@ scripts/
 │       ├── confirm.py       #     Block Kit ボタンハンドラ
 │       └── users.py         #     担当者名 → Slack user_id 解決
 ├── pm_embed.py              # FTS5 インデックス構築（argus_config.yaml に従い各DBに書き込む）
-├── pm_qa_start.sh           # デーモン起動スクリプト（nohup + PIDファイル管理）
-└── pm_qa_stop.sh            # デーモン停止スクリプト
+└── pm_daemon.sh             # デーモン統合管理（bash scripts/pm_daemon.sh start qa / stop qa / status）
 
 data/
 ├── argus_config.yaml    # 統合設定（インデックス定義・チャンネルマッピング・pm.dbパス）
@@ -73,14 +72,14 @@ logs/
 
 ## 起動・停止
 
-全 Argus スラッシュコマンド（`/argus-brief`・`/argus-investigate` 等）は `pm_qa_server.py` に統合されているため、**`pm_qa_start.sh` を起動するだけで全機能が有効になる**。
+全 Argus スラッシュコマンド（`/argus-brief`・`/argus-investigate` 等）は `pm_qa_server.py` に統合されているため、**`pm_daemon.sh start qa` を起動するだけで全機能が有効になる**。
 
 ```bash
 # 起動（起動中なら何もしない。cron の自動再起動にも使用）
-bash scripts/pm_qa_start.sh
+bash scripts/pm_daemon.sh start qa
 
 # 停止
-bash scripts/pm_qa_stop.sh
+bash scripts/pm_daemon.sh stop qa
 
 # 状態確認
 cat logs/pm_qa_server.pid | xargs kill -0 && echo 起動中 || echo 停止中
@@ -89,7 +88,7 @@ cat logs/pm_qa_server.pid | xargs kill -0 && echo 起動中 || echo 停止中
 tail -f logs/pm_qa_server.log
 ```
 
-`pm_qa_start.sh` は起動時に以下を自動で行う:
+`pm_daemon.sh start qa` は起動時に以下を自動で行う:
 - `~/.secrets/slack_tokens.sh`（`SLACK_BOT_TOKEN`・`SLACK_APP_TOKEN`・`SLACK_USER_TOKEN`）の読み込み
 - `~/.secrets/rivault_tokens.sh`（`RIVAULT_URL`・`RIVAULT_TOKEN`）の読み込み
 - `OPENAI_API_BASE=http://localhost:8000/v1`（gemma4）のデフォルト設定
@@ -786,7 +785,7 @@ pm_embed.py           → qa_pm.db（FTS5チャンクとして索引化）
 | `RIVAULT_TOKEN` | 任意 | — | RiVault API トークン |
 | `ARGUS_CONFIG` | 任意 | `data/argus_config.yaml` | 設定ファイルパス |
 
-`pm_qa_start.sh` が `~/.secrets/slack_tokens.sh` と `~/.secrets/rivault_tokens.sh` を自動 source するため、デーモン起動時は手動設定不要。CLI 直接実行時は `source ~/.secrets/slack_tokens.sh` が必要。
+`pm_daemon.sh start qa` が `~/.secrets/slack_tokens.sh` と `~/.secrets/rivault_tokens.sh` を自動 source するため、デーモン起動時は手動設定不要。CLI 直接実行時は `source ~/.secrets/slack_tokens.sh` が必要。
 
 ---
 
@@ -840,7 +839,7 @@ crontab -l | grep argus
 ### 5. 自動再起動の設定（任意）
 
 ```cron
-*/5 * * * * bash /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/pm_qa_start.sh >> /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/logs/pm_qa_cron.log 2>&1
+*/5 * * * * bash /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/pm_daemon.sh start qa >> /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/logs/pm_qa_cron.log 2>&1
 ```
 
 ---
@@ -850,7 +849,7 @@ crontab -l | grep argus
 **`/argus-brief` を実行しても何も返ってこない:**
 1. `tail -50 logs/pm_qa_server.log` でエラーを確認
 2. `cat logs/pm_qa_server.pid | xargs kill -0 && echo 起動中 || echo 停止中` でデーモン確認
-3. `bash scripts/pm_qa_start.sh` で再起動
+3. `bash scripts/pm_daemon.sh start qa` で再起動
 
 **「LLMエラー」が返ってくる:**
 - `curl http://localhost:8000/v1/models` で gemma4 の起動確認

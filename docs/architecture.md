@@ -178,8 +178,7 @@ scripts/
     ├── canvas_report.sh
     ├── slack_post_minutes.sh
     ├── pm_document_update.sh
-    ├── pm_qa_start.sh / pm_qa_stop.sh
-    └── pm_web_start.sh / pm_web_stop.sh  (pm_api.py の起動/停止)
+    └── pm_daemon.sh  (start/stop/status × qa: Argus, web: pm_api の統合管理)
 ```
 
 ---
