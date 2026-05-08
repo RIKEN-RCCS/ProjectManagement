@@ -517,8 +517,8 @@ def retrieve_knowledge_for_extraction(
         return ""
 
     try:
-        # pm_qa_server.py から検索関数をインポート
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        # pm_qa_server.py から検索関数をインポート（scripts/argus/ 配下）
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "argus"))
         from pm_qa_server import retrieve_chunks, rerank_chunks, format_context
 
         # FTS5検索
