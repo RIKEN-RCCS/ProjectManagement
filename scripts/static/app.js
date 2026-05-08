@@ -153,32 +153,123 @@ function openMinutes(meetingId, kind) {
     'width=960,height=780,scrollbars=yes,resizable=yes');
 }
 
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderEnrichSection(label, value) {
+  if (!value) return '';
+  const text = escapeHtml(value).replace(/\n/g, '<br>');
+  return `<div>
+    <div class="text-xs font-bold text-gray-500 mb-1">${label}</div>
+    <div class="bg-gray-50 border rounded p-2 whitespace-pre-wrap">${text}</div>
+  </div>`;
+}
+
+function renderRelatedIds(related) {
+  if (!related) return '';
+  let ids = [];
+  try {
+    const parsed = typeof related === 'string' ? JSON.parse(related) : related;
+    if (Array.isArray(parsed)) ids = parsed;
+  } catch (e) {
+    // fall through - raw string fallback
+  }
+  if (ids.length === 0 && typeof related === 'string') {
+    ids = [related];
+  }
+  const items = ids.map(id => `<code class="bg-blue-50 px-1 rounded text-xs">${escapeHtml(id)}</code>`).join(' ');
+  return `<div>
+    <div class="text-xs font-bold text-gray-500 mb-1">関連ID</div>
+    <div>${items}</div>
+  </div>`;
+}
+
+function openEnrichDialog(kind, data) {
+  const dlg = document.getElementById('dialog-enrich');
+  const title = document.getElementById('enrich-title');
+  const body = document.getElementById('enrich-body');
+  const actor = kind === 'AI' ? (data.requested_by || '') : (data.decided_by || '');
+  const actorLabel = kind === 'AI' ? '依頼者' : '判断者';
+  const conf = kind === 'AI' ? (data.requested_by_confidence || '') : (data.decided_by_confidence || '');
+  title.textContent = `${kind} #${data.id || '-'}`;
+  const contentSection = `<div>
+    <div class="text-xs font-bold text-gray-500 mb-1">内容</div>
+    <div class="bg-gray-50 border rounded p-2 whitespace-pre-wrap">${escapeHtml(data.content || '')}</div>
+  </div>`;
+  const actorSection = actor ? `<div>
+    <div class="text-xs font-bold text-gray-500 mb-1">${actorLabel}${conf ? ` <span class="font-normal text-gray-400">(${escapeHtml(conf)})</span>` : ''}</div>
+    <div>${escapeHtml(actor)}</div>
+  </div>` : '';
+  const parts = [
+    contentSection,
+    actorSection,
+    renderEnrichSection('根拠 (rationale)', data.rationale),
+    renderEnrichSection('背景 (source_context)', data.source_context),
+    renderRelatedIds(data.related_ids),
+  ].filter(Boolean);
+  if (parts.length <= 1) {
+    parts.push('<div class="text-gray-500 italic">エンリッチメント情報はまだありません。scripts/enrich/enrich_items.py を実行してください。</div>');
+  }
+  body.innerHTML = parts.join('');
+  dlg.showModal();
+}
+
 // ----------------------------------------------------------------
 // Action Items
 // ----------------------------------------------------------------
+// 根拠/背景セル: 要約を表示、クリックで詳細モーダル
+function enrichRenderer(params) {
+  const data = params.data || {};
+  const rat = data.rationale || '';
+  const ctx = data.source_context || '';
+  const rel = data.related_ids || '';
+  const has = rat || ctx || rel;
+  if (!has) return '<span style="color:#9ca3af;font-size:11px">—</span>';
+  const preview = (rat || ctx).replace(/[\r\n]+/g, ' ').slice(0, 60);
+  const marks = [];
+  if (rat) marks.push('根拠');
+  if (ctx) marks.push('背景');
+  if (rel) marks.push('関連');
+  const tag = marks.join('/');
+  const s = 'cursor:pointer;color:#1565c0;text-decoration:underline';
+  return `<span style="${s}" title="クリックで詳細表示">[${tag}] ${preview}${preview.length >= 60 ? '…' : ''}</span>`;
+}
+
 const aiColumnDefs = [
   { field: 'deleted', headerName: '削除', width: 50, pinned: 'left',
     cellRenderer: 'agCheckboxCellRenderer',
     cellEditor: 'agCheckboxCellEditor',
     cellRendererParams: { disabled: false } },
   { field: 'id', headerName: 'ID', editable: false, width: 50, pinned: 'left' },
-  { field: 'content', headerName: '内容', width: 380 },
-  { field: 'assignee', headerName: '担当者', width: 120 },
-  { field: 'due_date', headerName: '期限', width: 110 },
+  { field: 'content', headerName: '内容', width: 360 },
+  { field: 'assignee', headerName: '担当者', width: 110 },
+  { field: 'requested_by', headerName: '依頼者', width: 110 },
+  { field: 'due_date', headerName: '期限', width: 105 },
   { field: 'milestone_id', headerName: 'MS', width: 60,
     cellEditor: 'agSelectCellEditor',
     cellEditorParams: { values: [''] } },
-  { field: 'done', headerName: '完了', width: 80,
+  { field: 'done', headerName: '完了', width: 70,
     cellRenderer: 'agCheckboxCellRenderer',
     cellEditor: 'agCheckboxCellEditor',
     cellRendererParams: { disabled: false } },
-  { field: 'note', headerName: '対応状況', width: 280 },
+  { field: 'note', headerName: '対応状況', width: 260 },
+  { headerName: '根拠/背景', width: 280, editable: false,
+    colId: 'enrich',
+    valueGetter: (p) => (p.data && p.data.rationale) || '',
+    cellRenderer: enrichRenderer },
   { field: 'extracted_at', headerName: '発生日', editable: false, width: 110 },
   { field: 'source', headerName: '出典', editable: false, width: 110,
     cellRenderer: sourceRenderer },
   { field: 'source_ref', hide: true },
   { field: 'meeting_id', hide: true },
   { field: 'meeting_kind', hide: true },
+  { field: 'rationale', hide: true },
+  { field: 'source_context', hide: true },
+  { field: 'related_ids', hide: true },
+  { field: 'requested_by_confidence', hide: true },
 ];
 
 function initAiGrid() {
@@ -194,6 +285,10 @@ function initAiGrid() {
     stopEditingWhenCellsLoseFocus: true,
     singleClickEdit: true,
     onCellClicked: (event) => {
+      if (event.colDef.colId === 'enrich') {
+        openEnrichDialog('AI', event.data || {});
+        return;
+      }
       if (event.colDef.field !== 'source') return;
       const data = event.data || {};
       if (data.source === 'slack' && data.source_ref) {
@@ -280,11 +375,21 @@ const decColumnDefs = [
     cellEditor: 'agCheckboxCellEditor',
     cellRendererParams: { disabled: false } },
   { field: 'id', headerName: 'ID', editable: false, width: 50, pinned: 'left' },
-  { field: 'content', headerName: '内容', width: 500 },
+  { field: 'content', headerName: '内容', width: 440 },
+  { field: 'decided_by', headerName: '判断者', width: 110 },
+  { field: 'decided_at', headerName: '決定日', width: 110 },
+  { headerName: '根拠/背景', width: 280, editable: false,
+    colId: 'enrich',
+    valueGetter: (p) => (p.data && p.data.rationale) || '',
+    cellRenderer: enrichRenderer },
   { field: 'extracted_at', headerName: '発生日', editable: false, width: 110 },
   { field: 'source', headerName: '出典', editable: false, width: 110,
     cellRenderer: sourceRendererDec },
   { field: 'source_ref', hide: true },
+  { field: 'rationale', hide: true },
+  { field: 'source_context', hide: true },
+  { field: 'related_ids', hide: true },
+  { field: 'decided_by_confidence', hide: true },
 ];
 
 function initDecGrid() {
@@ -300,6 +405,10 @@ function initDecGrid() {
     stopEditingWhenCellsLoseFocus: true,
     singleClickEdit: true,
     onCellClicked: (event) => {
+      if (event.colDef.colId === 'enrich') {
+        openEnrichDialog('Decision', event.data || {});
+        return;
+      }
       if (event.colDef.field !== 'source') return;
       const data = event.data || {};
       if (data.source === 'slack' && data.source_ref) {

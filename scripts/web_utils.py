@@ -222,7 +222,7 @@ def load_minutes_content(meeting_id: str, no_encrypt: bool = False, kind: str = 
 
 def do_save_action_items(conn, original_df, edited_rows) -> tuple[int, list[dict]]:
     """アクションアイテムの変更を保存。(変更件数, コンフリクト一覧) を返す。"""
-    editable = ["content", "assignee", "due_date", "milestone_id", "note"]
+    editable = ["content", "assignee", "due_date", "milestone_id", "note", "requested_by"]
     count = 0
     conflicts: list[dict] = []
     for row in edited_rows:
@@ -232,7 +232,7 @@ def do_save_action_items(conn, original_df, edited_rows) -> tuple[int, list[dict
             continue
         orig = orig_rows.iloc[0]
         db_row = conn.execute(
-            "SELECT status, deleted, content, assignee, due_date, milestone_id, note"
+            "SELECT status, deleted, content, assignee, due_date, milestone_id, note, requested_by"
             " FROM action_items WHERE id=?", (ai_id,)
         ).fetchone()
         if db_row is None:
@@ -288,7 +288,7 @@ def do_save_decisions(conn, original_df, edited_rows) -> tuple[int, list[dict]]:
             continue
         orig = orig_rows.iloc[0]
         db_row = conn.execute(
-            "SELECT deleted, content, decided_at, acknowledged_at"
+            "SELECT deleted, content, decided_at, acknowledged_at, decided_by"
             " FROM decisions WHERE id=?", (dec_id,)
         ).fetchone()
         if db_row is None:
@@ -305,7 +305,7 @@ def do_save_decisions(conn, original_df, edited_rows) -> tuple[int, list[dict]]:
                 audit(conn, "decisions", dec_id, "deleted", old_del, new_del)
                 conn.execute("UPDATE decisions SET deleted=? WHERE id=?", (new_del, dec_id))
                 count += 1
-        for col in ("content", "decided_at", "acknowledged_at"):
+        for col in ("content", "decided_at", "acknowledged_at", "decided_by"):
             new_val = nv(row.get(col))
             old_val = nv(orig[col])
             if new_val != old_val:
