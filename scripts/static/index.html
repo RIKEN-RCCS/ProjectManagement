@@ -176,6 +176,18 @@
     </form>
   </dialog>
 
+  <!-- Enrichment Detail Dialog -->
+  <dialog id="dialog-enrich" class="rounded-lg shadow-xl p-6 w-[720px] max-h-[80vh] backdrop:bg-black/30 overflow-y-auto">
+    <div class="flex items-start justify-between mb-3">
+      <h2 class="text-lg font-bold">エンリッチメント詳細 <span id="enrich-title" class="text-sm font-normal text-gray-500"></span></h2>
+      <button type="button" onclick="this.closest('dialog').close()" class="text-gray-500 hover:text-gray-800 text-xl leading-none">✕</button>
+    </div>
+    <div id="enrich-body" class="flex flex-col gap-3 text-sm"></div>
+    <div class="flex justify-end mt-4">
+      <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">閉じる</button>
+    </div>
+  </dialog>
+
   <!-- Toast container -->
   <div id="toast-container" class="fixed bottom-4 right-4 flex flex-col gap-2 z-50"></div>
 
