@@ -873,6 +873,10 @@ def build_app():
     def handle_transcribe(ack, respond, command):
         _handle_transcribe_command(ack, respond, command, "/transcribe")
 
+    @app.command("/argus-delete")
+    def handle_argus_delete(ack, client, command):
+        handle_delete(ack, client, command)
+
     @app.command("/delete")
     def handle_delete(ack, client, command):
         filename = (command.get("text") or "").strip()
@@ -890,9 +894,24 @@ def build_app():
 
         ack(f"`{filename}` を検索して削除します...")
 
-        response = client.files_list(channel=channel_id, types="all")
-        files = response.get("files", [])
-        matched = [f for f in files if f.get("name") == filename]
+        files = []
+        cursor = None
+        for _ in range(20):
+            kwargs = {"channel": channel_id, "types": "all", "count": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            response = client.files_list(**kwargs)
+            files.extend(response.get("files", []))
+            cursor = (response.get("response_metadata") or {}).get("next_cursor") or ""
+            if not cursor:
+                break
+
+        target = filename.lower()
+        matched = [f for f in files if (f.get("name") or "").lower() == target]
+        if not matched:
+            matched = [f for f in files if (f.get("title") or "").lower() == target]
+        if not matched:
+            matched = [f for f in files if target in (f.get("name") or "").lower()]
 
         if not matched:
             client.chat_postMessage(
