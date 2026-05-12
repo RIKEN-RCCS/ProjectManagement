@@ -23,9 +23,9 @@
 ```
 /argus-brief                     # 直近30日を全体俯瞰
 /argus-brief 60                  # 期間を60日に拡張
-/argus-brief @西澤               # 西澤さん担当事項にフォーカス
+/argus-brief @富岳太郎               # 富岳太郎さん担当事項にフォーカス
 /argus-brief Benchpark           # Benchpark 話題にフォーカス
-/argus-brief 60 @西澤 GPU性能    # 組み合わせも可
+/argus-brief 60 @富岳太郎 GPU性能    # 組み合わせも可
 ```
 
 ### 引数ルール
@@ -33,7 +33,7 @@
 | トークン | 解釈 | 例 |
 |---|---|---|
 | 数字のみ   | 直近日数           | `60` → 過去60日分 |
-| `@` 始まり | 担当者フォーカス   | `@西澤` |
+| `@` 始まり | 担当者フォーカス   | `@富岳太郎` |
 | その他文字 | 話題フォーカス     | `Benchpark` |
 
 ### 想定シーン
@@ -85,7 +85,7 @@
 ```
 /argus-risk                      # 全プロジェクトのリスク俯瞰
 /argus-risk 60                   # 期間拡大
-/argus-risk @小林                # 特定担当者のリスク
+/argus-risk @富岳太郎                # 特定担当者のリスク
 /argus-risk Benchpark            # 特定話題のリスク
 ```
 
@@ -115,7 +115,7 @@ LLM が自律的にツール（DB検索・FTS全文検索・Slackメッセージ
 ```
 /argus-investigate M3マイルストーンの遅延原因を調査して
 /argus-investigate 先週の決定事項が実行されているか確認
-/argus-investigate @西澤 の負荷が高い原因を分析して
+/argus-investigate @富岳太郎 の負荷が高い原因を分析して
 /argus-investigate 設計方針に関する最近の議論は？
 /argus-investigate GPU Outsourcing Agreement の最新版はどこか
 ```
