@@ -1315,7 +1315,6 @@ def _run_transcribe(respond, command):
     if filename and not Path(filename).suffix:
         filename += ".m4a"
     channel_id = command.get("channel_id", "")
-    user_id = command.get("user_id", "")
     thread_ts = None
 
     if not filename:
@@ -1349,12 +1348,10 @@ def _run_transcribe(respond, command):
         )
         return
 
-    # 議事録ファイルのアップロード先となる親スレッドを作成。
-    # 投稿文言は簡潔にし、詳細な進捗通知は ephemeral で実行者にのみ送る。
     try:
         post = bot_client.chat_postMessage(
             channel=channel_id,
-            text=f":hourglass_flowing_sand: `{filename}` の議事録生成中...",
+            text=f":hourglass_flowing_sand: `{filename}` の処理を開始します...",
         )
         thread_ts = post["ts"]
     except Exception as e:
@@ -1371,7 +1368,7 @@ def _run_transcribe(respond, command):
 
     try:
         logger.info(f"[argus-transcribe] 開始: filename={filename} channel={channel_id}")
-        _run_transcribe_pipeline(bot_client, channel_id, filename, thread_ts, user_id=user_id)
+        _run_transcribe_pipeline(bot_client, channel_id, filename, thread_ts)
         logger.info(f"[argus-transcribe] 完了: filename={filename}")
         respond(
             text=f":white_check_mark: `{filename}` の議事録生成が完了しました。スレッドをご確認ください。",

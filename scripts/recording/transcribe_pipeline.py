@@ -60,14 +60,7 @@ def _get_hugging_face_token() -> str:
     return os.environ.get("HUGGING_FACE_TOKEN", "")
 
 
-def _post(client, channel_id, thread_ts, text, user_id=None):
-    """進捗通知。user_id があれば実行者にのみ見える ephemeral で投稿。"""
-    if user_id:
-        try:
-            client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
-            return
-        except Exception as e:
-            logger.warning(f"ephemeral post failed, falling back to thread post: {e}")
+def _post(client, channel_id, thread_ts, text):
     client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=text)
 
 
@@ -312,7 +305,7 @@ python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' {extr
 
 
 def run_minutes(transcript_path, client, channel_id, thread_ts,
-                vtt_path=None, slide_context_path=None, user_id=None):
+                vtt_path=None, slide_context_path=None):
     """generate_minutes_local.py をコンテナ外のPythonで実行し、議事録パスを返す。"""
     audio_save_dir = _get_audio_save_dir()
     vllm_api_base = _get_vllm_api_base()
@@ -370,7 +363,7 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
                 total_chunks = int(line.split(":")[1].strip().split()[0])
             except Exception:
                 pass
-            _post(client, channel_id, thread_ts, user_id=user_id, text=
+            _post(client, channel_id, thread_ts,
                   f"Stage 1 開始: 文字起こしを {total_chunks} チャンクに分割して抽出中...")
 
         elif "抽出完了" in line and total_chunks:
@@ -381,16 +374,16 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
                 milestone = (pct // 25) * 25
                 if milestone > 0 and milestone not in posted_milestones:
                     posted_milestones.add(milestone)
-                    _post(client, channel_id, thread_ts, user_id=user_id, text=
+                    _post(client, channel_id, thread_ts,
                           f"Stage 1: チャンク抽出 {milestone}% 完了 ({current}/{total_chunks})")
             except Exception:
                 pass
 
         elif "議事録を統合生成中" in line:
-            _post(client, channel_id, thread_ts, user_id=user_id, text= "Stage 2: 議事内容を統合生成中...")
+            _post(client, channel_id, thread_ts, "Stage 2: 議事内容を統合生成中...")
 
         elif "決定事項・アクションアイテムを生成中" in line:
-            _post(client, channel_id, thread_ts, user_id=user_id, text= "Stage 3: 決定事項・アクションアイテムを抽出中...")
+            _post(client, channel_id, thread_ts, "Stage 3: 決定事項・アクションアイテムを抽出中...")
 
         elif line.startswith("[完了]"):
             try:
@@ -415,7 +408,7 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
     return minutes_path
 
 
-def run_pipeline(client, channel_id, filename, thread_ts, user_id=None):
+def run_pipeline(client, channel_id, filename, thread_ts):
     """ダウンロード → 文字起こし → 議事録生成 → Slack投稿 の全体パイプライン。"""
     audio_path = None
     transcript_path = None
@@ -429,26 +422,24 @@ def run_pipeline(client, channel_id, filename, thread_ts, user_id=None):
         if vtt_path:
             vtt_msg = f"\nVTT ファイル検出: `{vtt_path.name}`（話者情報を議事録に活用します）"
 
-        _post(client, channel_id, thread_ts, user_id=user_id, text=
+        _post(client, channel_id, thread_ts,
               f"ダウンロード完了: `{filename}` ({file_size_mb:.1f} MB){vtt_msg}\n"
               f"文字起こしを開始します...")
 
         slide_context_path, terminology_path = run_slide_ocr(audio_path)
         if slide_context_path:
-            _post(client, channel_id, thread_ts, user_id=user_id, text=
+            _post(client, channel_id, thread_ts,
                   "スライドOCR完了: 固有名詞・用語を Whisper prompt と議事録生成に反映します")
 
         transcript_path = run_whisper(audio_path, terminology_path=terminology_path)
-        _post(client, channel_id, thread_ts, user_id=user_id, text=
+        _post(client, channel_id, thread_ts,
               f"文字起こし完了: `{transcript_path.name}`\n"
               f"要約を開始します（数十分かかる場合があります）...")
 
         minutes_path = run_minutes(transcript_path, client, channel_id, thread_ts,
                                    vtt_path=vtt_path,
-                                   slide_context_path=slide_context_path,
-                                   user_id=user_id)
+                                   slide_context_path=slide_context_path)
 
-        # 議事録ファイルはチャンネル全員が閲覧できるようスレッドにアップロード
         client.files_upload_v2(
             channel=channel_id,
             thread_ts=thread_ts,
@@ -460,7 +451,7 @@ def run_pipeline(client, channel_id, filename, thread_ts, user_id=None):
 
     except Exception as e:
         logger.exception("Pipeline failed")
-        _post(client, channel_id, thread_ts, user_id=user_id, text= f"エラーが発生しました:\n{e}")
+        _post(client, channel_id, thread_ts, f"エラーが発生しました:\n{e}")
         raise
     else:
         # 正常完了時のみ削除
