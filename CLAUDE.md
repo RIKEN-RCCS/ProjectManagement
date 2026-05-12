@@ -118,9 +118,10 @@ slack/
 │   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
 │   ├── pm_argus_daily.sh            # cron用: argus/pm_argus.py --brief-to-canvas / --risk を平日朝7:47に実行
 │   ├── recording/                   # 会議録音処理パッケージ
-│   │   ├── generate_minutes_local.py #  ローカルLLMでの高品質議事録生成（マルチステージ・--vtt 対応）
-│   │   ├── transcribe_pipeline.py   #   /argus-transcribe 用パイプライン（Slack DL → Whisper → 議事録生成）
-│   │   └── whisper_vad.py           #   VAD+DeepFilterNet+Whisper による話者分離・文字起こし
+│   │   ├── generate_minutes_local.py #  ローカルLLMでの高品質議事録生成（マルチステージ・--vtt・--slide-context 対応）
+│   │   ├── transcribe_pipeline.py   #   /argus-transcribe 用パイプライン（Slack DL → スライドOCR → Whisper → 議事録生成）
+│   │   ├── whisper_vad.py           #   VAD+DeepFilterNet+Whisper による話者分離・文字起こし（--initial-prompt-extra 対応）
+│   │   └── slide_ocr.py             #   ffmpeg scene detect + マルチモーダルLLM で動画からスライド文脈・固有名詞を抽出
 │   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。同名VTTも自動移動。-c CHANNEL_ID でSlack投稿も自動化
 │   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。同名VTT自動検出（--vtt で明示指定も可）。recording/generate_minutes_local.py → pm_minutes_import.py --no-llm → ingest/pm_ingest.py minutes を自動実行
 │   ├── pm_from_slack.sh             # Slack取得 → pm.db抽出を連続実行（slack_pipeline.py + ingest/pm_ingest.py slack）

@@ -484,7 +484,8 @@ def _expand_at_refs(text: str, base_dir: Path, depth: int) -> str:
 def retrieve_knowledge_for_extraction(
     query_text: str,
     qa_db_path: Path | None = None,
-    top_k: int = 3,
+    top_k: int = 5,
+    since_days: int = 90,
     logger=None,
 ) -> str:
     """
@@ -495,13 +496,15 @@ def retrieve_knowledge_for_extraction(
     Args:
         query_text: 検索クエリ（Slackスレッド本文 or 議事録本文）
         qa_db_path: FTS5インデックスDBパス（Noneの場合は data/qa_pm-all.db）
-        top_k: 返却する最大チャンク数（デフォルト3）
+        top_k: 返却する最大チャンク数（デフォルト5）
+        since_days: 検索対象を直近N日以内に限定（デフォルト90日）
         logger: ロガー（省略時は標準出力）
 
     Returns:
         フォーマット済みナレッジテキスト。検索失敗時は空文字列。
     """
     import logging
+    from datetime import datetime, timedelta
 
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -521,14 +524,27 @@ def retrieve_knowledge_for_extraction(
         sys.path.insert(0, str(Path(__file__).resolve().parent / "argus"))
         from pm_qa_server import retrieve_chunks, rerank_chunks, format_context
 
-        # FTS5検索
-        chunks = retrieve_chunks(query_text, qa_db_path, k=10)
+        # enrich/knowledge_context.py からキーワード抽出をインポート
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "enrich"))
+        from knowledge_context import extract_topic_keywords
+
+        # トピックキーワード抽出（名詞・固有名詞のみ）
+        keywords = extract_topic_keywords(query_text)
+        search_query = " ".join(keywords[:15])  # 上位15個
+
+        # 日付カットオフ計算
+        cutoff_date = (datetime.now() - timedelta(days=since_days)).strftime("%Y-%m-%d")
+
+        logger.info(f"ナレッジ検索: {cutoff_date} 以降, キーワード={search_query[:100]}")
+
+        # FTS5検索（日付フィルタ付き）
+        chunks = retrieve_chunks(search_query, qa_db_path, k=20, since_date=cutoff_date)
         if not chunks:
             logger.debug("ナレッジ検索: 該当なし")
             return "（該当する過去議論なし）"
 
         # LLM re-ranking で上位top_k件に絞り込み
-        reranked = rerank_chunks(query_text, chunks)[:top_k]
+        reranked = rerank_chunks(search_query, chunks)[:top_k]
 
         # プロンプト注入用フォーマット
         return format_context(reranked)

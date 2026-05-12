@@ -13,6 +13,10 @@
 #   --held-at YYYY-MM-DD 開催日（省略時はファイル名の GMT タイムスタンプを JST 変換して使用）
 #   --db PATH            pm.db のパス（省略時はデフォルト）
 #   --vtt PATH           Zoom VTT ファイル（省略時は同日の VTT を data/ から自動検出）
+#   --no-slide-ocr       スライドOCRを無効化（デフォルトは有効。動画にスライドなしの場合のみ使用）
+#   --scene-threshold N  ffmpeg scene detect 閾値（デフォルト: 0.25）
+#   --max-frames N       OCR に渡すフレーム数上限。超過時は時系列に均等間引き（デフォルト: 200）
+#   --ocr-workers N      OCR 並列ワーカー数（デフォルト: 8）
 #
 # 例:
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
@@ -53,6 +57,10 @@ MEETING_NAME=""
 HELD_AT=""
 DB_PATH=""
 VTT_FILE_ARG=""
+SLIDE_OCR=1
+SCENE_THRESHOLD="0.25"
+MAX_FRAMES="200"
+OCR_WORKERS="8"
 FILES=()
 
 while [[ $# -gt 0 ]]; do
@@ -62,6 +70,10 @@ while [[ $# -gt 0 ]]; do
     --held-at)      HELD_AT="$2";      shift 2 ;;
     --db)           DB_PATH="$2";      shift 2 ;;
     --vtt)          VTT_FILE_ARG="$2"; shift 2 ;;
+    --no-slide-ocr) SLIDE_OCR=0; shift ;;
+    --scene-threshold) SCENE_THRESHOLD="$2"; shift 2 ;;
+    --max-frames)   MAX_FRAMES="$2"; shift 2 ;;
+    --ocr-workers)  OCR_WORKERS="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
       exit 0 ;;
@@ -105,6 +117,47 @@ for INPUT_FILE in "${FILES[@]}"; do
   echo "処理開始: $INPUT_ABS"
   echo "=============================="
 
+  # --------------------------------------------------------------------------- #
+  # スライドOCR（Whisper より前に実行して terminology.txt を initial_prompt に渡す）
+  # --------------------------------------------------------------------------- #
+  SLIDE_CONTEXT_FILE=""
+  TERMINOLOGY_FILE=""
+  if [[ "$SLIDE_OCR" == "1" && "${EXT,,}" == "mp4" ]]; then
+    echo "[INFO] スライドOCR開始 (threshold=$SCENE_THRESHOLD, max_frames=$MAX_FRAMES)"
+    SLIDE_WORKDIR="$WORKDIR/slides_$(date +%s)"
+    mkdir -p "$SLIDE_WORKDIR"
+    SLIDE_CONTEXT_FILE="$SLIDE_WORKDIR/slide_context.md"
+    TERMINOLOGY_FILE="$SLIDE_WORKDIR/terminology.txt"
+    if "$PYTHON3" "$SCRIPT_DIR/recording/slide_ocr.py" "$INPUT_ABS" \
+        --out-dir "$SLIDE_WORKDIR" \
+        --scene-threshold "$SCENE_THRESHOLD" \
+        --max-frames "$MAX_FRAMES" \
+        --max-workers "$OCR_WORKERS" \
+        --context-out "$SLIDE_CONTEXT_FILE" \
+        --terminology-out "$TERMINOLOGY_FILE" \
+        --verbose; then
+      if [[ -s "$SLIDE_CONTEXT_FILE" ]]; then
+        echo "[INFO] スライド文脈生成: $(wc -c < "$SLIDE_CONTEXT_FILE") bytes"
+      else
+        SLIDE_CONTEXT_FILE=""
+      fi
+      if [[ ! -s "$TERMINOLOGY_FILE" ]]; then
+        TERMINOLOGY_FILE=""
+      fi
+    else
+      echo "[WARN] スライドOCR失敗。文脈・用語なしで続行します"
+      SLIDE_CONTEXT_FILE=""
+      TERMINOLOGY_FILE=""
+    fi
+  elif [[ "$SLIDE_OCR" == "1" ]]; then
+    echo "[INFO] mp4 以外のためスライドOCRをスキップします (ext=$EXT)"
+  fi
+
+  WHISPER_EXTRA_OPT=""
+  if [[ -n "$TERMINOLOGY_FILE" ]]; then
+    WHISPER_EXTRA_OPT="--initial-prompt-extra $TERMINOLOGY_FILE"
+  fi
+
   cat << EOF > "$WORKDIR/run.sh"
 . /.venv/bin/activate
 export HUGGING_FACE_TOKEN="${HUGGING_FACE_TOKEN:?HUGGING_FACE_TOKEN 環境変数が設定されていません}"
@@ -117,7 +170,7 @@ else
 fi
 ffmpeg -y -i $TMP_FILE -ac 1 -ar 16000 -vn -af "highpass=f=1000" -sample_fmt s16 $WAV_FILE
 ffprobe -v error -show_format -show_streams -i $WAV_FILE
-python3 $WHISPER_VAD $WAV_FILE $BASENAME.md
+python3 $WHISPER_VAD $WAV_FILE $BASENAME.md $WHISPER_EXTRA_OPT
 EOF
 
   time singularity run --nv "$SIFFILE1" sh "$WORKDIR/run.sh"
@@ -173,9 +226,19 @@ EOF
   else
     INPUT_DIR=$(dirname "$INPUT_ABS")
     INPUT_STEM=$(basename "$INPUT_ABS" | sed 's/\.[^.]*$//')
-    for vtt_candidate in \
-        "$INPUT_DIR/${INPUT_STEM}.transcript.vtt" "$DATA_DIR/${INPUT_STEM}.transcript.vtt" \
-        "$INPUT_DIR/${INPUT_STEM}.vtt" "$DATA_DIR/${INPUT_STEM}.vtt"; do
+    # 解像度サフィックス（例: _3840x2160, _1920x1080）を剥がした stem も候補に加える
+    INPUT_STEM_NORES=$(echo "$INPUT_STEM" | sed -E 's/_[0-9]+x[0-9]+$//')
+    VTT_CANDIDATES=(
+        "$INPUT_DIR/${INPUT_STEM}.transcript.vtt" "$DATA_DIR/${INPUT_STEM}.transcript.vtt"
+        "$INPUT_DIR/${INPUT_STEM}.vtt"            "$DATA_DIR/${INPUT_STEM}.vtt"
+    )
+    if [[ "$INPUT_STEM_NORES" != "$INPUT_STEM" ]]; then
+        VTT_CANDIDATES+=(
+            "$INPUT_DIR/${INPUT_STEM_NORES}.transcript.vtt" "$DATA_DIR/${INPUT_STEM_NORES}.transcript.vtt"
+            "$INPUT_DIR/${INPUT_STEM_NORES}.vtt"            "$DATA_DIR/${INPUT_STEM_NORES}.vtt"
+        )
+    fi
+    for vtt_candidate in "${VTT_CANDIDATES[@]}"; do
       if [[ -f "$vtt_candidate" ]]; then
         VTT_FILE="$vtt_candidate"
         echo "[INFO] VTT ファイル検出: $VTT_FILE"
@@ -192,6 +255,11 @@ EOF
     VTT_OPT="--vtt $VTT_FILE"
   fi
 
+  SLIDE_OPT=""
+  if [[ -n "$SLIDE_CONTEXT_FILE" && -s "$SLIDE_CONTEXT_FILE" ]]; then
+    SLIDE_OPT="--slide-context $SLIDE_CONTEXT_FILE"
+  fi
+
   # --------------------------------------------------------------------------- #
   # Step 1: generate_minutes_local.py で高品質議事録を生成
   # --------------------------------------------------------------------------- #
@@ -204,6 +272,7 @@ EOF
     --max-tokens 16384 \
     --multi-stage --chunk-minutes 10 \
     $VTT_OPT \
+    $SLIDE_OPT \
     2>&1 | tee "$TMPLOG"
   GEN_EXIT=${PIPESTATUS[0]}
 

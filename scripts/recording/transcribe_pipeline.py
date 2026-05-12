@@ -113,45 +113,129 @@ def download_audio(client, channel_id, filename,
     return save_path
 
 
-def download_vtt(client, channel_id, audio_filename):
+def download_vtt(client, channel_id, audio_filename,
+                 max_retries: int = 6, retry_delay: float = 10.0):
     """音声ファイルと同名の .vtt をチャンネルから検索・ダウンロードする。見つからなければ None。
 
-    検索順: {stem}.transcript.vtt → {stem}.vtt（先に見つかった方を使用）
+    検索順: {stem}.transcript.vtt → {stem}.vtt → {base_name}.transcript {paren}.vtt
+    括弧を含むファイル名に対応（例: "Recording (1).m4a" → "Recording.transcript (1).vtt"）
+    VTT ファイルは音声後に別途アップロードされる可能性があるため、リトライに対応
     """
+    import re
+
     stem = Path(audio_filename).stem
     vtt_candidates = [f"{stem}.transcript.vtt", f"{stem}.vtt"]
 
+    # 解像度サフィックス（例: _3840x2160, _1920x1080）を剥がした stem も候補に加える
+    stem_nores = re.sub(r"_\d+x\d+$", "", stem)
+    if stem_nores != stem:
+        vtt_candidates.extend([
+            f"{stem_nores}.transcript.vtt",
+            f"{stem_nores}.vtt",
+        ])
+
+    # 括弧を含むファイル名の場合、括弧部分を分離して追加パターンを生成
+    match = re.match(r"^(.+?)\s*(\([^)]*\))$", stem)
+    if match:
+        base_name, paren = match.groups()
+        vtt_candidates.extend([
+            f"{base_name}.transcript {paren}.vtt",
+            f"{base_name}{paren}.transcript.vtt",
+        ])
+
     try:
-        response = client.files_list(channel=channel_id, types="all")
-        files = response.get("files", [])
-        file_by_name = {f.get("name"): f for f in files}
+        for attempt in range(1, max_retries + 1):
+            response = client.files_list(channel=channel_id, types="all")
+            files = response.get("files", [])
+            file_by_name = {f.get("name"): f for f in files}
 
-        for vtt_filename in vtt_candidates:
-            if vtt_filename not in file_by_name:
-                continue
-            url = file_by_name[vtt_filename].get("url_private_download")
-            if not url:
-                logger.warning(f"VTT ファイル `{vtt_filename}` のダウンロードURLが取得できません")
-                continue
-            audio_save_dir = _get_audio_save_dir()
-            os.makedirs(audio_save_dir, exist_ok=True)
-            save_path = Path(audio_save_dir) / vtt_filename
-            _download_slack_file(url, save_path)
-            logger.info(f"VTT ファイルをダウンロード: {save_path}")
-            return save_path
+            for vtt_filename in vtt_candidates:
+                if vtt_filename not in file_by_name:
+                    continue
+                url = file_by_name[vtt_filename].get("url_private_download")
+                if not url:
+                    logger.warning(f"VTT ファイル `{vtt_filename}` のダウンロードURLが取得できません")
+                    continue
+                audio_save_dir = _get_audio_save_dir()
+                os.makedirs(audio_save_dir, exist_ok=True)
+                save_path = Path(audio_save_dir) / vtt_filename
+                _download_slack_file(url, save_path)
+                logger.info(f"VTT ファイルをダウンロード: {save_path}")
+                return save_path
 
-        logger.info(f"VTT ファイルはチャンネルに存在しません（検索: {', '.join(vtt_candidates)}）")
+            if attempt < max_retries:
+                logger.info(f"VTT 未検出 (試行 {attempt}/{max_retries}, 検索: {', '.join(vtt_candidates[:2])}) — {retry_delay:.0f}秒後にリトライ")
+                time.sleep(retry_delay)
+
+        logger.info(f"VTT ファイルはチャンネルに存在しません（検索: {', '.join(vtt_candidates[:2])}、{max_retries}回試行）")
         return None
     except Exception as e:
         logger.warning(f"VTT ダウンロードでエラー（スキップ）: {e}")
         return None
 
 
-def run_whisper(audio_path):
+def run_slide_ocr(video_path: Path) -> tuple[Path | None, Path | None]:
+    """動画（mp4 等）からスライドOCRを実行し (slide_context.md, terminology.txt) を返す。
+
+    失敗・該当なしの場合はそれぞれ None。mp4 以外は即 (None, None)。
+    """
+    if video_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+        return None, None
+
+    import shutil as _shutil
+    work_dir = Path(_get_audio_save_dir()) / f"slides_{video_path.stem}"
+    # 前回の残骸があると新規フレームと混在してインデックスがズレるので事前に掃除
+    if work_dir.exists():
+        _shutil.rmtree(work_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    context_path = work_dir / "slide_context.md"
+    terminology_path = work_dir / "terminology.txt"
+
+    cmd = [
+        sys.executable, "-u",  # -u: stdout/stderr をラインバッファにして即時フラッシュ
+        str(_RECORDING_DIR / "slide_ocr.py"),
+        str(video_path),
+        "--out-dir", str(work_dir),
+        "--context-out", str(context_path),
+        "--terminology-out", str(terminology_path),
+        "--verbose",
+    ]
+    logger.info(f"slide_ocr 起動: {' '.join(cmd)}")
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+    except Exception as e:
+        logger.warning(f"slide_ocr 起動失敗: {e}")
+        return None, None
+
+    try:
+        for line in proc.stdout:
+            logger.info("[slide_ocr] %s", line.rstrip())
+        proc.wait(timeout=3600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        logger.warning("slide_ocr.py タイムアウト — 文脈なしで続行")
+        return None, None
+
+    if proc.returncode != 0:
+        logger.warning(f"slide_ocr.py 失敗 (exit={proc.returncode})")
+        return None, None
+
+    ctx = context_path if context_path.exists() and context_path.stat().st_size > 0 else None
+    term = terminology_path if terminology_path.exists() and terminology_path.stat().st_size > 0 else None
+    logger.info(f"スライドOCR完了: context={ctx} terminology={term}")
+    return ctx, term
+
+
+def run_whisper(audio_path, terminology_path: Path | None = None):
     """Singularityコンテナ内でffmpeg変換 + whisper_vad.py を実行する。"""
     audio_save_dir = _get_audio_save_dir()
     hugging_face_token = _get_hugging_face_token()
     transcript_path = audio_path.with_suffix(".md")
+    extra_opt = f"--initial-prompt-extra '{terminology_path}'" if terminology_path else ""
 
     # FFmpeg 4.x → 6.x の soname マッピング（コンテナ内 FFmpeg 6.x vs torchcodec 要求 4.x）
     _FFMPEG_SHIMS = {
@@ -183,8 +267,8 @@ export HF_HOME="{HF_HOME}"
 export LD_LIBRARY_PATH="{lib_shim_dir}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 export PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync,expandable_segments:True
 
-ffmpeg -y -i {audio_path} -ac 1 -ar 16000 -vn -af "highpass=f=1000" -sample_fmt s16 {wav_path}
-python3 {_RECORDING_DIR}/whisper_vad.py {wav_path} {transcript_path}
+ffmpeg -y -i '{audio_path}' -ac 1 -ar 16000 -vn -af "highpass=f=1000" -sample_fmt s16 '{wav_path}'
+python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' {extra_opt}
 """)
 
     env = os.environ.copy()
@@ -221,11 +305,16 @@ python3 {_RECORDING_DIR}/whisper_vad.py {wav_path} {transcript_path}
 
 
 def run_minutes(transcript_path, client, channel_id, thread_ts,
-                vtt_path=None):
+                vtt_path=None, slide_context_path=None):
     """generate_minutes_local.py をコンテナ外のPythonで実行し、議事録パスを返す。"""
     audio_save_dir = _get_audio_save_dir()
     vllm_api_base = _get_vllm_api_base()
-    vllm_model = _get_vllm_model()
+    try:
+        vllm_model = _get_vllm_model()
+        logger.info(f"vLLM モデル: {vllm_model}")
+    except Exception as e:
+        logger.error(f"vLLM モデル取得エラー (API: {vllm_api_base}): {e}", exc_info=True)
+        raise
 
     minutes_dir = Path(audio_save_dir) / "minutes"
     minutes_dir.mkdir(parents=True, exist_ok=True)
@@ -239,6 +328,8 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
            "--max-tokens", "16384"]
     if vtt_path:
         cmd.extend(["--vtt", str(vtt_path)])
+    if slide_context_path:
+        cmd.extend(["--slide-context", str(slide_context_path)])
 
     proc = subprocess.Popen(
         cmd,
@@ -335,13 +426,19 @@ def run_pipeline(client, channel_id, filename, thread_ts):
               f"ダウンロード完了: `{filename}` ({file_size_mb:.1f} MB){vtt_msg}\n"
               f"文字起こしを開始します...")
 
-        transcript_path = run_whisper(audio_path)
+        slide_context_path, terminology_path = run_slide_ocr(audio_path)
+        if slide_context_path:
+            _post(client, channel_id, thread_ts,
+                  "スライドOCR完了: 固有名詞・用語を Whisper prompt と議事録生成に反映します")
+
+        transcript_path = run_whisper(audio_path, terminology_path=terminology_path)
         _post(client, channel_id, thread_ts,
               f"文字起こし完了: `{transcript_path.name}`\n"
               f"要約を開始します（数十分かかる場合があります）...")
 
         minutes_path = run_minutes(transcript_path, client, channel_id, thread_ts,
-                                   vtt_path=vtt_path)
+                                   vtt_path=vtt_path,
+                                   slide_context_path=slide_context_path)
 
         client.files_upload_v2(
             channel=channel_id,

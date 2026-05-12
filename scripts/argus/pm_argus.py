@@ -313,7 +313,7 @@ _BRIEF_PROMPT = """\
 
 {context}
 
-## 集計日: {today}（過去{days}日間のデータ）
+## 集計日: {today}（{period_desc}）
 
 ## pm.db 統計サマリー
 
@@ -342,11 +342,11 @@ _BRIEF_PROMPT = """\
 
 {weekly_trends}
 
-## 直近 {days} 日間の Slack 生メッセージ
+## 直近の Slack 生メッセージ（{period_desc}）
 
 {messages}
 
-## 直近 {days} 日間の議事録
+## 直近の議事録（{period_desc}）
 
 {minutes}
 
@@ -356,6 +356,57 @@ _BRIEF_PROMPT = """\
 特定の個人のタスク管理ではなく、プロジェクトのゴール達成・マイルストーン到達・リスク軽減に
 直結する事項を優先してください。
 データが示す具体的な懸案（マイルストーン名・期限超過のID・担当者名）を必ず引用してください。
+"""
+
+
+def _to_slack_mrkdwn(text: str) -> str:
+    """GitHub Flavored Markdown を Slack mrkdwn に変換。
+
+    - `**bold**` → `*bold*`
+    - `## heading` / `### heading` → `*heading*`
+    - `- item` はそのまま（Slackでも箇条書きとして表示される）
+    """
+    import re
+    # ヘッダー (## ... / ### ...) を太字に変換
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+    # **bold** → *bold*（ただし *...* と衝突しないよう一時置換）
+    text = re.sub(r'\*\*([^*\n]+?)\*\*', r'*\1*', text)
+    return text
+
+
+_DAILY_SUMMARY_PROMPT = """\
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
+以下のデータを分析し、**本日 {today} のプロジェクト活動記録**をサマライズしてください。
+
+## プロジェクト文脈
+
+{context}
+
+## 本日のSlackメッセージ
+
+{messages}
+
+## 本日の議事録
+
+{minutes}
+
+---
+
+以下の観点で本日の活動をサマライズしてください:
+
+### 1. 主な議論トピック
+本日Slack・会議で議論された主要なテーマ（3〜5件）
+
+### 2. 決定事項
+誰が何を決定したか、決定の背景・理由
+
+### 3. 新規アクションアイテム
+誰が何を担当することになったか、期限が設定されているか
+
+### 4. 重要な進捗・変更
+プロジェクトに影響する技術的進展・方針変更
+
+**データがない場合は「本日は活動記録がありません」と簡潔に記載してください。**
 """
 
 
@@ -496,7 +547,7 @@ _RISK_PROMPT = """\
 
 {context}
 
-## 集計日: {today}（過去{days}日間のデータ）
+## 集計日: {today}（{period_desc}）
 
 ## pm.db 統計サマリー
 
@@ -525,11 +576,11 @@ _RISK_PROMPT = """\
 
 {decisions_list}
 
-## 直近 {days} 日間の Slack 生メッセージ
+## 直近の Slack 生メッセージ（{period_desc}）
 
 {messages}
 
-## 直近 {days} 日間の議事録
+## 直近の議事録（{period_desc}）
 
 {minutes}
 
@@ -598,6 +649,14 @@ def _parse_command_args(text: str) -> tuple[int | None, str | None, str | None]:
     return days, assignee, topic
 
 
+def _format_period_description(days: int) -> str:
+    """日数に応じた期間表示文字列を返す。"""
+    if days == 0:
+        return "本日のデータ"
+    else:
+        return f"過去{days}日間のデータ"
+
+
 def build_brief_prompt(
     messages: str,
     minutes: str,
@@ -609,6 +668,16 @@ def build_brief_prompt(
     topic: str | None = None,
     requester: str = "プロジェクトメンバー",
 ) -> str:
+    # days == 0 の場合は日次活動サマリープロンプトを使用
+    if days == 0:
+        return _DAILY_SUMMARY_PROMPT.format(
+            today=today,
+            context=context,
+            messages=messages or "（本日のメッセージはありません）",
+            minutes=minutes or "（本日の議事録はありません）",
+        )
+
+    # 既存のロジック（days > 0）
     s = stats["stats"]
     focus_lines = []
     if assignee:
@@ -621,9 +690,11 @@ def build_brief_prompt(
         )
     focus_section = ("\n\n## フォーカス指定\n\n" + "\n".join(focus_lines)) if focus_lines else ""
 
+    period_desc = _format_period_description(days)
+
     prompt = _BRIEF_PROMPT.format(
         today=today,
-        days=days,
+        period_desc=period_desc,
         context=context,
         total_open=s["total_open"],
         total_closed=s["total_closed"],
@@ -712,9 +783,11 @@ def build_risk_prompt(
         )
     focus_section = ("\n\n## フォーカス指定\n\n" + "\n".join(focus_lines)) if focus_lines else ""
 
+    period_desc = _format_period_description(days)
+
     prompt = _RISK_PROMPT.format(
         today=today,
-        days=days,
+        period_desc=period_desc,
         context=context,
         total_open=s["total_open"],
         total_closed=s["total_closed"],
@@ -823,17 +896,29 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         if topic:
             header += f"  話題フォーカス: {topic}"
         respond(
-            text=f"{header}\n\n{result}",
-            response_type="ephemeral",
-            replace_original=True,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _to_slack_mrkdwn(f"{header}\n\n{result}"),
+                    },
+                }
+            ],
         )
         logger.info("[argus-brief] 完了")
     except Exception as e:
         logger.exception("[argus-brief] エラー")
         respond(
-            text=f":warning: Argus ブリーフィング生成エラー: {e}",
-            response_type="ephemeral",
-            replace_original=True,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":warning: Argus ブリーフィング生成エラー: {e}",
+                    },
+                }
+            ],
         )
 
 
@@ -875,17 +960,29 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
         logger.info("[argus-draft] RiVault 呼び出し中...")
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         respond(
-            text=f"*Argus 草案 ({purpose}: {subject})*\n\n{result}",
-            response_type="ephemeral",
-            replace_original=True,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _to_slack_mrkdwn(f"*Argus 草案 ({purpose}: {subject})*\n\n{result}"),
+                    },
+                }
+            ],
         )
         logger.info("[argus-draft] 完了")
     except Exception as e:
         logger.exception("[argus-draft] エラー")
         respond(
-            text=f":warning: Argus 草案生成エラー: {e}",
-            response_type="ephemeral",
-            replace_original=True,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":warning: Argus 草案生成エラー: {e}",
+                    },
+                }
+            ],
         )
 
 
@@ -926,17 +1023,278 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         if topic:
             header += f"  話題フォーカス: {topic}"
         respond(
-            text=f"{header}\n\n{result}",
-            response_type="ephemeral",
-            replace_original=True,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _to_slack_mrkdwn(f"{header}\n\n{result}"),
+                    },
+                }
+            ],
         )
         logger.info("[argus-risk] 完了")
     except Exception as e:
         logger.exception("[argus-risk] エラー")
         respond(
-            text=f":warning: Argus リスク分析エラー: {e}",
-            response_type="ephemeral",
-            replace_original=True,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":warning: Argus リスク分析エラー: {e}",
+                    },
+                }
+            ],
+        )
+
+
+def _build_channel_name_map() -> dict[str, str]:
+    """argus_config.yaml からチャンネルID -> 名前のマッピングを生成"""
+    channel_map = {}
+    config_path = Path(_REPO_ROOT) / "data" / "argus_config.yaml"
+
+    try:
+        with open(config_path) as f:
+            for line in f:
+                # コメント行から抽出: # C0XXXXXXX チャンネル名
+                if line.startswith("#") and line.lstrip("#").startswith(" C0"):
+                    parts = line.lstrip("# ").strip().split(None, 1)
+                    if len(parts) == 2:
+                        ch_id, ch_name = parts
+                        if ch_id not in channel_map:  # 重複は先出を優先
+                            channel_map[ch_id] = ch_name
+    except Exception:
+        pass
+
+    # pm_qa_server.py の _CHANNEL_NAMES をフォールバック
+    if not channel_map:
+        try:
+            from argus.pm_qa_server import _CHANNEL_NAMES
+            channel_map.update(_CHANNEL_NAMES)
+        except ImportError:
+            pass
+
+    return channel_map
+
+
+def _filter_mentions_for_user(
+    messages: str,
+    user_name: str,
+    user_id: str,
+    channel_names: dict[str, str],
+    user_id_map: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """
+    生メッセージから実行者へのメンションを抽出し、
+    (全体メッセージ, メンション専用セクション) を返す。
+    実行者が投稿したメッセージは除外する。
+
+    Args:
+        messages: fetch_raw_messages() の出力 (チャンネル単位で整形済み)
+        user_name: 実行者の表示名 (例: "Hikaru Inoue (RIKEN)" または "hikaru.inoue")
+        user_id: 実行者の Slack user_id (例: "U08MWC731GR")
+        channel_names: チャンネルID -> 表示名のマッピング
+        user_id_map: user_id -> user_name のマッピング（テキスト内のユーザーID展開用）
+
+    Returns:
+        (全体メッセージ, メンション専用セクション or "")
+        メンションがゼロ件の場合は ("全体", "")
+    """
+    if user_id_map is None:
+        user_id_map = {}
+    mention_lines = []
+
+    # 検索パターン: user_id、姓、user_name の全パターンを試す
+    search_patterns = [user_id]  # 最優先: user_id (最も正確)
+
+    # 姓を取得 (例: "Hikaru Inoue (RIKEN)" -> "Inoue")
+    parts = user_name.split()
+    if len(parts) >= 2:
+        search_patterns.append(parts[1])  # 姓
+
+    # user_name 全体も追加 (例: "Hikaru Inoue" または "hikaru.inoue")
+    search_patterns.append(user_name)
+
+    # チャンネルごとに分割 (## チャンネル: で区切られている)
+    for ch_section in messages.split("## チャンネル: "):
+        if not ch_section.strip():
+            continue
+
+        # チャンネルID取得 (先頭行)
+        lines = ch_section.strip().split("\n")
+        ch_id = lines[0].strip()
+        ch_name = channel_names.get(ch_id, ch_id)
+
+        # メッセージ行を走査
+        for line in lines[1:]:
+            # [YYYY-MM-DD HH:MM] user: text 形式
+            if "] " not in line:
+                continue
+
+            # 投稿者名と本文を分離
+            bracket_part = line.split("] ", 1)
+            if len(bracket_part) < 2:
+                continue
+
+            poster_and_text = bracket_part[1]
+            # "  user: text" または "user: text" 形式
+            colon_idx = poster_and_text.find(": ")
+            if colon_idx == -1:
+                continue
+
+            poster = poster_and_text[:colon_idx].strip()
+            text_part = poster_and_text[colon_idx + 2:]
+
+            # ★ ここで投稿者が実行者と異なるか確認（自分宛のメンションのみ）
+            if poster == user_name or poster == user_id or any(p in poster for p in search_patterns):
+                # 自分が投稿したメッセージなので除外
+                continue
+
+            # text 部分に任意のパターンが含まれるか確認
+            if any(pattern in text_part for pattern in search_patterns):
+                # テキスト内のユーザーID (U0XXXXXXX) を展開
+                expanded_line = line
+                for uid, uname in user_id_map.items():
+                    expanded_line = expanded_line.replace(uid, uname)
+
+                # チャンネル名付きで記録
+                mention_lines.append(f"{ch_name} {expanded_line}")
+
+    if not mention_lines:
+        return messages, ""
+
+    mention_section = (
+        "## あなた宛のメンション\n\n"
+        + "\n".join(mention_lines)
+        + "\n"
+    )
+
+    return messages, mention_section
+
+
+def _run_today_only(respond, command, *, no_encrypt: bool = False):
+    """Slack /argus-today のバックグラウンド処理。
+    本日のデータのみ収集し、実行者宛メンションを別トピック化。
+    """
+    import logging
+    logger = logging.getLogger("pm_argus")
+
+    try:
+        # 1. 実行者情報取得
+        user_name = command.get("user_name") or "プロジェクトメンバー"
+        user_id = command.get("user_id") or ""
+        requester = user_name
+
+        # 2. 今日のデータを収集
+        today = date.today().isoformat()
+        since_date = today  # --today-only 相当
+        days = 0
+
+        logger.info(f"[argus-today] requester={requester} user_id={user_id}")
+
+        context = load_claude_md_context()
+        messages, minutes, stats, conns = _collect_all_data(
+            today, since_date, no_encrypt=no_encrypt
+        )
+        for c in conns:
+            c.close()
+
+        # 3. ユーザーIDマップを構築（テキスト内のID展開用）
+        import re
+        user_id_map = {}
+        try:
+            from db_utils import open_db
+
+            # まずテキスト内に含まれるユーザーIDを全て抽出
+            data_dir = _REPO_ROOT / "data"
+            uid_pattern = re.compile(r'(U0[A-Z0-9]{9})')
+            text_uids = set()
+
+            for db_file in data_dir.glob("C*.db"):
+                try:
+                    conn = open_db(db_file, encrypt=not no_encrypt)
+
+                    # テキスト内のユーザーIDパターン (U0XXXXXXXXX = 10文字) を抽出
+                    for row in conn.execute("SELECT text FROM messages WHERE text IS NOT NULL").fetchall():
+                        if row[0]:
+                            text_uids.update(uid_pattern.findall(row[0]))
+
+                    conn.close()
+                except Exception:
+                    pass
+
+            # 次に、各チャンネルでそれらのユーザーIDを検索して名前を取得
+            for db_file in data_dir.glob("C*.db"):
+                try:
+                    conn = open_db(db_file, encrypt=not no_encrypt)
+
+                    # テキスト内に出現したユーザーIDの名前を検索
+                    for uid in text_uids:
+                        if uid not in user_id_map:
+                            # 同じuser_idで user_name が異なるレコードを探す
+                            result = conn.execute(
+                                "SELECT user_name FROM messages WHERE user_id = ? AND user_name IS NOT NULL AND user_name != ? AND user_name NOT LIKE 'U0%' LIMIT 1",
+                                (uid, uid)
+                            ).fetchone()
+                            if result and result[0]:
+                                user_id_map[uid] = result[0]
+
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"[argus-today] ユーザーIDマップ構築失敗: {e}")
+
+        # 4. メンション抽出 (argus_config.yaml + _CHANNEL_NAMES から取得)
+        channel_names = _build_channel_name_map()
+        _, mention_section = _filter_mentions_for_user(messages, user_name, user_id, channel_names, user_id_map)
+
+        # 5. プロンプト構築
+        prompt = build_brief_prompt(
+            messages, minutes, stats, context, today, days,
+            assignee=None, topic=None, requester=requester,
+        )
+
+        # 6. LLM呼び出し (日次サマリープロンプト使用)
+        logger.info("[argus-today] LLM 呼び出し中...")
+        result = call_argus_llm(
+            prompt,
+            system="あなたはAIインテリジェンスシステムArgusです。",
+        )
+
+        # 7. メンションセクションを追加
+        if mention_section:
+            result += f"\n\n---\n\n{mention_section}"
+
+        # 8. ephemeral 応答 (Block Kit で mrkdwn 有効化)
+        header = f":memo: *Argus 今日の活動サマリー ({today})*"
+        respond(
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _to_slack_mrkdwn(f"{header}\n\n{result}"),
+                    },
+                }
+            ],
+        )
+
+        logger.info("[argus-today] 完了")
+
+    except Exception as e:
+        logger.exception("[argus-today] エラー")
+        respond(
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":warning: Argus 日次サマリー生成エラー: {e}",
+                    },
+                }
+            ],
         )
 
 
@@ -949,6 +1307,11 @@ def _run_transcribe(respond, command):
     完了・エラー通知は respond() で ephemeral 返信する。
     """
     filename = (command.get("text") or "").strip()
+    # Slack の装飾記法（*bold*, _italic_, `code`, ~strike~）や貼り付け時のゼロ幅/引用符を剥がす
+    if filename:
+        # 前後の装飾マーカー・引用符を剥がす
+        filename = filename.strip("*_`~'\"「」​‌‍﻿")
+        # <@U...|name> 形式や <http://...> Slack リンク記法は対象外なのでそのまま
     if filename and not Path(filename).suffix:
         filename += ".m4a"
     channel_id = command.get("channel_id", "")
@@ -1046,6 +1409,8 @@ def main() -> None:
                         help="データ収集の開始日（デフォルト: 30日前）")
     parser.add_argument("--days", type=int, default=None, metavar="N",
                         help="直近何日分を対象にするか（デフォルト: 30日。--since と同時指定時は --since 優先）")
+    parser.add_argument("--today-only", action="store_true",
+                        help="今日のデータのみ収集（--days と --since を無視）")
     parser.add_argument("--assignee", default=None, metavar="NAME",
                         help="担当者フォーカス（例: --assignee 西澤）")
     parser.add_argument("--topic", default=None, metavar="TEXT",
@@ -1057,8 +1422,15 @@ def main() -> None:
     args = parser.parse_args()
 
     today = date.today().isoformat()
-    days = args.days if args.days is not None else _DEFAULT_SINCE_DAYS
-    since_date = args.since or (date.today() - timedelta(days=days)).isoformat()
+
+    if args.today_only:
+        # 今日のデータのみ
+        days = 0
+        since_date = today
+    else:
+        # 既存のロジック
+        days = args.days if args.days is not None else _DEFAULT_SINCE_DAYS
+        since_date = args.since or (date.today() - timedelta(days=days)).isoformat()
     pm_db_paths_cli = [Path(args.db)] if args.db else load_pm_db_paths()
     requester = args.requester or os.environ.get("USER") or "プロジェクトメンバー"
 
@@ -1083,7 +1455,13 @@ def main() -> None:
         )
         print("[INFO] LLM に問い合わせ中（ブリーフィング）...", file=sys.stderr)
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
-        canvas_content = f"# Argus ブリーフィング ({today})\n\n{result}\n\n_生成: {today} JST_"
+
+        # タイトルを days == 0 の場合に変更
+        if days == 0:
+            canvas_content = f"# Argus 日次活動サマリー ({today})\n\n{result}\n\n_生成: {today} JST_"
+        else:
+            canvas_content = f"# Argus ブリーフィング ({today})\n\n{result}\n\n_生成: {today} JST_"
+
         print("\n" + "=" * 60)
         print(canvas_content)
         print("=" * 60)
@@ -1130,7 +1508,7 @@ def main() -> None:
         print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
 
     else:
-        conn.close()
+        _close_conns()
         parser.print_help()
 
 

@@ -36,7 +36,7 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_local_llm, load_claude_md_context
 from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
-from argus.pm_argus import _run_brief, _run_draft, _run_risk, _run_transcribe, _transcribe_jobs, _transcribe_lock
+from argus.pm_argus import _run_brief, _run_draft, _run_risk, _run_today_only, _run_transcribe, _transcribe_jobs, _transcribe_lock
 from argus.pm_argus_agent import _run_investigate
 from argus.patrol.confirm import handle_approve_close, handle_reject_close
 from argus.patrol.state import PatrolState
@@ -98,7 +98,7 @@ TOP_K_RETRIEVE = 30   # FTS検索で広めに取得する件数
 TOP_K_RERANK = 5      # re-rank後に回答生成へ渡す件数
 MAX_TOKENS = 1024
 LLM_TIMEOUT = 120
-RERANK_TIMEOUT = 30
+RERANK_TIMEOUT = 60  # 30 → 60秒（議事録生成の re-rank に十分な時間を確保）
 
 _OPENAI_BASE = os.environ.get("OPENAI_API_BASE", "")
 _OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "dummy")
@@ -183,17 +183,17 @@ def sanitize_fts_query(q: str) -> str:
     return " ".join(tokens)
 
 
-def _fts5_search(conn: sqlite3.Connection, query: str, k: int) -> list[dict]:
+def _fts5_search(conn: sqlite3.Connection, query: str, k: int, date_filter: str = "1=1", date_params: list = []) -> list[dict]:
     try:
         rows = conn.execute(
-            """SELECT c.source_type, c.source_db, c.record_id, c.held_at,
+            f"""SELECT c.source_type, c.source_db, c.record_id, c.held_at,
                       c.content, c.source_ref, fts.rank
                FROM fts
                JOIN chunks c ON fts.rowid = c.id
-               WHERE fts MATCH ?
+               WHERE fts MATCH ? AND {date_filter}
                ORDER BY rank
                LIMIT ?""",
-            (query, k),
+            [query] + date_params + [k],
         ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError as e:
@@ -201,7 +201,7 @@ def _fts5_search(conn: sqlite3.Connection, query: str, k: int) -> list[dict]:
         return []
 
 
-def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int) -> list[dict]:
+def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int, date_filter: str = "1=1", date_params: list = []) -> list[dict]:
     """fts_tokens（SudachiPy形態素解析）テーブルで段階的AND検索を行う。"""
     # 全トークン → 先頭3 → 先頭2 → 先頭1 の順で試行
     token_sets = [tokens]
@@ -216,14 +216,14 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int) -> l
         query = " ".join(tset)
         try:
             rows = conn.execute(
-                """SELECT c.source_type, c.source_db, c.record_id, c.held_at,
+                f"""SELECT c.source_type, c.source_db, c.record_id, c.held_at,
                           c.content, c.source_ref, fts_tokens.rank
                    FROM fts_tokens
                    JOIN chunks c ON fts_tokens.rowid = c.id
-                   WHERE fts_tokens MATCH ?
+                   WHERE fts_tokens MATCH ? AND {date_filter}
                    ORDER BY rank
                    LIMIT ?""",
-                (query, k),
+                [query] + date_params + [k],
             ).fetchall()
             if rows:
                 return [dict(r) for r in rows]
@@ -233,7 +233,7 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int) -> l
     return []
 
 
-def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE) -> list[dict]:
+def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, since_date: str | None = None) -> list[dict]:
     """指定インデックスDBから関連チャンクを取得する。
 
     検索戦略（順番に試行）:
@@ -241,6 +241,12 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE) -> l
     2. trigram FTS5 AND検索（段階的トークン削減）
     3. LIKE 検索フォールバック
     4. 最新日付レコードのフォールバック
+
+    Args:
+        question: 検索クエリ
+        index_db: FTS5インデックスDBのパス
+        k: 取得件数上限
+        since_date: YYYY-MM-DD形式。指定時はこの日付以降のレコードのみ検索
     """
     if not index_db.exists():
         logger.warning(f"インデックスDBが見つかりません: {index_db}")
@@ -249,6 +255,10 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE) -> l
     conn = sqlite3.connect(str(index_db))
     conn.row_factory = sqlite3.Row
     try:
+        # 日付フィルタ条件句の構築
+        date_filter = "held_at >= ?" if since_date else "1=1"
+        date_params = [since_date] if since_date else []
+
         # --- Step 1: SudachiPy形態素解析 + fts_tokens 検索 ---
         sudachi_tokens = sudachi_tokenize_query(question)
         if sudachi_tokens:
@@ -257,7 +267,7 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE) -> l
             ).fetchone() is not None
 
             if has_fts_tokens:
-                rows = _fts_tokens_search(conn, sudachi_tokens, k)
+                rows = _fts_tokens_search(conn, sudachi_tokens, k, date_filter, date_params)
                 if rows:
                     logger.info(
                         f"SudachiPy FTSマッチ ({len(rows)}件): {sudachi_tokens} in {index_db.name}"
@@ -281,7 +291,7 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE) -> l
 
         for tset in token_sets:
             q = " ".join(tset)
-            rows = _fts5_search(conn, q, k)
+            rows = _fts5_search(conn, q, k, date_filter, date_params)
             if rows:
                 logger.info(f"trigram FTSマッチ ({len(rows)}件): [{q}] in {index_db.name}")
                 return rows
@@ -291,9 +301,9 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE) -> l
                    (valid_tokens[0] if valid_tokens else ""))
         if keyword:
             rows = conn.execute(
-                """SELECT source_type, source_db, record_id, held_at, content, source_ref, 0 AS rank
-                   FROM chunks WHERE content LIKE ? LIMIT ?""",
-                (f"%{keyword}%", k),
+                f"""SELECT source_type, source_db, record_id, held_at, content, source_ref, 0 AS rank
+                   FROM chunks WHERE {date_filter} AND content LIKE ? LIMIT ?""",
+                date_params + [f"%{keyword}%", k],
             ).fetchall()
             if rows:
                 logger.info(f"LIKE検索フォールバック ({len(rows)}件): [{keyword}]")
@@ -302,9 +312,9 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE) -> l
         # --- Step 4: 最新記録フォールバック ---
         logger.info(f"マッチなし → 最新記録フォールバック (sudachi={sudachi_tokens})")
         rows = conn.execute(
-            """SELECT source_type, source_db, record_id, held_at, content, source_ref, 0 AS rank
-               FROM chunks WHERE held_at IS NOT NULL ORDER BY held_at DESC LIMIT ?""",
-            (k,),
+            f"""SELECT source_type, source_db, record_id, held_at, content, source_ref, 0 AS rank
+               FROM chunks WHERE {date_filter} AND held_at IS NOT NULL ORDER BY held_at DESC LIMIT ?""",
+            date_params + [k],
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -333,6 +343,7 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
 
     prompt = (
         f"以下のチャンク一覧から、質問に最も関連するものを{TOP_K_RERANK}件選んでください。\n"
+        f"**直近の議論を優先してください。**\n"
         f"番号のみをスペース区切りで出力してください（例: 0 3 7 12 15）。\n\n"
         f"質問: {question}\n\n"
         f"チャンク一覧:\n{context_str}"
@@ -346,7 +357,7 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
             api_key=_OPENAI_KEY,
             max_tokens=30,
             no_stream=True,
-            timeout=RERANK_TIMEOUT,
+            timeout=60,  # 30 → 60秒
         )
         indices: list[int] = []
         for token in result.strip().split():
@@ -363,7 +374,9 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
 
         logger.warning("re-rank: 有効な番号が得られず先頭件数で代替")
     except Exception as e:
-        logger.warning(f"re-rankエラー: {e} → 先頭{TOP_K_RERANK}件で代替")
+        logger.warning(f"re-rankエラー: {e}. 日付降順フォールバックを使用")
+        # フォールバック: 日付降順でソート
+        return sorted(chunks, key=lambda x: x.get("held_at", ""), reverse=True)[:TOP_K_RERANK]
 
     return chunks[:TOP_K_RERANK]
 
@@ -762,6 +775,12 @@ def build_app():
         ack()
         respond(text=":hourglass_flowing_sand: Argus 分析中...", response_type="ephemeral")
         executor.submit(_run_brief, respond, command)
+
+    @app.command("/argus-today")
+    def handle_argus_today(ack, respond, command):
+        ack()
+        respond(text=":hourglass_flowing_sand: Argus 今日の活動を分析中...", response_type="ephemeral")
+        executor.submit(_run_today_only, respond, command)
 
     @app.command("/argus-draft")
     def handle_argus_draft(ack, respond, command):
