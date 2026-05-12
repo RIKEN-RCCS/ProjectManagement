@@ -61,7 +61,7 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 - Pass 2 は過去ナレッジ全体から関連情報を引いて紐付ける
 - データ品質管理は `pm_screen.py`（重複検出）→ `pm_relink.py`（一括削除・編集）で行う
 
-`pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_ingest.py minutes`（pm.db転記）の順で呼び出す。Zoom VTT ファイルが同名で存在する場合は自動検出し、話者情報を議事録生成に活用する（`--vtt` オプション）。
+`pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_ingest.py minutes`（pm.db転記）の順で呼び出す。Zoom VTT ファイルが同名で存在する場合は自動検出し、話者情報を議事録生成に活用する（`--vtt` オプション、解像度サフィックス `_3840x2160` 等を剥がすフォールバックあり）。mp4 の場合は `slide_ocr.py` を冒頭で自動実行し、スライド文脈と固有名詞リストを Stage 1/2/3 プロンプト・Whisper initial_prompt の両方に同梱して ASR/LLM 両段階で品質を向上させる（`--no-slide-ocr` で無効化可能）。
 
 **各DBの役割分担**:
 - `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
@@ -122,8 +122,9 @@ slack/
 │   │   ├── transcribe_pipeline.py   #   /argus-transcribe 用パイプライン（Slack DL → スライドOCR → Whisper → 議事録生成）
 │   │   ├── whisper_vad.py           #   VAD+DeepFilterNet+Whisper による話者分離・文字起こし（--initial-prompt-extra 対応）
 │   │   └── slide_ocr.py             #   ffmpeg scene detect + マルチモーダルLLM で動画からスライド文脈・固有名詞を抽出
-│   ├── pm_from_recording_auto.sh    # data/*.m4a を検出して pm_from_recording.sh を自動投入。同名VTTも自動移動。-c CHANNEL_ID でSlack投稿も自動化
-│   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。同名VTT自動検出（--vtt で明示指定も可）。recording/generate_minutes_local.py → pm_minutes_import.py --no-llm → ingest/pm_ingest.py minutes を自動実行
+│   ├── pm_from_recording_auto.sh    # data/*.m4a および data/*.mp4 を検出して pm_from_recording.sh を自動投入。同名VTTも自動移動。-c CHANNEL_ID でSlack投稿も自動化
+│   ├── pm_from_recording.sh         # 会議録音をローカルで処理するスクリプト。mp4 はスライドOCR自動有効化、同名VTT自動検出（--vtt で明示指定も可）。recording/slide_ocr.py → recording/generate_minutes_local.py → pm_minutes_import.py --no-llm → ingest/pm_ingest.py minutes を自動実行
+│   ├── pm_argus_daily_summary.sh    # cron用: 平日17:00に --today-only で当日分サマリーを Canvas に投稿
 │   ├── pm_from_slack.sh             # Slack取得 → pm.db抽出を連続実行（slack_pipeline.py + ingest/pm_ingest.py slack）
 │   ├── canvas_report.sh             # Canvas同期 → PMレポート生成・Canvas投稿（pm_sync_canvas.py + pm_report.py）
 │   └── slack_post_minutes.sh        # 議事録DBの内容をSlackチャンネルに投稿（pm_minutes_import.py --post-to-slack）
