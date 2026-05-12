@@ -61,7 +61,7 @@ _ARGUS_CONFIG = _DATA_DIR / "argus_config.yaml"
 _QA_CONFIG_LEGACY = _DATA_DIR / "qa_config.yaml"
 _DEFAULT_SINCE_DAYS = 30
 _DEFAULT_MAX_STEPS = 5
-_DEFAULT_TIMEOUT = 180.0
+_DEFAULT_TIMEOUT = 300.0
 _CONTEXT_CHAR_LIMIT = 100_000
 
 
@@ -293,6 +293,190 @@ def _tool_get_slack_messages(args: dict, ctx: AgentContext) -> str:
     )
 
 
+_CHANNEL_NAME_CACHE: dict[str, str] | None = None
+
+
+def _load_channel_names() -> dict[str, str]:
+    """argus_config.yaml のコメント行 `# Cxxx some_name` から channel_id→name を収集。"""
+    global _CHANNEL_NAME_CACHE
+    if _CHANNEL_NAME_CACHE is not None:
+        return _CHANNEL_NAME_CACHE
+    names: dict[str, str] = {}
+    cfg_path = _ARGUS_CONFIG if _ARGUS_CONFIG.exists() else _QA_CONFIG_LEGACY
+    if cfg_path.exists():
+        try:
+            for line in cfg_path.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if not s.startswith("#"):
+                    continue
+                m = re.match(r"#\s*(C[A-Z0-9]{5,})\s+(.+?)\s*$", s)
+                if m:
+                    names[m.group(1)] = m.group(2)
+        except Exception as e:
+            logger.warning("channel name load error: %s", e)
+    _CHANNEL_NAME_CACHE = names
+    return names
+
+
+def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
+    """指定ユーザーがメンション/名指しされた Slack メッセージを集計する。
+
+    user_id（<@Uxxx>）と名前（text への部分一致）の両方で検索。
+    since/until（YYYY-MM-DD）で期間絞り込み可。省略時は ctx.since 以降。
+    """
+    from db_utils import open_db
+
+    user_id = (args.get("user_id") or "").strip()
+    name = (args.get("name") or "").strip()
+    since = args.get("since") or ctx.since
+    until = args.get("until") or ctx.today
+    limit = int(args.get("limit", 50))
+
+    if not user_id and not name:
+        return "user_id または name のどちらかを指定してください。"
+
+    # LLM がカンマ区切りで複数候補を渡してくる場合（例: "西田, Takuhiro Nishida, 西田拓展"）がある。
+    # 分割して user_id 解決に使う。name 本体は最初のトークン（多くは漢字の姓）を使う。
+    name_candidates: list[str] = []
+    if name:
+        for tok in re.split(r"[、,，]", name):
+            tok = tok.strip()
+            if tok:
+                name_candidates.append(tok)
+        if name_candidates:
+            name = name_candidates[0]
+
+    # name が与えられて user_id が空なら、名前から user_id を解決して両方でOR検索する。
+    # Slackメッセージ本文では user_id (Uxxxx) 文字列で呼びかけられることが多く、
+    # 「西田さん」のような部分名では名簿由来の user_id でしか拾えないケースがある。
+    resolved_uid = None
+    resolved_display = None
+    if name and not user_id:
+        try:
+            from argus.patrol.state import PatrolState
+            from argus.patrol.users import UserResolver
+            from slack_sdk import WebClient
+            import os
+            state = PatrolState(ctx.data_dir / "patrol_state.db")
+            bot_token = os.environ.get("SLACK_BOT_TOKEN")
+            slack = WebClient(token=bot_token) if bot_token else None
+            resolver = UserResolver(state, slack, ctx.data_dir)
+            # name_candidates を順に試す（カンマ区切り入力対策）
+            for cand in name_candidates or [name]:
+                resolved_uid = resolver.resolve(cand)
+                if resolved_uid:
+                    name = cand
+                    break
+            if resolved_uid:
+                user_id = resolved_uid
+                # 解決に使えた display_name を Slack DB から引いて補助検索に使う
+                from db_utils import open_db
+                for db_file in ctx.data_dir.glob("C*.db"):
+                    try:
+                        c = open_db(db_file, encrypt=not ctx.no_encrypt)
+                        row = c.execute(
+                            "SELECT user_name FROM messages WHERE user_id=? AND user_name IS NOT NULL LIMIT 1",
+                            (resolved_uid,),
+                        ).fetchone()
+                        c.close()
+                        if row and row["user_name"]:
+                            resolved_display = row["user_name"]
+                            break
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning(f"[search_mentions] name→user_id 解決失敗: {e}")
+
+    # 情報アクセス境界を argus_config.yaml のインデックス定義に合わせるため、
+    # 現在のインデックスに紐づく channels に限定して検索する。
+    channels = ctx.channels or []
+    if not channels:
+        return "検索対象チャンネルがありません。"
+
+    where_parts = ["date(timestamp) >= ?", "date(timestamp) <= ?",
+                   "text IS NOT NULL", "text != ''"]
+    params: list = [since, until]
+    like_parts = []
+    if user_id:
+        # Slack DB 内では text のメンションが <@Uxxx> 形式の場合と、
+        # <@ と > が剥がされて素の Uxxx 文字列で保存される場合の両方がある。
+        # どちらでもヒットさせるため user_id 自体で LIKE する。
+        like_parts.append("text LIKE ?")
+        params.append(f"%{user_id}%")
+        # user_id が確定しているなら name マッチは曖昧になるため行わない
+        # （「西田さん」と本文で言及されただけで、宛てではない投稿を拾ってしまう）
+    elif name:
+        like_parts.append("text LIKE ?")
+        params.append(f"%{name}%")
+    where_parts.append("(" + " OR ".join(like_parts) + ")")
+    # 対象ユーザー本人の投稿は除外（宛て=受け取ったメッセージを集計するため）
+    if user_id:
+        where_parts.append("(user_id IS NULL OR user_id != ?)")
+        params.append(user_id)
+    where_clause = " AND ".join(where_parts)
+
+    sql = (
+        f"SELECT timestamp, user_name, text, permalink, 0 AS is_reply "
+        f"FROM messages WHERE {where_clause} "
+        f"UNION ALL "
+        f"SELECT timestamp, user_name, text, permalink, 1 AS is_reply "
+        f"FROM replies WHERE {where_clause} "
+        f"ORDER BY timestamp DESC LIMIT ?"
+    )
+
+    all_rows = []
+    for ch_id in channels:
+        db_path = ctx.data_dir / f"{ch_id}.db"
+        if not db_path.exists():
+            continue
+        try:
+            conn = open_db(db_path, encrypt=not ctx.no_encrypt)
+        except Exception as e:
+            all_rows.append((None, None, f"（{ch_id}.db 接続失敗: {e}）", None, 0, ch_id))
+            continue
+        try:
+            rows = conn.execute(sql, params + params + [limit]).fetchall()
+            for r in rows:
+                all_rows.append((r["timestamp"], r["user_name"], r["text"],
+                                 r["permalink"], r["is_reply"], ch_id))
+        except Exception as e:
+            all_rows.append((None, None, f"（{ch_id} クエリエラー: {e}）", None, 0, ch_id))
+        finally:
+            conn.close()
+
+    if not all_rows:
+        q = f"user_id={user_id}" if user_id else f"name={name}"
+        return f"該当メッセージなし ({q}, {since}〜{until})"
+
+    # 新しい順に並べて上位 limit 件
+    all_rows.sort(key=lambda x: x[0] or "", reverse=True)
+    all_rows = all_rows[:limit]
+
+    header_bits = [f"{len(all_rows)} 件", f"{since}〜{until}"]
+    if resolved_uid:
+        header_bits.append(f"name=\"{name}\" → user_id={resolved_uid}"
+                           + (f" (display_name={resolved_display})" if resolved_display else ""))
+    ch_names = _load_channel_names()
+    lines = [f"# 検索結果: " + "、".join(header_bits)]
+    lines.append("")
+    lines.append(
+        "（注: 以下は生メッセージ。要約や省略せず、そのままユーザーに提示すること。）"
+    )
+    for ts, user, text, permalink, is_reply, ch_id in all_rows:
+        ts_short = (ts or "")[:16]
+        ch_name = ch_names.get(ch_id, ch_id)
+        tag = "返信" if is_reply else "投稿"
+        body = text or ""
+        link = f"\n  {permalink}" if permalink else ""
+        lines.append("")
+        lines.append(f"---")
+        lines.append(f"[{ts_short}] #{ch_name} ({tag}) {user}:")
+        lines.append(body)
+        if link:
+            lines.append(link.strip())
+    return "\n".join(lines)
+
+
 TOOLS: list[ToolDef] = [
     ToolDef(
         name="get_milestone_progress",
@@ -341,6 +525,25 @@ TOOLS: list[ToolDef] = [
         description="議事録・Slackメッセージを全文検索する（FTS5 + LLM re-ranking）",
         parameters={"query": "検索クエリ（自然言語可）"},
         fn=_tool_search_text,
+    ),
+    ToolDef(
+        name="search_mentions",
+        description=(
+            "指定ユーザーがメンション（<@Uxxx>）または名指し（姓・氏名の文字列）"
+            "された Slack メッセージを全チャンネルから集計する。"
+            "「自分宛」「富岳太郎さん宛」系の質問はこのツールを使う。"
+            " 推奨: user_id と name の両方を同時に指定する（OR検索）。"
+            " 日本語/英語名での呼びかけ（例: 「Hikaru Inoue 5/19は...」）は"
+            " user_id だけでは拾えないため name の指定が必須。"
+        ),
+        parameters={
+            "user_id": "Slack user_id（例: U08ABC123）。メンション検索用",
+            "name": "名前文字列（例: 西田、Takuhiro Nishida）。単一の名前のみ。複数候補のカンマ区切りは禁止。漢字の姓を推奨（内部で user_id に自動解決される）",
+            "since": "この日付以降（YYYY-MM-DD、省略時はデフォルト期間）",
+            "until": "この日付以前（YYYY-MM-DD、省略時は今日）",
+            "limit": "取得件数（デフォルト50）",
+        },
+        fn=_tool_search_mentions,
     ),
     ToolDef(
         name="get_slack_messages",
@@ -416,6 +619,26 @@ _AGENT_SYSTEM_PROMPT = """\
 1つの応答に複数のツール呼び出しを含めることができます。
 
 {tool_descriptions}
+
+## 重要: スレッド内の追質問への応答
+
+ユーザーのリクエストに「## スレッド内の過去のやり取り」セクションが含まれている場合、
+直近の質問は**その会話の続き・深掘り**である可能性が極めて高い。
+
+- 指示語（「それ」「さっき言った」「その件」等）は過去のやり取りを参照して解決せよ
+- まず過去のやり取りだけで答えられるかを検討する。答えられるなら**ツールを呼ばずに直接回答**する
+- 過去のやり取りに登場していないキーワードでツール検索して、会話の流れを無視した回答をするのは禁止
+- 補足情報が必要な場合のみ、会話の流れに沿ったクエリで search_text / search_mentions / get_slack_messages を呼ぶ
+- Argus（=あなた自身）の過去の発言は自分のコンテキストとして活用する
+
+## 重要: search_mentions の結果の扱い
+
+`search_mentions` ツールの結果は**全件・生メッセージをそのまま最終回答に転載**すること。
+- 要約・省略・言い換え・件数制限を行わない
+- ツールが返した全エントリを、タイムスタンプ・チャンネル名・投稿者・本文・URL含めて原文のまま書き出す
+- 「3件ほど抜粋」「主なものを列挙」のような独自の絞り込みは禁止
+- ツールの出力全文を最終回答にコピーしてよい（長さの心配は不要、後段で分割投稿される）
+- ユーザーは「誰が何と言ったか」の原文を全て見たい
 
 ## 回答の完了
 
@@ -639,7 +862,7 @@ def run_agent(
             response = call_argus_llm(
                 prompt,
                 max_tokens=4096,
-                timeout=min(60, int(timeout - elapsed)),
+                timeout=max(30, int(timeout - elapsed)),
             )
         except Exception as e:
             logger.exception(f"[investigate] LLM呼び出しエラー: {e}")

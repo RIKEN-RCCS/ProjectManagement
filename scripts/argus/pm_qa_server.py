@@ -953,6 +953,200 @@ def build_app():
                 text=f"`{filename}` の削除に失敗しました: {e}",
             )
 
+    # --- app_mention ハンドラ（常駐AIとしての @mention 応答） ---
+    # 当面は C0A9KG036CS（personal/debug）のみで有効。動作確認後に拡大する。
+    _MENTION_ALLOWED_CHANNELS = {"C0A9KG036CS"}
+
+    @app.event("app_mention")
+    def handle_app_mention(event, client):
+        channel_id = event.get("channel", "")
+        if channel_id not in _MENTION_ALLOWED_CHANNELS:
+            logger.info(f"[mention] 許可外チャンネル {channel_id} からのメンションを無視")
+            return
+
+        raw_text = event.get("text", "") or ""
+        # <@Uxxxx> 形式のメンションを全て除去
+        question = re.sub(r"<@[UW][A-Z0-9]+>", "", raw_text).strip()
+        if not question:
+            return
+
+        thread_ts = event.get("thread_ts") or event.get("ts")
+        user_id = event.get("user", "")
+        ts_for_reply = thread_ts
+
+        # 受付通知（スレッドに公開）
+        try:
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=ts_for_reply,
+                text=f":mag: 調査中... `{question[:80]}`",
+            )
+        except Exception as e:
+            logger.warning(f"[mention] 受付通知失敗: {e}")
+
+        executor.submit(
+            _run_mention_investigate,
+            client, channel_id, ts_for_reply, question, user_id, event,
+        )
+
+    def _run_mention_investigate(client, channel_id, thread_ts, question, user_id, event):
+        """app_mention からの調査実行。スレッドに公開返信する。"""
+        try:
+            from datetime import date, timedelta
+            from argus.pm_argus_agent import (
+                _resolve_index_and_channels, _expand_id_references,
+                AgentContext, build_seed_data, run_agent,
+                _DEFAULT_SINCE_DAYS, _DATA_DIR, _MINUTES_DIR,
+            )
+            from pm_argus import _to_slack_mrkdwn
+
+            today = date.today().isoformat()
+            since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
+            index_db, channels, pm_db_paths = _resolve_index_and_channels(channel_id)
+            conns = [open_pm_db(p) for p in pm_db_paths]
+
+            # スレッド文脈の取り込み（メンションがスレッド内にある場合）
+            thread_context = ""
+            is_threaded_followup = False
+            parent_ts = event.get("thread_ts")
+            current_ts = event.get("ts")
+            if parent_ts and parent_ts != current_ts:
+                is_threaded_followup = True
+                try:
+                    resp = client.conversations_replies(
+                        channel=channel_id, ts=parent_ts, limit=50,
+                    )
+                    msgs = resp.get("messages", []) or []
+                    # 現在の質問メッセージ自体は除外（文脈は「過去のやり取り」）
+                    past_msgs = [m for m in msgs if m.get("ts") != current_ts]
+
+                    # ユーザーID → display_name キャッシュ
+                    name_cache: dict[str, str] = {}
+
+                    def _resolve_name(uid: str) -> str:
+                        if not uid:
+                            return "?"
+                        if uid in name_cache:
+                            return name_cache[uid]
+                        try:
+                            u = client.users_info(user=uid)
+                            prof = (u.get("user") or {}).get("profile") or {}
+                            nm = prof.get("real_name") or prof.get("display_name") or uid
+                        except Exception:
+                            nm = uid
+                        name_cache[uid] = nm
+                        return nm
+
+                    lines = []
+                    for m in past_msgs:
+                        uid = m.get("user") or m.get("bot_id") or ""
+                        is_bot = bool(m.get("bot_id")) or (m.get("subtype") == "bot_message")
+                        speaker = "Argus" if is_bot else _resolve_name(uid)
+                        # Bot が Block Kit で投稿した場合 text が空で blocks 側に本文があることがある
+                        text_body = m.get("text") or ""
+                        if not text_body and m.get("blocks"):
+                            texts = []
+                            for b in m["blocks"]:
+                                t = (b.get("text") or {}).get("text") or ""
+                                if t:
+                                    texts.append(t)
+                            text_body = "\n".join(texts)
+                        text_body = text_body.replace("\n", " ")[:800]
+                        lines.append(f"- **{speaker}**: {text_body}")
+                    if lines:
+                        thread_context = (
+                            "\n\n## スレッド内の過去のやり取り（時系列、直近のメンションの手前まで）\n"
+                            + "\n".join(lines)
+                            + "\n\n上記はこのスレッドでの過去の会話。"
+                            "直近の質問は上記を前提とした**深掘り・追質問**である可能性が高い。"
+                            "まず上記のやり取りから直接答えられないかを検討し、答えられる場合はツールを呼ばずに回答する。"
+                            "必要に応じて補足情報をツールで取得する。"
+                        )
+                except Exception as e:
+                    logger.warning(f"[mention] スレッド取得失敗: {e}")
+
+            ctx = AgentContext(
+                conns=conns, today=today, since=since_date,
+                no_encrypt=False, data_dir=_DATA_DIR, minutes_dir=_MINUTES_DIR,
+                index_db=index_db, channels=channels,
+            )
+
+            # 実行者情報をシードに注入（search_mentions ツールに使わせる）
+            user_info = ""
+            if user_id:
+                display_name = ""
+                try:
+                    u = client.users_info(user=user_id)
+                    prof = (u.get("user") or {}).get("profile") or {}
+                    display_name = prof.get("real_name") or prof.get("display_name") or ""
+                except Exception as e:
+                    logger.warning(f"[mention] users_info 失敗: {e}")
+                # 姓のみ（スペース前の部分）も抽出。日本語名指し検索の補助
+                name_first_token = display_name.split()[0] if display_name else ""
+                user_info = (
+                    f"\n\n## 実行者情報\n"
+                    f"- user_id: {user_id}\n"
+                    f"- 名前（display_name）: {display_name}\n"
+                    f"- 姓/first token: {name_first_token}\n"
+                    f"「自分」「私」など一人称の参照はこのユーザーを指す。\n"
+                    f"メンション/名指しを検索する場合は search_mentions ツールを使うこと。\n"
+                    f"**重要**: Slack メッセージ本文での名指しは `<@{user_id}>` 形式だけでなく\n"
+                    f"「{display_name}」のような**日本語/英語名の文字列**で行われることが多い。\n"
+                    f"したがって search_mentions は **user_id と name（=「{display_name}」）の両方を同時に指定**して呼ぶこと。\n"
+                    f"どちらか一方では取りこぼす。"
+                )
+            seed_data = build_seed_data(ctx) + user_info + thread_context
+
+            result = run_agent(
+                question=question, seed_data=seed_data, respond=None, ctx=ctx,
+            )
+            result = _expand_id_references(result, conns)
+            for c in conns:
+                c.close()
+
+            header = f"<@{user_id}> *Argus 調査結果* ({today})\n\n" if user_id else f"*Argus 調査結果* ({today})\n\n"
+            body = _to_slack_mrkdwn(header + result)
+            # Slack section block は 3000 文字、chat_postMessage text は 40000 文字上限。
+            # 長い出力は段落単位でチャンク分割し、複数メッセージに分けて投稿する。
+            _CHUNK = 2800
+
+            def _split(text: str, size: int) -> list[str]:
+                chunks: list[str] = []
+                remaining = text
+                while len(remaining) > size:
+                    cut = remaining.rfind("\n---", 0, size)
+                    if cut < size // 2:
+                        cut = remaining.rfind("\n\n", 0, size)
+                    if cut < size // 2:
+                        cut = remaining.rfind("\n", 0, size)
+                    if cut <= 0:
+                        cut = size
+                    chunks.append(remaining[:cut])
+                    remaining = remaining[cut:].lstrip("\n")
+                if remaining:
+                    chunks.append(remaining)
+                return chunks
+
+            parts = _split(body, _CHUNK)
+            for i, part in enumerate(parts):
+                suffix = f"\n\n（{i+1}/{len(parts)}）" if len(parts) > 1 else ""
+                text_part = part + suffix
+                client.chat_postMessage(
+                    channel=channel_id, thread_ts=thread_ts, text=text_part,
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text_part}}],
+                )
+            logger.info(f"[mention] 完了 channel={channel_id} thread={thread_ts}")
+
+        except Exception as e:
+            logger.exception(f"[mention] エラー: {e}")
+            try:
+                client.chat_postMessage(
+                    channel=channel_id, thread_ts=thread_ts,
+                    text=f":warning: 調査中にエラーが発生しました: {e}",
+                )
+            except Exception:
+                pass
+
     def _shutdown(signum, frame):
         logger.info("シャットダウン中...")
         executor.shutdown(wait=False)
