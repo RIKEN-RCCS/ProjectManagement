@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # pm_from_recording_auto.sh
 #
-# meetings/ ディレクトリの m4a ファイルを検出し、pm_from_recording.sh に自動投入する。
+# meetings/ ディレクトリの m4a / mp4 ファイルを検出し、pm_from_recording.sh に自動投入する。
 # cron で定期実行することを想定（1時間に1回など）。
 #
-# ファイル名形式: YYYY-MM-DD_{meeting-name}.m4a
+# ファイル名形式: YYYY-MM-DD_{meeting-name}.{m4a,mp4}
 #   - YYYY-MM-DD  → --held-at に渡す（開催日）
 #   - {meeting-name} → --meeting-name に渡す。docs/project.md「会議の種類と頻度」の
 #                      いずれかに一致しない場合はスキップ
+#   - mp4 の場合は pm_from_recording.sh 側で自動的にスライドOCRが有効になる
 #
 # 有効な全ファイルを1つの sbatch ジョブにまとめて投入する。
 # 投入済みファイルは meetings/processing/ に移動して再投入を防ぐ。
@@ -152,11 +153,11 @@ mkdir -p "$PROCESSING_DIR"
 log "=== pm_from_recording_auto 開始 ==="
 
 shopt -s nullglob
-m4a_files=("$MEETINGS_DIR"/*.m4a)
+recording_files=("$MEETINGS_DIR"/*.m4a "$MEETINGS_DIR"/*.mp4)
 shopt -u nullglob
 
-if [[ ${#m4a_files[@]} -eq 0 ]]; then
-    log "対象ファイルなし（meetings/*.m4a が存在しません）"
+if [[ ${#recording_files[@]} -eq 0 ]]; then
+    log "対象ファイルなし（meetings/*.m4a または meetings/*.mp4 が存在しません）"
     log "=== 完了 ==="
     exit 0
 fi
@@ -170,13 +171,14 @@ declare -a BATCH_NAMES=()
 declare -a BATCH_DBS=()
 skipped=0
 
-for m4a_file in "${m4a_files[@]}"; do
-    filename=$(basename "$m4a_file")
-    name="${filename%.m4a}"
+for rec_file in "${recording_files[@]}"; do
+    filename=$(basename "$rec_file")
+    ext="${filename##*.}"
+    name="${filename%.*}"
 
     # 形式チェック: YYYY-MM-DD_{meeting-name}
     if [[ ! "$name" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})_(.+)$ ]]; then
-        log "[SKIP] 形式不一致（YYYY-MM-DD_{meeting-name}.m4a ではない）: $filename"
+        log "[SKIP] 形式不一致（YYYY-MM-DD_{meeting-name}.{m4a,mp4} ではない）: $filename"
         skipped=$((skipped + 1))
         continue
     fi
@@ -211,7 +213,7 @@ for m4a_file in "${m4a_files[@]}"; do
 
     # processing/ に移動（再投入防止）。同名 .vtt があれば一緒に移動
     dest="$PROCESSING_DIR/$filename"
-    mv "$m4a_file" "$dest"
+    mv "$rec_file" "$dest"
     for vtt_suffix in ".transcript.vtt" ".vtt"; do
         vtt_src="$MEETINGS_DIR/${name}${vtt_suffix}"
         if [[ -f "$vtt_src" ]]; then

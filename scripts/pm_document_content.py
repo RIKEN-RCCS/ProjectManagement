@@ -597,7 +597,15 @@ def _pdf_to_images(pdf_path: Path, tmpdir: Path) -> list[Path]:
     return []
 
 
-def _ocr_image(img_path: Path, base_url: str) -> str | None:
+def ocr_slide_image(img_path: Path, base_url: str, prompt: str | None = None) -> str | None:
+    """スライド/ドキュメント画像をマルチモーダルLLMでOCRしMarkdownを返す。
+
+    他モジュール（recording/slide_ocr.py 等）からも利用する公開API。
+    """
+    return _ocr_image(img_path, base_url, prompt=prompt)
+
+
+def _ocr_image(img_path: Path, base_url: str, prompt: str | None = None) -> str | None:
     import requests
 
     with open(img_path, "rb") as f:
@@ -616,7 +624,7 @@ def _ocr_image(img_path: Path, base_url: str) -> str | None:
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                {"type": "text", "text": SLIDE_OCR_PROMPT},
+                {"type": "text", "text": prompt or SLIDE_OCR_PROMPT},
             ],
         }],
         "max_tokens": 4096,

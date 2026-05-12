@@ -116,7 +116,7 @@ def load_model(use_local, hf_token, device):
     return processor, model
 
 
-def transcribe_chunks(chunks, processor, model, device):
+def transcribe_chunks(chunks, processor, model, device, initial_prompt=INITIAL_PROMPT):
     print("[INFO] Transcribing chunks (Whisper)...")
     segments = []
     for start_sec, end_sec, chunk in chunks:
@@ -127,7 +127,7 @@ def transcribe_chunks(chunks, processor, model, device):
             return_tensors="pt",
             language="ja",
             task="transcribe",
-            initial_prompt=INITIAL_PROMPT,
+            initial_prompt=initial_prompt,
         )
         input_features = inputs.input_features.to(device, dtype=model.dtype)
 
@@ -211,7 +211,21 @@ def main():
     parser.add_argument("input_audio", help="Input audio file path (e.g., meeting.wav)")
     parser.add_argument("output_text", help="Output text file path (e.g., result.txt)")
     parser.add_argument("--local", action="store_true", help=f"Use local fine-tuned model ({MODEL_LOCAL})")
+    parser.add_argument("--initial-prompt-extra", default=None,
+                        help="固有名詞リストファイル（1行1語）。INITIAL_PROMPT の末尾に連結する。Whisper prompt は 224 token 上限のため超過分は切り詰め")
     args = parser.parse_args()
+
+    initial_prompt = INITIAL_PROMPT
+    if args.initial_prompt_extra and os.path.exists(args.initial_prompt_extra):
+        with open(args.initial_prompt_extra, encoding="utf-8") as _f:
+            extra_terms = [line.strip() for line in _f if line.strip()]
+        if extra_terms:
+            extra_str = "スライド由来の固有名詞：" + "、".join(extra_terms) + "。"
+            # Whisper prompt tokenizer の上限 (224 token 程度) を粗く文字数で抑制
+            max_extra_chars = max(0, 700 - len(INITIAL_PROMPT))
+            extra_str = extra_str[:max_extra_chars]
+            initial_prompt = INITIAL_PROMPT + extra_str
+            print(f"[INFO] initial_prompt に {len(extra_terms)} 語を追加しました（{len(extra_str)} 字）")
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -236,7 +250,7 @@ def main():
         diarization = diarization.speaker_diarization
 
     processor, model = load_model(args.local, hf_token, device)
-    segments = transcribe_chunks(chunks, processor, model, device)
+    segments = transcribe_chunks(chunks, processor, model, device, initial_prompt=initial_prompt)
     labeled = assign_speaker_labels(segments, diarization)
     write_output(args.output_text, labeled)
 

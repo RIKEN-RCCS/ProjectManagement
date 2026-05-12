@@ -71,10 +71,16 @@ sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4
 | `--meeting-name NAME` | なし | 指定すると文字起こし後に pm.db へ直接インポートし .md を削除 |
 | `--held-at YYYY-MM-DD` | GMT→JST変換 | `--meeting-name` と併用。省略時はファイル名のGMTタイムスタンプをJSTに変換して取得 |
 | `--vtt PATH` | 同名VTT自動検出 | Zoom VTT ファイルを明示指定。省略時は `{stem}.transcript.vtt` → `{stem}.vtt` の順で自動検出 |
+| `--no-slide-ocr` | 有効（mp4のみ） | スライドOCRを無効化（スライドなしの動画で OCR コストを省く場合のみ使用） |
+| `--scene-threshold N` | `0.25` | ffmpeg scene detect 閾値。小さくすると抽出フレーム数が増える |
+| `--max-frames N` | `200` | OCR に渡すフレーム数の上限。超過時は動画全編から時系列に均等間引き（先頭 N 枚だけを拾って後半を捨てることはしない）|
+| `--ocr-workers N` | `8` | OCR 並列ワーカー数 |
 
-処理フロー: ffmpeg → WAV変換（16kHz, mono） → DeepFilterNetノイズ除去 → SileroVAD → pyannote話者分離 → Whisper large-v3 文字起こし
+処理フロー: **スライドOCR（mp4のみ、scene detect + マルチモーダルLLM）** → ffmpeg → WAV変換（16kHz, mono） → DeepFilterNetノイズ除去 → SileroVAD → pyannote話者分離 → Whisper large-v3 文字起こし（スライドから抽出した固有名詞を initial_prompt に追加）
 
 **VTT 話者情報の活用**: Zoom の自動文字起こし VTT ファイルが存在する場合、VTT の正確な話者名を Whisper の高品質日本語文字起こしと統合する。議事録 Stage 3（決定事項・アクションアイテム抽出）で話者名をもとに担当者を推定する。VTT ファイルの検索は同名のみ（フォールバックなし）: `{stem}.transcript.vtt` → `{stem}.vtt` の順で検索し、先に見つかった方を使用する。
+
+**スライドOCRの活用**: mp4 には発表スライドが写っていることが多く、スライド上の固有名詞・技術用語・数値を OCR で抽出することで Whisper の誤変換を補える。`scripts/recording/slide_ocr.py` が ffmpeg の scene detect でスライド切り替わりのフレームを抽出し、マルチモーダルLLM（`OPENAI_API_BASE`）で Markdown に変換する。得られた結果は (1) 固有名詞リストを Whisper の `initial_prompt` に追加、(2) スライド文脈を `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱、の 2 系統で議事録品質に反映される。スライドなしの会議（frames=0）や mp4 以外の拡張子、OPENAI_API_BASE 未設定時はスキップされ既存動作にフォールバックする。VTT × Slides × Whisper の 3 系統はそれぞれ独立して有効/無効化でき、共存する。
 
 `--meeting-name` 指定時の追加フロー: 文字起こし完了 → `generate_minutes_local.py`（VTTあれば `--vtt` 付き）で議事録生成 → `pm_minutes_import.py` で議事録DBに保存 → `pm_ingest.py minutes` で pm.db に転記 → .md 削除
 

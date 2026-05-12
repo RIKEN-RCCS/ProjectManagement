@@ -70,7 +70,7 @@ RULES:
 6. Section titles: concise Japanese noun phrases reflecting the actual topic discussed (15 characters or less)
 7. NO speaker attribution ("〜さんが言った", "SPEAKER_XX が" etc.)
 8. Do NOT insert horizontal rules (---) between sections
-9. Actively correct speech recognition errors: cross-reference ALL technical terms, application names, and project-specific words against the Project Terminology Reference. Replace phonetic approximations or garbled terms with the correct form (e.g. 「ファントホローブルー」→ FrontFlow/Blue, 「サーモン」→ SALMON, 「スケールTKF」→ SCALE-LETKF).
+9. Actively correct speech recognition errors: cross-reference ALL technical terms, application names, and project-specific words against the Project Terminology Reference AND the Slides Shown in This Meeting (if provided). Replace phonetic approximations or garbled terms with the correct form (e.g. 「ファントホローブルー」→ FrontFlow/Blue, 「サーモン」→ SALMON, 「スケールTKF」→ SCALE-LETKF). Slide text is ground truth for proper nouns and numeric figures.
 10. Preserve exact numbers and dates as written in the summaries
 11. Begin output immediately with "## 議事内容" — no preamble, no other sections
 CRITICAL: The strings "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in your output.
@@ -94,7 +94,7 @@ Output format:
 
 ## Project Terminology Reference
 {claude_md_context}
-
+{slide_context_block}
 ## Meeting Segment Summaries
 {transcript}
 """
@@ -108,7 +108,7 @@ RULES:
 2. Begin immediately with "## 決定事項" — no preamble, no thinking text
 3. Dates/deadlines: use exactly as written in the summaries (e.g. "26日", "来週月曜日") — do NOT expand or infer months/years
 4. Person names: normalize using the Participant List below; if no clear assignee, write "（未定）"
-5. Actively correct speech recognition errors: replace phonetic approximations with correct terms from the Participant List and Project Terminology Reference (e.g. 「ファントホローブルー」→ FrontFlow/Blue, 「サーモン」→ SALMON).
+5. Actively correct speech recognition errors: replace phonetic approximations with correct terms from the Participant List, Project Terminology Reference, AND the Slides Shown in This Meeting (if provided) (e.g. 「ファントホローブルー」→ FrontFlow/Blue, 「サーモン」→ SALMON). Slide text is ground truth for proper nouns and numeric figures.
 CRITICAL: "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in output.
 {vtt_speaker_instructions}
 ## 決定事項 rules:
@@ -151,7 +151,7 @@ Output format (EXACTLY 3 columns — do NOT add extra columns):
 
 ## Participant List
 {claude_md_context}
-
+{slide_context_block}
 ## Meeting Segment Summaries
 {transcript}
 """
@@ -295,10 +295,12 @@ RULES:
 3. Write in natural Japanese WITHOUT speaker attribution or "SPEAKER_XX" references
 4. Do NOT add content not present in the transcript
 5. Output Japanese prose only (no bullet points, no headers)
+6. If "Slides Shown in This Meeting" is provided below, treat the slide text as ground truth for proper nouns, acronyms, and numeric figures — prefer slide spellings over ASR when they conflict.
 CRITICAL: Never write "SPEAKER_00", "SPEAKER_01", "SPEAKER_02" or any "SPEAKER_" token in the output.
 
 ## Project Terminology
 {claude_md_context}
+{slide_context_block}
 
 ## Transcript ({time_range})
 {chunk_text}
@@ -322,6 +324,7 @@ def extract_from_chunk(
     no_chat_template_kwargs: bool = False,
     temperature: Optional[float] = None,
     max_tokens: int = 4096,
+    slide_context_block: str = "",
 ) -> str:
     """1チャンクから事実を抽出する（Stage 1）"""
     prompt = CHUNK_EXTRACTION_TEMPLATE.format(
@@ -330,6 +333,7 @@ def extract_from_chunk(
         time_range=time_range,
         claude_md_context=claude_md_context,
         chunk_text=chunk_text,
+        slide_context_block=slide_context_block,
     )
     system = "You are a Japanese meeting minutes assistant. Output Japanese prose only, no bullet points."
     # thinking モデルは思考トークン分を考慮して max_tokens をそのまま使用
@@ -362,6 +366,7 @@ def generate_minutes(
     from_combined: Optional[str] = None,
     temperature: Optional[float] = None,
     vtt_path: Optional[str] = None,
+    slide_context: Optional[str] = None,
 ) -> str:
     """文字起こしファイルから議事録を生成してファイルに保存する。
 
@@ -378,6 +383,19 @@ def generate_minutes(
     print(f"[INFO] {len(segments)} セグメントを検出")
 
     claude_md_context = load_claude_md_context()
+
+    # スライドOCRから得た文脈をプロンプトに同梱するブロック
+    if slide_context:
+        slide_context_block = (
+            "\n## Slides Shown in This Meeting\n"
+            "These are the ACTUAL presentation slides shown during this meeting, extracted via OCR. "
+            "Treat these as ground truth for proper nouns, acronyms, technical terms, and numeric figures. "
+            "When Whisper ASR output conflicts with slide text, trust the slide text.\n\n"
+            f"{slide_context}\n"
+        )
+        print(f"[INFO] スライド文脈を同梱: {len(slide_context)} 字")
+    else:
+        slide_context_block = ""
 
     # 出力パスの命名に必要な now/basename は早めに確定する
     now = datetime.now()
@@ -396,6 +414,7 @@ def generate_minutes(
         prompt = PROMPT_TEMPLATE.format(
             claude_md_context=claude_md_context,
             transcript=combined,
+            slide_context_block=slide_context_block,
         )
         minutes_text = call_local_llm(
             prompt, model, base_url, api_key, timeout,
@@ -429,6 +448,7 @@ def generate_minutes(
                     think=think, no_stream=no_stream,
                     no_chat_template_kwargs=no_chat_template_kwargs,
                     temperature=temperature, max_tokens=max_tokens,
+                    slide_context_block=slide_context_block,
                 )
                 # 空チャンク（reasoning parser が content を返さなかった場合等）はリトライ
                 if not extraction and not no_stream:
@@ -459,6 +479,7 @@ def generate_minutes(
         prompt = PROMPT_TEMPLATE.format(
             claude_md_context=claude_md_context,
             transcript=combined,
+            slide_context_block=slide_context_block,
         )
         minutes_text = call_local_llm(
             prompt, model, base_url, api_key, timeout,
@@ -504,18 +525,21 @@ def generate_minutes(
 
     print(f"[INFO] ローカルLLM（{model}）で決定事項・アクションアイテムを生成中...")
 
-    # ナレッジ検索（Phase 3追加）
-    knowledge_context = retrieve_knowledge_for_extraction(
-        decisions_input,
-        qa_db_path=REPO_ROOT / "data" / "qa_pm-all.db",
-        top_k=3,
-    )
+    # ナレッジ検索（Phase 3追加）— いったん停止
+    # knowledge_context = retrieve_knowledge_for_extraction(
+    #     decisions_input,
+    #     qa_db_path=REPO_ROOT / "data" / "qa_pm-all.db",
+    #     top_k=5,
+    #     since_days=90,
+    # )
+    knowledge_context = ""  # 出典機能を停止
 
     decisions_prompt = DECISIONS_TEMPLATE.format(
         claude_md_context=claude_md_context,
         knowledge_context=knowledge_context,  # 追加
         transcript=decisions_input,
         vtt_speaker_instructions=vtt_instructions,
+        slide_context_block=slide_context_block,
     )
     # thinking モデルは thinking に多くのトークンを消費するため max_tokens をそのまま使用
     decisions_max_tokens = max_tokens if (think or no_chat_template_kwargs) else 1024
@@ -630,6 +654,13 @@ def main() -> int:
         metavar="FILE",
         help="Zoom VTT ファイルパス（話者帰属情報を Stage 3 に付加して担当者特定を向上させる）",
     )
+    parser.add_argument(
+        "--slide-context",
+        default=None,
+        metavar="FILE",
+        help="スライドOCR から得た文脈テキスト（slide_ocr.py の --context-out 出力）。"
+             "Stage 1/2/3 プロンプトに同梱して固有名詞の誤変換を補正する",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.transcript):
@@ -660,6 +691,8 @@ def main() -> int:
         print(f"[INFO] temperature : {args.temperature}")
     if args.vtt:
         print(f"[INFO] VTT ファイル  : {args.vtt}")
+    if args.slide_context:
+        print(f"[INFO] スライド文脈  : {args.slide_context}")
     print(f"[INFO] LLM URL     : {base_url}")
 
     try:
@@ -672,6 +705,9 @@ def main() -> int:
             from_combined=args.from_combined,
             temperature=args.temperature,
             vtt_path=args.vtt,
+            slide_context=(Path(args.slide_context).read_text(encoding="utf-8")
+                           if args.slide_context and Path(args.slide_context).exists()
+                           else None),
         )
         print(f"[完了] {output_path}")
         return 0
