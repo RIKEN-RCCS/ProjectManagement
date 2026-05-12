@@ -116,8 +116,9 @@ pm.db の新規 decisions/action_items
 | `pm_minutes_catalog.py` | 議事録を Slack 投稿 + Canvas 目録生成 |
 | `pm_document_extract.py` | Slack投稿中のBOXリンク → `docs_*.db`（メタデータ）|
 | `pm_web_fetch.py` | 外部Webサイト → `web_articles.db` |
-| `generate_minutes_local.py` | 文字起こし → 議事録（ローカルLLM）|
-| `transcribe_pipeline.py` / `whisper_vad.py` | 音声ファイル → 文字起こし |
+| `generate_minutes_local.py` | 文字起こし → 議事録（ローカルLLM。`--vtt`・`--slide-context` 対応）|
+| `transcribe_pipeline.py` / `whisper_vad.py` | 音声/動画ファイル → 文字起こし（`--initial-prompt-extra` で固有名詞注入）|
+| `slide_ocr.py` | mp4 → スライドフレーム抽出 → マルチモーダルOCR（slide_context / terminology 生成）|
 
 ---
 
@@ -161,9 +162,10 @@ scripts/
 │   pm_embed.py                        FTS5構築（argus/ 外、他スクリプトからも使用）
 │
 ├── recording/                         会議録音処理パッケージ
-│   ├── generate_minutes_local.py
-│   ├── transcribe_pipeline.py
-│   └── whisper_vad.py
+│   ├── generate_minutes_local.py      議事録生成（VTT・スライドOCR文脈対応）
+│   ├── transcribe_pipeline.py         /argus-transcribe パイプライン（スライドOCR自動実行）
+│   ├── whisper_vad.py                 Whisper ASR（initial_prompt に固有名詞追加可）
+│   └── slide_ocr.py                   mp4 → ffmpeg scene detect + マルチモーダルOCR
 │
 ├── 共通ユーティリティ
 │   ├── db_utils.py                    DB接続・統計クエリ
