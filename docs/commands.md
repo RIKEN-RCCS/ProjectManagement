@@ -590,7 +590,7 @@ python3 scripts/pm_document_extract.py --post-to-canvas --canvas-id F0XXXXXX --i
 
 ```sh
 # 構造化クエリ
-python3 scripts/pm_qa_server.py --test-hybrid "西澤さんの担当タスクは？"
+python3 scripts/pm_qa_server.py --test-hybrid "富岳太郎さんの担当タスクは？"
 python3 scripts/pm_qa_server.py --test-hybrid "M1マイルストーンの進捗は？"
 python3 scripts/pm_qa_server.py --test-hybrid "期限超過アイテムは？"
 

@@ -94,7 +94,7 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
 
 - `/argus-investigate` でテキスト検索（FTS5）に加え、pm.dbの構造化データ（担当者・期限・マイルストーン・統計）をSQLで直接クエリできるようになった
 - LLMによるIntent分類で質問を `structured` / `text` / `hybrid` に自動分類
-- 「西澤さんの担当タスクは？」「期限超過アイテムは？」のような構造化質問に直接回答可能
+- 「富岳太郎さんの担当タスクは？」「期限超過アイテムは？」のような構造化質問に直接回答可能
 
 #### 5.7 外部Web情報の取り込み（pm_web_fetch.py、実装済み）
 

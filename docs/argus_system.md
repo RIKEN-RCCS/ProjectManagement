@@ -8,7 +8,7 @@ Slack・議事録・pm.db のデータを統合分析し、プロジェクトマ
 ## 概要
 
 ```
-ユーザー: /argus-brief 60 @西澤（チャンネル: C08SXA4M7JT）
+ユーザー: /argus-brief 60 @富岳太郎（チャンネル: C08SXA4M7JT）
          ↓ Slack Socket Mode
 pm_qa_server.py（常駐デーモン）
   ├─ ack()                         ← 3秒以内に即時応答
@@ -106,16 +106,16 @@ tail -f logs/pm_qa_server.log
 ```
 /argus-brief
 /argus-brief 60                   ← 直近60日分を分析（デフォルト: 30日）
-/argus-brief @西澤                 ← 西澤さん担当事項にフォーカス
+/argus-brief @富岳太郎                 ← 富岳太郎さん担当事項にフォーカス
 /argus-brief Benchpark             ← Benchpark 話題にフォーカス
-/argus-brief 60 @西澤 GPU性能      ← 全オプション組み合わせ
+/argus-brief 60 @富岳太郎 GPU性能      ← 全オプション組み合わせ
 ```
 
 **引数のパース規則**:
 | トークン | 判定 | 例 |
 |---|---|---|
 | 数字のみ | 直近日数 | `60` → 過去60日分 |
-| `@` 始まり | 担当者フォーカス | `@西澤` → 西澤さんの担当事項を重点分析 |
+| `@` 始まり | 担当者フォーカス | `@富岳太郎` → 富岳太郎さんの担当事項を重点分析 |
 | その他テキスト | 話題フォーカス | `Benchpark` → Benchpark 関連を重点分析 |
 
 ---
@@ -145,7 +145,7 @@ tail -f logs/pm_qa_server.log
 ```
 /argus-risk
 /argus-risk 60                    ← 直近60日分を分析
-/argus-risk @小林                  ← 小林さん担当事項のリスクにフォーカス
+/argus-risk @富岳太郎                  ← 富岳太郎さん担当事項のリスクにフォーカス
 /argus-risk Benchpark             ← Benchpark 関連リスクにフォーカス
 ```
 
@@ -227,7 +227,7 @@ LLM が自律的にツール（DB検索・全文検索・Slackメッセージ取
 /argus-investigate M3マイルストーンの遅延原因を調査して
 /argus-investigate 先週の決定事項が実行されているか確認
 /argus-investigate Benchparkハッカソンの準備状況を確認
-/argus-investigate @西澤 の負荷が高い原因を分析して
+/argus-investigate @富岳太郎 の負荷が高い原因を分析して
 /argus-investigate 設計方針に関する最近の議論は？
 ```
 
@@ -415,7 +415,7 @@ pm_qa_server.py: app.action("patrol_approve_close" / "patrol_reject_close")
 
 ### 担当者名 → Slack user_id 解決（`argus/patrol/users.py`）
 
-pm.db の `assignee` は「西澤」のような日本語表示名だが、Slack DM には `user_id` が必要。
+pm.db の `assignee` は「富岳太郎」のような日本語表示名だが、Slack DM には `user_id` が必要。
 `UserResolver` が以下の3段階で解決する:
 
 | 優先順位 | 方式 | 速度 | 説明 |
@@ -565,7 +565,7 @@ python3 scripts/argus/pm_argus_patrol.py --list-pending
 
 # 引数指定（スラッシュコマンドと同等）
 ~/.venv_aarch64/bin/python3 scripts/argus/pm_argus.py --brief-to-canvas --dry-run \
-    --days 60 --assignee 西澤 --topic Benchpark
+    --days 60 --assignee 富岳太郎 --topic Benchpark
 ```
 
 | オプション | デフォルト | 説明 |
@@ -577,7 +577,7 @@ python3 scripts/argus/pm_argus_patrol.py --list-pending
 | `--since YYYY-MM-DD` | 30日前 | データ収集開始日（`--days` より優先） |
 | `--days N` | `30` | 直近何日分を対象にするか |
 | `--today-only` | — | 今日のデータのみ収集（`--days` / `--since` を無視。日次サマリー用）|
-| `--assignee NAME` | — | 担当者フォーカス（例: `--assignee 西澤`） |
+| `--assignee NAME` | — | 担当者フォーカス（例: `--assignee 富岳太郎`） |
 | `--topic TEXT` | — | 話題フォーカス（例: `--topic Benchpark`） |
 | `--db PATH` | `data/pm.db` | pm.db のパス |
 | `--no-encrypt` | — | 平文モード |
