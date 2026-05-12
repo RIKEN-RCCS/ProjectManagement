@@ -25,5 +25,13 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+LOG_DIR="$REPO_ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/pm_web_update.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo ""
+echo "======== pm_web_update.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
 
 "$PYTHON3" "$SCRIPT_DIR/pm_web_fetch.py" "$@"

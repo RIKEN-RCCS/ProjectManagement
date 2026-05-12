@@ -708,6 +708,70 @@ def run_agent(
 #  Slack Handler
 # =========================================================================== #
 
+_ID_REF_RE = re.compile(
+    r"(?P<full>"
+    r"(?P<kind>a|d|AI|決定|ID)"      # 種別
+    r"\s*[:： ]\s*"
+    r"(?P<id>\d{1,6})"
+    r")"
+)
+
+
+def _expand_id_references(text: str, conns: list) -> str:
+    """出力中の `a:670` / `AI:670` / `決定:42` / `ID:670` 等を content[:60] で展開する。
+
+    参照先が action_items なら `a:670 "xxxxx..."`、decisions なら `d:42 "xxxxx..."`。
+    pm.db に見つからないIDは元のまま残す。
+    """
+    cache: dict[tuple[str, int], str | None] = {}
+
+    def _lookup(table: str, item_id: int) -> str | None:
+        key = (table, item_id)
+        if key in cache:
+            return cache[key]
+        snippet: str | None = None
+        for conn in conns:
+            try:
+                row = conn.execute(
+                    f"SELECT content FROM {table} WHERE id = ? AND COALESCE(deleted,0)=0",
+                    (item_id,),
+                ).fetchone()
+            except Exception:
+                continue
+            if row and row["content"]:
+                s = row["content"].replace("\n", " ").strip()
+                snippet = s[:60] + ("…" if len(s) > 60 else "")
+                break
+        cache[key] = snippet
+        return snippet
+
+    def _replace(m: re.Match) -> str:
+        kind = m.group("kind")
+        item_id = int(m.group("id"))
+        # 種別から対象テーブルを推定。a/AI → action_items、d/決定 → decisions、
+        # ID は両方試す（action_items 優先）
+        if kind in ("a", "AI"):
+            tables = ["action_items"]
+            norm = f"a:{item_id}"
+        elif kind in ("d", "決定"):
+            tables = ["decisions"]
+            norm = f"d:{item_id}"
+        else:  # ID
+            tables = ["action_items", "decisions"]
+            norm = f"ID:{item_id}"
+
+        for t in tables:
+            snippet = _lookup(t, item_id)
+            if snippet:
+                prefix = "a" if t == "action_items" else "d"
+                if kind == "ID":
+                    return f"{prefix}:{item_id} “{snippet}”"
+                return f"{norm} “{snippet}”"
+        return m.group("full")
+
+    return _ID_REF_RE.sub(_replace, text)
+
+
 def _run_investigate(respond, command, *, no_encrypt: bool = False):
     """Slack /argus-investigate のバックグラウンド処理"""
     try:
@@ -740,6 +804,9 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             ctx=ctx,
         )
 
+        # ID 参照 (a:670 / d:42 / AI:670 / 決定:42 / ID:670) を content[:60] で展開
+        result = _expand_id_references(result, conns)
+
         for c in conns:
             c.close()
 
@@ -749,9 +816,18 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
         if len(header) + len(result) > _SLACK_MAX_CHARS:
             result = result[:_SLACK_MAX_CHARS - len(header) - 20] + "\n\n（...以下省略）"
 
+        # GitHub Flavored Markdown を Slack mrkdwn に変換（他 Argus コマンドと揃える）
+        from pm_argus import _to_slack_mrkdwn
+        body = _to_slack_mrkdwn(header + result)
+
         try:
             respond(
-                text=header + result,
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": body},
+                    }
+                ],
                 response_type="ephemeral",
                 replace_original=True,
             )

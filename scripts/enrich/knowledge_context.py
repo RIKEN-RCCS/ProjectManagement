@@ -438,19 +438,39 @@ def format_knowledge_for_prompt(
         sections.append("\n".join(lines))
 
     # 3. 議事録・Slackからの関連記述 (FTS5)
+    # document / web は別セクションに分離し、source_ref を明示することで
+    # LLM が rationale や source_context で「〇〇設計書に基づき」と引用できるようにする
     fts_chunks = knowledge.get("fts_chunks", [])
     if fts_chunks:
-        lines = ["### 議事録・Slackからの関連記述"]
-        for c in fts_chunks:
-            src = c.get("source_type", "?")
-            date = c.get("held_at") or "?"
-            text = c.get("content", "")[:500].replace("\n", " ")
-            line = f"- ({date}, {src}) {text}"
-            if total + len(line) > max_chars:
-                break
-            lines.append(line)
-            total += len(line)
-        sections.append("\n".join(lines))
+        docs_and_web = [c for c in fts_chunks if c.get("source_type") in ("document", "web")]
+        others       = [c for c in fts_chunks if c.get("source_type") not in ("document", "web")]
+
+        if docs_and_web:
+            lines = ["### 関連ドキュメント・公開情報（根拠として引用可）"]
+            for c in docs_and_web:
+                src = c.get("source_type", "?")
+                date = c.get("held_at") or "?"
+                ref = c.get("source_ref") or ""
+                text = c.get("content", "")[:500].replace("\n", " ")
+                line = f"- ({date}, {src}) {text}" + (f"  [出典: {ref}]" if ref else "")
+                if total + len(line) > max_chars:
+                    break
+                lines.append(line)
+                total += len(line)
+            sections.append("\n".join(lines))
+
+        if others:
+            lines = ["### 議事録・Slackからの関連記述"]
+            for c in others:
+                src = c.get("source_type", "?")
+                date = c.get("held_at") or "?"
+                text = c.get("content", "")[:500].replace("\n", " ")
+                line = f"- ({date}, {src}) {text}"
+                if total + len(line) > max_chars:
+                    break
+                lines.append(line)
+                total += len(line)
+            sections.append("\n".join(lines))
 
     # 4. 担当者パターン
     patterns = knowledge.get("participant_patterns", {})

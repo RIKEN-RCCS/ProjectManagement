@@ -582,11 +582,11 @@ python3 scripts/pm_document_extract.py --post-to-canvas --canvas-id F0XXXXXX --i
 
 **抽出済み管理**: `extract_state` テーブルで処理済み `thread_ts` を記録し、再実行時に重複処理を防止する。
 
-**FTS5連携**: 抽出後に `pm_embed.py` を実行すると、`docs_{index_name}.db` のドキュメントが FTS5 インデックスに組み込まれ `/argus-ask` で検索可能になる。
+**FTS5連携**: 抽出後に `pm_embed.py` を実行すると、`docs_{index_name}.db` のドキュメントが FTS5 インデックスに組み込まれ `/argus-investigate` で検索可能になる。
 
 ### 13. ハイブリッド検索テスト（pm_qa_server.py --test-hybrid）
 
-`/argus-ask` のハイブリッド検索をSlackデーモン不要でCLIテストする。
+`/argus-investigate` のハイブリッド検索をSlackデーモン不要でCLIテストする。
 
 ```sh
 # 構造化クエリ
@@ -643,7 +643,7 @@ crontab -e
 # 30 3 * * * cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && ~/.venv_aarch64/bin/python3 scripts/pm_web_fetch.py >> logs/pm_web_cron.log 2>&1
 ```
 
-**FTS5連携**: `web_articles.db` が存在すれば `pm_embed.py`（`pm_document_update.sh` 経由）実行時に自動で FTS5 インデックスに組み込まれ `/argus-ask` で検索可能になる。
+**FTS5連携**: `web_articles.db` が存在すれば `pm_embed.py`（`pm_document_update.sh` 経由）実行時に自動で FTS5 インデックスに組み込まれ `/argus-investigate` で検索可能になる。
 
 **web_sources.yaml の構造**:
 ```yaml
