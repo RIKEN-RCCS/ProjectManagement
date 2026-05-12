@@ -38,6 +38,72 @@ class UserResolver:
         self._data_dir = data_dir
         self._api_members: list[dict] | None = None
 
+    def _roster_lookup_uid(self, name: str) -> str | None:
+        """docs/project.md の行に埋め込まれた [Uxxx] を直接引く。
+        行内のどこかに name の文字列が含まれていて、かつ [Uxxx] マーカーがあれば採用。"""
+        try:
+            repo_root = Path(__file__).resolve().parents[3]
+            md = repo_root / "docs" / "project.md"
+            if not md.exists():
+                return None
+            import re
+            uid_re = re.compile(r"\[(U[A-Z0-9]{5,})\]")
+            n = name.strip()
+            for line in md.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line.startswith("- "):
+                    continue
+                if n not in line:
+                    continue
+                m = uid_re.search(line)
+                if m:
+                    return m.group(1)
+        except Exception as e:
+            logger.warning("roster uid lookup error: %s", e)
+        return None
+
+    def _roster_aliases(self, name: str) -> list[str]:
+        """docs/project.md の名簿から、name（姓漢字・姓英語など）に対応する英語フルネーム候補を返す。"""
+        try:
+            repo_root = Path(__file__).resolve().parents[3]
+            md = repo_root / "docs" / "project.md"
+            if not md.exists():
+                return []
+            import re
+            out = []
+            n = name.strip()
+            for line in md.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line.startswith("- "):
+                    continue
+                body = line[2:]
+                # email / ":" より前を取り出し、空白（タブ含む）で分割
+                head = re.split(r"[:：]", body, 1)[0]
+                parts = re.split(r"\s+", head.strip())
+                if len(parts) < 3:
+                    continue
+                # parts は [姓漢字, 名漢字, 英名First, 英名Last, (email)] 形式が多い
+                # name が parts 内のいずれか（部分一致）なら、英語名候補を抽出
+                joined = " ".join(parts)
+                if n in joined:
+                    # ASCII トークンを英語名として抽出
+                    ascii_tokens = [p for p in parts if re.fullmatch(r"[A-Za-z'\.\-]+", p)]
+                    if len(ascii_tokens) >= 2:
+                        out.append(" ".join(ascii_tokens[:2]))
+                        out.append(" ".join(ascii_tokens[-2:]))
+                        out.extend(ascii_tokens)
+            # 重複除去、順序保持
+            seen = set()
+            result = []
+            for a in out:
+                if a and a not in seen:
+                    seen.add(a)
+                    result.append(a)
+            return result
+        except Exception as e:
+            logger.warning("roster parse error: %s", e)
+            return []
+
     def resolve(self, display_name: str) -> str | None:
         """
         担当者名 → Slack user_id。解決不能なら None。
@@ -53,6 +119,12 @@ class UserResolver:
         if cached:
             return cached
 
+        # 名簿に [Uxxx] が埋め込まれていればそれを最優先で採用
+        uid = self._roster_lookup_uid(name)
+        if uid:
+            self._state.cache_user(name, uid)
+            return uid
+
         uid = self._mine_slack_dbs(name)
         if uid:
             self._state.cache_user(name, uid)
@@ -63,15 +135,34 @@ class UserResolver:
             self._state.cache_user(name, uid)
             return uid
 
+        # docs/project.md の名簿で英語名エイリアスを引いて再試行
+        for alias in self._roster_aliases(name):
+            if alias == name:
+                continue
+            uid = self._mine_slack_dbs(alias) or self._search_api(alias)
+            if uid:
+                logger.info("roster alias: %s → %s → %s", name, alias, uid)
+                self._state.cache_user(name, uid)
+                return uid
+
         logger.warning("user_id 解決失敗: %s", name)
         return None
 
     def _mine_slack_dbs(self, name: str) -> str | None:
         """Slack DB ({channel_id}.db) から user_name で user_id を検索。"""
+        try:
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+            from db_utils import open_db
+        except Exception:
+            open_db = None
         for db_file in self._data_dir.glob("C*.db"):
             try:
-                conn = sqlite3.connect(str(db_file))
-                conn.row_factory = sqlite3.Row
+                if open_db is not None:
+                    conn = open_db(db_file, encrypt=True)
+                else:
+                    conn = sqlite3.connect(str(db_file))
+                    conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     "SELECT user_id FROM messages"
                     " WHERE user_name LIKE ? AND user_id IS NOT NULL AND user_id != ''"
