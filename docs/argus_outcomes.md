@@ -1,270 +1,246 @@
-# Argus AI — PM成果ガイド
+# Argus AI — 使い方ガイド
 
-プロジェクトマネージャーが**Argusで実現できる成果**と、その背景にある機能・システム設計の対応図。
+プロジェクトマネージャーが Slack から呼び出せる 5 つのコマンドの実践的な使い方まとめ。
 
----
-
-## 成果1: 朝の優先順位づけ（5分で完了）
-
-**ユーザーの得られるもの**: 今日やるべきことを優先度順に最大5件。前日の決定事項・期限超過・Slack動向を総合分析。
-
-| 流れ | 担当 | 実装 |
-|---|---|---|
-| Slack へ `/argus-brief` を実行 | ユーザー | — |
-| pm_qa_server.py がリアルタイム分析 | Argus | `pm_argus.py` |
-| • 過去60日の Slack メッセージを収集 | — | argus_config.yaml チャンネル定義 |
-| • 該当期間の議事録本文を取得 | — | data/minutes/{kind}.db（会議DB） |
-| • pm.db の統計（期限超過・負荷） | — | db_utils.fetch_* 関数 |
-| • LLM が優先度づけ（gemma4/RiVault） | — | call_argus_llm() |
-| • 本人だけに見える返信（ephemeral） | — | Slack Socket Mode |
-| ユーザーが確認・実行 | ユーザー | — |
-
-**オプション引数で焦点を変更**:
-- `/argus-brief` ← 全体俯瞰
-- `/argus-brief 60` ← 過去60日分に拡大
-- `/argus-brief @西澤` ← 西澤さん担当事項に焦点
-- `/argus-brief Benchpark` ← Benchpark 話題に焦点
-
-**自動化**: 平日朝 8:57 に Canvas へ自動投稿（cron）→ 全員が朝礼前に確認可能
-
----
-
-## 成果2: リスク早期検知（24/7 自動巡回）
-
-**ユーザーの得られるもの**: 顕在化しているリスクと放置すると問題になりうる予兆を優先度付きで自動発見。
-
-| リスク種別 | 検知機構 | 通知先 | 判定ロジック |
+| コマンド | いつ使うか | 応答形式 | 典型的な所要時間 |
 |---|---|---|---|
-| **完了シグナル検知** | Patrol Agent | 担当者（DM + Block Kit） | キーワード + LLM 自然言語判定の二段構え |
-| **期限超過リマインダー** | Patrol Agent | 担当者（DM） | `due_date < today`（7日ごと） |
-| **期限前警告** | Patrol Agent | 担当者（DM） | `today + 3日 >= due_date`（期限前1回） |
-| **未確認決定事項** | Patrol Agent | リーダー会議チャンネル | `decided_at <= today - 7日` かつ `acknowledged_at IS NULL`（7日ごと） |
-| **長期停滞** | Patrol Agent | 担当者 + リーダー会議チャンネル | 14日間更新なし（14日ごと） |
-| **マイルストーン健全性** | Patrol Agent | リーダー会議チャンネル | `完了率 < 経過割合 × 0.7`（7日ごと） |
-| **週次トレンド悪化** | Patrol Agent | リーダー会議チャンネル | `直近2週完了 < 前2週完了 × 0.5`（7日ごと） |
+| `/argus-brief`      | 今週〜直近の状況を俯瞰して優先順位をつけたい | ephemeral（自分のみ） | 30〜60秒 |
+| `/argus-today`      | 本日の動きと自分宛メンションを見落としなく確認したい | ephemeral | 20〜40秒 |
+| `/argus-risk`       | 顕在化しているリスク・予兆を洗い出したい | ephemeral | 30〜60秒 |
+| `/argus-investigate`| 「なぜ」「どこで決めた」の深掘り調査がしたい | ephemeral | 30〜180秒 |
+| `/argus-transcribe` | 会議の録音・録画から議事録を生成したい | スレッドに投稿 | 10〜20分 |
 
-**仕組み**:
-- `patrol_detect.py` が決定論的ルール（LLM不使用）で検出
-- `patrol_actions.py` が Slack 通知・Block Kit ボタン送信
-- `patrol_state.db` で冪等性・cooldown管理（同じリスクの重複通知を防止）
-- **完了確認フロー**: 担当者が Block Kit の「完了にする」ボタンを押す → `patrol_confirm.py` が pm.db に反映（audit_log 付き）
-
-**自動実行**: 平日30分ごと（cron）→ 常時ウォッチドッグ
+すべてのコマンドは本人だけに見える **ephemeral 返信**。ただし `/argus-transcribe` の進捗通知はスレッド全員に可視（完了通知は ephemeral）。
 
 ---
 
-## 成果3: リスク・課題の根本原因分析（10分で深掘り）
+## 1. `/argus-brief` — 優先順位づけブリーフィング
 
-**ユーザーの得られるもの**: 単発ブリーフィング（成果1）では不可能な因果分析。LLMが自律的にツール選択して段階的に調査。
+今日やるべきことを優先度順に最大5件提示する。pm.db 統計・Slack 生メッセージ・議事録を総合分析。
 
-| 質問例 | LLMが選ぶツール | 情報源 | 回答内容 |
-|---|---|---|---|
-| `M3マイルストーンの遅延原因を調査して` | get_milestone_progress → get_overdue_items → search_decisions | pm.db + 議事録 | M3の完了率が期待値を下回る理由・関連決定事項・期限超過AI |
-| `先週の決定事項が実行されているか確認` | get_unacknowledged_decisions → search_action_items → search_text | pm.db + Slack | 未確認決定のリスト・関連AI状況・実行進捗 |
-| `@西澤 の負荷が高い原因を分析して` | get_assignee_workload → search_action_items → search_text | pm.db + Slack | 西澤さんの open AI 件数・分野・期限・外部待ちの有無 |
-| `GPU性能に関する最近の議論は？` | search_text | FTS5 インデックス | 議事録・Slack の生メッセージから関連チャンク抽出・LLM re-ranking で上位5件 |
-
-**技術基盤** (`pm_argus_agent.py`):
-- LLM が `<tool_call>` タグで必要なツールを指定
-- ツール実行結果を LLM にフィードバック
-- 最大5ステップまで反復（180秒タイムアウト）
-- すべて本人だけに見える ephemeral 返信
-
-| ツール | 実装 | 用途 |
-|---|---|---|
-| `get_milestone_progress` | db_utils.py | マイルストーン完了率・残日数 |
-| `get_overdue_items` | db_utils.py | 期限超過AI（フィルタ可） |
-| `get_assignee_workload` | db_utils.py | 担当者別負荷 |
-| `get_weekly_trends` | db_utils.py | 週次作成/完了トレンド |
-| `get_unacknowledged_decisions` | db_utils.py | 未確認決定事項 |
-| `search_action_items` | pm_argus_agent.py | AI の構造化検索（SQL） |
-| `search_decisions` | pm_argus_agent.py | 決定事項の構造化検索 |
-| `search_text` | pm_qa_server.py | 議事録・Slack 全文検索（FTS5 + LLM re-ranking） |
-| `get_slack_messages` | pm_argus_agent.py | 特定チャンネルの生メッセージ |
-
----
-
-## 成果4: 会議資料・メッセージ自動草案（3分で下書き）
-
-**ユーザーの得られるもの**: 会議アジェンダ・進捗報告・確認依頼メッセージの草案を即座に生成。
-
-| 用途 | 指定方法 | 主な情報源 | 草案の内容例 |
-|---|---|---|---|
-| アジェンダ | `/argus-draft agenda 次回リーダー会議` | 未確認決定 + 期限超過AI + 直近Slack | • 確認待ち決定事項3件 • 期限超過AI（GPU性能評価など） • Slack で浮上した検討事項 |
-| 進捗報告 | `/argus-draft report 4月進捗報告` | マイルストーン進捗 + 週次完了 + 担当者負荷 | • M1 75% 完了（残り3件） • 完了数が前週比20%減 • 期限超過が5件 |
-| 確認依頼 | `/argus-draft request NVIDIAへの性能確認` | 期限超過 + 担当者別負荷 + 直近Slack | • 外部待ちAI件数 • 関連決定事項 • 期待納期 |
-
-**実装** (`pm_argus.py` の draft ハンドラ):
-- pm.db + Slack 生メッセージ + 議事録から関連情報を LLM コンテキストとして構築
-- ユーザーが「どの情報を含めるか」判断する（人間の最終確認）
-
----
-
-## 成果5: 会議録音 → 議事録（Slack アップロード）
-
-**ユーザーの得られるもの**: 音声ファイルをスレッドにアップロード → 数分待つと議事録（決定・AI付き）が自動生成。
-
-| ステップ | 実装 | 時間 |
-|---|---|---|
-| ユーザーが Slack にファイルアップロード → `/argus-transcribe GMT20260302-032528_Recording.mp4` を実行 | pm_qa_server.py ソケットハンドラ | 3秒 |
-| ファイル + 同名 VTT（Zoom自動文字起こし）を取得 | transcribe_pipeline.py | — |
-| ffmpeg で WAV 変換（16kHz mono） | — | — |
-| DeepFilterNet ノイズ除去 | whisper_vad.py | — |
-| Whisper large-v3 で高品質文字起こし | — | 5～10分 |
-| ローカル LLM（gemma4）で議事録生成（マルチステージ） | generate_minutes_local.py | 3～5分 |
-|  • Stage 1: チャンク抽出（話題ごと） | — | — |
-|  • Stage 2: チャンク統合（段落化） | — | — |
-|  • Stage 3: 決定事項・AI 抽出（VTT の話者情報活用で精度向上） | — | — |
-| 完成した議事録（Markdown + 構造化 JSON） → スレッドに投稿 | pm_minutes_import.py | 1秒 |
-
-**VTT 話者情報の活用**:
-- Zoom の自動文字起こし VTT（例: `2026-04-28_Leader_Meeting.vtt`）があれば自動検出・ダウンロード
-- VTT の正確な話者名（「西澤」「小林」など）を Whisper の高品質日本語文字起こしと統合
-- アクションアイテムの担当者推定精度が大幅向上（LLM が正確な話者情報を参照）
-
-**進捗通知**: Slack スレッド上でリアルタイム更新（「ダウンロード完了」→「文字起こし完了」→「Stage 1/2/3 処理中」→「完成」）
-
----
-
-## 成果6: 過去の決定・議論を背景付きで素早く検索
-
-**ユーザーの得られるもの**: 過去の決定事項・議論・ドキュメントを素早く引用可能な形式で検索。「以前決めたことはなんだったか」をリアルタイムで回答。
-
-| 場面 | ユーザーのアクション | 得られるもの | 応答時間 |
-|---|---|---|---|
-| Slack上での質問 | `/argus-investigate GPU性能に関する決定事項は？` | 関連情報を上位5件、出典付きで返答 | 10～30秒 |
-| 会議中の確認 | `/argus-investigate 先週決めた設計方針について再度確認したい` | 過去の設計会議の決定内容・背景を提示 | 10～30秒 |
-| ドキュメント確認 | `/argus-investigate GPU Outsourcing Agreement の最新版はどこか` | BOXドキュメントの位置・共有者・更新日を提示 | 5～10秒 |
-| 業界情報確認 | `/argus-investigate Zettaスケール達成の業界動向は` | RIKEN公式・HPC ニュース・NVIDIA ブログの関連記事を提示 | 10～20秒 |
-
-**ユーザーが得る効果**:
-- 会議中に「昔何決めたっけ？」と迷わない
-- 同じ議論を繰り返さない
-- ドキュメントの在処を素早く確認
-- 業界トレンドと内部決定の整合性を確認可能
-
-**技術基盤**: 議事録・Slack生メッセージ・BOXドキュメント・外部Web記事を FTS5 全文検索インデックスに統合。SudachiPy 形態素解析 + LLM re-ranking で精度向上。
-
----
-
-## 成果7: 毎週の進捗レポート自動投稿 + Canvas での対応状況管理
-
-**ユーザーの得られるもの**: 毎週月曜朝に Canvas にレポート自動投稿。会議中に対応状況を直接編集 → pm.db に即座に反映。変更履歴が監査可能。
-
-| タイミング | ユーザーのアクション | 効果 |
-|---|---|---|
-| 月曜朝 | Canvas を開く | マイルストーン進捗・期限超過・要注意事項を把握 |
-| 会議中 | Canvas 上でアイテムを編集（担当者・期限・マイルストーン・状況・対応状況） | リアルタイムに pm.db に反映・audit_log に記録 |
-| 会議中 | 決定事項のチェックボックスにチェック | 確認済み状態を記録 |
-| Canvas から source 列クリック | Slack スレッド or 議事録本文へジャンプ | アイテムの背景・根拠を即座に確認 |
-
-**レポート構成**: プロジェクト現在地（マイルストーン完了率）→ 直近の決定事項 → 要注意事項（期限超過・停滞・未確認決定）→ 未完了アクションアイテム表（全フィールド編集可能）
-
-**ユーザーが得る効果**:
-- 全員が同じ進捗情報で同期
-- Canvas ↔ pm.db が常に同期
-- 「いつ誰が何を変更したか」を監査可能
-- 「誰が言った」「いつ決めた」の根拠をリンク経由で即座に遡行可能
-
-**自動実行**: 毎週月曜朝 9:00（cron）に pm_report.py が Canvas へ投稿
-
----
-
-## 成果まとめ表
-
-| 成果 | 使用場面 | ユーザーアクション | 実施主体 | 更新頻度 |
-|---|---|---|---|---|
-| 朝の優先順位づけ | 毎朝 5分で確認 | `/argus-brief [引数]` | ユーザー or cron自動投稿 | 毎日 |
-| リスク自動検知 | 顕在化・予兆リスクの通知 | 自動 DM・チャンネル通知 | Patrol Agent（cron 30分ごと） | 常時 |
-| 根本原因分析 | 「なぜ遅れているのか」を深掘り | `/argus-investigate <質問>` | ユーザー発動 | オンデマンド |
-| 草案生成 | 会議資料・メッセージ作成 | `/argus-draft <用途> <件名>` | ユーザー発動 | オンデマンド |
-| 会議録音 → 議事録 | 会議終了直後 | `/argus-transcribe <ファイル名>` | ユーザー発動 | オンデマンド |
-| 過去の検索・引用 | 「昔何決めたっけ？」を確認 | `/argus-investigate <質問>` | ユーザー発動 | オンデマンド |
-| 進捗・対応状況管理 | 月曜朝に全員で確認・編集 | Canvas 編集 | cron自動投稿 + ユーザー編集 | 毎週 |
-
----
-
-## アーキテクチャ図（成果 → 機能マッピング）
+### 使い方
 
 ```
-ユーザーのアクション（7つの成果）
-  ├─ /argus-brief [引数]              ← 成果1: 朝の優先順位づけ
-  ├─ 自動 DM・チャンネル通知           ← 成果2: リスク自動検知
-  ├─ /argus-investigate <質問>        ← 成果3,6: 根本原因分析・過去検索
-  ├─ /argus-draft <用途> <件名>       ← 成果4: 草案生成
-  ├─ /argus-transcribe <ファイル>    ← 成果5: 議事録自動生成
-  └─ Canvas 上で編集＆確認            ← 成果7: 進捗・対応状況管理
-       ↓
-システム処理層
-  pm_qa_server.py         ← Socket Mode デーモン（全コマンド統一処理）
-  pm_argus.py             ← データ収集・LLM プロンプト構築
-  pm_argus_agent.py       ← Investigation Agent（マルチステップ調査）
-  pm_argus_patrol.py      ← Patrol Agent（自動リスク検知）
-  pm_report.py            ← 週次レポート生成・投稿
-  pm_sync_canvas.py       ← Canvas ↔ pm.db 同期
-       ↓
-データ基盤層
-  pm.db                    ← PM統合データ（決定・AI・MS・audit_log）
-  data/minutes/{kind}.db   ← 議事録DB（会議ごと）
-  {channel_id}.db          ← Slack 生メッセージDB
-  data/qa_pm*.db           ← FTS5 インデックス（議事録・Slack・ドキュメント・Web）
-  patrol_state.db          ← Patrol 冪等性・cooldown 管理
-       ↓
-LLM 層
-  gemma4（ローカル vLLM）  ← 優先使用（128K context）
-  RiVault（理研製）        ← gemma4 未起動時フォールバック（200K context）
+/argus-brief                     # 直近30日を全体俯瞰
+/argus-brief 60                  # 期間を60日に拡張
+/argus-brief @西澤               # 西澤さん担当事項にフォーカス
+/argus-brief Benchpark           # Benchpark 話題にフォーカス
+/argus-brief 60 @西澤 GPU性能    # 組み合わせも可
 ```
+
+### 引数ルール
+
+| トークン | 解釈 | 例 |
+|---|---|---|
+| 数字のみ   | 直近日数           | `60` → 過去60日分 |
+| `@` 始まり | 担当者フォーカス   | `@西澤` |
+| その他文字 | 話題フォーカス     | `Benchpark` |
+
+### 想定シーン
+
+- 毎朝の 5 分レビュー
+- 週初めに「自分のチームが今抱えている山」を把握
+- 特定マイルストーンが遅延気味で、関連AI・決定を一望したい
+
+### 自動実行
+
+平日朝 8:57 に cron で過去30日分のブリーフィングを Canvas（`F0AT4N36TFF`）へ自動投稿。朝礼前に全員が確認できる。
+
+---
+
+## 2. `/argus-today` — 今日の活動サマリー（個人向け）
+
+本日の Slack・議事録を 4 観点（議論・決定・AI・進捗）でサマライズし、さらに **実行者宛のメンション** を別セクションで生データ表示。
+
+### 使い方
+
+```
+/argus-today
+```
+
+引数なし。本日分のデータのみが対象。
+
+### 想定シーン
+
+- 朝イチで「昨日から今日にかけて何があったか」を 1 分で把握
+- 自分宛の依頼（メンション）を見落とさない
+- 17:00 の cron が Canvas（`F0ATCN7E2D9`）へ自動投稿する日次サマリーのオンデマンド版
+
+### `/argus-brief` との違い
+
+| 観点 | `/argus-brief` | `/argus-today` |
+|---|---|---|
+| 対象期間   | 直近30日（`--days` で変更可） | 本日のみ |
+| 出力形式   | 優先アクション5件 | 4観点の活動サマリー |
+| メンション | なし | あなた宛メンション別セクション |
+
+---
+
+## 3. `/argus-risk` — リスク分析
+
+顕在化しているリスクと放置すると問題になる予兆を優先度付きで列挙。`/argus-brief` と同じ引数ルール。
+
+### 使い方
+
+```
+/argus-risk                      # 全プロジェクトのリスク俯瞰
+/argus-risk 60                   # 期間拡大
+/argus-risk @小林                # 特定担当者のリスク
+/argus-risk Benchpark            # 特定話題のリスク
+```
+
+### 想定シーン
+
+- 週次の役員会前に「報告すべき火種」を洗い出す
+- 新しい責任範囲を引き継いだ直後に全体のリスク状況を理解
+- `/argus-brief` で気になった項目をリスク観点で掘り下げ
+
+### Patrol Agent との棲み分け
+
+| 機構 | いつ動く | 何を見る |
+|---|---|---|
+| Patrol Agent（自動） | 平日 30 分ごと | 決定論的ルール（期限超過・停滞・健全性・トレンド悪化）→ 担当者/リーダーへ自動通知 |
+| `/argus-risk`（手動） | ユーザー実行時 | LLM による文脈解釈込みのリスク俯瞰 |
+
+Patrol が「拾い漏れないための常時監視」、`/argus-risk` が「今からここを語れるように整理する」補完関係。
+
+---
+
+## 4. `/argus-investigate` — マルチステップ調査（Agent）
+
+LLM が自律的にツール（DB検索・FTS全文検索・Slackメッセージ取得）を選択しながら最大 5 ステップで調査。旧 `/argus-ask` の単発 QA 機能もこれに統合済み。
+
+### 使い方
+
+```
+/argus-investigate M3マイルストーンの遅延原因を調査して
+/argus-investigate 先週の決定事項が実行されているか確認
+/argus-investigate @西澤 の負荷が高い原因を分析して
+/argus-investigate 設計方針に関する最近の議論は？
+/argus-investigate GPU Outsourcing Agreement の最新版はどこか
+```
+
+### 得意なこと
+
+| 質問タイプ | 例 |
+|---|---|
+| 因果分析            | 「遅延の原因」「負荷集中の理由」 |
+| クロスソース相関    | pm.db + 議事録 + Slack を跨いだ整合確認 |
+| 過去決定の検索      | 「前に何を決めたか」「どの会議の決定か」 |
+| ドキュメント探索    | BOX資料・外部Web記事のタイトル・共有者・URL |
+| 構造化QA            | 「〇〇さんの担当」「M2のAI件数」など SQL 相当 |
+
+### 内部で使われるツール
+
+| ツール | 情報源 |
+|---|---|
+| `get_milestone_progress`      | pm.db |
+| `get_overdue_items`           | pm.db |
+| `get_assignee_workload`       | pm.db |
+| `get_weekly_trends`           | pm.db |
+| `get_unacknowledged_decisions`| pm.db |
+| `search_action_items`         | pm.db（条件検索） |
+| `search_decisions`            | pm.db（キーワード） |
+| `search_text`                 | FTS5（議事録/Slack/BOXドキュメント/Web記事） |
+| `get_slack_messages`          | {channel_id}.db |
+
+### 出力中のID参照
+
+回答中に `a:670` / `d:42` のようなID参照が現れた場合、自動的に対象アイテムの冒頭60文字を併記するので、参照先をいちいち開かなくても意味が分かる。
+
+### CLI モード
+
+```bash
+python3 scripts/argus/pm_argus_agent.py --investigate "M3の遅延原因を調査" --dry-run
+python3 scripts/argus/pm_argus_agent.py --investigate "先週の決定事項の実行状況" --max-steps 5
+```
+
+---
+
+## 5. `/argus-transcribe` — 会議録音の文字起こし・議事録生成
+
+Slack チャンネルにアップロードされた音声・動画ファイルをダウンロードし、Whisper → LLM 議事録生成までを自動実行してスレッドに投稿する。
+
+### 使い方
+
+```
+/argus-transcribe GMT20260302-032528_Recording.mp4
+/argus-transcribe 2026-04-20_Leader_Meeting.m4a
+```
+
+ファイル名は太字 (`*foo.mp4*`) やコード記法 (`` `foo.mp4` ``) で囲まれていても自動で剥がす。
+
+### 処理フロー
+
+1. Slack からファイル検索・ダウンロード（同名 VTT も自動検出）
+2. 動画（mp4 等）の場合は **スライドOCR** 実行（ffmpeg scene detect + マルチモーダルLLM）
+3. Whisper large-v3 で文字起こし（スライドから抽出した固有名詞を initial_prompt に注入）
+4. ローカルLLM（gemma4）で議事録生成（マルチステージ: 抽出 → 統合 → 決定事項・AI 抽出）
+5. スレッドに議事録ファイル（Markdown）をアップロード
+
+### 品質向上の3系統
+
+| 系統 | 効果 | 自動判定 |
+|---|---|---|
+| **VTT話者情報** | Zoom自動文字起こしの話者名を統合 → 担当者推定精度向上 | 同名 `.vtt` / `.transcript.vtt` を自動検出 |
+| **スライドOCR** | 固有名詞・技術用語・数値の誤変換を抑制 | mp4 で `OPENAI_API_BASE` 設定時に自動実行（`--no-slide-ocr` で無効化） |
+| **Whisper + LLM** | 高品質日本語文字起こし + 構造化抽出 | 常時有効 |
+
+3 系統は独立して ON/OFF でき、共存する。
+
+### 進捗通知
+
+- 処理開始・DL完了・ASR完了・Stage 1/2/3 進捗 → **スレッドに投稿**（全員に可視）
+- 最終完了・エラー → **ephemeral**（実行者のみ）
+
+### 排他制御
+
+同時実行は 1 ジョブのみ。処理中の再実行は現在のジョブ情報を表示してエラーを返す。
+
+### 想定シーン
+
+- Zoom 会議終了直後、録画ファイルをチャンネルに投げて即議事録化
+- 「口頭で決まったこと」を pm.db に載せるため、聞き直し不要で AI・決定が抽出される
 
 ---
 
 ## セットアップ（最小要件）
 
-1. **`bash scripts/pm_daemon.sh start qa` 実行**
-   - Slack トークン読み込み（`~/.secrets/slack_tokens.sh`）
-   - Socket Mode デーモン起動
-   - 全スラッシュコマンド有効化
+1. デーモン起動（これだけで全コマンドが有効化）
+   ```bash
+   bash scripts/pm_daemon.sh start qa
+   ```
 
-2. **FTS5 インデックス構築**
+2. FTS5 インデックス構築（`/argus-investigate` の `search_text` 用）
    ```bash
    python3 scripts/pm_embed.py --full-rebuild
    ```
 
-3. **Patrol cron 設定**
+3. cron 設定
    ```
-   */30 * * * 1-5  python3 scripts/pm_argus_patrol.py
-   ```
-
-4. **朝ブリーフィング cron 設定**
-   ```
-   57 8 * * 1-5  python3 scripts/pm_argus.py --brief-to-canvas
+   57 8   * * 1-5  python3 scripts/argus/pm_argus.py --brief-to-canvas             # 朝ブリーフィング
+   0  17  * * 1-5  bash   scripts/pm_argus_daily_summary.sh                         # 17時日次サマリー
+   */30 * * * 1-5  python3 scripts/argus/pm_argus_patrol.py                         # Patrol（リスク自動検知）
    ```
 
 ---
 
 ## よくある質問
 
-**Q: 何を用意すればすぐに使える？**
-A: `pm_daemon.sh start qa` を実行するだけ。Slack トークンと gemma4 が起動していれば全機能が動作。
+**Q: `/argus-brief` と `/argus-today` の使い分けは？**
+A: 広く浅く（30日）が brief、今日だけを深く + 自分宛メンション強調が today。
 
-**Q: LLM の品質が問題なら？**
-A: gemma4 が落ちるなら RiVault にフォールバック。または `call_argus_llm()` を Claude API に切り替え可能（性能・コスト トレードオフあり）。
+**Q: `/argus-risk` と Patrol はどう違う？**
+A: Patrol が決定論的ルールで自動通知、`/argus-risk` は LLM による文脈解釈付きの手動呼び出し。
 
-**Q: 検索結果が的外れなら？**
-A: `pm_embed.py --full-rebuild` で FTS5 インデックスを再構築。SudachiPy 辞書の形態素解析精度に依存。
+**Q: `/argus-investigate` の回答に「a:670」と出るが参照先が分からない**
+A: 現在は冒頭60文字が自動併記される。さらに詳細を見たい場合は Web UI (`pm_api.py`) か `python3 scripts/pm_relink.py --list` で確認。
 
-**Q: Canvas 編集が pm.db に反映されない？**
-A: `pm_sync_canvas.py --dry-run` でデバッグ。Slack API の `url_private` が更新される遅延あり（数分待つ）。
+**Q: `/argus-transcribe` が「現在処理中のジョブがあります」と返る**
+A: 前のジョブ完了まで待機。進捗は `tail -f logs/pm_qa_server.log` または対象スレッドで確認可能。
 
-**Q: Patrol のリマインダーが多すぎる？**
-A: `patrol_config.yaml` で cooldown や threshold を調整（例: `cooldown_days: 14` → 2週ごとに変更）。
+**Q: LLMの品質が悪い／タイムアウトする**
+A: `curl http://localhost:8000/v1/models` で gemma4 の起動確認。落ちていれば RiVault へ自動フォールバックするので `RIVAULT_URL` 設定を確認。
 
----
-
-## ロードマップ
-
-| 優先度 | 施策 | 説明 |
-|---|---|---|
-| P1 | リスク検知の精緻化 | 完了シグナル検出の LLM 精度向上・検出ルール増強 |
-| P2 | セマンティック検索導入 | FTS5 から Embedding ベース検索へ（意味的な近さを考慮） |
-| P3 | Slack アプリ化 | Canvas 代わりに Slack アプリで pm.db 編集できるようにする |
-| P4 | マルチモーダル議事録 | 動画フレームから話者同定・スライド OCR による精度向上 |
+**Q: 検索結果が的外れ（`/argus-investigate` の search_text）**
+A: `pm_embed.py --full-rebuild --index-name <name>` で FTS5 を再構築。対象チャンネル→インデックス対応は `data/argus_config.yaml` を参照。

@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db_utils import init_pm_db
-from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg, add_output_arg, make_logger
+from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg, add_output_arg, make_logger, load_claude_md_context
 from ingest.ingest_plugin import IngestContext
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +79,10 @@ def main() -> None:
         help="利用可能なソース一覧を表示して終了",
     )
     parser.add_argument("--db", default=None, metavar="PATH", help="pm.db のパス")
+    parser.add_argument(
+        "--no-auto-enrich", action="store_true",
+        help="Pass 1 投入後の自動エンリッチメント（Pass 2）をスキップ",
+    )
     add_dry_run_arg(parser)
     add_no_encrypt_arg(parser)
     add_since_arg(parser)
@@ -116,8 +120,36 @@ def main() -> None:
         repo_root=REPO_ROOT,
     )
 
+    def _max_ids() -> tuple[int, int]:
+        d = pm_conn.execute("SELECT COALESCE(MAX(id), 0) FROM decisions").fetchone()[0]
+        a = pm_conn.execute("SELECT COALESCE(MAX(id), 0) FROM action_items").fetchone()[0]
+        return d, a
+
     try:
+        pre_d, pre_a = _max_ids()
         plugin.run(args, ctx)
+
+        # Pass 2: 自動エンリッチメント
+        if args.dry_run or args.no_auto_enrich or args.source == "goals":
+            pass
+        else:
+            post_d, post_a = _max_ids()
+            new_d = [{"id": i} for i in range(pre_d + 1, post_d + 1)]
+            new_a = [{"id": i} for i in range(pre_a + 1, post_a + 1)]
+            if new_d or new_a:
+                log(f"\n[INFO] 自動エンリッチ対象: decisions={len(new_d)}件, action_items={len(new_a)}件")
+                try:
+                    from enrich.enrich_items import enrich_batch, _fetch_target_items
+                    ids = [f"d:{d['id']}" for d in new_d] + [f"a:{a['id']}" for a in new_a]
+                    decisions, action_items = _fetch_target_items(pm_conn, item_ids=ids)
+                    project_context = load_claude_md_context()
+                    enrich_batch(
+                        pm_conn, decisions, action_items,
+                        project_context=project_context,
+                        dry_run=False, log=log,
+                    )
+                except Exception as e:
+                    log(f"[WARN] 自動エンリッチ失敗（Pass 1 は成功扱い）: {e}")
     finally:
         pm_conn.close()
         close_log()

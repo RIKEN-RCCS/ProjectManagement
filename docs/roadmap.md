@@ -87,18 +87,18 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
 #### 5.5 ドキュメントレジストリ（pm_document_extract.py、実装済み）
 
 - Slack投稿中のBOXリンクを自動収集し、ローカルLLMでメタデータ（タイトル・種別・説明・共有者・トピック）を構造化して `docs_{index_name}.db` に保存する
-- `pm_embed.py` でFTS5インデックスに組み込み、`/argus-ask` から検索可能にする
+- `pm_embed.py` でFTS5インデックスに組み込み、`/argus-investigate` から検索可能にする
 - Canvas投稿機能でドキュメント一覧を共有できる
 
 #### 5.6 ハイブリッド検索（pm_qa_server.py、実装済み）
 
-- `/argus-ask` でテキスト検索（FTS5）に加え、pm.dbの構造化データ（担当者・期限・マイルストーン・統計）をSQLで直接クエリできるようになった
+- `/argus-investigate` でテキスト検索（FTS5）に加え、pm.dbの構造化データ（担当者・期限・マイルストーン・統計）をSQLで直接クエリできるようになった
 - LLMによるIntent分類で質問を `structured` / `text` / `hybrid` に自動分類
 - 「西澤さんの担当タスクは？」「期限超過アイテムは？」のような構造化質問に直接回答可能
 
 #### 5.7 外部Web情報の取り込み（pm_web_fetch.py、実装済み）
 
-- RIKEN公式サイト・HPC系ニュース（Top500/HPCwire/insideHPC）・NVIDIAブログなどの公開情報を定期取得し `/argus-ask` で検索可能にする
+- RIKEN公式サイト・HPC系ニュース（Top500/HPCwire/insideHPC）・NVIDIAブログなどの公開情報を定期取得し `/argus-investigate` で検索可能にする
 - `data/web_sources.yaml` でソース・キーワードフィルタ・対象インデックスを定義し、`pm_web_fetch.py` が `data/web_articles.db` に保存する
 - `pm_embed.py --web-only` で高速に FTS5 インデックスに組み込み（議事録・Slack処理をスキップ）
 - `pm_web_fetch.py` を cron（毎朝03:30 JST）で定期実行。FTS5 組み込みは `pm_document_update.sh`（`pm_embed.py`）が自動で行う

@@ -41,6 +41,16 @@ export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
 
 # --------------------------------------------------------------------------- #
+# ログ出力先
+# --------------------------------------------------------------------------- #
+LOG_DIR="$REPO_ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/pm_document_update.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo ""
+echo "======== pm_document_update.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
+
+# --------------------------------------------------------------------------- #
 # 引数パース
 # --------------------------------------------------------------------------- #
 INDEX_NAME=""
