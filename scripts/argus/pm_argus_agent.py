@@ -32,7 +32,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_argus_llm, load_claude_md_context
+from cli_utils import call_argus_llm, load_claude_md_context, prefer_rivault
 from db_utils import (
     open_pm_db,
     fetch_milestone_progress,
@@ -861,11 +861,12 @@ def run_agent(
 
         llm_t0 = time.time()
         try:
-            response = call_argus_llm(
-                prompt,
-                max_tokens=4096,
-                timeout=max(30, int(timeout - elapsed)),
-            )
+            with prefer_rivault():
+                response = call_argus_llm(
+                    prompt,
+                    max_tokens=4096,
+                    timeout=max(30, int(timeout - elapsed)),
+                )
         except Exception as e:
             logger.exception(f"[investigate] LLM呼び出しエラー: {e}")
             progress(f"LLMエラー: {e}")
