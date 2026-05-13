@@ -161,15 +161,17 @@ python3 scripts/pm_minutes_import.py \
 - `decisions`: 決定事項
 - `action_items`: アクションアイテム + `assignee`（担当者）+ `due_date`（期限）
 
-### 3a. 議事録一括アップロード・Canvas目録生成（pm_minutes_catalog.py）
+### 3a. 議事録 Box アップロード・Canvas 目録生成（pm_minutes_catalog.py）
 
-議事録DBから Markdown ファイルを一括で Slack にアップロードし、チャンネルごとの Canvas に目録（クリッカブルリンク一覧）を生成する。設定は `data/minutes_channels.yaml` で会議種別→チャンネル・Canvas ID を定義する。
+議事録DBから Markdown を Box にアップロードし、Slack Canvas に目録（Box 共有リンク一覧）を生成する。設定は `data/argus_config.yaml` の `meetings:` に会議種別ごとに `box_folder_id`・`catalog_canvas_id` を定義する。
+
+同名ファイルが既に Box フォルダに存在する場合は **バージョン更新**（`box files:versions:upload`）で上書きする。
 
 ```sh
-# 未アップロード分を一括アップロード
+# 未アップロード分を Box にアップロード
 python3 scripts/pm_minutes_catalog.py --upload
 
-# 目録Canvasを更新
+# 目録 Canvas を更新
 python3 scripts/pm_minutes_catalog.py --catalog
 
 # 両方実行
@@ -181,34 +183,36 @@ python3 scripts/pm_minutes_catalog.py --upload --meeting-name Leader_Meeting --s
 # アップロード状態一覧
 python3 scripts/pm_minutes_catalog.py --list
 
-# 確認のみ（DB保存・Slack API呼び出しなし）
+# 確認のみ（Box・Canvas 書き込みなし）
 python3 scripts/pm_minutes_catalog.py --upload --dry-run
 ```
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `--upload` | — | 未アップロードの議事録を一括アップロード |
-| `--catalog` | — | 目録Canvasを更新 |
-| `--list` | — | 全議事録のアップロード状態を一覧表示 |
+| `--upload` | — | 未アップロードの議事録を Box にアップロード |
+| `--catalog` | — | 目録 Canvas を更新 |
+| `--list` | — | アップロード状態を一覧表示 |
 | `--meeting-name NAME` | 全種別 | 特定の会議種別のみ対象 |
 | `--since YYYY-MM-DD` | なし | この日付以降のみ対象 |
-| `--force` | — | アップロード済みも再アップロード |
-| `--config PATH` | `data/minutes_channels.yaml` | YAML設定ファイル |
-| `--dry-run` | — | DB保存・Slack API呼び出しなし |
+| `--force` | — | アップロード済みも再アップロード（Box はバージョン更新） |
+| `--config PATH` | `data/argus_config.yaml` | 設定ファイル |
+| `--dry-run` | — | Box・Canvas 書き込みなし |
 | `--no-encrypt` | — | 平文モード |
 | `--output PATH` | — | ログをファイルにも保存 |
 
-**Slack トークン**: `SLACK_USER_TOKEN`（xoxp-）を使用。
+**前提**: Box CLI (`box` コマンド) がログイン済みで、アップロード先フォルダへの書き込み権限があること。Canvas 投稿に `SLACK_USER_TOKEN`（xoxp-）が必要。
 
-**アップロード管理**: 各議事録DBに `upload_log` テーブルを作成し、チャンネルごとのアップロード状態（permalink・日時）を記録。再実行時は未アップロード分のみ処理（`--force` で再アップロード可）。
+**アップロード管理**: 各議事録DBに `upload_log` テーブル（`meeting_id` PK、`box_folder_id`・`box_file_id`・`box_shared_url`・`uploaded_at`）を作成。再実行時は未アップロード分のみ処理（`--force` で既存ファイルもバージョン更新）。
 
-**minutes_channels.yaml の構造**:
+**argus_config.yaml の meetings 構造**:
 ```yaml
-channels:
-  <CHANNEL_ID>:                          # チャンネルID
-    name: "20_1_リーダ会議メンバ"         # 表示名
-    minutes: [Leader_Meeting]            # 対象会議種別
-    catalog_canvas_id: <CANVAS_ID>         # 目録Canvas ID（省略可）
+meetings:
+  Leader_Meeting:
+    pm_db: pm.db                      # pm_from_recording_auto.sh 用
+    box_folder_id: "123456789"        # 議事録 MD の Box アップロード先
+    catalog_canvas_id: <CANVAS_ID>      # 目録 Canvas ID
+  Co-design_Review_Meeting:
+    pm_db: pm-hpc.db                  # box_folder_id 未設定なら目録対象外
 ```
 
 ### 3b, 4, 8. pm.db 統合インジェスト（pm_ingest.py）
