@@ -322,6 +322,54 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, sinc
         conn.close()
 
 
+# --- HyDE クエリ拡張 ---
+
+def expand_query_hyde(query: str, n_extra: int = 2, timeout: int = 30) -> list[str]:
+    """HyDE 風クエリ拡張: 元クエリ + LLM 生成の別表現を返す。
+
+    ドキュメント本文と質問語彙が乖離していると FTS 検索でヒットしない。
+    LLM に「本文に出てきそうな別表現」を生成させて検索語彙のギャップを埋める。
+    エラー時は元クエリのみ返す（フォールバック）。
+    """
+    prompt = (
+        f"以下の検索クエリを、日本語ドキュメントの全文検索で当たりやすくするため\n"
+        f"別表現に書き換えてください。ドキュメント本文に出てきそうな語彙を使うこと。\n\n"
+        f"元クエリ: {query}\n\n"
+        f"出力フォーマット（各行1クエリ、コードブロック禁止、説明文禁止、{n_extra}行のみ）:"
+    )
+    try:
+        from cli_utils import call_argus_llm
+        response = call_argus_llm(prompt, max_tokens=200, timeout=timeout)
+        extras = [ln.strip() for ln in response.splitlines() if ln.strip()]
+        import re as _re
+        extras = [_re.sub(r"^[-*\d.）)\s]+", "", ln).strip() for ln in extras]
+        extras = [e for e in extras if e and e != query][:n_extra]
+    except Exception as e:
+        logger.warning(f"[HyDE] 拡張失敗: {e}")
+        extras = []
+    return [query] + extras
+
+
+def retrieve_chunks_hyde(
+    question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
+    since_date: str | None = None, n_extra: int = 2, max_merged: int = 60,
+) -> list[dict]:
+    """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。retrieve_chunks のラッパ。"""
+    queries = expand_query_hyde(question, n_extra=n_extra)
+    logger.info(f"[HyDE] queries={queries}")
+    seen: set = set()
+    merged: list[dict] = []
+    for q in queries:
+        for c in retrieve_chunks(q, index_db, k=k, since_date=since_date):
+            key = (c.get("source_db"), c.get("record_id"), c.get("content", "")[:80])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(c)
+    logger.info(f"[HyDE] マージ後 {len(merged)} チャンク")
+    return merged[:max_merged]
+
+
 # --- Re-ranking ---
 
 def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
@@ -716,8 +764,8 @@ def _run_qa(question: str, respond, index_name: str, index_db: Path,
                 logger.info("  構造化クエリ: 結果なし")
 
         if intent in ("text", "hybrid") or (intent == "structured" and not structured_context):
-            chunks = retrieve_chunks(question, index_db)
-            logger.info(f"  {len(chunks)} チャンク取得")
+            chunks = retrieve_chunks_hyde(question, index_db)
+            logger.info(f"  {len(chunks)} チャンク取得（HyDE拡張後）")
             chunks = rerank_chunks(question, chunks)
             logger.info(f"  re-rank後: {len(chunks)} チャンク")
 
@@ -991,6 +1039,11 @@ def build_app():
 
     def _run_mention_investigate(client, channel_id, thread_ts, question, user_id, event):
         """app_mention からの調査実行。スレッドに公開返信する。"""
+        from cli_utils import allow_rivault_fallback
+        with allow_rivault_fallback():
+            _run_mention_investigate_impl(client, channel_id, thread_ts, question, user_id, event)
+
+    def _run_mention_investigate_impl(client, channel_id, thread_ts, question, user_id, event):
         try:
             from datetime import date, timedelta
             from argus.pm_argus_agent import (
@@ -1088,12 +1141,15 @@ def build_app():
                     f"- user_id: {user_id}\n"
                     f"- 名前（display_name）: {display_name}\n"
                     f"- 姓/first token: {name_first_token}\n"
-                    f"「自分」「私」など一人称の参照はこのユーザーを指す。\n"
-                    f"メンション/名指しを検索する場合は search_mentions ツールを使うこと。\n"
-                    f"**重要**: Slack メッセージ本文での名指しは `<@{user_id}>` 形式だけでなく\n"
-                    f"「{display_name}」のような**日本語/英語名の文字列**で行われることが多い。\n"
-                    f"したがって search_mentions は **user_id と name（=「{display_name}」）の両方を同時に指定**して呼ぶこと。\n"
-                    f"どちらか一方では取りこぼす。"
+                    f"「自分」「私」「あなた宛」など一人称の参照はこのユーザーを指す。\n"
+                    f"\n"
+                    f"## ツール選択のガイド（重要）\n"
+                    f"- **質問が一人称/名指し参照を含まない場合は search_mentions を使わないこと**。\n"
+                    f"  例: 「Xのリストは？」「Yの進捗は？」→ まず search_text で本文検索する。\n"
+                    f"- search_mentions は「私宛のメンションは？」「〇〇さん宛の依頼は？」等、\n"
+                    f"  メンション対象が明確な質問のみで使う。\n"
+                    f"- search_mentions を使う場合は user_id={user_id} と name=「{display_name}」を同時指定する\n"
+                    f"  （どちらか一方では取りこぼす）。"
                 )
             seed_data = build_seed_data(ctx) + user_info + thread_context
 
@@ -1225,8 +1281,8 @@ def test_hybrid(question: str) -> None:
             print("\n[構造化クエリ結果] なし")
 
     if intent in ("text", "hybrid") or (intent == "structured" and not structured_context):
-        chunks = retrieve_chunks(question, index_db)
-        print(f"\n[FTS検索] {len(chunks)} チャンク取得")
+        chunks = retrieve_chunks_hyde(question, index_db)
+        print(f"\n[FTS検索] {len(chunks)} チャンク取得（HyDE拡張後）")
         chunks = rerank_chunks(question, chunks)
         print(f"[re-rank後] {len(chunks)} チャンク")
         for i, c in enumerate(chunks, 1):
