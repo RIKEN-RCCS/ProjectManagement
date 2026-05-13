@@ -294,6 +294,30 @@ def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int =
     )
 
 
+# RiVault を優先使用するフラグ（リクエストスコープ）。
+# デフォルト False = ローカル LLM を使う。
+# Slack メンションハンドラなど、特定の経路でのみ prefer_rivault() で True にする。
+import contextvars as _contextvars
+_prefer_rivault: _contextvars.ContextVar[bool] = _contextvars.ContextVar(
+    "prefer_rivault", default=False
+)
+
+
+class prefer_rivault:
+    """with ブロック内の call_argus_llm() で RiVault を最優先で使う。"""
+    def __enter__(self):
+        self._token = _prefer_rivault.set(True)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _prefer_rivault.reset(self._token)
+        return False
+
+
+# 後方互換エイリアス
+allow_rivault_fallback = prefer_rivault
+
+
 def call_argus_llm(
     prompt: str,
     *,
@@ -302,43 +326,40 @@ def call_argus_llm(
     system: str = "",
 ) -> str:
     """
-    Argus 用 LLM 呼び出し。gemma4（localhost）優先、未起動なら RiVault にフォールバック。
+    Argus 用 LLM 呼び出し。
 
-    優先順位:
-        1. OPENAI_API_BASE（gemma4 等のローカル vLLM）— 128K 対応済みなら十分
-        2. RIVAULT_URL（RiVault GLM-4.7-Flash）— ローカルが使えない場合のフォールバック
+    - prefer_rivault() コンテキスト内 または ARGUS_PREFER_RIVAULT=1 の場合 → RiVault を直接使用
+    - それ以外 → ローカル vLLM を使用（未起動なら RuntimeError）
     """
-    local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+    prefer_rv = _prefer_rivault.get() or os.environ.get("ARGUS_PREFER_RIVAULT") == "1"
 
-    # ローカル vLLM が起動しているか確認
+    if prefer_rv:
+        return call_rivault(prompt, timeout=timeout, max_tokens=max_tokens, system=system)
+
+    local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
     import requests as _req
     try:
         _req.get(local_base.rstrip("/v1").rstrip("/") + "/health", timeout=3)
-        local_ok = True
     except Exception:
-        local_ok = False
+        raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません。")
 
-    if local_ok:
-        model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(local_base)
-        return call_local_llm(
-            prompt,
-            model=model,
-            base_url=local_base,
-            api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
-            timeout=timeout,
-            max_tokens=max_tokens,
-            system=system,
-            no_stream=True,
-        )
-    # フォールバック: RiVault
-    print("[INFO] ローカル LLM に接続できません。RiVault にフォールバックします。", file=sys.stderr)
-    return call_rivault(prompt, timeout=timeout, max_tokens=max_tokens, system=system)
+    model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(local_base)
+    return call_local_llm(
+        prompt,
+        model=model,
+        base_url=local_base,
+        api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+        timeout=timeout,
+        max_tokens=max_tokens,
+        system=system,
+        no_stream=True,
+    )
 
 
 def call_rivault(
     prompt: str,
     *,
-    model: str = "zai-org/GLM-4.7-Flash",
+    model: str | None = None,
     timeout: int = 300,
     max_tokens: int = 8192,
     system: str = "",
@@ -348,6 +369,7 @@ def call_rivault(
     環境変数:
         RIVAULT_URL   — エンドポイント URL（末尾に /v1 を含む形式。例: https://rivault.example/v1）
         RIVAULT_TOKEN — API トークン
+        RIVAULT_MODEL — モデル名（省略時は "zai-org/GLM-4.7-Flash"）
     call_local_llm() が base_url + "/chat/completions" でURLを組み立てるため、
     RIVAULT_URL に /v1 が含まれていれば正しく /v1/chat/completions になる。
     """
@@ -357,6 +379,8 @@ def call_rivault(
             "RIVAULT_URL が未設定。source ~/.secrets/rivault_tokens.sh を実行してください"
         )
     api_key = os.environ.get("RIVAULT_TOKEN", "dummy")
+    if model is None:
+        model = os.environ.get("RIVAULT_MODEL", "zai-org/GLM-4.7-Flash")
     # GLM-4.7-Flash は thinking モデルのため enable_thinking=False で thinking を無効化する。
     # 非ストリーミングはゲートウェイタイムアウト(504)が発生するためストリーミングを使用する。
     import requests as _requests
@@ -370,8 +394,17 @@ def call_rivault(
         "messages": messages,
         "max_tokens": max_tokens,
         "stream": True,
-        "chat_template_kwargs": {"enable_thinking": False},
     }
+    # モデル別の thinking 制御
+    # - GLM-4.7-Flash: thinking.type=disabled / enable_thinking=False で無効化可能
+    # - Kimi-K2-Thinking: thinking は常時ON（無効化不可）。temperature=1.0 推奨
+    model_lower = model.lower()
+    if "kimi" in model_lower:
+        payload["temperature"] = 1.0
+    else:
+        # Z.ai GLM 系など thinking 無効化可能なモデル
+        payload["thinking"] = {"type": "disabled"}
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -379,7 +412,8 @@ def call_rivault(
     url = base_url.rstrip("/") + "/chat/completions"
     resp = _requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
     resp.raise_for_status()
-    parts: list[str] = []
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     print("[INFO] Argus 生成中 ", end="", flush=True, file=sys.stderr)
     for raw_line in resp.iter_lines():
         if not raw_line:
@@ -392,14 +426,32 @@ def call_rivault(
             break
         try:
             chunk = _json.loads(data_str)
-            token_text = (chunk.get("choices", [{}])[0].get("delta", {}).get("content") or "")
-            if token_text:
-                parts.append(token_text)
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            # Z.ai 仕様: reasoning_content と content は別フィールド
+            reasoning_text = delta.get("reasoning_content") or ""
+            content_text = delta.get("content") or ""
+            if reasoning_text:
+                reasoning_parts.append(reasoning_text)
+            if content_text:
+                content_parts.append(content_text)
                 print(".", end="", flush=True, file=sys.stderr)
         except _json.JSONDecodeError:
             continue
     print(" 完了", flush=True, file=sys.stderr)
-    return "".join(parts).strip()
+    content = "".join(content_parts).strip()
+    reasoning = "".join(reasoning_parts).strip()
+    # content が空で reasoning に全部入っていた場合（thinking 無効化が効かなかった場合）は reasoning を使う
+    if not content and reasoning:
+        print(f"[WARN] RiVault: content 空・reasoning_content のみ ({len(reasoning)} chars)。reasoning を返却",
+              file=sys.stderr)
+        content = reasoning
+        reasoning = ""
+    if reasoning:
+        print(f"[INFO] RiVault: reasoning_content={len(reasoning)} chars, content={len(content)} chars",
+              file=sys.stderr)
+    # 念のため <think> タグ混入にも対応
+    stripped = strip_think_blocks(content)
+    return stripped
 
 
 # --------------------------------------------------------------------------- #
@@ -522,7 +574,7 @@ def retrieve_knowledge_for_extraction(
     try:
         # pm_qa_server.py から検索関数をインポート（scripts/argus/ 配下）
         sys.path.insert(0, str(Path(__file__).resolve().parent / "argus"))
-        from pm_qa_server import retrieve_chunks, rerank_chunks, format_context
+        from pm_qa_server import retrieve_chunks_hyde, rerank_chunks, format_context
 
         # enrich/knowledge_context.py からキーワード抽出をインポート
         sys.path.insert(0, str(Path(__file__).resolve().parent / "enrich"))
@@ -537,8 +589,8 @@ def retrieve_knowledge_for_extraction(
 
         logger.info(f"ナレッジ検索: {cutoff_date} 以降, キーワード={search_query[:100]}")
 
-        # FTS5検索（日付フィルタ付き）
-        chunks = retrieve_chunks(search_query, qa_db_path, k=20, since_date=cutoff_date)
+        # FTS5検索（HyDE クエリ拡張 + 日付フィルタ付き）
+        chunks = retrieve_chunks_hyde(search_query, qa_db_path, k=20, since_date=cutoff_date)
         if not chunks:
             logger.debug("ナレッジ検索: 該当なし")
             return "（該当する過去議論なし）"

@@ -264,14 +264,15 @@ def _tool_search_decisions(args: dict, ctx: AgentContext) -> str:
 
 
 def _tool_search_text(args: dict, ctx: AgentContext) -> str:
-    from pm_qa_server import retrieve_chunks, rerank_chunks, format_context
+    from pm_qa_server import retrieve_chunks_hyde, rerank_chunks, format_context
     query = args.get("query", "")
     if not query:
         return "（検索クエリが空です）"
-    chunks = retrieve_chunks(query, ctx.index_db, k=30)
-    if not chunks:
+    merged = retrieve_chunks_hyde(query, ctx.index_db, k=30)
+    if not merged:
         return f"（「{query}」に一致する情報なし）"
-    reranked = rerank_chunks(query, chunks)
+    # re-rank は元クエリで実施（意図のブレを避けるため）
+    reranked = rerank_chunks(query, merged)
     return format_context(reranked)
 
 
@@ -858,6 +859,7 @@ def run_agent(
         prompt = _serialize_conversation(system_prompt, messages)
         logger.info(f"[investigate] Step {step}/{max_steps}: LLM呼び出し ({len(prompt)} chars)")
 
+        llm_t0 = time.time()
         try:
             response = call_argus_llm(
                 prompt,
@@ -868,6 +870,15 @@ def run_agent(
             logger.exception(f"[investigate] LLM呼び出しエラー: {e}")
             progress(f"LLMエラー: {e}")
             break
+        llm_elapsed = time.time() - llm_t0
+        logger.info(
+            f"[investigate] Step {step}/{max_steps}: LLM応答 "
+            f"{len(response)} chars, {llm_elapsed:.1f}s"
+        )
+        logger.info(
+            f"[investigate] Step {step}/{max_steps} 生成内容:\n"
+            f"----8<---- raw response ----8<----\n{response}\n----8<---- end ----8<----"
+        )
 
         final = parse_final_answer(response)
         if final:
@@ -906,6 +917,17 @@ def run_agent(
                     f"（同一引数での再呼び出し。前回と同じ結果です。別の引数を試すか <final_answer> で回答してください）"
                 )
                 continue
+            # 同一ツール名を3回以上呼んでいれば打ち切り（引数違いでも）
+            same_name_count = sum(1 for k in call_history if f'"name": "{tc["name"]}"' in k)
+            if same_name_count >= 2:
+                result_parts.append(
+                    f"[Tool Result: {tc['name']}]\n"
+                    f"（同一ツール {tc['name']} が既に{same_name_count}回呼ばれています。"
+                    f"**別のツール**を試すか、これまでの結果で <final_answer> を出力してください。"
+                    f"特に `search_text` はまだ試していなければ最優先で使うこと。）"
+                )
+                call_history.append(call_key)
+                continue
             call_history.append(call_key)
 
             tool_name = tc["name"]
@@ -913,7 +935,13 @@ def run_agent(
             args_desc = ", ".join(f"{k}={v}" for k, v in tool_args.items()) if tool_args else ""
             progress(f"Step {step}/{max_steps}: {tool_name}({args_desc})")
 
+            tool_t0 = time.time()
             result = execute_tool(tool_name, tool_args, ctx)
+            tool_elapsed = time.time() - tool_t0
+            logger.info(
+                f"[investigate] Step {step}/{max_steps} tool={tool_name}"
+                f" args={tool_args} result_len={len(str(result))} chars, {tool_elapsed:.1f}s"
+            )
             result_parts.append(f"[Tool Result: {tool_name}]\n{result}")
 
         messages.append({"role": "user", "content": "\n\n".join(result_parts)})
