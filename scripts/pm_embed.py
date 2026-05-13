@@ -421,9 +421,21 @@ def index_docs(
     chunk_rows: list[dict] = []
     now = now_iso()
 
-    for row in src_conn.execute(
-        "SELECT id, title, type, description, shared_by, shared_at, url, related_topic, permalink FROM documents"
-    ):
+    # relevance='noise' は索引から除外（未判定・core・related・unknown は含める）
+    try:
+        query = (
+            "SELECT id, title, type, description, shared_by, shared_at, url, "
+            "related_topic, permalink FROM documents "
+            "WHERE COALESCE(relevance,'') != 'noise'"
+        )
+        cursor = src_conn.execute(query)
+    except sqlite3.OperationalError:
+        # relevance 列が未導入の古いDB
+        cursor = src_conn.execute(
+            "SELECT id, title, type, description, shared_by, shared_at, url, "
+            "related_topic, permalink FROM documents"
+        )
+    for row in cursor:
         text_parts = []
         if row["title"]:
             text_parts.append(row["title"])

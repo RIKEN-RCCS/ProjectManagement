@@ -85,7 +85,10 @@ CREATE TABLE IF NOT EXISTS documents (
     channel_id  TEXT,
     permalink   TEXT,
     related_topic TEXT,
-    extracted_at TEXT NOT NULL
+    extracted_at TEXT NOT NULL,
+    relevance TEXT,
+    relevance_reason TEXT,
+    relevance_judged_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS extract_state (

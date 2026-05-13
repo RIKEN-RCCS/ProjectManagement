@@ -348,23 +348,54 @@ def _convert_boxnote(path: Path) -> tuple[str, str]:
 
 
 def _extract_boxnote_text(data: dict) -> str:
-    """BOX Note JSON からテキストを再帰的に抽出する。"""
+    """BOX Note JSON (ProseMirror) から本文テキストのみを抽出する。
+
+    BoxNote の構造:
+      { "type": "doc", "content": [ {"type": "paragraph", "content": [ {"type":"text","text":"本文"} ] }, ... ] }
+
+    - type="text" のノードの "text" フィールドのみを本文として採用
+    - paragraph/heading/list_item/bullet_list/ordered_list の境界で改行を挿入
+    - author_id・mark・attrs 等の構造メタは無視
+    """
     parts: list[str] = []
 
+    _BLOCK_TYPES = {
+        "paragraph", "heading", "list_item",
+        "bullet_list", "ordered_list", "blockquote", "code_block",
+    }
+
     def _walk(node):
-        if isinstance(node, str):
-            parts.append(node)
-        elif isinstance(node, dict):
-            if "text" in node:
-                parts.append(str(node["text"]))
+        if isinstance(node, dict):
+            node_type = node.get("type")
+            # テキストノード: text フィールドのみを本文として採用
+            if node_type == "text":
+                txt = node.get("text")
+                if isinstance(txt, str):
+                    parts.append(txt)
+                return  # text ノードは葉なのでこれ以上降りない
+            # ProseMirror ブロックノード: content を再帰、終わりに改行
+            if "content" in node and isinstance(node["content"], list):
+                for child in node["content"]:
+                    _walk(child)
+                if node_type in _BLOCK_TYPES:
+                    parts.append("\n")
+                return
+            # ラッパー（{"doc": {...}} や {"version":..., "doc":{...}} 等）:
+            # dict / list の値のみ降りる（文字列・数値・真偽値はメタなので無視）
             for v in node.values():
-                _walk(v)
+                if isinstance(v, (dict, list)):
+                    _walk(v)
         elif isinstance(node, list):
             for item in node:
                 _walk(item)
+        # str / int / その他は無視（構造メタの値を拾わない）
 
     _walk(data)
-    return "\n".join(parts)
+    # 連続改行を圧縮
+    import re as _re
+    text = "".join(parts)
+    text = _re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
 
 
 # ---------------------------------------------------------------------------
