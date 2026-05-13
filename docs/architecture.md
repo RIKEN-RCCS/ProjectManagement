@@ -113,7 +113,7 @@ pm.db の新規 decisions/action_items
 | スクリプト | 役割 |
 |---|---|
 | `pm_minutes_import.py` | 議事録 Markdown → `data/minutes/{kind}.db` |
-| `pm_minutes_catalog.py` | 議事録を Slack 投稿 + Canvas 目録生成 |
+| `pm_minutes_catalog.py` | 議事録を Box にアップロード + Canvas 目録生成 |
 | `pm_document_extract.py` | Slack投稿中のBOXリンク → `docs_*.db`（メタデータ）|
 | `pm_web_fetch.py` | 外部Webサイト → `web_articles.db` |
 | `generate_minutes_local.py` | 文字起こし → 議事録（ローカルLLM。`--vtt`・`--slide-context` 対応）|
@@ -135,7 +135,7 @@ scripts/
 │   │   ├── goals.py                   goals.yaml → pm.db プラグイン
 │   │   └── ingest_plugin.py           プラグインインタフェース
 │   ├── pm_minutes_import.py           議事録MD → 議事録DB
-│   ├── pm_minutes_catalog.py          議事録 Slack 投稿
+│   ├── pm_minutes_catalog.py          議事録 Box アップロード・Canvas 目録
 │   ├── pm_document_extract.py         BOXリンク → docs_*.db
 │   └── pm_web_fetch.py                外部Web → web_articles.db
 │

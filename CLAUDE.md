@@ -79,7 +79,7 @@ slack/
 ├── scripts/                         # スクリプト一式
 │   ├── slack_pipeline.py            # Slack差分取得（SDK経由）。新規・更新スレッドのみ取得してDBに保存。--skip-fetch でAPI取得スキップ、--list でスレッド一覧表示
 │   ├── pm_minutes_import.py         # 議事録 → data/minutes/{kind}.db（詳細議事録・担当者・期限を構造化保存）。--export でDB内容をMarkdownにエクスポート、--no-llm で人間修正済みMarkdownをLLM不使用で再インポート。--post-to-slack でSlack投稿。--delete で削除
-│   ├── pm_minutes_catalog.py        # 議事録一括アップロード・Canvas目録生成（minutes_channels.yaml で会議種別→チャンネルを定義）
+│   ├── pm_minutes_catalog.py        # 議事録を Box にアップロードし、Canvas 目録を更新（argus_config.yaml の meetings: に box_folder_id・catalog_canvas_id を定義）
 │   ├── ingest/                      # [Pass 1] データ取り込みプラグイン一式
 │   │   ├── pm_ingest.py             #   統合ランナー（`pm_ingest.py --list` で一覧）
 │   │   ├── slack.py                 #   Slack DB生メッセージ → 決定事項・アクションアイテム抽出
@@ -136,8 +136,7 @@ slack/
     ├── docs_*.db                     # ドキュメントレジストリDB（BOXリンクのメタデータ、暗号化）
     ├── web_articles.db              # 外部Web記事DB（平文sqlite3、公開情報なので暗号化不要）
     ├── web_sources.yaml             # 外部Webソース定義（URL・キーワードフィルタ・対象インデックス）
-    ├── minutes_channels.yaml         # 議事録アップロード先チャンネル・目録Canvas定義（pm_minutes_catalog.py 用）
-    ├── argus_config.yaml            # Argus 統合設定（インデックス定義・チャンネルマッピング・pm.dbパス。旧 qa_config.yaml）
+    ├── argus_config.yaml            # Argus 統合設定（インデックス定義・チャンネルマッピング・pm.dbパス・会議ごとの Box/Canvas ID）
     ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。議事録・Slack・docs・web記事を含む）
     ├── secretary_canvas_id.txt      # Argus の Canvas 投稿先ID
     ├── patrol_config.yaml           # Patrol Agent 設定（検出器の有効/無効・閾値・通知チャンネル）
