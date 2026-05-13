@@ -145,10 +145,6 @@ Output format (EXACTLY 3 columns — do NOT add extra columns):
 |---|---|---|
 | （名前または未定） | （タスクの内容・背景・成果物を2〜3文で） | （期限または未定） |
 
-## 過去の関連議論・決定事項（参考情報）
-
-{knowledge_context}
-
 ## Participant List
 {claude_md_context}
 {slide_context_block}
@@ -532,11 +528,8 @@ def generate_minutes(
     #     top_k=5,
     #     since_days=90,
     # )
-    knowledge_context = ""  # 出典機能を停止
-
     decisions_prompt = DECISIONS_TEMPLATE.format(
         claude_md_context=claude_md_context,
-        knowledge_context=knowledge_context,  # 追加
         transcript=decisions_input,
         vtt_speaker_instructions=vtt_instructions,
         slide_context_block=slide_context_block,
