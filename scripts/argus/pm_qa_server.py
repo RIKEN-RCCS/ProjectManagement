@@ -365,6 +365,53 @@ def extract_search_keywords(query: str, timeout: int = 30) -> str:
         return query
 
 
+# --- 鮮度スコアリング ---
+
+# 鮮度の半減期（日数）。180 日 = 約 6 ヶ月で recency_score が 0.5 になる
+_RECENCY_HALF_LIFE_DAYS = 180.0
+# 統合スコアでの鮮度重み（0=BM25 のみ、1=鮮度のみ）
+_RECENCY_WEIGHT = 0.4
+
+
+def _recency_score(held_at: str | None, today=None) -> float:
+    """指数減衰での鮮度スコア（0.0〜1.0、新しいほど 1 に近い）。
+
+    held_at が不明な場合は中央値 0.5 を返す。
+    half_life_days 経過で 0.5、その2倍で 0.25、と指数減衰する。
+    """
+    import math
+    from datetime import date as _date
+    if today is None:
+        today = _date.today()
+    if not held_at:
+        return 0.5
+    try:
+        d = _date.fromisoformat(str(held_at)[:10])
+    except (ValueError, TypeError):
+        return 0.5
+    age_days = max(0, (today - d).days)
+    return math.exp(-age_days / _RECENCY_HALF_LIFE_DAYS * math.log(2))
+
+
+def _combined_score(chunk: dict, today=None) -> float:
+    """BM25 ランクと鮮度スコアを加重和で統合（高いほど良い）。
+
+    FTS5 の rank は負の値で「小さいほど（より負ほど）良い」ため正規化する。
+    """
+    raw_rank = chunk.get("rank")
+    if raw_rank is None:
+        bm25_norm = 0.5
+    else:
+        # rank は通常 -10〜0 の範囲。-rank を取って 1/(1+x) で 0..1 に正規化。
+        try:
+            r = -float(raw_rank)
+            bm25_norm = 1.0 / (1.0 + max(0.0, r) * 0.1)
+        except (TypeError, ValueError):
+            bm25_norm = 0.5
+    rec = _recency_score(chunk.get("held_at"), today)
+    return (1.0 - _RECENCY_WEIGHT) * bm25_norm + _RECENCY_WEIGHT * rec
+
+
 # --- HyDE クエリ拡張 ---
 
 def expand_query_hyde(query: str, n_extra: int = 2, timeout: int = 30) -> list[str]:
@@ -422,6 +469,10 @@ def retrieve_chunks_hyde(
             seen.add(key)
             merged.append(c)
     logger.info(f"[HyDE] マージ後 {len(merged)} チャンク")
+    # 鮮度を加味した統合スコアで再ソート（新しい情報を優先）
+    from datetime import date as _date
+    today = _date.today()
+    merged.sort(key=lambda c: _combined_score(c, today), reverse=True)
     return merged[:max_merged]
 
 
