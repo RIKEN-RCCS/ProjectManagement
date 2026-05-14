@@ -322,6 +322,49 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, sinc
         conn.close()
 
 
+# --- クエリ意図抽出（メタ語除去）---
+
+def extract_search_keywords(query: str, timeout: int = 30) -> str:
+    """ユーザー質問から FTS 検索に使うべきキーワードだけを抽出する。
+
+    「議論」「推移」「経緯」「整理して」のようなメタ要求語・指示動詞は
+    検索キーワードとして AND 条件に入ると本来欲しい文書を弾いてしまう。
+    LLM で純粋な検索対象キーワードだけを残す。
+
+    エラー時は元クエリをそのまま返す（フォールバック）。
+    """
+    prompt = (
+        "あなたは検索クエリの整理役です。\n"
+        "ユーザーの質問から、FTS全文検索で実際に当てるべき「検索対象キーワード」"
+        "だけをスペース区切りで抽出してください。\n\n"
+        "除外する語の例:\n"
+        "- メタ要求語: 議論, 検討, 討議, 進捗, 経緯, 推移, 動向, 状況, 内容\n"
+        "- 指示動詞: 整理, まとめ, 要約, 教えて, 知りたい, 説明, 整理して\n"
+        "- 一般的な疑問詞: いつ, どこ, なぜ, どう, どのように\n"
+        "- 時間範囲表現: 最近, 直近, 過去, 今, 現在\n\n"
+        "残すべき語:\n"
+        "- 固有名詞・技術用語（スケールアウトネットワーク, MONAKA-X, 帯域幅, FP8 等）\n"
+        "- 人名・組織名（富士通, NVIDIA, 西澤 等）\n"
+        "- 略語・型番（NVL72, M3, SubWG3 等）\n\n"
+        f"質問: {query}\n\n"
+        "出力（キーワードをスペース区切り、説明文・コードブロック禁止、1行のみ）:"
+    )
+    try:
+        from cli_utils import call_argus_llm
+        response = call_argus_llm(prompt, max_tokens=100, timeout=timeout)
+        # 1 行目だけ取り、余計な記号を除去
+        line = response.strip().splitlines()[0].strip() if response.strip() else ""
+        import re as _re
+        line = _re.sub(r"^[-*\d.）)\s]+", "", line).strip()
+        # 出力が空・元クエリと同一・極端に短い（記号のみ等）場合はフォールバック
+        if not line or len(line) < 2:
+            return query
+        return line
+    except Exception as e:
+        logger.warning(f"[KeywordExtract] 失敗: {e}")
+        return query
+
+
 # --- HyDE クエリ拡張 ---
 
 def expand_query_hyde(query: str, n_extra: int = 2, timeout: int = 30) -> list[str]:
@@ -360,8 +403,14 @@ def retrieve_chunks_hyde(
     question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     since_date: str | None = None, n_extra: int = 2, max_merged: int = 60,
 ) -> list[dict]:
-    """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。retrieve_chunks のラッパ。"""
-    queries = expand_query_hyde(question, n_extra=n_extra)
+    """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。retrieve_chunks のラッパ。
+
+    前段で意図抽出（メタ要求語・指示動詞の除去）を行ってから HyDE で言い換えを生成する。
+    """
+    cleaned = extract_search_keywords(question)
+    if cleaned != question:
+        logger.info(f"[KeywordExtract] '{question}' → '{cleaned}'")
+    queries = expand_query_hyde(cleaned, n_extra=n_extra)
     logger.info(f"[HyDE] queries={queries}")
     seen: set = set()
     merged: list[dict] = []
