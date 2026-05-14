@@ -290,6 +290,9 @@ def _tool_search_text(args: dict, ctx: AgentContext) -> str:
             ref_str = f" | <{ref}|リンク>"
         elif source_type == "box_document" and ref:
             ref_str = f" | <{ref}|Boxで開く>"
+            slack_links = _fetch_slack_references_for_box(chunk.get("record_id") or "")
+            if slack_links:
+                ref_str += " / Slack共有: " + ", ".join(slack_links)
         else:
             ref_str = f" | {ref}" if ref else ""
         lines.append(f"[{idx}] 出典: {label}{ref_str}")
@@ -980,6 +983,44 @@ def run_agent(
     return "調査が完了しませんでした。より具体的な質問で再度お試しください。"
 
 
+_SLACK_REF_CACHE: dict[str, list[str]] = {}
+
+
+def _fetch_slack_references_for_box(box_file_id: str, limit: int = 2) -> list[str]:
+    """box_file_id に紐づく Slack 共有パーマリンクを最大 limit 件返す（新しい順）。"""
+    if not box_file_id:
+        return []
+    if box_file_id in _SLACK_REF_CACHE:
+        return _SLACK_REF_CACHE[box_file_id]
+    try:
+        from db_utils import open_db
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent.parent / "data" / "box_docs.db"
+        if not path.exists():
+            _SLACK_REF_CACHE[box_file_id] = []
+            return []
+        conn = open_db(path, encrypt=True)
+        rows = conn.execute(
+            "SELECT slack_permalink, shared_at, shared_by FROM slack_references"
+            " WHERE box_file_id=? AND slack_permalink IS NOT NULL"
+            " ORDER BY shared_at DESC LIMIT ?",
+            (box_file_id, limit),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        _SLACK_REF_CACHE[box_file_id] = []
+        return []
+    out = []
+    for r in rows:
+        link = r["slack_permalink"]
+        date = (r["shared_at"] or "")[:10]
+        by = r["shared_by"] or ""
+        label_bits = " ".join(b for b in [date, by] if b)
+        out.append(f"<{link}|{label_bits or 'Slack'}>")
+    _SLACK_REF_CACHE[box_file_id] = out
+    return out
+
+
 def _append_sources_section(answer: str, ctx: AgentContext) -> str:
     """ctx.cited_chunks にあるチャンクから「## 出典」セクションを生成して回答末尾に付与する。
 
@@ -1006,6 +1047,9 @@ def _append_sources_section(answer: str, ctx: AgentContext) -> str:
             link = f"<{ref}|リンク>"
         elif source_type == "box_document" and ref:
             link = f"<{ref}|Boxで開く>"
+            slack_links = _fetch_slack_references_for_box(chunk.get("record_id") or "")
+            if slack_links:
+                link = link + " / Slack共有: " + ", ".join(slack_links)
         elif source_type == "minutes_content" and ref:
             held_at = chunk.get("held_at") or ""
             link = f"{held_at} {ref}".strip()

@@ -2,22 +2,24 @@
 """
 pm_document_screen.py
 
-docs_*.db のドキュメントに対し、ローカルLLMで relevance (core/related/noise)
-を判定し、CSVでエクスポート・人間精査後にインポートするスクリーニングツール。
+box_docs.db.box_files に対し、本文（doc_content.content_md）の冒頭を
+ローカルLLMで読み取り、relevance (core/related/noise/unknown) を判定する
+スクリーニングツール。判定結果は box_files.relevance に保存され、
+pm_embed.py が relevance='noise' のファイルを索引から除外する。
 
-relevance 列:
+relevance:
   core    — 富岳NEXTプロジェクトの本質的ナレッジ（設計資料・公式報告書・意思決定資料等）
   related — 関連するが本質ではない（補助資料・参考情報・過去事例等）
   noise   — プロジェクトと無関係 / 索引化するとノイズになる（雑談添付・個人メモ等）
   unknown — 判定不能（情報不足）
 
 Usage:
-  # メタデータのみでLLM判定（全 docs_*.db 対象、未判定のみ）
+  # 本文ベースでLLM判定（未判定のみ）
   python3 scripts/pm_document_screen.py --judge
 
-  # 特定インデックスのみ / 全件再判定
-  python3 scripts/pm_document_screen.py --judge --index-name pm
+  # 全件再判定 / 特定 index_name のみ
   python3 scripts/pm_document_screen.py --judge --force
+  python3 scripts/pm_document_screen.py --judge --index-name pm
 
   # CSVにエクスポート（精査用、noise を先頭に）
   python3 scripts/pm_document_screen.py --export --output screen.csv
@@ -45,18 +47,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cli_utils import add_no_encrypt_arg, call_local_llm
 from db_utils import open_db
 
-import yaml
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-ARGUS_CONFIG = DATA_DIR / "argus_config.yaml"
-QA_CONFIG_LEGACY = DATA_DIR / "qa_config.yaml"
+BOX_DOCS_DB = DATA_DIR / "box_docs.db"
 
 VALID_RELEVANCE = {"core", "related", "noise", "unknown"}
-BATCH_SIZE = 10
+BATCH_SIZE = 5  # 本文を渡すので少なめ
+CONTENT_PREVIEW_CHARS = 2500
 
 JUDGE_PROMPT = """あなたは「富岳NEXT」プロジェクト（次世代スーパーコンピュータ開発）の
-ナレッジマネジメント担当です。Slackで共有されたBOXドキュメントのメタデータを見て、
+ナレッジマネジメント担当です。Box に格納されたドキュメントの本文冒頭を見て、
 RAG検索インデックスに残すべきか判定してください。
 
 # プロジェクト文脈
@@ -67,13 +67,13 @@ RAG検索インデックスに残すべきか判定してください。
 # 判定カテゴリ
 - core    : プロジェクトの本質的ナレッジ。設計資料・公式報告書・意思決定資料・議事録・技術仕様
 - related : 関連するが本質ではない。参考資料・過去事例・外部文献・補助資料
-- noise   : 索引化すべきでない。雑談添付・個人メモ・関係ない資料・壊れたリンク・情報不足で意味不明
-- unknown : タイトル等が欠損・不明瞭で判定不能
+- noise   : 索引化すべきでない。雑談添付・個人メモ・関係ない資料・壊れたファイル・情報不足で意味不明
+- unknown : 本文が空・抽出失敗・短すぎて判定不能
 
 # 出力形式
 各ドキュメントに対し次の JSON 配列を出力（順序は入力と同じ）:
 [
-  {{"id": <id>, "relevance": "core|related|noise|unknown", "reason": "<1行の根拠>"}},
+  {{"box_file_id": "<id>", "relevance": "core|related|noise|unknown", "reason": "<1行の根拠>"}},
   ...
 ]
 
@@ -83,49 +83,19 @@ RAG検索インデックスに残すべきか判定してください。
 JSON配列のみ出力。コードブロック記法不要。"""
 
 
-def load_config() -> dict:
-    path = ARGUS_CONFIG if ARGUS_CONFIG.exists() else QA_CONFIG_LEGACY
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def get_docs_db_paths(index_name: str | None) -> list[tuple[str, Path]]:
-    config = load_config()
-    indices = config.get("indices", {})
-    names = [index_name] if index_name else list(indices.keys())
-    result = []
-    for n in names:
-        p = DATA_DIR / f"docs_{n}.db"
-        if p.exists():
-            result.append((n, p))
-    return result
-
-
-def ensure_relevance_columns(conn) -> None:
-    cur = conn.execute("PRAGMA table_info(documents)")
-    cols = {r[1] for r in cur.fetchall()}
-    for col, decl in [
-        ("relevance", "TEXT"),
-        ("relevance_reason", "TEXT"),
-        ("relevance_judged_at", "TEXT"),
-    ]:
-        if col not in cols:
-            conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {decl}")
-    conn.commit()
-
-
 def format_doc_for_prompt(row) -> str:
-    parts = [f"id={row['id']}"]
-    parts.append(f"title={row['title'] or '(不明)'}")
-    if row["type"]:
-        parts.append(f"type={row['type']}")
-    if row["description"]:
-        parts.append(f"desc={row['description'][:200]}")
-    if row["shared_by"]:
-        parts.append(f"shared_by={row['shared_by']}")
-    if row["related_topic"]:
-        parts.append(f"topic={row['related_topic']}")
-    return " | ".join(parts)
+    name = row["name"] or "(名前なし)"
+    folder = row["folder_path"] or ""
+    content = (row["content_md"] or "").strip()[:CONTENT_PREVIEW_CHARS]
+    parts = [f"=== box_file_id={row['box_file_id']} ==="]
+    parts.append(f"path: {folder}/{name}" if folder else f"name: {name}")
+    if row["file_format"]:
+        parts.append(f"format: {row['file_format']}")
+    if content:
+        parts.append(f"本文(冒頭{CONTENT_PREVIEW_CHARS}字):\n{content}")
+    else:
+        parts.append("(本文なし)")
+    return "\n".join(parts)
 
 
 def _get_llm_params():
@@ -140,17 +110,17 @@ def _get_llm_params():
     return detect_vllm_model(base_url), base_url, api_key
 
 
-def judge_batch(rows: list, logger) -> dict[int, tuple[str, str]]:
-    """Returns {id: (relevance, reason)}."""
+def judge_batch(rows: list, logger) -> dict[str, tuple[str, str]]:
+    """Returns {box_file_id: (relevance, reason)}."""
     if not rows:
         return {}
-    doc_lines = "\n".join(format_doc_for_prompt(r) for r in rows)
+    doc_lines = "\n\n".join(format_doc_for_prompt(r) for r in rows)
     prompt = JUDGE_PROMPT.format(documents=doc_lines)
     try:
         model, base_url, api_key = _get_llm_params()
         result = call_local_llm(
             prompt, model=model, base_url=base_url, api_key=api_key,
-            max_tokens=2048, timeout=180,
+            max_tokens=2048, timeout=300,
         )
     except Exception as e:
         logger.error(f"LLMエラー: {e}")
@@ -176,118 +146,126 @@ def judge_batch(rows: list, logger) -> dict[int, tuple[str, str]]:
         logger.error(f"JSONパース失敗: {result[:200]}")
         return {}
 
-    out: dict[int, tuple[str, str]] = {}
+    out: dict[str, tuple[str, str]] = {}
     for item in parsed:
         if not isinstance(item, dict):
             continue
-        try:
-            doc_id = int(item.get("id"))
-        except (TypeError, ValueError):
+        fid = str(item.get("box_file_id") or "").strip()
+        if not fid:
             continue
         rel = str(item.get("relevance", "unknown")).lower().strip()
         if rel not in VALID_RELEVANCE:
             rel = "unknown"
         reason = str(item.get("reason", ""))[:300]
-        out[doc_id] = (rel, reason)
+        out[fid] = (rel, reason)
     return out
 
 
 def cmd_judge(args, logger) -> None:
-    targets = get_docs_db_paths(args.index_name)
-    if not targets:
-        print("対象DBなし")
+    if not BOX_DOCS_DB.exists():
+        print(f"box_docs.db が存在しません: {BOX_DOCS_DB}")
         return
 
+    conn = open_db(BOX_DOCS_DB, encrypt=not args.no_encrypt)
+
+    where = ["dc.content_md IS NOT NULL"]
+    if not args.force:
+        where.append("(bf.relevance IS NULL OR bf.relevance = '')")
+    if args.index_name:
+        where.append(f"bf.index_name LIKE '%\"{args.index_name}\"%'")
+    where_sql = " AND ".join(where)
+
+    rows = conn.execute(
+        f"SELECT bf.box_file_id, bf.name, bf.folder_path, bf.file_format,"
+        f" dc.content_md"
+        f" FROM box_files bf JOIN doc_content dc"
+        f" ON bf.box_file_id = dc.box_file_id"
+        f" WHERE {where_sql}"
+        f" ORDER BY bf.box_file_id"
+    ).fetchall()
+
+    if not rows:
+        print("判定対象なし")
+        conn.close()
+        return
+
+    print(f"判定対象: {len(rows)} 件")
+    now = datetime.now().isoformat()
     total_updated = 0
-    for idx_name, db_path in targets:
-        conn = open_db(db_path, encrypt=not args.no_encrypt)
-        ensure_relevance_columns(conn)
+    processed = 0
 
-        where = "" if args.force else "WHERE relevance IS NULL"
-        rows = conn.execute(
-            f"SELECT id, title, type, description, shared_by, related_topic "
-            f"FROM documents {where} ORDER BY id"
-        ).fetchall()
+    for start in range(0, len(rows), BATCH_SIZE):
+        batch = rows[start : start + BATCH_SIZE]
+        verdicts = judge_batch(batch, logger)
+        processed += len(batch)
+        print(f"  [{processed}/{len(rows)}] バッチ処理 (判定: {len(verdicts)}/{len(batch)})")
 
-        if not rows:
-            print(f"[{idx_name}] 判定対象なし")
-            conn.close()
+        if args.dry_run:
+            for r in batch:
+                v = verdicts.get(r["box_file_id"])
+                if v:
+                    print(f"    {r['box_file_id']} {v[0]:7s} {(r['name'] or '')[:50]} — {v[1][:60]}")
             continue
 
-        print(f"[{idx_name}] 判定対象: {len(rows)} 件")
-        now = datetime.now().isoformat()
-        processed = 0
+        for fid, (rel, reason) in verdicts.items():
+            conn.execute(
+                "UPDATE box_files SET relevance=?, relevance_reason=?,"
+                " relevance_judged_at=? WHERE box_file_id=?",
+                (rel, reason, now, fid),
+            )
+            total_updated += 1
+        conn.commit()
 
-        for start in range(0, len(rows), BATCH_SIZE):
-            batch = rows[start : start + BATCH_SIZE]
-            verdicts = judge_batch(batch, logger)
-            processed += len(batch)
-            print(f"  [{processed}/{len(rows)}] {idx_name} バッチ処理 "
-                  f"(判定: {len(verdicts)}/{len(batch)})")
-
-            if args.dry_run:
-                for r in batch:
-                    v = verdicts.get(r["id"])
-                    if v:
-                        print(f"    id={r['id']} {v[0]:7s} {r['title'][:50]} — {v[1][:60]}")
-                continue
-
-            for doc_id, (rel, reason) in verdicts.items():
-                conn.execute(
-                    "UPDATE documents SET relevance=?, relevance_reason=?, "
-                    "relevance_judged_at=? WHERE id=?",
-                    (rel, reason, now, doc_id),
-                )
-                total_updated += 1
-            conn.commit()
-
-        conn.close()
-
+    conn.close()
     print(f"\n完了: {total_updated} 件更新" + (" (dry-run)" if args.dry_run else ""))
 
 
 def cmd_export(args, logger) -> None:
-    targets = get_docs_db_paths(args.index_name)
-    rows_all: list[dict] = []
-    for idx_name, db_path in targets:
-        conn = open_db(db_path, encrypt=not args.no_encrypt)
-        ensure_relevance_columns(conn)
-        for r in conn.execute(
-            "SELECT id, title, type, description, shared_by, shared_at, "
-            "channel_id, related_topic, url, relevance, relevance_reason "
-            "FROM documents ORDER BY id"
-        ):
-            rows_all.append({
-                "index_name": idx_name,
-                "id": r["id"],
-                "relevance": r["relevance"] or "unknown",
-                "final_relevance": r["relevance"] or "unknown",
-                "relevance_reason": r["relevance_reason"] or "",
-                "title": r["title"] or "",
-                "type": r["type"] or "",
-                "shared_by": r["shared_by"] or "",
-                "shared_at": r["shared_at"] or "",
-                "channel_id": r["channel_id"] or "",
-                "related_topic": r["related_topic"] or "",
-                "description": (r["description"] or "")[:300],
-                "url": r["url"] or "",
-            })
-        conn.close()
+    if not BOX_DOCS_DB.exists():
+        print(f"box_docs.db が存在しません: {BOX_DOCS_DB}")
+        return
+    conn = open_db(BOX_DOCS_DB, encrypt=not args.no_encrypt)
 
-    # noise を先頭にソート → unknown → related → core
-    order = {"noise": 0, "unknown": 1, "related": 2, "core": 3}
-    rows_all.sort(key=lambda x: (order.get(x["relevance"], 9), x["index_name"], x["id"]))
+    where = ""
+    params: list = []
+    if args.index_name:
+        where = "WHERE index_name LIKE ?"
+        params = [f'%"{args.index_name}"%']
+    rows = conn.execute(
+        f"SELECT box_file_id, name, folder_path, file_format, modified_at,"
+        f" index_name, source_name, relevance, relevance_reason"
+        f" FROM box_files {where} ORDER BY relevance, name", params
+    ).fetchall()
+    conn.close()
 
-    fields = ["index_name", "id", "relevance", "final_relevance", "relevance_reason",
-              "title", "type", "shared_by", "shared_at", "channel_id",
-              "related_topic", "description", "url"]
+    out_rows = []
+    for r in rows:
+        out_rows.append({
+            "box_file_id": r["box_file_id"],
+            "relevance": r["relevance"] or "",
+            "final_relevance": r["relevance"] or "",
+            "relevance_reason": r["relevance_reason"] or "",
+            "name": r["name"] or "",
+            "folder_path": r["folder_path"] or "",
+            "file_format": r["file_format"] or "",
+            "modified_at": r["modified_at"] or "",
+            "index_name": r["index_name"] or "",
+            "source_name": r["source_name"] or "",
+        })
+
+    order = {"noise": 0, "unknown": 1, "": 2, "related": 3, "core": 4}
+    out_rows.sort(key=lambda x: (order.get(x["relevance"], 9), x["name"]))
+
+    fields = ["box_file_id", "relevance", "final_relevance", "relevance_reason",
+              "name", "folder_path", "file_format", "modified_at",
+              "index_name", "source_name"]
     out_path = Path(args.output)
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
-        for r in rows_all:
+        for r in out_rows:
             w.writerow(r)
-    print(f"書き出し完了: {out_path} ({len(rows_all)} 行)")
+    print(f"書き出し完了: {out_path} ({len(out_rows)} 行)")
 
 
 def cmd_import(args, logger) -> None:
@@ -296,79 +274,67 @@ def cmd_import(args, logger) -> None:
         print(f"ファイルなし: {in_path}")
         sys.exit(1)
 
-    # index_name ごとに docs をまとめて更新
-    updates: dict[str, list[tuple[int, str]]] = {}
+    updates: list[tuple[str, str]] = []
     with open(in_path, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            idx = row["index_name"]
-            final = row.get("final_relevance", "").strip().lower()
-            if final not in VALID_RELEVANCE:
+            fid = (row.get("box_file_id") or "").strip()
+            final = (row.get("final_relevance") or "").strip().lower()
+            if not fid or final not in VALID_RELEVANCE:
                 continue
-            try:
-                doc_id = int(row["id"])
-            except (TypeError, ValueError):
-                continue
-            updates.setdefault(idx, []).append((doc_id, final))
+            updates.append((fid, final))
 
     if not updates:
         print("有効な更新行なし")
         return
 
-    total = 0
+    conn = open_db(BOX_DOCS_DB, encrypt=not args.no_encrypt)
     now = datetime.now().isoformat()
-    for idx_name, items in updates.items():
-        db_path = DATA_DIR / f"docs_{idx_name}.db"
-        if not db_path.exists():
-            print(f"[WARN] {db_path} が存在しません。スキップ")
+    changed = 0
+    for fid, final in updates:
+        cur = conn.execute("SELECT relevance FROM box_files WHERE box_file_id=?", (fid,))
+        existing = cur.fetchone()
+        if not existing:
             continue
-        conn = open_db(db_path, encrypt=not args.no_encrypt)
-        ensure_relevance_columns(conn)
-        changed = 0
-        for doc_id, final in items:
-            cur = conn.execute("SELECT relevance FROM documents WHERE id=?", (doc_id,))
-            existing = cur.fetchone()
-            if not existing:
-                continue
-            if existing["relevance"] == final:
-                continue
-            if args.dry_run:
-                print(f"  [DRY] {idx_name} id={doc_id} {existing['relevance']} → {final}")
-            else:
-                conn.execute(
-                    "UPDATE documents SET relevance=?, relevance_judged_at=? WHERE id=?",
-                    (final, now, doc_id),
-                )
-            changed += 1
-        if not args.dry_run:
-            conn.commit()
-        conn.close()
-        print(f"[{idx_name}] 更新: {changed} 件")
-        total += changed
-
-    print(f"\n完了: {total} 件" + (" (dry-run)" if args.dry_run else ""))
+        if existing["relevance"] == final:
+            continue
+        if args.dry_run:
+            print(f"  [DRY] {fid} {existing['relevance']} → {final}")
+        else:
+            conn.execute(
+                "UPDATE box_files SET relevance=?, relevance_judged_at=?"
+                " WHERE box_file_id=?",
+                (final, now, fid),
+            )
+        changed += 1
+    if not args.dry_run:
+        conn.commit()
+    conn.close()
+    print(f"完了: {changed} 件" + (" (dry-run)" if args.dry_run else ""))
 
 
 def cmd_stats(args, logger) -> None:
-    targets = get_docs_db_paths(args.index_name)
-    print(f"{'index':12s} {'core':>6s} {'related':>8s} {'noise':>6s} "
-          f"{'unknown':>8s} {'未判定':>8s} {'合計':>6s}")
-    print("-" * 60)
-    for idx_name, db_path in targets:
-        conn = open_db(db_path, encrypt=not args.no_encrypt)
-        ensure_relevance_columns(conn)
-        counts = {"core": 0, "related": 0, "noise": 0, "unknown": 0, None: 0}
-        for r in conn.execute("SELECT relevance, COUNT(*) FROM documents GROUP BY relevance"):
-            counts[r[0]] = r[1]
-        total = sum(counts.values())
-        conn.close()
-        print(f"{idx_name:12s} {counts['core']:>6d} {counts['related']:>8d} "
-              f"{counts['noise']:>6d} {counts['unknown']:>8d} {counts[None]:>8d} "
-              f"{total:>6d}")
+    if not BOX_DOCS_DB.exists():
+        print(f"box_docs.db が存在しません: {BOX_DOCS_DB}")
+        return
+    conn = open_db(BOX_DOCS_DB, encrypt=not args.no_encrypt)
+    counts = {"core": 0, "related": 0, "noise": 0, "unknown": 0, None: 0}
+    for r in conn.execute("SELECT relevance, COUNT(*) FROM box_files GROUP BY relevance"):
+        counts[r[0]] = r[1]
+    total = sum(counts.values())
+    conn.close()
+    print(f"core    : {counts['core']:>6d}")
+    print(f"related : {counts['related']:>6d}")
+    print(f"noise   : {counts['noise']:>6d}")
+    print(f"unknown : {counts['unknown']:>6d}")
+    print(f"未判定  : {counts[None]:>6d}")
+    print(f"合計    : {total:>6d}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="docs_*.db のドキュメントを relevance 判定・精査")
+    parser = argparse.ArgumentParser(
+        description="box_docs.db のドキュメントを本文ベースで relevance 判定・精査"
+    )
     g = parser.add_mutually_exclusive_group(required=True)
     g.add_argument("--judge", action="store_true", help="LLMで relevance を判定")
     g.add_argument("--export", action="store_true", help="CSV にエクスポート")
