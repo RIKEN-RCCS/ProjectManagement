@@ -193,6 +193,9 @@ def call_local_llm(
         if not no_chat_template_kwargs:
             payload["chat_template_kwargs"] = {"enable_thinking": True}
         payload["top_p"] = 0.95
+        # Gemma 4 公式: 「skip_special_tokens=False is essential」for reasoning_parser
+        # gemma4 以外でも害はないため think=True 時は常に False にする
+        payload["skip_special_tokens"] = False
     # Qwen3-Swallow 推奨サンプリングパラメータ（HF公式サンプルより）
     if no_chat_template_kwargs:
         payload["top_k"] = 20
@@ -324,6 +327,7 @@ def call_argus_llm(
     timeout: int = 300,
     max_tokens: int = 4096,
     system: str = "",
+    think: bool = False,
 ) -> str:
     """
     Argus 用 LLM 呼び出し。
@@ -353,6 +357,7 @@ def call_argus_llm(
         max_tokens=max_tokens,
         system=system,
         no_stream=True,
+        think=think,
     )
 
 
