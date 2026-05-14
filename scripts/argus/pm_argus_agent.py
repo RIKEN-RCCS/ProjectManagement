@@ -108,6 +108,7 @@ class AgentContext:
     minutes_dir: Path = field(default_factory=lambda: _MINUTES_DIR)
     index_db: Path = field(default_factory=lambda: _DATA_DIR / "qa_pm.db")
     channels: list[str] = field(default_factory=list)
+    cited_chunks: list[dict] = field(default_factory=list)
 
 
 # =========================================================================== #
@@ -264,16 +265,37 @@ def _tool_search_decisions(args: dict, ctx: AgentContext) -> str:
 
 
 def _tool_search_text(args: dict, ctx: AgentContext) -> str:
-    from pm_qa_server import retrieve_chunks_hyde, rerank_chunks, format_context
+    from pm_qa_server import retrieve_chunks_hyde, rerank_chunks, _format_source_label
     query = args.get("query", "")
     if not query:
         return "（検索クエリが空です）"
     merged = retrieve_chunks_hyde(query, ctx.index_db, k=30)
     if not merged:
         return f"（「{query}」に一致する情報なし）"
-    # re-rank は元クエリで実施（意図のブレを避けるため）
     reranked = rerank_chunks(query, merged)
-    return format_context(reranked)
+    # グローバル番号でチャンクを蓄積し、最終回答に出典セクションを自動付与する
+    lines = []
+    for chunk in reranked:
+        ctx.cited_chunks.append(chunk)
+        idx = len(ctx.cited_chunks)
+        label = _format_source_label(chunk)
+        ref = chunk.get("source_ref") or ""
+        source_type = chunk.get("source_type", "")
+        if source_type == "slack_raw" and ref:
+            ref_str = f" | <{ref}|スレッドを開く>"
+        elif source_type == "minutes_content" and ref:
+            held_at = chunk.get("held_at") or ""
+            ref_str = f" | {held_at} {ref}" if held_at else f" | {ref}"
+        elif source_type == "web" and ref:
+            ref_str = f" | <{ref}|リンク>"
+        elif source_type == "box_document" and ref:
+            ref_str = f" | <{ref}|Boxで開く>"
+        else:
+            ref_str = f" | {ref}" if ref else ""
+        lines.append(f"[{idx}] 出典: {label}{ref_str}")
+        lines.append(f"    {chunk['content'].strip()}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _tool_get_slack_messages(args: dict, ctx: AgentContext) -> str:
@@ -886,7 +908,7 @@ def run_agent(
         final = parse_final_answer(response)
         if final:
             logger.info(f"[investigate] <final_answer> 検出 (Step {step})")
-            return final
+            return _append_sources_section(final, ctx)
 
         tool_calls = parse_tool_calls(response)
 
@@ -895,7 +917,7 @@ def run_agent(
             if parse_error_count >= 2:
                 logger.warning("[investigate] 2回連続でツール呼び出し/最終回答なし。生テキストを返却")
                 clean = re.sub(r"<[^>]+>", "", response).strip()
-                return clean if clean else response
+                return _append_sources_section(clean if clean else response, ctx)
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": (
                 "[System] ツール呼び出しか最終回答が検出できませんでした。\n"
@@ -954,8 +976,47 @@ def run_agent(
         if msg["role"] == "assistant":
             clean = re.sub(r"<tool_call>.*?</tool_call>", "", msg["content"], flags=re.DOTALL).strip()
             if clean:
-                return clean
+                return _append_sources_section(clean, ctx)
     return "調査が完了しませんでした。より具体的な質問で再度お試しください。"
+
+
+def _append_sources_section(answer: str, ctx: AgentContext) -> str:
+    """ctx.cited_chunks にあるチャンクから「## 出典」セクションを生成して回答末尾に付与する。
+
+    本文中に [N] 形式の参照がない場合でも、検索したチャンクは追跡情報として末尾に列挙する。
+    重複する (source_type, source_ref, held_at) は1つにまとめる。
+    """
+    from pm_qa_server import _format_source_label
+    if not ctx.cited_chunks:
+        return answer
+
+    seen: set[tuple] = set()
+    items: list[tuple[int, str]] = []
+    for i, chunk in enumerate(ctx.cited_chunks, 1):
+        key = (chunk.get("source_type"), chunk.get("source_ref"), chunk.get("held_at"))
+        if key in seen:
+            continue
+        seen.add(key)
+        label = _format_source_label(chunk)
+        ref = chunk.get("source_ref") or ""
+        source_type = chunk.get("source_type", "")
+        if source_type == "slack_raw" and ref:
+            link = f"<{ref}|スレッドを開く>"
+        elif source_type == "web" and ref:
+            link = f"<{ref}|リンク>"
+        elif source_type == "box_document" and ref:
+            link = f"<{ref}|Boxで開く>"
+        elif source_type == "minutes_content" and ref:
+            held_at = chunk.get("held_at") or ""
+            link = f"{held_at} {ref}".strip()
+        else:
+            link = ref
+        items.append((i, f"- [{i}] {label}" + (f" — {link}" if link else "")))
+
+    if not items:
+        return answer
+    lines = ["", "## 出典"] + [s for _, s in items]
+    return answer.rstrip() + "\n" + "\n".join(lines)
 
 
 # =========================================================================== #
