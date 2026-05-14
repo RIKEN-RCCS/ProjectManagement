@@ -543,7 +543,7 @@ def index_box_doc_content(
                 "held_at": (row["modified_at"] or "")[:10] or None,
                 "content": prefixed,
                 "tokens": sudachi_tokenize(prefixed),
-                "source_ref": None,
+                "source_ref": f"https://app.box.com/file/{row['box_file_id']}",
                 "indexed_at": now,
             })
 

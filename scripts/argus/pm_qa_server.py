@@ -541,6 +541,7 @@ _SOURCE_TYPE_LABEL = {
     "minutes_content": "議事録本文",
     "slack_raw": "Slackメッセージ",
     "document": "資料",
+    "box_document": "Box資料",
     "web": "Web記事",
 }
 
@@ -567,6 +568,16 @@ def _format_source_label(chunk: dict) -> str:
         domain = urlparse(ref).netloc.replace("www.", "") if ref else "web"
         held_at = chunk["held_at"] or "日付不明"
         return f"{domain} / {label} ({held_at})"
+    if source_type == "box_document":
+        # content 先頭の【folder/filename】からタイトルを抽出
+        content = chunk.get("content") or ""
+        title = ""
+        if content.startswith("【"):
+            end = content.find("】")
+            if end > 0:
+                title = content[1:end]
+        held_at = chunk.get("held_at") or "日付不明"
+        return f"{title or 'Box資料'} ({held_at})"
     db_name = chunk["source_db"].replace("minutes/", "").replace(".db", "")
     # Slack チャンネルIDを人名称に変換
     if source_type == "slack_raw":
@@ -589,6 +600,8 @@ def format_context(chunks: list[dict]) -> str:
             ref_str = f" | {held_at} {ref}" if held_at else f" | {ref}"
         elif source_type == "web" and ref:
             ref_str = f" | <{ref}|リンク>"
+        elif source_type == "box_document" and ref:
+            ref_str = f" | <{ref}|Boxで開く>"
         else:
             ref_str = f" | {ref}" if ref else ""
 
