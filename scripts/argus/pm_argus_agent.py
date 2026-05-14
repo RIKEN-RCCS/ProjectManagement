@@ -577,6 +577,10 @@ def _build_tool_descriptions() -> str:
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 _FINAL_ANSWER_RE = re.compile(r"<final_answer>(.*?)</final_answer>", re.DOTALL)
+# Kimi-K2-Thinking が稀に <answer>...</answer> タグでラップして返すケースの救済
+# 中身が JSON なら tool_call として扱い、それ以外は final_answer として扱う
+_ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
+_JSON_TOOL_CALL_RE = re.compile(r"\{[^{}]*?\"name\"\s*:\s*\"[^\"]+\"[^{}]*?\"args\"\s*:\s*\{[^{}]*\}[^{}]*\}", re.DOTALL)
 
 
 def parse_tool_calls(response: str) -> list[dict]:
@@ -590,12 +594,47 @@ def parse_tool_calls(response: str) -> list[dict]:
                 results.append({"name": name, "args": args})
         except json.JSONDecodeError:
             results.append({"error": f"JSONパースエラー: {m.group(1)[:100]}"})
+    if results:
+        return results
+    # フォールバック: <answer>{json}</answer> 形式や、生 JSON の混入を検出
+    for m in _ANSWER_TAG_RE.finditer(response):
+        body = m.group(1).strip()
+        for jm in _JSON_TOOL_CALL_RE.finditer(body):
+            try:
+                obj = json.loads(jm.group(0))
+                name = obj.get("name", "")
+                args = obj.get("args", {})
+                if isinstance(args, dict) and isinstance(name, str) and name:
+                    results.append({"name": name, "args": args})
+            except json.JSONDecodeError:
+                pass
+    if results:
+        return results
+    # <answer> タグなしで生 JSON だけ返ってくるケース
+    for jm in _JSON_TOOL_CALL_RE.finditer(response):
+        try:
+            obj = json.loads(jm.group(0))
+            name = obj.get("name", "")
+            args = obj.get("args", {})
+            if isinstance(args, dict) and isinstance(name, str) and name:
+                results.append({"name": name, "args": args})
+        except json.JSONDecodeError:
+            pass
     return results
 
 
 def parse_final_answer(response: str) -> str | None:
     m = _FINAL_ANSWER_RE.search(response)
-    return m.group(1).strip() if m else None
+    if m:
+        return m.group(1).strip()
+    # フォールバック: <answer> タグの中身が JSON でなければ最終回答とみなす
+    a = _ANSWER_TAG_RE.search(response)
+    if a:
+        body = a.group(1).strip()
+        # JSON tool_call っぽくない（"name":"..." を含まない）なら最終回答
+        if "\"name\"" not in body or "\"args\"" not in body:
+            return body
+    return None
 
 
 # =========================================================================== #
@@ -618,6 +657,11 @@ _AGENT_SYSTEM_PROMPT = """\
 </tool_call>
 
 1つの応答に複数のツール呼び出しを含めることができます。
+
+**重要: タグ名は厳密に守ること**
+- ツール呼び出し: `<tool_call>...</tool_call>`（`<answer>` や `<call>` などは使用禁止）
+- 最終回答: `<final_answer>...</final_answer>`（`<answer>` などは使用禁止）
+- タグ名を間違えるとパースエラーで応答がユーザーに届かない
 
 {tool_descriptions}
 
