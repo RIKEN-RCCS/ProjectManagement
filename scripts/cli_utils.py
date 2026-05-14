@@ -397,10 +397,13 @@ def call_rivault(
     }
     # モデル別の thinking 制御
     # - GLM-4.7-Flash: thinking.type=disabled / enable_thinking=False で無効化可能
-    # - Kimi-K2-Thinking: thinking は常時ON（無効化不可）。temperature=1.0 推奨
+    # - Kimi-K2-Thinking: thinking は常時ON（無効化不可）。
+    #   Moonshot 公式は temperature=1.0 推奨だが、Argus は事実検索・回答用途のため
+    #   再現性を優先して 0.3 に下げる（同一質問の回答揺れを抑制）。
+    #   RiVault は temperature を尊重することを 2026-05-14 に確認済み。
     model_lower = model.lower()
     if "kimi" in model_lower:
-        payload["temperature"] = 1.0
+        payload["temperature"] = 0.3
     else:
         # Z.ai GLM 系など thinking 無効化可能なモデル
         payload["thinking"] = {"type": "disabled"}
