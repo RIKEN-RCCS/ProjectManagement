@@ -956,7 +956,7 @@ def run_agent(
             with prefer_rivault():
                 response = call_argus_llm(
                     prompt,
-                    max_tokens=4096,
+                    max_tokens=32768,
                     timeout=max(30, int(timeout - elapsed)),
                 )
         except Exception as e:
