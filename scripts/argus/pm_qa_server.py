@@ -1044,10 +1044,12 @@ def build_app():
         )
 
     def _run_mention_investigate(client, channel_id, thread_ts, question, user_id, event):
-        """app_mention からの調査実行。スレッドに公開返信する。"""
-        from cli_utils import allow_rivault_fallback
-        with allow_rivault_fallback():
-            _run_mention_investigate_impl(client, channel_id, thread_ts, question, user_id, event)
+        """app_mention からの調査実行。スレッドに公開返信する。
+
+        2026-05-14: ローカル gemma4 reasoning モードに統一したため
+        prefer_rivault() のラップは撤去（旧 Kimi 切替時の名残）。
+        """
+        _run_mention_investigate_impl(client, channel_id, thread_ts, question, user_id, event)
 
     def _run_mention_investigate_impl(client, channel_id, thread_ts, question, user_id, event):
         try:
