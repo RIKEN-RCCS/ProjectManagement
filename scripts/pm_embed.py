@@ -3,12 +3,11 @@
 pm_embed.py - FTS5インデックス構築スクリプト
 
 argus_config.yaml（旧 qa_config.yaml）の定義に従い、会議議事録本文・Slack要約を
-インデックスDB（qa_pm.db / qa_pm-hpc.db / qa_pm-bmt.db / qa_pm-pmo.db）に書き込む。
+インデックスDB（qa_pm.db / qa_pm-hpc.db / qa_pm-pmo.db）に書き込む。
 
 使い方:
   python3 scripts/pm_embed.py                          # 全インデックス差分更新
   python3 scripts/pm_embed.py --full-rebuild           # 全インデックス全件再構築
-  python3 scripts/pm_embed.py --index-name pm-bmt      # 特定インデックスのみ
   python3 scripts/pm_embed.py --dry-run                # 件数確認のみ
 """
 

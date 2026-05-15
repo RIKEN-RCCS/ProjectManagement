@@ -341,7 +341,7 @@ def main() -> None:
 
     if not args.db:
         print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
-        print("  例: --db data/pm.db / --db data/pm-hpc.db / --db data/pm-bmt.db", file=sys.stderr)
+        print("  例: --db data/pm.db / --db data/pm-hpc.db", file=sys.stderr)
         sys.exit(1)
     db_path = Path(args.db)
     today = date.today().isoformat()

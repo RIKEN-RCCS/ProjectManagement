@@ -566,7 +566,6 @@ python3 scripts/pm_slack_box_links.py --dry-run
 
 # 登録済みドキュメント一覧
 python3 scripts/pm_slack_box_links.py --list
-python3 scripts/pm_slack_box_links.py --list --index-name pm-bmt
 
 # Canvas に投稿
 python3 scripts/pm_slack_box_links.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
