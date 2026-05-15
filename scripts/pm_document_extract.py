@@ -140,18 +140,24 @@ def collect_box_messages(channel_id: str, no_encrypt: bool, since: str | None = 
 # --------------------------------------------------------------------------- #
 
 
-def resolve_box_url(url: str, logger) -> tuple[str, str] | None:
+def resolve_box_url(url: str, logger) -> tuple[str, str, str]:
     """box CLI で共有URLを box_file_id に解決。
 
     Returns:
-        (box_file_id, name) または None
+        (status, box_file_id, name)
+        status: "file"     ファイル解決成功（DB保存対象）
+                "folder"   フォルダ共有（DB保存しないがカウント）
+                "skipped"  /folder/ 直リンクなど API を叩く前に判定可
+                "failed"   404/失効/CLIエラー
     """
-    # /s/<token> 形式以外（直接 file/<id> 形式など）はそのままパースを試みる
     m = re.search(r"/file/(\d+)", url)
     if m:
-        return (m.group(1), "")
+        return ("file", m.group(1), "")
+    # /folder/<id> 形式は CLI を叩かずにフォルダと判定
+    if re.search(r"/folder/(\d+)", url):
+        return ("folder", "", "")
     if "/s/" not in url:
-        return None
+        return ("skipped", "", "")
     try:
         res = subprocess.run(
             ["box", "shared-links:get", url, "--json"],
@@ -159,17 +165,20 @@ def resolve_box_url(url: str, logger) -> tuple[str, str] | None:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         logger.warning(f"box CLI 呼び出し失敗 {url}: {e}")
-        return None
+        return ("failed", "", "")
     if res.returncode != 0:
         logger.info(f"  解決不能 {url}: {res.stderr.strip()[:120]}")
-        return None
+        return ("failed", "", "")
     try:
         data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return None
-    if data.get("type") != "file":
-        return None  # フォルダ等は対象外
-    return (str(data["id"]), data.get("name") or "")
+        return ("failed", "", "")
+    item_type = data.get("type")
+    if item_type == "folder":
+        return ("folder", "", "")
+    if item_type != "file":
+        return ("skipped", "", "")
+    return ("file", str(data["id"]), data.get("name") or "")
 
 
 # --------------------------------------------------------------------------- #
@@ -379,8 +388,7 @@ def main():
     print(f"処理対象: {total_messages} 件（{len(channel_messages)} チャンネル）")
     processed = 0
     saved_refs = 0
-    resolved = 0
-    unresolved = 0
+    counts = {"file": 0, "folder": 0, "failed": 0, "skipped": 0}
 
     for channel_id, messages in channel_messages:
         for batch_start in range(0, len(messages), BATCH_SIZE):
@@ -391,13 +399,11 @@ def main():
 
             for msg in batch:
                 for url in msg["urls"]:
-                    resolved_pair = resolve_box_url(url, logger)
-                    if resolved_pair:
-                        box_file_id, _name = resolved_pair
-                        resolved += 1
-                    else:
-                        box_file_id = None
-                        unresolved += 1
+                    status, box_file_id, _name = resolve_box_url(url, logger)
+                    counts[status] = counts.get(status, 0) + 1
+                    # ファイル以外（フォルダ・失効・スキップ）はDB保存しない
+                    if status != "file":
+                        continue
                     ctx = ctx_map.get(url, {})
                     if args.dry_run:
                         print(f"  url={url}\n    fid={box_file_id}"
@@ -424,7 +430,8 @@ def main():
 
     box_conn.close()
     print(f"\n完了: slack_references {saved_refs} 件保存"
-          f"（解決済み {resolved} / 未解決 {unresolved}）"
+          f"（ファイル {counts['file']} / フォルダ {counts['folder']}"
+          f" / 失効・404 {counts['failed']} / その他 {counts['skipped']}）"
           + (" (dry-run)" if args.dry_run else ""))
 
 
