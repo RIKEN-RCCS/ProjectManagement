@@ -57,8 +57,7 @@ data/
 ├── patrol_config.yaml   # Patrol Agent 設定（検出器の有効/無効・閾値・通知チャンネル）
 ├── patrol_state.db      # Patrol Agent 冪等性DB（自動作成、平文sqlite3）
 ├── qa_pm.db             # FTS5 インデックス: リーダー会議など汎用（平文sqlite3）
-├── qa_pm-hpc.db         # FTS5 インデックス: HPCアプリWG
-├── qa_pm-bmt.db         # FTS5 インデックス: ベンチマークWG
+├── qa_pm-hpc.db         # FTS5 インデックス: HPCアプリWG（BenchmarkWG含む）
 └── qa_pm-pmo.db         # FTS5 インデックス: PMO
 
 logs/
@@ -580,8 +579,7 @@ python3 scripts/argus/pm_argus_patrol.py --list-pending
 | インデックス | DBファイル | 想定ソース |
 |---|---|---|
 | `pm` | `data/qa_pm.db` | Leader_Meeting + リーダー会議チャンネル |
-| `pm-hpc` | `data/qa_pm-hpc.db` | Block1/2、SubWGx + HPCアプリWGチャンネル |
-| `pm-bmt` | `data/qa_pm-bmt.db` | BenchmarkWG_Meeting + ベンチマークWGチャンネル |
+| `pm-hpc` | `data/qa_pm-hpc.db` | Block1/2、SubWGx、BenchmarkWG_Meeting + HPCアプリ・ベンチマークWGチャンネル |
 | `pm-pmo` | `data/qa_pm-pmo.db` | Co-design_Review等 + PMO系チャンネル |
 
 実際のマッピングは `data/argus_config.yaml` で定義する。
@@ -609,13 +607,8 @@ indices:
 
   pm-hpc:
     db: data/qa_pm-hpc.db
-    minutes: [Block1_Meeting, Block2_Meeting, SubWG3_Meeting, ...]
-    channels: [<CHANNEL_ID>, <CHANNEL_ID>, <CHANNEL_ID>]
-
-  pm-bmt:
-    db: data/qa_pm-bmt.db
-    minutes: [BenchmarkWG_Meeting]
-    channels: [<CHANNEL_ID>, <CHANNEL_ID>]
+    minutes: [Block1_Meeting, Block2_Meeting, SubWG3_Meeting, BenchmarkWG_Meeting, ...]
+    channels: [<CHANNEL_ID>, <CHANNEL_ID>, <CHANNEL_ID>, <CHANNEL_ID>, <CHANNEL_ID>]
 
   pm-pmo:
     db: data/qa_pm-pmo.db
@@ -861,7 +854,7 @@ cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement
 ~/.venv_aarch64/bin/python3 scripts/pm_embed.py --full-rebuild
 
 # 特定インデックスのみ
-~/.venv_aarch64/bin/python3 scripts/pm_embed.py --index-name pm-bmt --full-rebuild
+~/.venv_aarch64/bin/python3 scripts/pm_embed.py --index-name pm-hpc --full-rebuild
 ```
 
 ### 4. cron の設定確認

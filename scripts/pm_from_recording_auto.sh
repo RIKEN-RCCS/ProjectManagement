@@ -57,8 +57,7 @@ is_valid_meeting_name() {
 # meeting-name → pm.db パスのマッピング
 #   Leader_Meeting / Co-design_Review_Meeting → pm.db
 #   ApplicationDiscussion                      → pm-personal.db
-#   Block1/Block2/SubWG系                     → pm-hpc.db
-#   BenchmarkWG_Meeting                        → pm-bmt.db
+#   Block1/Block2/SubWG系/BenchmarkWG_Meeting  → pm-hpc.db
 # --------------------------------------------------------------------------- #
 get_pm_db() {
     local name="$1"
@@ -67,10 +66,8 @@ get_pm_db() {
             echo "$REPO_ROOT/data/pm.db" ;;
         ApplicationDiscussion)
             echo "$REPO_ROOT/data/pm-personal.db" ;;
-        Block1_Meeting|Block2_Meeting|SubWG_Meeting|SubWG[0-9]*_Meeting)
+        Block1_Meeting|Block2_Meeting|SubWG_Meeting|SubWG[0-9]*_Meeting|BenchmarkWG_Meeting)
             echo "$REPO_ROOT/data/pm-hpc.db" ;;
-        BenchmarkWG_Meeting)
-            echo "$REPO_ROOT/data/pm-bmt.db" ;;
         *)
             echo "$REPO_ROOT/data/pm.db" ;;
     esac

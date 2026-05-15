@@ -551,7 +551,6 @@ def main():
         print("  例:", file=sys.stderr)
         print("    --db data/pm.db       # Leader_Meeting / Co-design_Review_Meeting", file=sys.stderr)
         print("    --db data/pm-hpc.db   # Block*_Meeting / SubWG*_Meeting", file=sys.stderr)
-        print("    --db data/pm-bmt.db   # BenchmarkWG_Meeting", file=sys.stderr)
         sys.exit(1)
 
     conn = open_db(args.db, encrypt=not args.no_encrypt, migrations=[_AUDIT_LOG_DDL])

@@ -12,7 +12,7 @@
 #   bash scripts/pm_box_update.sh --dry-run
 #
 # Options:
-#   --index-name NAME     特定インデックスのみ処理（pm / pm-hpc / pm-bmt / pm-pmo）
+#   --index-name NAME     特定インデックスのみ処理（pm / pm-hpc / pm-pmo）
 #   -c CHANNEL_ID         特定チャンネルのみ抽出（pm_slack_box_links.py のみ）
 #   --dry-run             DB保存なし・確認のみ（全スクリプトに渡す）
 #   --force               抽出済み・変換済みも再処理
