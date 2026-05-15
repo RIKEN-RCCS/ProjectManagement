@@ -156,16 +156,16 @@ Slack上に散在するBOXリンク（ファイル共有URL）を自動収集し
 
 ```sh
 # BOXリンクを収集・構造化
-python3 scripts/pm_document_extract.py
+python3 scripts/pm_slack_box_links.py
 
 # FTS5インデックスに組み込み（/argus-ask で検索可能に）
 python3 scripts/pm_embed.py --full-rebuild
 
 # 一覧表示
-python3 scripts/pm_document_extract.py --list
+python3 scripts/pm_slack_box_links.py --list
 
 # Canvas に投稿
-python3 scripts/pm_document_extract.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
+python3 scripts/pm_slack_box_links.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
 ```
 
 ### 6. データの編集と修正 — 「LLMの誤りを人間が正せる」
@@ -351,7 +351,7 @@ bash scripts/pm_daemon.sh stop qa     # 停止
 |-----------|------|
 | `pm_qa_server.py` | Slack Socket Modeデーモン（/argus-ask・/argus-*を統合処理）。ハイブリッド検索対応 |
 | `pm_embed.py` | QAインデックス構築（SudachiPy+FTS5、ドキュメントレジストリも索引化） |
-| `pm_document_extract.py` | Slack BOXリンク収集・ローカルLLMで構造化 → docs_*.db に保存 |
+| `pm_slack_box_links.py` | Slack BOXリンク収集・ローカルLLMで構造化 → docs_*.db に保存 |
 
 ### 共通ライブラリ
 

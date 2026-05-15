@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pm_document_screen.py
+pm_box_relevance.py
 
 box_docs.db.box_files に対し、本文（doc_content.content_md）の冒頭を
 ローカルLLMで読み取り、relevance (core/related/noise/unknown) を判定する
@@ -15,20 +15,20 @@ relevance:
 
 Usage:
   # 本文ベースでLLM判定（未判定のみ）
-  python3 scripts/pm_document_screen.py --judge
+  python3 scripts/pm_box_relevance.py --judge
 
   # 全件再判定 / 特定 index_name のみ
-  python3 scripts/pm_document_screen.py --judge --force
-  python3 scripts/pm_document_screen.py --judge --index-name pm
+  python3 scripts/pm_box_relevance.py --judge --force
+  python3 scripts/pm_box_relevance.py --judge --index-name pm
 
   # CSVにエクスポート（精査用、noise を先頭に）
-  python3 scripts/pm_document_screen.py --export --output screen.csv
+  python3 scripts/pm_box_relevance.py --export --output screen.csv
 
   # 精査後のCSVをDBに反映
-  python3 scripts/pm_document_screen.py --import screen.csv
+  python3 scripts/pm_box_relevance.py --import screen.csv
 
   # relevance分布を集計
-  python3 scripts/pm_document_screen.py --stats
+  python3 scripts/pm_box_relevance.py --stats
 """
 
 from __future__ import annotations
@@ -349,7 +349,7 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-    logger = logging.getLogger("pm_document_screen")
+    logger = logging.getLogger("pm_box_relevance")
 
     if args.judge:
         cmd_judge(args, logger)

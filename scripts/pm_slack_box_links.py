@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pm_document_extract.py
+pm_slack_box_links.py
 
 Slack メッセージ中の Box リンクを `box shared-links:get` で box_file_id に解決し、
 box_docs.db.slack_references テーブルに「誰がいつどのチャンネルでどのファイルを
@@ -12,17 +12,17 @@ box_docs.db.box_files / doc_content に集約されている。
 
 Usage:
   # 全チャンネルを処理（未処理のみ）
-  python3 scripts/pm_document_extract.py
+  python3 scripts/pm_slack_box_links.py
 
   # 特定チャンネル / 全件再処理
-  python3 scripts/pm_document_extract.py -c C08M0249GRL
-  python3 scripts/pm_document_extract.py --force
+  python3 scripts/pm_slack_box_links.py -c C08M0249GRL
+  python3 scripts/pm_slack_box_links.py --force
 
   # 確認用（DB保存なし）
-  python3 scripts/pm_document_extract.py --dry-run
+  python3 scripts/pm_slack_box_links.py --dry-run
 
   # 一覧表示
-  python3 scripts/pm_document_extract.py --list
+  python3 scripts/pm_slack_box_links.py --list
 """
 
 import argparse
@@ -353,7 +353,7 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-    logger = logging.getLogger("pm_document_extract")
+    logger = logging.getLogger("pm_slack_box_links")
 
     if args.show_list:
         list_references(args.no_encrypt, args.since, args.channel)

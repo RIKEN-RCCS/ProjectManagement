@@ -2,7 +2,7 @@
 # pm_web_update.sh
 #
 # 外部Web情報を取得し data/web_articles.db に保存する（cronドライバ）。
-# FTS5 インデックスへの組み込みは pm_document_update.sh（pm_embed.py）が行う。
+# FTS5 インデックスへの組み込みは pm_box_update.sh（pm_embed.py）が行う。
 #
 # Usage:
 #   bash scripts/pm_web_update.sh

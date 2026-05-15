@@ -84,7 +84,7 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
   - 各マイルストーンについて、期限・達成条件・関連アクションアイテムの完了率をDBから直接計算
   - 現在日付と期限を照合し、達成済み・進行中・未着手・遅延を自動判定（LLM不使用）
 
-#### 5.5 ドキュメントレジストリ（pm_document_extract.py、実装済み）
+#### 5.5 ドキュメントレジストリ（pm_slack_box_links.py、実装済み）
 
 - Slack投稿中のBOXリンクを自動収集し、ローカルLLMでメタデータ（タイトル・種別・説明・共有者・トピック）を構造化して `docs_{index_name}.db` に保存する
 - `pm_embed.py` でFTS5インデックスに組み込み、`/argus-investigate` から検索可能にする
@@ -101,7 +101,7 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
 - RIKEN公式サイト・HPC系ニュース（Top500/HPCwire/insideHPC）・NVIDIAブログなどの公開情報を定期取得し `/argus-investigate` で検索可能にする
 - `data/web_sources.yaml` でソース・キーワードフィルタ・対象インデックスを定義し、`pm_web_fetch.py` が `data/web_articles.db` に保存する
 - `pm_embed.py --web-only` で高速に FTS5 インデックスに組み込み（議事録・Slack処理をスキップ）
-- `pm_web_fetch.py` を cron（毎朝03:30 JST）で定期実行。FTS5 組み込みは `pm_document_update.sh`（`pm_embed.py`）が自動で行う
+- `pm_web_fetch.py` を cron（毎朝03:30 JST）で定期実行。FTS5 組み込みは `pm_box_update.sh`（`pm_embed.py`）が自動で行う
 - 出典は `top500.org / Web記事 (2025-11-15)` 形式で表示される
 
 ---
