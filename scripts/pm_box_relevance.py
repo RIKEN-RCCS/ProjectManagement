@@ -268,49 +268,92 @@ def cmd_export(args, logger) -> None:
     print(f"書き出し完了: {out_path} ({len(out_rows)} 行)")
 
 
+_INVALID_FID_RE = re.compile(r"[^0-9]")
+
+
+def _looks_like_box_file_id(s: str) -> bool:
+    """純粋に数字のみで構成された box_file_id か（Excel指数表記を弾く）。"""
+    return bool(s) and _INVALID_FID_RE.search(s) is None
+
+
 def cmd_import(args, logger) -> None:
     in_path = Path(args.import_csv)
     if not in_path.exists():
         print(f"ファイルなし: {in_path}")
         sys.exit(1)
 
-    updates: list[tuple[str, str]] = []
+    rows: list[dict] = []
     with open(in_path, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            fid = (row.get("box_file_id") or "").strip()
             final = (row.get("final_relevance") or "").strip().lower()
-            if not fid or final not in VALID_RELEVANCE:
+            if final not in VALID_RELEVANCE:
                 continue
-            updates.append((fid, final))
+            rows.append({
+                "box_file_id": (row.get("box_file_id") or "").strip(),
+                "name": (row.get("name") or "").strip(),
+                "folder_path": (row.get("folder_path") or "").strip(),
+                "final": final,
+            })
 
-    if not updates:
+    if not rows:
         print("有効な更新行なし")
         return
 
     conn = open_db(BOX_DOCS_DB, encrypt=not args.no_encrypt)
     now = datetime.now().isoformat()
     changed = 0
-    for fid, final in updates:
-        cur = conn.execute("SELECT relevance FROM box_files WHERE box_file_id=?", (fid,))
-        existing = cur.fetchone()
-        if not existing:
+    skipped = 0
+    fid_lookup_failed = 0
+
+    for row in rows:
+        fid = row["box_file_id"]
+        existing = None
+        if _looks_like_box_file_id(fid):
+            existing = conn.execute(
+                "SELECT box_file_id, relevance FROM box_files WHERE box_file_id=?", (fid,)
+            ).fetchone()
+
+        # box_file_id でマッチしないとき (folder_path, name) で逆引き
+        if existing is None and row["name"]:
+            cands = conn.execute(
+                "SELECT box_file_id, relevance FROM box_files"
+                " WHERE name=? AND COALESCE(folder_path,'')=?",
+                (row["name"], row["folder_path"]),
+            ).fetchall()
+            if len(cands) == 1:
+                existing = cands[0]
+            elif len(cands) > 1:
+                logger.warning(
+                    f"name+folder_path で複数候補 ({len(cands)} 件): {row['folder_path']}/{row['name']}"
+                )
+                fid_lookup_failed += 1
+                continue
+
+        if existing is None:
+            fid_lookup_failed += 1
             continue
-        if existing["relevance"] == final:
+
+        if existing["relevance"] == row["final"]:
+            skipped += 1
             continue
+
         if args.dry_run:
-            print(f"  [DRY] {fid} {existing['relevance']} → {final}")
+            print(f"  [DRY] {existing['box_file_id']} {existing['relevance']} → {row['final']}")
         else:
             conn.execute(
                 "UPDATE box_files SET relevance=?, relevance_judged_at=?"
                 " WHERE box_file_id=?",
-                (final, now, fid),
+                (row["final"], now, existing["box_file_id"]),
             )
         changed += 1
+
     if not args.dry_run:
         conn.commit()
     conn.close()
-    print(f"完了: {changed} 件" + (" (dry-run)" if args.dry_run else ""))
+    print(f"完了: {changed} 件更新"
+          f"（変化なし {skipped}, 行特定不能 {fid_lookup_failed}）"
+          + (" (dry-run)" if args.dry_run else ""))
 
 
 def cmd_stats(args, logger) -> None:
