@@ -112,8 +112,8 @@ slack/
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks・VTTパース・話者マッピング）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
 │   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
 │   ├── web_utils.py                 # pm_api.py 用のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
-│   ├── pm_document_extract.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
-│   ├── pm_document_update.sh        # BOXリンク抽出（pm_document_extract.py）→ FTS5更新（pm_embed.py）を連続実行
+│   ├── pm_slack_box_links.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
+│   ├── pm_box_update.sh        # BOXリンク抽出（pm_slack_box_links.py）→ FTS5更新（pm_embed.py）を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
 │   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
 │   ├── pm_argus_daily.sh            # cron用: argus/pm_argus.py --brief-to-canvas / --risk を平日朝7:47に実行

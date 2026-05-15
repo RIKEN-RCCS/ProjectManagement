@@ -114,7 +114,7 @@ pm.db の新規 decisions/action_items
 |---|---|
 | `pm_minutes_import.py` | 議事録 Markdown → `data/minutes/{kind}.db` |
 | `pm_minutes_catalog.py` | 議事録を Box にアップロード + Canvas 目録生成 |
-| `pm_document_extract.py` | Slack投稿中のBOXリンク → `docs_*.db`（メタデータ）|
+| `pm_slack_box_links.py` | Slack投稿中のBOXリンク → `docs_*.db`（メタデータ）|
 | `pm_web_fetch.py` | 外部Webサイト → `web_articles.db` |
 | `generate_minutes_local.py` | 文字起こし → 議事録（ローカルLLM。`--vtt`・`--slide-context` 対応）|
 | `transcribe_pipeline.py` / `whisper_vad.py` | 音声/動画ファイル → 文字起こし（`--initial-prompt-extra` で固有名詞注入）|
@@ -136,7 +136,7 @@ scripts/
 │   │   └── ingest_plugin.py           プラグインインタフェース
 │   ├── pm_minutes_import.py           議事録MD → 議事録DB
 │   ├── pm_minutes_catalog.py          議事録 Box アップロード・Canvas 目録
-│   ├── pm_document_extract.py         BOXリンク → docs_*.db
+│   ├── pm_slack_box_links.py         BOXリンク → docs_*.db
 │   └── pm_web_fetch.py                外部Web → web_articles.db
 │
 ├── enrich/ (Pass 2)                   エンリッチメントパッケージ
@@ -180,7 +180,7 @@ scripts/
     ├── pm_from_recording_auto.sh
     ├── canvas_report.sh
     ├── slack_post_minutes.sh
-    ├── pm_document_update.sh
+    ├── pm_box_update.sh
     └── pm_daemon.sh  (start/stop/status × qa: Argus, web: pm_api の統合管理)
 ```
 

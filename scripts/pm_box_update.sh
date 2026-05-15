@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# pm_document_update.sh
+# pm_box_update.sh
 #
 # ドキュメントレジストリの更新と FTS5 インデックスへの組み込みを連続実行する。
-#   ステップ1: pm_document_extract.py  — Slack BOXリンクを収集・LLMでメタデータ抽出
-#   ステップ2: pm_document_content.py  — BOXフォルダからドキュメント本文を取得・Markdown変換
+#   ステップ1: pm_slack_box_links.py  — Slack BOXリンクを収集・LLMでメタデータ抽出
+#   ステップ2: pm_box_crawl.py  — BOXフォルダからドキュメント本文を取得・Markdown変換
 #   ステップ3: pm_embed.py            — docs_*.db + box_docs.db を FTS5 インデックスに組み込み
 #
 # Usage:
-#   bash scripts/pm_document_update.sh
-#   bash scripts/pm_document_update.sh --index-name pm
-#   bash scripts/pm_document_update.sh --dry-run
+#   bash scripts/pm_box_update.sh
+#   bash scripts/pm_box_update.sh --index-name pm
+#   bash scripts/pm_box_update.sh --dry-run
 #
 # Options:
 #   --index-name NAME     特定インデックスのみ処理（pm / pm-hpc / pm-bmt / pm-pmo）
-#   -c CHANNEL_ID         特定チャンネルのみ抽出（pm_document_extract.py のみ）
+#   -c CHANNEL_ID         特定チャンネルのみ抽出（pm_slack_box_links.py のみ）
 #   --dry-run             DB保存なし・確認のみ（全スクリプトに渡す）
 #   --force               抽出済み・変換済みも再処理
 #   --full-rebuild        FTS5 インデックスを全件再構築（pm_embed.py のみ）
 #   --skip-embed          ステップ3（pm_embed.py）をスキップ
-#   --skip-box-content    ステップ2（pm_document_content.py）をスキップ
-#   --since YYYY-MM-DD    この日付以降のメッセージのみ対象（pm_document_extract.py のみ）
+#   --skip-box-content    ステップ2（pm_box_crawl.py）をスキップ
+#   --since YYYY-MM-DD    この日付以降のメッセージのみ対象（pm_slack_box_links.py のみ）
 
 set -euo pipefail
 
@@ -45,10 +45,10 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
 # --------------------------------------------------------------------------- #
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/pm_document_update.log"
+LOG_FILE="$LOG_DIR/pm_box_update.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo ""
-echo "======== pm_document_update.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
+echo "======== pm_box_update.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
 
 # --------------------------------------------------------------------------- #
 # 引数パース
@@ -91,7 +91,7 @@ EXTRACT_OPTS=()
 [[ -n "$SINCE" ]]      && EXTRACT_OPTS+=(--since "$SINCE")
 
 echo "================================================================"
-echo "ステップ1: BOXリンク抽出 (pm_document_extract.py)"
+echo "ステップ1: BOXリンク抽出 (pm_slack_box_links.py)"
 [[ -n "$INDEX_NAME" ]] && echo "  インデックス : $INDEX_NAME"
 [[ -n "$CHANNEL" ]]    && echo "  チャンネル   : $CHANNEL"
 [[ -n "$SINCE" ]]      && echo "  since        : $SINCE"
@@ -99,14 +99,14 @@ echo "ステップ1: BOXリンク抽出 (pm_document_extract.py)"
 [[ -n "$FORCE" ]]      && echo "  force        : on"
 echo "================================================================"
 
-"$PYTHON3" "$SCRIPT_DIR/pm_document_extract.py" "${EXTRACT_OPTS[@]}"
+"$PYTHON3" "$SCRIPT_DIR/pm_slack_box_links.py" "${EXTRACT_OPTS[@]}"
 
 # --------------------------------------------------------------------------- #
 # ステップ2: BOXドキュメント本文抽出
 # --------------------------------------------------------------------------- #
 if [[ -n "$SKIP_BOX_CONTENT" ]]; then
     echo ""
-    echo "ステップ2: pm_document_content.py はスキップします (--skip-box-content)"
+    echo "ステップ2: pm_box_crawl.py はスキップします (--skip-box-content)"
 else
     BOX_OPTS=(--scan --convert)
     [[ -n "$DRY_RUN" ]] && BOX_OPTS+=("$DRY_RUN")
@@ -114,12 +114,12 @@ else
 
     echo ""
     echo "================================================================"
-    echo "ステップ2: BOXドキュメント本文抽出 (pm_document_content.py)"
+    echo "ステップ2: BOXドキュメント本文抽出 (pm_box_crawl.py)"
     [[ -n "$DRY_RUN" ]] && echo "  dry-run      : on"
     [[ -n "$FORCE" ]]   && echo "  force        : on"
     echo "================================================================"
 
-    "$PYTHON3" "$SCRIPT_DIR/pm_document_content.py" "${BOX_OPTS[@]}"
+    "$PYTHON3" "$SCRIPT_DIR/pm_box_crawl.py" "${BOX_OPTS[@]}"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -129,7 +129,7 @@ if [[ -n "$SKIP_EMBED" ]]; then
     echo ""
     echo "ステップ3: pm_embed.py はスキップします (--skip-embed)"
     echo ""
-    echo "✓ pm_document_update.sh 完了（FTS5未更新）"
+    echo "✓ pm_box_update.sh 完了（FTS5未更新）"
     exit 0
 fi
 
@@ -149,4 +149,4 @@ echo "================================================================"
 "$PYTHON3" "$SCRIPT_DIR/pm_embed.py" "${EMBED_OPTS[@]}"
 
 echo ""
-echo "✓ pm_document_update.sh 完了"
+echo "✓ pm_box_update.sh 完了"

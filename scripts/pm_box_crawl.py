@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pm_document_content.py — BOXドキュメント本文取込みスクリプト
+pm_box_crawl.py — BOXドキュメント本文取込みスクリプト
 
 BOXフォルダからファイルを取得し、各形式をMarkdownに変換して
 box_docs.db に保存する。pm_embed.py で FTS5 索引化すれば
@@ -8,32 +8,32 @@ box_docs.db に保存する。pm_embed.py で FTS5 索引化すれば
 
 使い方:
   # BOXフォルダを走査してファイル一覧を登録
-  python3 scripts/pm_document_content.py --scan
+  python3 scripts/pm_box_crawl.py --scan
 
   # 登録済みファイルの本文を抽出
-  python3 scripts/pm_document_content.py --convert
+  python3 scripts/pm_box_crawl.py --convert
 
   # 走査＋変換を一括実行
-  python3 scripts/pm_document_content.py --scan --convert
+  python3 scripts/pm_box_crawl.py --scan --convert
 
   # 特定ソースのみ
-  python3 scripts/pm_document_content.py --scan --source "アプリケーション開発エリア"
+  python3 scripts/pm_box_crawl.py --scan --source "アプリケーション開発エリア"
 
   # 特定ファイルのみ変換
-  python3 scripts/pm_document_content.py --convert --box-file-id 123456
+  python3 scripts/pm_box_crawl.py --convert --box-file-id 123456
 
   # 特定形式のみ
-  python3 scripts/pm_document_content.py --convert --type pptx
+  python3 scripts/pm_box_crawl.py --convert --type pptx
 
   # 確認のみ
-  python3 scripts/pm_document_content.py --scan --dry-run
-  python3 scripts/pm_document_content.py --convert --dry-run
+  python3 scripts/pm_box_crawl.py --scan --dry-run
+  python3 scripts/pm_box_crawl.py --convert --dry-run
 
   # 再変換
-  python3 scripts/pm_document_content.py --convert --force
+  python3 scripts/pm_box_crawl.py --convert --force
 
   # 一覧表示
-  python3 scripts/pm_document_content.py --list
+  python3 scripts/pm_box_crawl.py --list
 """
 from __future__ import annotations
 

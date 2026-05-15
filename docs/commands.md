@@ -550,26 +550,26 @@ tail -f logs/pm_web.log
 - フィルタ: status（open/closed/すべて）・マイルストーン・発生日・削除状態（非削除/削除済み/すべて）
 - 楽観的排他制御: 別タブや他ユーザーが先に保存した場合はエラーを表示し上書きを防止
 
-### 12. ドキュメントレジストリ（pm_document_extract.py）
+### 12. ドキュメントレジストリ（pm_slack_box_links.py）
 
 Slack投稿中のBOXリンクを収集し、ローカルLLMで構造化メタデータを抽出して `docs_{index_name}.db` に保存する。情報の散逸に対処するための機能。
 
 ```sh
 # 全インデックス対象に抽出
-python3 scripts/pm_document_extract.py
+python3 scripts/pm_slack_box_links.py
 
 # 特定インデックスのみ
-python3 scripts/pm_document_extract.py --index-name pm
+python3 scripts/pm_slack_box_links.py --index-name pm
 
 # 確認のみ（DB保存なし）
-python3 scripts/pm_document_extract.py --dry-run
+python3 scripts/pm_slack_box_links.py --dry-run
 
 # 登録済みドキュメント一覧
-python3 scripts/pm_document_extract.py --list
-python3 scripts/pm_document_extract.py --list --index-name pm-bmt
+python3 scripts/pm_slack_box_links.py --list
+python3 scripts/pm_slack_box_links.py --list --index-name pm-bmt
 
 # Canvas に投稿
-python3 scripts/pm_document_extract.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
+python3 scripts/pm_slack_box_links.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
 ```
 
 | オプション | デフォルト | 説明 |
@@ -611,7 +611,7 @@ python3 scripts/pm_qa_server.py --test-hybrid "GPU性能に関する決定事項
 
 RIKEN公式サイト・HPCニュースサイト・NVIDIAブログなどの外部公開情報を取得し `data/web_articles.db` に保存する。
 取得対象・キーワードフィルタ・対象インデックスは `data/web_sources.yaml` で定義する。
-FTS5インデックスへの組み込みは `pm_document_update.sh`（`pm_embed.py`）が自動的に行う。
+FTS5インデックスへの組み込みは `pm_box_update.sh`（`pm_embed.py`）が自動的に行う。
 
 ```sh
 # 全ソースの差分取得（新規URLのみ保存）
@@ -647,7 +647,7 @@ crontab -e
 # 30 3 * * * cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && ~/.venv_aarch64/bin/python3 scripts/pm_web_fetch.py >> logs/pm_web_cron.log 2>&1
 ```
 
-**FTS5連携**: `web_articles.db` が存在すれば `pm_embed.py`（`pm_document_update.sh` 経由）実行時に自動で FTS5 インデックスに組み込まれ `/argus-investigate` で検索可能になる。
+**FTS5連携**: `web_articles.db` が存在すれば `pm_embed.py`（`pm_box_update.sh` 経由）実行時に自動で FTS5 インデックスに組み込まれ `/argus-investigate` で検索可能になる。
 
 **web_sources.yaml の構造**:
 ```yaml

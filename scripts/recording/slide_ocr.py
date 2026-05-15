@@ -188,7 +188,7 @@ def ocr_slides(
         logger.warning("OPENAI_API_BASE 未設定のため OCR をスキップします")
         return [""] * len(frames)
 
-    from pm_document_content import ocr_slide_image
+    from pm_box_crawl import ocr_slide_image
 
     import time as _time
     completed_count = 0
