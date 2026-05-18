@@ -176,6 +176,8 @@ scripts/
 │   ├── pm_slack_box_links.py         Slack上のBOXリンク → docs_*.db (メタデータ)
 │   ├── pm_box_crawl.py                BOX本文 → box_docs.db (Markdown化)
 │   ├── pm_box_relevance.py            box_docs.db の relevance 判定
+│   ├── pm_box_distill.py              [Pass 3] knowledge.db への蒸留
+│   ├── pm_knowledge_edit.py           knowledge.db の人手編集CLI
 │   └── pm_web_fetch.py                外部Web → web_articles.db
 │
 ├── enrich/ (Pass 2)                   エンリッチメントパッケージ

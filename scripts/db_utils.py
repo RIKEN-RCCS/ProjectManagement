@@ -231,6 +231,120 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
     )
 
 
+# --------------------------------------------------------------------------- #
+# knowledge.db（蒸留ナレッジ）
+# --------------------------------------------------------------------------- #
+
+_KNOWLEDGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS knowledge (
+    id                       TEXT PRIMARY KEY,        -- KN-0001 形式
+    kind                     TEXT NOT NULL,            -- decision / constraint / position / glossary
+    topic                    TEXT NOT NULL,
+    current_state            TEXT NOT NULL,
+    rationale                TEXT,
+    alternatives_rejected    TEXT,
+    constraints_invariants   TEXT,
+    tags                     TEXT,                     -- JSON 配列
+    owners                   TEXT,                     -- JSON 配列
+    decided_at               TEXT,                     -- YYYY-MM-DD
+    last_validated_at        TEXT,                     -- YYYY-MM-DD
+    confidence               TEXT NOT NULL DEFAULT 'medium',  -- high / medium (low は書き込まない)
+    superseded_by            TEXT,                     -- knowledge.id への参照
+    deleted                  INTEGER NOT NULL DEFAULT 0,
+    created_at               TEXT NOT NULL,
+    updated_at               TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_kind ON knowledge(kind);
+CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by);
+
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+    knowledge_id  TEXT NOT NULL,
+    source_type   TEXT NOT NULL,    -- box_file / minutes / decision / slack / web
+    source_ref    TEXT NOT NULL,
+    weight        TEXT NOT NULL DEFAULT 'primary',     -- primary / supporting / historical
+    excerpt       TEXT,
+    added_at      TEXT NOT NULL,
+    PRIMARY KEY (knowledge_id, source_type, source_ref),
+    FOREIGN KEY (knowledge_id) REFERENCES knowledge(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_sources_ref
+    ON knowledge_sources(source_type, source_ref);
+
+CREATE TABLE IF NOT EXISTS knowledge_relations (
+    from_id     TEXT NOT NULL,
+    to_id       TEXT NOT NULL,
+    relation    TEXT NOT NULL,      -- supersedes / depends_on / conflicts_with / refines / related_to
+    note        TEXT,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (from_id, to_id, relation),
+    FOREIGN KEY (from_id) REFERENCES knowledge(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_id)   REFERENCES knowledge(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_audit (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    knowledge_id  TEXT NOT NULL,
+    field         TEXT NOT NULL,
+    old_value     TEXT,
+    new_value     TEXT,
+    changed_at    TEXT NOT NULL,
+    source        TEXT NOT NULL,    -- distill_llm / human_edit / relink / merge
+    actor         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_audit_id ON knowledge_audit(knowledge_id);
+
+CREATE TABLE IF NOT EXISTS distill_state (
+    source_type              TEXT NOT NULL,
+    source_ref               TEXT NOT NULL,
+    last_input_hash          TEXT,
+    last_distilled_at        TEXT,
+    produced_knowledge_ids   TEXT,                     -- JSON 配列
+    status                   TEXT NOT NULL DEFAULT 'ok',  -- ok / skipped / error
+    note                     TEXT,
+    PRIMARY KEY (source_type, source_ref)
+);
+"""
+
+
+def init_knowledge_db(db_path: Path, no_encrypt: bool = False):
+    """knowledge.db を初期化して接続を返す。SQLCipher で暗号化（pm.db と同様）。"""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        schema=_KNOWLEDGE_SCHEMA,
+    )
+
+
+def open_knowledge_db(db_path: Path, no_encrypt: bool = False):
+    """既存の knowledge.db を開く。スキーマがなければ作成する。"""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return open_db(
+        db_path,
+        encrypt=not no_encrypt,
+        schema=_KNOWLEDGE_SCHEMA,
+    )
+
+
+def next_knowledge_id(conn) -> str:
+    """次の KN-XXXX を発番する。再利用しない（最大値+1）。"""
+    row = conn.execute(
+        "SELECT id FROM knowledge"
+        " WHERE id LIKE 'KN-%'"
+        " ORDER BY CAST(SUBSTR(id, 4) AS INTEGER) DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return "KN-0001"
+    try:
+        last = int(row["id"].split("-")[1])
+    except Exception:
+        last = 0
+    return f"KN-{last + 1:04d}"
+
+
 def normalize_assignee(name: str | None) -> str | None:
     """担当者名を正規化する。
     - 未展開の Slack メンション ID (<@UXXX> / @UXXX / 生の UXXX) を除去
