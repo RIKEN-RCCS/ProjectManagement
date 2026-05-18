@@ -241,7 +241,9 @@ def cmd_export(conn, output: Path, *, include_deleted: bool, log) -> None:
         "SELECT id, kind, " + ", ".join(_EDITABLE_FIELDS) + f" FROM knowledge {where} ORDER BY id"
     ).fetchall()
     fields = ["id", "kind"] + _EDITABLE_FIELDS
-    with output.open("w", newline="", encoding="utf-8") as f:
+    # Excel が UTF-8 として認識できるよう BOM 付きで書き出す（utf-8-sig）。
+    # BOM は他ツール（pandas / Python csv reader）でも透過的に処理される。
+    with output.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for r in rows:
@@ -254,7 +256,8 @@ def cmd_import(conn, csv_path: Path, *, actor: str | None, dry_run: bool, log) -
     if not csv_path.exists():
         log(f"[ERROR] {csv_path} が見つかりません")
         return
-    with csv_path.open(encoding="utf-8") as f:
+    # utf-8-sig は BOM があれば自動で剥がし、BOM なし UTF-8 でも問題なく読める。
+    with csv_path.open(encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
