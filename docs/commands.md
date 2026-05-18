@@ -783,13 +783,11 @@ sources:
 
 #### box_docs.db のスキーマ
 
-| テーブル | カラム | 説明 |
-|---|---|---|
-| `box_files` | `box_file_id` (UNIQUE) / `box_folder_id` / `name` / `file_format` / `size_bytes` / `modified_at` / `folder_path` / `index_name` / `source_name` / `registered_at` | メタデータ |
-| `box_files`（追加列） | `relevance` / `relevance_reason` / `relevance_judged_at` | `pm_box_relevance.py` が付与 |
-| `doc_content` | `box_file_id` (UNIQUE) / `content_md` / `content_hash` / `page_count` / `char_count` / `convert_method` / `extracted_at` | 本文Markdown |
+詳細は `docs/schema.md` の「data/box_docs.db」セクションを参照。要点:
 
-`box_files` と `doc_content` は `box_file_id` で 1:1。`--remove` 時は両テーブルから削除される。
+- `box_files`: メタデータ（`box_file_id` UNIQUE、`folder_path`・`index_name`・`source_name` 等）+ `pm_box_relevance.py` が埋める `relevance` / `relevance_reason` / `relevance_judged_at`
+- `doc_content`: 本文 Markdown（`box_file_id` UNIQUE、`content_md`・`content_hash`・`convert_method` 等）
+- `box_files` と `doc_content` は `box_file_id` で 1:1。`--remove` 時は両テーブルから削除される
 
 #### 運用フロー（推奨）
 
