@@ -16,6 +16,11 @@
 ├──────────────────────────────────────────────────────────────────┤
 │ エンリッチメント層: 過去ナレッジによる文脈補完                       │
 │   FTS5 検索 + 構造化データで判断者・根拠・関連IDを付与               │
+├──────────────────────────────────────────────────────────────────┤
+│ ナレッジ層: BOX 本文・議事録・決定事項を意思決定単位に蒸留           │
+│   → knowledge.db (プロジェクト全体共通)                              │
+│     brief/risk のプロンプトに常時同梱できる短文サマリと、            │
+│     investigate でフル展開できる根拠・代替案・制約を保持             │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,6 +80,36 @@ pm.db の新規 decisions/action_items
 - Pass 1 は「単一のスレッド・議事録」だけを見て抽出する（LLM の context に収まる範囲）
 - Pass 2 は「過去のナレッジ全体」から関連情報を引いて紐付ける（FTS5 で事前絞り込みが必要）
 - 分離することで Pass 1 の失敗と Pass 2 の失敗を独立に扱える
+
+### Pass 3: ナレッジ蒸留（Distill）— 設計中
+
+`box_docs.db` の本文・議事録・`pm.db.decisions` を入力として、LLM が **意思決定 / 制約 / 立場 / 用語**
+の単位に蒸留し、`data/knowledge.db` に格納する（スキーマは `docs/schema.md` 参照）。
+本文を毎回プロンプトに詰める方式は brief/risk の S/N を下げるため、**蒸留済みの短文要約のみを常時参照**
+する形にする。
+
+```
+box_docs.db (本文 Markdown)
+data/minutes/{kind}.db                   ┐
+pm.db.decisions                          ├─→ pm_box_distill.py（仮、未実装）
+                                          │     └─ LLM で蒸留 → 1レコード = 1意思決定
+                                          ▼
+                                    knowledge.db
+                                    （プロジェクト全体共通、index 分割なし）
+                                          │
+        ┌─────────────────────────────────┼─────────────────────────────────┐
+        ▼                                 ▼                                 ▼
+  /argus-brief                       /argus-risk                       /argus-investigate
+  プロンプトに current_state を     不整合・古いレコード・矛盾を       get_knowledge ツールで
+  常時同梱                          シグナルとして抽出                rationale / alternatives を引く
+```
+
+**ナレッジ層の設計原則**（詳細は `docs/schema.md`）:
+- **プロジェクト全体共通**: `argus_config.yaml` の `index_name` 等によるチャンネル別分割は持たない。
+  ナレッジは富岳NEXTプロジェクト全体に渡って共有される
+- **意思決定単位**: 1 BOX ファイル ≠ 1 レコード。`knowledge_sources` で N:M 結合し、根拠を追跡可能にする
+- **時系列の劣化**: `last_validated_at` と `superseded_by` で版管理。古いレコードは brief で減衰させる
+- **冪等な蒸留**: `distill_state` で入力ハッシュを記録し、変化のあった BOX ファイルのみ再蒸留
 
 ---
 
@@ -199,6 +234,7 @@ scripts/
 | `data/pm.db` | PM 統合データ（**action_items / decisions / meetings / goals / milestones の唯一の正本**。2026-05-17 に pm-hpc.db / pm-pmo.db / pm-personal.db への分割を廃止し pm.db に一本化。`action_items.channel_id` / `decisions.channel_id` で出典チャンネルを保持）| ✅ |
 | `data/docs_*.db` | BOXドキュメントメタデータ（Slackリンク経由）| ✅ |
 | `data/box_docs.db` | BOXドキュメント本文（Markdown化）+ relevance（core/related/noise/unknown）| ✅ |
+| `data/knowledge.db` | **蒸留ナレッジレイヤ**（プロジェクト全体共通。意思決定 / 制約 / 立場 / 用語の正規化済みレコード）| ✅ |
 | `data/web_articles.db` | 外部Web記事 | ❌（公開情報）|
 | `data/qa_index.db` | FTS5 統合検索インデックス（`chunks` + `chunk_indexes(chunk_id, index_name)` で論理 index を分離。2026-05-18 に `qa_pm*.db` 分割を廃止）| ❌（導出データ）|
 | `data/patrol_state.db` | Patrol 冪等性・承認待ち | ❌（機密なし）|
