@@ -71,11 +71,15 @@ _CONTEXT_CHAR_LIMIT = 100_000
 
 def _resolve_index_and_channels(
     channel_id: str | None = None,
-) -> tuple[Path, list[str], list[Path]]:
-    """argus_config.yaml を読み、channel_id に対応する index_db, channels, pm_db_paths を返す。"""
+) -> tuple[Path, list[str], list[Path], str]:
+    """argus_config.yaml を読み、channel_id に対応する index_db (統合)・channels・pm_db_paths・index_name を返す。
+
+    全インデックスは統合 data/qa_index.db を共有し、検索時に index_name でフィルタする。
+    """
+    qa_index = _DATA_DIR / "qa_index.db"
     config_path = _ARGUS_CONFIG if _ARGUS_CONFIG.exists() else _QA_CONFIG_LEGACY
     if not config_path.exists():
-        return _DATA_DIR / "qa_pm.db", [], [_PM_DB]
+        return qa_index, [], [_PM_DB], "pm"
 
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
@@ -86,12 +90,10 @@ def _resolve_index_and_channels(
 
     index_name = channel_map.get(channel_id, default_index) if channel_id else default_index
     index_cfg = indices.get(index_name, {})
-    db_rel = index_cfg.get("db", f"data/qa_{index_name}.db")
-    index_db = _REPO_ROOT / db_rel
     channels = index_cfg.get("channels", [])
     pm_db_list = index_cfg.get("pm_db", ["data/pm.db"])
     pm_db_paths = [_REPO_ROOT / p for p in pm_db_list]
-    return index_db, channels, pm_db_paths
+    return qa_index, channels, pm_db_paths, index_name
 
 
 # =========================================================================== #
@@ -106,7 +108,8 @@ class AgentContext:
     no_encrypt: bool = False
     data_dir: Path = field(default_factory=lambda: _DATA_DIR)
     minutes_dir: Path = field(default_factory=lambda: _MINUTES_DIR)
-    index_db: Path = field(default_factory=lambda: _DATA_DIR / "qa_pm.db")
+    index_db: Path = field(default_factory=lambda: _DATA_DIR / "qa_index.db")
+    index_name: str = "pm"
     channels: list[str] = field(default_factory=list)
     cited_chunks: list[dict] = field(default_factory=list)
 
@@ -269,7 +272,7 @@ def _tool_search_text(args: dict, ctx: AgentContext) -> str:
     query = args.get("query", "")
     if not query:
         return "（検索クエリが空です）"
-    merged = retrieve_chunks_hyde(query, ctx.index_db, k=30)
+    merged = retrieve_chunks_hyde(query, ctx.index_db, k=30, index_name=ctx.index_name)
     if not merged:
         return f"（「{query}」に一致する情報なし）"
     reranked = rerank_chunks(query, merged)
@@ -395,21 +398,22 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
                     break
             if resolved_uid:
                 user_id = resolved_uid
-                # 解決に使えた display_name を Slack DB から引いて補助検索に使う
+                # 解決に使えた display_name を統合 Slack DB から引いて補助検索に使う
                 from db_utils import open_db
-                for db_file in ctx.data_dir.glob("C*.db"):
+                slack_db = ctx.data_dir / "slack.db"
+                if slack_db.exists():
                     try:
-                        c = open_db(db_file, encrypt=not ctx.no_encrypt)
+                        c = open_db(slack_db, encrypt=not ctx.no_encrypt)
                         row = c.execute(
-                            "SELECT user_name FROM messages WHERE user_id=? AND user_name IS NOT NULL LIMIT 1",
+                            "SELECT user_name FROM messages WHERE user_id=?"
+                            " AND user_name IS NOT NULL LIMIT 1",
                             (resolved_uid,),
                         ).fetchone()
                         c.close()
                         if row and row["user_name"]:
                             resolved_display = row["user_name"]
-                            break
                     except Exception:
-                        continue
+                        pass
         except Exception as e:
             logger.warning(f"[search_mentions] name→user_id 解決失敗: {e}")
 
@@ -441,34 +445,32 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
         params.append(user_id)
     where_clause = " AND ".join(where_parts)
 
+    all_rows = []
+    db_path = ctx.data_dir / "slack.db"
+    if not db_path.exists():
+        return f"（data/slack.db が見つかりません）"
+
+    ph = ",".join("?" * len(channels))
     sql = (
-        f"SELECT timestamp, user_name, text, permalink, 0 AS is_reply "
-        f"FROM messages WHERE {where_clause} "
+        f"SELECT timestamp, user_name, text, permalink, channel_id, 0 AS is_reply "
+        f"FROM messages WHERE channel_id IN ({ph}) AND {where_clause} "
         f"UNION ALL "
-        f"SELECT timestamp, user_name, text, permalink, 1 AS is_reply "
-        f"FROM replies WHERE {where_clause} "
+        f"SELECT timestamp, user_name, text, permalink, channel_id, 1 AS is_reply "
+        f"FROM replies WHERE channel_id IN ({ph}) AND {where_clause} "
         f"ORDER BY timestamp DESC LIMIT ?"
     )
-
-    all_rows = []
-    for ch_id in channels:
-        db_path = ctx.data_dir / f"{ch_id}.db"
-        if not db_path.exists():
-            continue
-        try:
-            conn = open_db(db_path, encrypt=not ctx.no_encrypt)
-        except Exception as e:
-            all_rows.append((None, None, f"（{ch_id}.db 接続失敗: {e}）", None, 0, ch_id))
-            continue
-        try:
-            rows = conn.execute(sql, params + params + [limit]).fetchall()
-            for r in rows:
-                all_rows.append((r["timestamp"], r["user_name"], r["text"],
-                                 r["permalink"], r["is_reply"], ch_id))
-        except Exception as e:
-            all_rows.append((None, None, f"（{ch_id} クエリエラー: {e}）", None, 0, ch_id))
-        finally:
-            conn.close()
+    try:
+        conn = open_db(db_path, encrypt=not ctx.no_encrypt)
+        rows = conn.execute(
+            sql,
+            channels + params + channels + params + [limit],
+        ).fetchall()
+        for r in rows:
+            all_rows.append((r["timestamp"], r["user_name"], r["text"],
+                             r["permalink"], r["is_reply"], r["channel_id"]))
+        conn.close()
+    except Exception as e:
+        all_rows.append((None, None, f"（slack.db クエリエラー: {e}）", None, 0, ""))
 
     if not all_rows:
         q = f"user_id={user_id}" if user_id else f"name={name}"
@@ -1141,7 +1143,7 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
 
-        index_db, channels, pm_db_paths = _resolve_index_and_channels(channel_id)
+        index_db, channels, pm_db_paths, index_name = _resolve_index_and_channels(channel_id)
         conns = [open_pm_db(p, no_encrypt=no_encrypt) for p in pm_db_paths]
 
         ctx = AgentContext(
@@ -1152,6 +1154,7 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             data_dir=_DATA_DIR,
             minutes_dir=_MINUTES_DIR,
             index_db=index_db,
+            index_name=index_name,
             channels=channels,
         )
 
@@ -1231,7 +1234,7 @@ def main():
     today = date.today().isoformat()
     since_date = (date.today() - timedelta(days=args.days)).isoformat()
 
-    index_db, channels, pm_db_paths = _resolve_index_and_channels()
+    index_db, channels, pm_db_paths, index_name = _resolve_index_and_channels()
     if args.db != str(_PM_DB):
         pm_db_paths = [Path(args.db)]
     conns = [open_pm_db(p, no_encrypt=args.no_encrypt) for p in pm_db_paths]
@@ -1244,6 +1247,7 @@ def main():
         data_dir=_DATA_DIR,
         minutes_dir=_MINUTES_DIR,
         index_db=index_db,
+        index_name=index_name,
         channels=channels,
     )
 

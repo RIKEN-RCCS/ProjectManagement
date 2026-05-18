@@ -2,13 +2,16 @@
 
 ### 1. Slack差分取得（slack_pipeline.py）
 
+2026-05-18 以降は全チャンネル統合DB `data/slack.db` を共有する。`--db` を省略するとこのパスが使われる。
+新規 / 更新スレッドは `channel_id` 列付きで挿入され、クエリ側はすべて `WHERE channel_id = ?` で
+チャンネルを絞り込む。
+
 ```sh
-# 通常運用: 差分のみ取得
-python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --db data/<CHANNEL_ID>.db
+# 通常運用: 差分のみ取得（統合DB data/slack.db に書き込まれる）
+python3 scripts/slack_pipeline.py -c <CHANNEL_ID>
 
 # 初回・過去分の取り込み（oldest をAPIに渡してページネーション全件取得）
-python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --db data/<CHANNEL_ID>.db \
-    --since 2025-04-01
+python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --since 2025-04-01
 
 # DB内のスレッド一覧を表示
 python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --list
@@ -17,7 +20,7 @@ python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --list
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `-c CHANNEL_ID` | `<CHANNEL_ID>` | 対象チャンネルID |
-| `--db PATH` | `data/{channel_id}.db` | SQLite DBファイルパス |
+| `--db PATH` | `data/slack.db` | SQLite DBファイルパス（全チャンネル統合） |
 | `--since YYYY-MM-DD` | なし（全件） | この日付以降のメッセージのみ取得（APIに oldest として渡す） |
 | `-l N` | `100` | 1ページあたりの取得件数上限（最大999） |
 | `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用） |
@@ -46,7 +49,7 @@ bash scripts/pm_from_slack.sh -c <CHANNEL_ID> --dry-run
 | `--since YYYY-MM-DD` | なし | この日付以降のみ対象（両スクリプトに渡す） |
 | `--dry-run` | - | DB保存なし・確認のみ（両スクリプトに渡す） |
 | `--no-encrypt` | - | 平文モード（両スクリプトに渡す） |
-| `--db-slack PATH` | `data/{channel_id}.db` | Slack DBパス |
+| `--db-slack PATH` | `data/slack.db` | Slack DBパス（全チャンネル統合） |
 | `--db-pm PATH` | `data/pm.db` | pm.db パス |
 | `--skip-fetch` | - | Slack API取得をスキップ（`slack_pipeline.py` のみ） |
 | `--force-reextract` | - | 抽出済みスレッドも再処理（`pm_ingest.py slack` のみ） |
@@ -208,11 +211,11 @@ python3 scripts/pm_minutes_catalog.py --upload --dry-run
 ```yaml
 meetings:
   Leader_Meeting:
-    pm_db: pm.db                      # pm_from_recording_auto.sh 用
+    pm_db: pm.db                      # pm_from_recording_auto.sh 用（2026-05-17 以降は全会議が pm.db）
     box_folder_id: "123456789"        # 議事録 MD の Box アップロード先
     catalog_canvas_id: <CANVAS_ID>      # 目録 Canvas ID
   Co-design_Review_Meeting:
-    pm_db: pm-hpc.db                  # box_folder_id 未設定なら目録対象外
+    pm_db: pm.db                      # box_folder_id 未設定なら目録対象外
 ```
 
 ### 3b, 4, 8. pm.db 統合インジェスト（pm_ingest.py）
@@ -260,7 +263,7 @@ python3 scripts/ingest/pm_ingest.py goals --goals-list
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--slack-channel CHANNEL_ID` | `<CHANNEL_ID>` | 対象チャンネルID |
-| `--slack-db PATH` | `data/{channel_id}.db` | Slack DBのパス |
+| `--slack-db PATH` | `data/slack.db` | Slack DBのパス（全チャンネル統合） |
 | `--slack-force-reextract` | - | 抽出済みスレッドも再処理 |
 | `--slack-list` | - | 抽出済みスレッド一覧を表示して終了 |
 
@@ -587,6 +590,221 @@ python3 scripts/pm_slack_box_links.py --post-to-canvas --canvas-id F0XXXXXX --in
 
 **FTS5連携**: 抽出後に `pm_embed.py` を実行すると、`docs_{index_name}.db` のドキュメントが FTS5 インデックスに組み込まれ `/argus-investigate` で検索可能になる。
 
+### 12a. BOXドキュメント本文取込み（pm_box_crawl.py + pm_box_relevance.py + pm_box_update.sh）
+
+§12 がBOXリンクの**メタデータ**だけを保存するのに対し、本節は **BOXフォルダから本文を取得して Markdown 化**し、ナレッジ検索の本体として `/argus-investigate` から本文を直接ヒットさせる仕組みを扱う。
+
+#### 全体パイプライン
+
+```
+[box_sources.yaml]
+   ↓ ステップA: フォルダ走査
+pm_box_crawl.py --scan
+   ↓ box_files テーブル（メタデータ + folder_path + index_name）
+   ↓ ステップB: 本文Markdown化
+pm_box_crawl.py --convert
+   ↓ doc_content テーブル（content_md + content_hash）
+   ↓ ステップC: relevance 判定（任意だが推奨）
+pm_box_relevance.py --judge
+   ↓ box_files.relevance ∈ {core, related, noise, unknown}
+   ↓ ステップD: FTS5 索引化（noise は自動除外）
+pm_embed.py
+   ↓ data/qa_index.db に投入（chunk_indexes 経由で index_name に紐付け）
+   ↓ noise の box_files は索引対象から自動除外
+   → /argus-investigate から検索可能
+```
+
+`pm_box_update.sh` は **A+B+D** を一括実行するエントリポイント（ステップ1: `pm_slack_box_links.py`、ステップ2: `pm_box_crawl.py --scan --convert`、ステップ3: `pm_embed.py`）。relevance 判定（C）は別運用。
+
+#### ステップA+B: 走査・変換（pm_box_crawl.py）
+
+BOX CLI 経由でフォルダを再帰走査し、対応形式（pptx/docx/pdf/xlsx/md/boxnote/txt）をローカル変換チェーンで Markdown 化して `box_docs.db` に保存する。
+
+```sh
+# 走査と変換を一括実行
+python3 scripts/pm_box_crawl.py --scan --convert
+
+# 走査のみ（メタデータだけ box_files に登録）
+python3 scripts/pm_box_crawl.py --scan
+
+# 既存登録ファイルの本文だけ抽出
+python3 scripts/pm_box_crawl.py --convert
+
+# 特定ソース・形式・ファイルを限定
+python3 scripts/pm_box_crawl.py --scan --source "アプリケーション開発エリア"
+python3 scripts/pm_box_crawl.py --convert --type pptx
+python3 scripts/pm_box_crawl.py --convert --box-file-id 123456789
+
+# 再変換（content_hash が変わっていなくても再処理）
+python3 scripts/pm_box_crawl.py --convert --force
+
+# 変換ロジックの単体検証（DB書き込みなし）
+python3 scripts/pm_box_crawl.py --debug-convert /path/to/file.pptx
+
+# 一覧・ファイル削除
+python3 scripts/pm_box_crawl.py --list
+python3 scripts/pm_box_crawl.py --remove --box-file-id 123456789
+python3 scripts/pm_box_crawl.py --remove --folder-pattern "アーカイブ/*"
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--scan` | — | `box_sources.yaml` の全ソースを走査して `box_files` に登録 |
+| `--convert` | — | `box_files` の未変換ファイルをダウンロード・Markdown化 |
+| `--list` | — | 登録ファイル一覧を表示 |
+| `--show BOX_FILE_ID` | — | 指定ファイルの本文を表示 |
+| `--remove` | — | ファイルを `box_files` + `doc_content` から削除（`--box-file-id` または `--folder-pattern` と併用） |
+| `--source NAME` | 全ソース | `box_sources.yaml` の `name` で絞り込み |
+| `--box-file-id ID` | — | 特定ファイルのみ |
+| `--folder-pattern PAT` | — | `--remove` 用 fnmatch パターン（例: `アーカイブ/*`）|
+| `--type EXT` | 全形式 | `pptx` / `docx` / `pdf` / `xlsx` / `md` / `boxnote` / `txt` のみ変換 |
+| `--force` | — | 変換済みも再変換 |
+| `--workers N` | `2` | `--convert` の並列数 |
+| `--db PATH` | `data/box_docs.db` | DBファイル |
+| `--config PATH` | `data/box_sources.yaml` | ソース定義ファイル |
+| `--debug-convert PATH` | — | 変換のみ単体実行（DB書き込みなし、ロジック検証用） |
+| `--dry-run` / `--no-encrypt` / `--output` | — | 共通 |
+
+**変換チェーン（形式別フォールバック）**:
+
+| 形式 | 主経路 | フォールバック |
+|---|---|---|
+| md / txt | そのまま読み込み | — |
+| docx | LibreOffice → HTML → Markdown | — |
+| xlsx | LibreOffice → HTML → Markdown（テーブル整形） | — |
+| pptx | LibreOffice → HTML → Markdown | gemma4 マルチモーダル OCR（`OPENAI_API_BASE`）|
+| pdf | `pdftotext` でテキスト抽出 | テキスト無しのスキャンPDFはマルチモーダルOCR |
+| boxnote | JSON 抽出（`_extract_boxnote_text`）| — |
+
+**マルチモーダル変換**: 文字情報を持たないPPTXやスキャンPDFは ffmpeg 等で画像化したうえで `OPENAI_API_BASE` のマルチモーダルLLMに投げて Markdown 化する。`OPENAI_API_BASE` 未設定の場合はテキスト抽出のみで進む。
+
+#### ステップC: relevance 判定（pm_box_relevance.py）
+
+本文の冒頭をローカルLLMで読み取り、ナレッジとしての価値を 4 段階に分類する。判定結果は `box_files.relevance` に保存される。
+
+| relevance | 用途 |
+|---|---|
+| `core`    | 富岳NEXTプロジェクトの本質的ナレッジ（設計資料・公式報告書・意思決定資料）|
+| `related` | 関連するが本質ではない（補助資料・参考情報・過去事例）|
+| `noise`   | プロジェクト外・索引化するとノイズになる（雑談添付・個人メモ）|
+| `unknown` | 判定不能（情報不足）|
+
+```sh
+# 未判定のみLLM判定
+python3 scripts/pm_box_relevance.py --judge
+
+# 全件再判定 / 特定 index_name のみ
+python3 scripts/pm_box_relevance.py --judge --force
+python3 scripts/pm_box_relevance.py --judge --index-name pm
+
+# CSV にエクスポート（noise を先頭に並べ、人手で final_relevance を上書き可能）
+python3 scripts/pm_box_relevance.py --export --output screen.csv
+
+# 精査後のCSVをDBに反映
+python3 scripts/pm_box_relevance.py --import screen.csv
+
+# relevance分布の集計
+python3 scripts/pm_box_relevance.py --stats
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--judge` | — | 未判定 (`relevance` が空) のファイルをLLM判定 |
+| `--export` | — | CSV にエクスポート（`noise` 優先表示） |
+| `--import PATH` | — | CSV をインポートして `relevance` を上書き |
+| `--stats` | — | relevance 分布を集計表示 |
+| `--index-name NAME` | 全インデックス | 特定インデックスのみ |
+| `--force` | — | `--judge` で判定済みも再判定 |
+| `--output PATH` | `docs_screen.csv` | `--export` の出力先 |
+| `--dry-run` / `--no-encrypt` | — | 共通 |
+
+**FTS5 連携**: `pm_embed.py` は `box_files.relevance = 'noise'` のファイルを索引対象から除外する（`COALESCE(bf.relevance, '') != 'noise'`）。NULL/空文字のファイル（未判定）は索引対象に含まれる。
+
+#### ステップD: 一括実行シェル（pm_box_update.sh）
+
+ステップ1（Slackリンク）+ ステップ2（本文取込み）+ ステップ3（FTS5）を順に実行する。
+
+```sh
+# 全ソース・全インデックス
+bash scripts/pm_box_update.sh
+
+# 特定インデックスのみ
+bash scripts/pm_box_update.sh --index-name pm
+
+# 走査・変換は飛ばしてFTS5だけ更新
+bash scripts/pm_box_update.sh --skip-box-content
+
+# 本文取込みは走らせるが FTS5 は飛ばす
+bash scripts/pm_box_update.sh --skip-embed
+
+# 確認のみ
+bash scripts/pm_box_update.sh --dry-run
+```
+
+| オプション | 説明 |
+|---|---|
+| `--index-name NAME` | 特定インデックス（pm / pm-hpc / pm-pmo） |
+| `-c CHANNEL_ID` | ステップ1（pm_slack_box_links.py）のチャンネルを限定 |
+| `--since YYYY-MM-DD` | ステップ1 の対象日付 |
+| `--force` | 抽出済み・変換済みも再処理 |
+| `--full-rebuild` | ステップ3 で FTS5 を全件再構築 |
+| `--skip-box-content` | ステップ2（pm_box_crawl.py）をスキップ |
+| `--skip-embed` | ステップ3（pm_embed.py）をスキップ |
+| `--dry-run` | 全ステップで DB保存なし |
+
+**ログ**: `logs/pm_box_update.log` に追記。
+
+#### box_sources.yaml の構造
+
+```yaml
+sources:
+  - name: "20_アプリケーション開発ユニット"
+    folder_id: "321131927032"        # BOX Web UI URL の末尾から取得
+    index_names: [pm, pm-all]        # 投入先の論理 index 名（qa_index.db.chunk_indexes に登録）
+    recursive: true
+    extensions: [pptx, docx, pdf, md]
+    max_file_size_mb: 50
+    enabled: true
+    exclude_folders: ["*_議事", "*/old*", "*Application_analysis*"]
+    exclude_patterns: ["*_draft*", "~$*", "会議案内/*"]
+```
+
+| フィールド | 必須 | 説明 |
+|---|---|---|
+| `name` | ✓ | 表示名・`--source` でのフィルタキー |
+| `folder_id` | ✓ | BOX フォルダ ID（数値文字列）|
+| `index_names` | ✓ | 投入先インデックス名のリスト（複数指定可）|
+| `recursive` | — | サブフォルダも走査するか（デフォルト `true`） |
+| `extensions` | — | 対象拡張子リスト（未指定なら全 `SUPPORTED_EXTENSIONS`）|
+| `max_file_size_mb` | — | 上限サイズ（超過ファイルはスキップ）|
+| `enabled` | — | `false` なら走査対象外 |
+| `exclude_folders` | — | フォルダパスの fnmatch パターン（マッチしたフォルダ配下を除外）|
+| `exclude_patterns` | — | ファイル名の fnmatch パターン |
+
+#### box_docs.db のスキーマ
+
+| テーブル | カラム | 説明 |
+|---|---|---|
+| `box_files` | `box_file_id` (UNIQUE) / `box_folder_id` / `name` / `file_format` / `size_bytes` / `modified_at` / `folder_path` / `index_name` / `source_name` / `registered_at` | メタデータ |
+| `box_files`（追加列） | `relevance` / `relevance_reason` / `relevance_judged_at` | `pm_box_relevance.py` が付与 |
+| `doc_content` | `box_file_id` (UNIQUE) / `content_md` / `content_hash` / `page_count` / `char_count` / `convert_method` / `extracted_at` | 本文Markdown |
+
+`box_files` と `doc_content` は `box_file_id` で 1:1。`--remove` 時は両テーブルから削除される。
+
+#### 運用フロー（推奨）
+
+```
+1. box_sources.yaml にフォルダ追加
+2. bash scripts/pm_box_update.sh                      # 走査・変換・FTS5更新
+3. python3 scripts/pm_box_relevance.py --judge        # 関連度判定（未判定のみ）
+4. python3 scripts/pm_box_relevance.py --stats        # noise が多すぎないか確認
+5. python3 scripts/pm_box_relevance.py --export       # 不安なら CSV で精査
+6. （必要なら）CSV を編集 → --import で反映
+7. bash scripts/pm_box_update.sh --skip-box-content   # FTS5 のみ再構築（noise 除外を反映）
+```
+
+定期運用は `pm_box_update.sh` を crontab に登録、relevance 判定は新規追加時のみ実行する形が現実的。
+
 ### 13. ハイブリッド検索テスト（pm_qa_server.py --test-hybrid）
 
 `/argus-investigate` のハイブリッド検索をSlackデーモン不要でCLIテストする。
@@ -656,7 +874,7 @@ sources:
     type: rss                          # "rss" または "html_index"
     keywords: [Fugaku, RIKEN, HPC]    # いずれか1語を含む記事のみ保存
     max_articles: 50                   # 1回の実行で最大何件保存するか
-    target_indices: [pm, pm-hpc]       # 組み込む qa_pm*.db インデックス名
+    target_indices: [pm, pm-hpc]       # 組み込む論理 index 名（qa_index.db.chunk_indexes に登録）
     enabled: true
 ```
 

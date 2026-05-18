@@ -60,7 +60,7 @@ done
 
 if [[ -z "$DB" ]]; then
     echo "[ERROR] --db が未指定です。" >&2
-    echo "  例: --db data/pm.db / --db data/pm-hpc.db" >&2
+    echo "  例: --db data/pm.db" >&2
     exit 1
 fi
 if [[ -z "$CANVAS_ID" ]]; then

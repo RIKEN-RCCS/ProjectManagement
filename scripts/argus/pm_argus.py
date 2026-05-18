@@ -116,32 +116,31 @@ def fetch_raw_messages(
     max_chars: int = _MAX_CHARS_PER_CHANNEL,
 ) -> str:
     """
-    Slack DB ({channel_id}.db) から messages + replies を取得し、
+    Slack 統合 DB (data/slack.db) から指定チャンネルの messages + replies を取得し、
     "[YYYY-MM-DD HH:MM] user_name: text" 形式で整形して返す。
     max_chars を超える場合は最古のメッセージから切り捨てる（最新を優先）。
     """
-    db_path = data_dir / f"{channel_id}.db"
+    db_path = data_dir / "slack.db"
     if not db_path.exists():
-        return f"（{channel_id}.db が見つかりません）"
+        return "（data/slack.db が見つかりません）"
 
     try:
         conn = open_db(db_path, encrypt=not no_encrypt)
     except Exception as e:
-        return f"（{channel_id}.db の接続に失敗: {e}）"
+        return f"（{db_path.name} の接続に失敗: {e}）"
 
     lines = []
     try:
-        # 親メッセージ + 返信を timestamp 昇順で取得
         rows = conn.execute(
             """SELECT timestamp, user_name, text, 0 AS is_reply
-               FROM messages
-               WHERE date(timestamp) >= ? AND text IS NOT NULL AND text != ''
-               UNION ALL
-               SELECT timestamp, user_name, text, 1 AS is_reply
-               FROM replies
-               WHERE date(timestamp) >= ? AND text IS NOT NULL AND text != ''
-               ORDER BY timestamp ASC""",
-            (since_date, since_date),
+                 FROM messages
+                 WHERE channel_id = ? AND date(timestamp) >= ? AND text IS NOT NULL AND text != ''
+                 UNION ALL
+                 SELECT timestamp, user_name, text, 1 AS is_reply
+                 FROM replies
+                 WHERE channel_id = ? AND date(timestamp) >= ? AND text IS NOT NULL AND text != ''
+                 ORDER BY timestamp ASC""",
+            (channel_id, since_date, channel_id, since_date),
         ).fetchall()
 
         formatted = []
@@ -372,6 +371,37 @@ def _to_slack_mrkdwn(text: str) -> str:
     # **bold** → *bold*（ただし *...* と衝突しないよう一時置換）
     text = re.sub(r'\*\*([^*\n]+?)\*\*', r'*\1*', text)
     return text
+
+
+# Slack section block の text は 3000 文字上限。超過するとブロック全体が無音で破棄される。
+_SLACK_SECTION_LIMIT = 2900  # 安全マージン
+
+
+def _split_mrkdwn_to_blocks(text: str) -> list[dict]:
+    """長文 mrkdwn を Slack section block の上限内で分割する。
+
+    改行優先で区切り、超過する単一行は文字数で強制切断する。
+    """
+    blocks: list[dict] = []
+    buf = ""
+    for line in text.split("\n"):
+        # 単一行が上限を超える場合は強制分割
+        while len(line) > _SLACK_SECTION_LIMIT:
+            if buf:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": buf}})
+                buf = ""
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line[:_SLACK_SECTION_LIMIT]}})
+            line = line[_SLACK_SECTION_LIMIT:]
+        # 通常の改行単位で詰める
+        candidate = (buf + "\n" + line) if buf else line
+        if len(candidate) > _SLACK_SECTION_LIMIT:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": buf}})
+            buf = line
+        else:
+            buf = candidate
+    if buf:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": buf}})
+    return blocks
 
 
 _DAILY_SUMMARY_PROMPT = """\
@@ -895,17 +925,10 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
             header += f"  担当者フォーカス: {assignee}"
         if topic:
             header += f"  話題フォーカス: {topic}"
-        respond(
-            blocks=[
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": _to_slack_mrkdwn(f"{header}\n\n{result}"),
-                    },
-                }
-            ],
-        )
+        full_text = _to_slack_mrkdwn(f"{header}\n\n{result}")
+        blocks = _split_mrkdwn_to_blocks(full_text)
+        logger.info(f"[argus-brief] respond text={len(full_text)} chars, blocks={len(blocks)}")
+        respond(blocks=blocks)
         logger.info("[argus-brief] 完了")
     except Exception as e:
         logger.exception("[argus-brief] エラー")
@@ -959,17 +982,10 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
 
         logger.info("[argus-draft] RiVault 呼び出し中...")
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
-        respond(
-            blocks=[
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": _to_slack_mrkdwn(f"*Argus 草案 ({purpose}: {subject})*\n\n{result}"),
-                    },
-                }
-            ],
-        )
+        full_text = _to_slack_mrkdwn(f"*Argus 草案 ({purpose}: {subject})*\n\n{result}")
+        blocks = _split_mrkdwn_to_blocks(full_text)
+        logger.info(f"[argus-draft] respond text={len(full_text)} chars, blocks={len(blocks)}")
+        respond(blocks=blocks)
         logger.info("[argus-draft] 完了")
     except Exception as e:
         logger.exception("[argus-draft] エラー")
@@ -1022,17 +1038,10 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
             header += f"  担当者フォーカス: {assignee}"
         if topic:
             header += f"  話題フォーカス: {topic}"
-        respond(
-            blocks=[
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": _to_slack_mrkdwn(f"{header}\n\n{result}"),
-                    },
-                }
-            ],
-        )
+        full_text = _to_slack_mrkdwn(f"{header}\n\n{result}")
+        blocks = _split_mrkdwn_to_blocks(full_text)
+        logger.info(f"[argus-risk] respond text={len(full_text)} chars, blocks={len(blocks)}")
+        respond(blocks=blocks)
         logger.info("[argus-risk] 完了")
     except Exception as e:
         logger.exception("[argus-risk] エラー")
@@ -1206,43 +1215,29 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         try:
             from db_utils import open_db
 
-            # まずテキスト内に含まれるユーザーIDを全て抽出
-            data_dir = _REPO_ROOT / "data"
+            # 統合 DB (data/slack.db) からユーザーID展開用マップを構築
+            unified_db = _REPO_ROOT / "data" / "slack.db"
             uid_pattern = re.compile(r'(U0[A-Z0-9]{9})')
             text_uids = set()
 
-            for db_file in data_dir.glob("C*.db"):
-                try:
-                    conn = open_db(db_file, encrypt=not no_encrypt)
-
-                    # テキスト内のユーザーIDパターン (U0XXXXXXXXX = 10文字) を抽出
-                    for row in conn.execute("SELECT text FROM messages WHERE text IS NOT NULL").fetchall():
-                        if row[0]:
-                            text_uids.update(uid_pattern.findall(row[0]))
-
-                    conn.close()
-                except Exception:
-                    pass
-
-            # 次に、各チャンネルでそれらのユーザーIDを検索して名前を取得
-            for db_file in data_dir.glob("C*.db"):
-                try:
-                    conn = open_db(db_file, encrypt=not no_encrypt)
-
-                    # テキスト内に出現したユーザーIDの名前を検索
-                    for uid in text_uids:
-                        if uid not in user_id_map:
-                            # 同じuser_idで user_name が異なるレコードを探す
-                            result = conn.execute(
-                                "SELECT user_name FROM messages WHERE user_id = ? AND user_name IS NOT NULL AND user_name != ? AND user_name NOT LIKE 'U0%' LIMIT 1",
-                                (uid, uid)
-                            ).fetchone()
-                            if result and result[0]:
-                                user_id_map[uid] = result[0]
-
-                    conn.close()
-                except Exception:
-                    pass
+            try:
+                conn = open_db(unified_db, encrypt=not no_encrypt)
+                # テキスト内のユーザーIDパターン (U0XXXXXXXXX = 10文字) を抽出
+                for row in conn.execute("SELECT text FROM messages WHERE text IS NOT NULL").fetchall():
+                    if row[0]:
+                        text_uids.update(uid_pattern.findall(row[0]))
+                # テキストに出現した user_id の display_name を引く
+                for uid in text_uids:
+                    result = conn.execute(
+                        "SELECT user_name FROM messages WHERE user_id = ?"
+                        " AND user_name IS NOT NULL AND user_name != ? AND user_name NOT LIKE 'U0%' LIMIT 1",
+                        (uid, uid),
+                    ).fetchone()
+                    if result and result[0]:
+                        user_id_map[uid] = result[0]
+                conn.close()
+            except Exception:
+                pass
         except Exception as e:
             logger.debug(f"[argus-today] ユーザーIDマップ構築失敗: {e}")
 
@@ -1269,17 +1264,10 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
 
         # 8. ephemeral 応答 (Block Kit で mrkdwn 有効化)
         header = f":memo: *Argus 今日の活動サマリー ({today})*"
-        respond(
-            blocks=[
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": _to_slack_mrkdwn(f"{header}\n\n{result}"),
-                    },
-                }
-            ],
-        )
+        full_text = _to_slack_mrkdwn(f"{header}\n\n{result}")
+        blocks = _split_mrkdwn_to_blocks(full_text)
+        logger.info(f"[argus-today] respond text={len(full_text)} chars, blocks={len(blocks)}")
+        respond(blocks=blocks)
 
         logger.info("[argus-today] 完了")
 

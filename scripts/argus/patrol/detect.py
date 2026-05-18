@@ -491,10 +491,10 @@ def _parse_permalink(permalink: str) -> tuple[str, str]:
 def _get_recent_replies(
     data_dir: Path, channel_id: str, thread_ts: str, cutoff_date: str
 ) -> list[str]:
-    """Slack DB からスレッドの最新返信テキストを取得する。"""
+    """統合 Slack DB (data/slack.db) からスレッドの最新返信テキストを取得する。"""
     from db_utils import open_pm_db
 
-    db_path = data_dir / f"{channel_id}.db"
+    db_path = data_dir / "slack.db"
     if not db_path.exists():
         return []
 

@@ -55,6 +55,12 @@
         発生日（以降）
         <input id="f-ai-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
       </label>
+      <div class="flex flex-col text-xs text-gray-600">
+        <span>ソース絞り込み</span>
+        <button type="button" onclick="openSourceFilter('ai')" id="btn-ai-source" class="border rounded px-2 py-1 text-sm bg-white hover:bg-gray-50 text-left min-w-[200px]">
+          すべて
+        </button>
+      </div>
       <button onclick="loadActionItems()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
     </div>
 
@@ -89,6 +95,12 @@
         発生日（以降）
         <input id="f-dec-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
       </label>
+      <div class="flex flex-col text-xs text-gray-600">
+        <span>ソース絞り込み</span>
+        <button type="button" onclick="openSourceFilter('dec')" id="btn-dec-source" class="border rounded px-2 py-1 text-sm bg-white hover:bg-gray-50 text-left min-w-[200px]">
+          すべて
+        </button>
+      </div>
       <button onclick="loadDecisions()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
     </div>
 
@@ -174,6 +186,50 @@
         <button type="submit" class="bg-blue-600 text-white rounded px-4 py-1 text-sm">追加</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Source Filter Dialog (channel / meeting_kind multi-select) -->
+  <dialog id="dialog-source-filter" class="rounded-lg shadow-xl p-6 w-[720px] max-h-[80vh] backdrop:bg-black/30 overflow-y-auto">
+    <div class="flex items-start justify-between mb-3">
+      <h2 class="text-lg font-bold">ソース絞り込み <span id="source-filter-target" class="text-sm font-normal text-gray-500"></span></h2>
+      <button type="button" onclick="this.closest('dialog').close()" class="text-gray-500 hover:text-gray-800 text-xl leading-none">✕</button>
+    </div>
+
+    <p class="text-xs text-gray-500 mb-3">
+      Slack チャンネル と 会議名 で絞り込みます。両方を指定した場合は OR 結合（どちらかに合致するレコードを表示）。
+      何も選択しなければ全件が対象です。
+    </p>
+
+    <!-- Preset buttons -->
+    <div class="mb-3">
+      <div class="text-xs font-bold text-gray-700 mb-1">プリセット</div>
+      <div id="source-presets" class="flex flex-wrap gap-1"></div>
+    </div>
+
+    <!-- Selected chips -->
+    <div class="mb-3">
+      <div class="text-xs font-bold text-gray-700 mb-1">選択中 <span id="source-selected-count" class="text-gray-500 font-normal"></span></div>
+      <div id="source-chips" class="flex flex-wrap gap-1 min-h-[28px] p-2 border rounded bg-gray-50"></div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-3">
+      <div>
+        <div class="text-xs font-bold text-gray-700 mb-1">Slack チャンネル</div>
+        <div id="source-channels" class="border rounded p-2 max-h-[280px] overflow-y-auto text-sm"></div>
+      </div>
+      <div>
+        <div class="text-xs font-bold text-gray-700 mb-1">会議名 (meeting_kind)</div>
+        <div id="source-meetings" class="border rounded p-2 max-h-[280px] overflow-y-auto text-sm"></div>
+      </div>
+    </div>
+
+    <div class="flex justify-between items-center mt-4">
+      <button type="button" onclick="clearSourceFilter()" class="text-sm text-red-600 hover:underline">全クリア</button>
+      <div class="flex gap-2">
+        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">キャンセル</button>
+        <button type="button" onclick="applySourceFilter()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm">適用して検索</button>
+      </div>
+    </div>
   </dialog>
 
   <!-- Enrichment Detail Dialog -->

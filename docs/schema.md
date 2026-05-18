@@ -1,6 +1,12 @@
 ## DBスキーマ
 
-### {channel_id}.db（Slackデータ）
+### data/slack.db（Slackデータ統合）
+
+2026-05-18 にチャンネル別 `{channel_id}.db` を廃止し、全チャンネルを `data/slack.db` に統合した（旧DBは `data/*.db.bak` として保管）。`messages` / `replies` / `summaries` の各テーブルは
+すべて `channel_id` 列を含み、PK は `(thread_ts, channel_id)` / `(msg_ts, channel_id)` で
+チャンネルをまたいだ衝突を防ぐ。テーブルスキーマ自体は旧 `{channel_id}.db` から変更なし。
+クエリ側はすべて `WHERE channel_id = ?` を付与する（`scripts/argus/pm_argus.py: fetch_raw_messages`、
+`scripts/pm_slack_box_links.py: collect_box_messages`、`scripts/argus/patrol/users.py: _mine_slack_dbs` ほか）。
 
 #### messages（親メッセージ）
 
@@ -40,6 +46,9 @@ Slack API の latest_reply  vs  MAX(replies.msg_ts)
 
 ### pm.db（PM統合データ）
 
+`action_items` / `decisions` / `meetings` / `goals` / `milestones` の唯一の正本。
+2026-05-17 に pm-hpc.db / pm-pmo.db / pm-personal.db への分割運用を廃止し、すべてのチャンネル・会議のインジェスト先を pm.db に統一した（旧DBは `data/*.db.bak` として保管）。FTS5 検索インデックスも 2026-05-18 に `data/qa_index.db` に統合し、論理 index は `chunk_indexes(chunk_id, index_name)` の junction で表現する（領域フィルタとしての分離は維持しつつ、本体 chunks の重複は排除）。
+
 #### meetings
 
 | カラム | 型 | 説明 |
@@ -65,6 +74,7 @@ Slack API の latest_reply  vs  MAX(replies.msg_ts)
 | `source` | TEXT | `meeting` または `slack` |
 | `source_ref` | TEXT | 背景への参照（議事録パス or Slackパーマリンク） |
 | `extracted_at` | TEXT | 発生日（meetingは開催日、slackは投稿日。YYYY-MM-DD） |
+| `channel_id` | TEXT | 出典 Slack チャンネルID（slack 由来のレコードのみ。meeting 由来は NULL）。2026-05-18 追加 |
 | `deleted` | INTEGER | 論理削除フラグ（0=有効、1=削除済み。デフォルト0）。全クエリで `COALESCE(deleted,0)=0` でフィルタ |
 
 #### decisions
@@ -78,6 +88,7 @@ Slack API の latest_reply  vs  MAX(replies.msg_ts)
 | `source_ref` | TEXT | 背景への参照（議事録パス or Slackパーマリンク） |
 | `source_context` | TEXT | 根拠となった議論・発言の要約（`pm_ingest.py minutes` 経由のみ。LLMが抽出） |
 | `extracted_at` | TEXT | 発生日（meetingは開催日、slackは投稿日。YYYY-MM-DD） |
+| `channel_id` | TEXT | 出典 Slack チャンネルID（slack 由来のレコードのみ。meeting 由来は NULL）。2026-05-18 追加 |
 | `deleted` | INTEGER | 論理削除フラグ（0=有効、1=削除済み。デフォルト0）。全クエリで `COALESCE(deleted,0)=0` でフィルタ |
 
 #### slack_extractions（抽出済みスレッド管理）

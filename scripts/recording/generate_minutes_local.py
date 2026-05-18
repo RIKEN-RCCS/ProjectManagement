@@ -524,9 +524,10 @@ def generate_minutes(
     # ナレッジ検索（Phase 3追加）— いったん停止
     # knowledge_context = retrieve_knowledge_for_extraction(
     #     decisions_input,
-    #     qa_db_path=REPO_ROOT / "data" / "qa_pm-all.db",
+    #     qa_db_path=REPO_ROOT / "data" / "qa_index.db",
     #     top_k=5,
     #     since_days=90,
+    #     index_name="pm-all",
     # )
     decisions_prompt = DECISIONS_TEMPLATE.format(
         claude_md_context=claude_md_context,

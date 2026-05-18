@@ -224,6 +224,9 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
             "ALTER TABLE action_items ADD COLUMN requested_by_confidence TEXT",
             "ALTER TABLE action_items ADD COLUMN rationale TEXT",
             "ALTER TABLE action_items ADD COLUMN related_ids TEXT",
+            # 2026-05-18: Slack チャンネル ID をフィルタ・集計のキーとして正規化
+            "ALTER TABLE action_items ADD COLUMN channel_id TEXT",
+            "ALTER TABLE decisions ADD COLUMN channel_id TEXT",
         ],
     )
 
@@ -298,6 +301,9 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
             "ALTER TABLE action_items ADD COLUMN requested_by_confidence TEXT",
             "ALTER TABLE action_items ADD COLUMN rationale TEXT",
             "ALTER TABLE action_items ADD COLUMN related_ids TEXT",
+            # 2026-05-18: Slack チャンネル ID をフィルタ・集計のキーとして正規化
+            "ALTER TABLE action_items ADD COLUMN channel_id TEXT",
+            "ALTER TABLE decisions ADD COLUMN channel_id TEXT",
         ],
     )
 
@@ -640,7 +646,7 @@ if __name__ == "__main__":
     elif args.audit_log:
         if not args.db:
             print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
-            print("  例: --db data/pm.db / --db data/pm-hpc.db", file=sys.stderr)
+            print("  例: --db data/pm.db", file=sys.stderr)
             sys.exit(1)
         db_path = Path(args.db)
         if not db_path.exists():

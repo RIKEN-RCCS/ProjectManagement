@@ -55,22 +55,11 @@ is_valid_meeting_name() {
 
 # --------------------------------------------------------------------------- #
 # meeting-name → pm.db パスのマッピング
-#   Leader_Meeting / Co-design_Review_Meeting → pm.db
-#   ApplicationDiscussion                      → pm-personal.db
-#   Block1/Block2/SubWG系/BenchmarkWG_Meeting  → pm-hpc.db
+#   2026-05-17: action_items / decisions の管理を pm.db に一本化したため、
+#   会議名による DB 振り分けは廃止。すべての会議が data/pm.db に投入される。
 # --------------------------------------------------------------------------- #
 get_pm_db() {
-    local name="$1"
-    case "$name" in
-        Leader_Meeting|Co-design_Review_Meeting)
-            echo "$REPO_ROOT/data/pm.db" ;;
-        ApplicationDiscussion)
-            echo "$REPO_ROOT/data/pm-personal.db" ;;
-        Block1_Meeting|Block2_Meeting|SubWG_Meeting|SubWG[0-9]*_Meeting|BenchmarkWG_Meeting)
-            echo "$REPO_ROOT/data/pm-hpc.db" ;;
-        *)
-            echo "$REPO_ROOT/data/pm.db" ;;
-    esac
+    echo "$REPO_ROOT/data/pm.db"
 }
 
 # --------------------------------------------------------------------------- #

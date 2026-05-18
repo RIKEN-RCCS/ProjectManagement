@@ -15,7 +15,7 @@
 #   --no-encrypt          平文モード（両スクリプトに渡す）
 #   --skip-fetch          Slack API取得をスキップ（slack_pipeline.py のみ）
 #   --force-reextract     抽出済みスレッドも再処理（pm_ingest.py slack のみ）
-#   --db-slack PATH       {channel_id}.db のパス
+#   --db-slack PATH       Slack DB のパス（デフォルト: data/slack.db）
 #   --db-pm PATH          pm.db のパス
 
 set -euo pipefail
@@ -69,7 +69,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # DB パスのデフォルト
-DB_SLACK="${DB_SLACK:-${REPO_ROOT}/data/${CHANNEL}.db}"
+DB_SLACK="${DB_SLACK:-${REPO_ROOT}/data/slack.db}"
 DB_PM="${DB_PM:-${REPO_ROOT}/data/pm.db}"
 
 # --------------------------------------------------------------------------- #
