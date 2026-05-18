@@ -953,3 +953,89 @@ python3 scripts/pm_screen.py --include-decisions
 1. `pm_screen.py --export` で重複候補をCSV出力
 2. CSVを人間が確認し、削除すべき行に `deleted=1` を立てる
 3. `pm_relink.py --import screen.csv` で一括削除を反映
+
+### 17. ナレッジ蒸留（pm_box_distill.py） — Pass 3
+
+`box_docs.db` 本文・`data/minutes/{kind}.db`・`pm.db.decisions` を入力として、
+ローカル LLM で「**意思決定 / 制約 / 立場 / 用語**」の単位に蒸留して `data/knowledge.db` に
+書き込む。設計原則・採否基準は `docs/distill_policy.md` 参照。
+
+```sh
+# 全ソース・差分のみ蒸留（distill_state で冪等管理）
+python3 scripts/pm_box_distill.py
+
+# ソースを限定
+python3 scripts/pm_box_distill.py --source box
+python3 scripts/pm_box_distill.py --source minutes
+python3 scripts/pm_box_distill.py --source decisions
+
+# 期間指定
+python3 scripts/pm_box_distill.py --since 2026-04-01
+
+# 確認のみ（LLM 呼び出し・DB保存なし）
+python3 scripts/pm_box_distill.py --dry-run
+
+# distill_state を無視して再蒸留
+python3 scripts/pm_box_distill.py --force
+
+# 統計表示（kind / confidence / status 内訳。500 超で警告）
+python3 scripts/pm_box_distill.py --stats
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--source {box,minutes,decisions,all}` | `all` | 蒸留対象ソース |
+| `--since YYYY-MM-DD` | なし | この日付以降のみ対象 |
+| `--force` | — | `distill_state` を無視して再蒸留 |
+| `--dry-run` | — | LLM 呼び出し・DB保存なし、件数のみ表示 |
+| `--stats` | — | knowledge.db の統計を表示して終了 |
+| `--no-encrypt` | — | 平文モード |
+| `--output PATH` | — | ログをファイルにも保存 |
+
+**採否ポリシー**:
+- `confidence='low'` のレコードは書き込まない（ノイズ排除）
+- LLM が抽出対象なしと判定した場合は `distill_state.status='skipped'` を記録
+- 物理削除はしない（人手介入時も `deleted=1` のみ）
+
+### 18. ナレッジ人手編集（pm_knowledge_edit.py）
+
+普段使わない前提の人手介入 CLI。`/argus-investigate` などで間違いに気付いたときに最小手数で
+修正できるよう、即時操作と CSV 一括編集の両方を提供する。詳細は `docs/distill_policy.md` 参照。
+
+```sh
+# 一覧（非削除のみ） / 削除済みも含める
+python3 scripts/pm_knowledge_edit.py --list
+python3 scripts/pm_knowledge_edit.py --list --include-deleted
+
+# 1件詳細（sources / relations / audit_log を含む）
+python3 scripts/pm_knowledge_edit.py --show KN-0042
+
+# 即時操作
+python3 scripts/pm_knowledge_edit.py --invalidate KN-0042             # deleted=1
+python3 scripts/pm_knowledge_edit.py --restore KN-0042                # deleted=0
+python3 scripts/pm_knowledge_edit.py --supersede KN-0042 KN-0099      # 上書き連鎖
+python3 scripts/pm_knowledge_edit.py --confidence KN-0042 low
+
+# CSV 一括編集
+python3 scripts/pm_knowledge_edit.py --export                          # knowledge_edit.csv
+python3 scripts/pm_knowledge_edit.py --import knowledge_edit.csv --dry-run
+python3 scripts/pm_knowledge_edit.py --import knowledge_edit.csv --actor "井上"
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--list` | — | レコード一覧 |
+| `--show KN-XXXX` | — | 詳細表示 |
+| `--invalidate KN-XXXX` | — | `deleted=1`（論理削除） |
+| `--restore KN-XXXX` | — | `deleted=0`（復活） |
+| `--supersede OLD NEW` | — | `OLD.superseded_by = NEW` を立てて `knowledge_relations.supersedes` も登録 |
+| `--confidence ID LEVEL` | — | `confidence` を `high` / `medium` / `low` に変更 |
+| `--export` | — | CSV 一括編集用にエクスポート |
+| `--import PATH` | — | CSV を読み込んで `knowledge.db` に反映 |
+| `--include-deleted` | — | `--list` / `--export` で削除済みも含める |
+| `--actor NAME` | — | 変更者名（`knowledge_audit.actor` に記録） |
+| `--dry-run` | — | `--import` 時に DB 更新せず変更内容のみ表示 |
+| `--no-encrypt` | — | 平文モード |
+
+全変更は `knowledge_audit` に `source='human_edit'` で記録される。`--supersede` は
+`knowledge_relations` の `supersedes` 行も自動で作る。物理削除はサポートしない。

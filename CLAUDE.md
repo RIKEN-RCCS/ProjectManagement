@@ -118,6 +118,8 @@ slack/
 │   ├── pm_slack_box_links.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存（メタデータのみ）。Canvas投稿・FTS5連携対応
 │   ├── pm_box_crawl.py             # BOXフォルダを走査して本文を Markdown 化（pptx/docx/pdf/xlsx/boxnote）→ box_docs.db に保存。box_sources.yaml で対象フォルダ定義
 │   ├── pm_box_relevance.py         # box_docs.db の各ファイルをローカルLLMで relevance 判定（core/related/noise/unknown）。noise は pm_embed.py が索引除外
+│   ├── pm_box_distill.py           # [Pass 3] box_docs.db / minutes / pm.db.decisions → knowledge.db への蒸留（意思決定/制約/立場/用語）。distill_state で冪等性管理。confidence='low' は書き込まない
+│   ├── pm_knowledge_edit.py        # knowledge.db の人手編集CLI。--invalidate / --supersede / --confidence / CSV一括編集。全変更は knowledge_audit に記録
 │   ├── pm_box_update.sh        # ステップ1: pm_slack_box_links.py → ステップ2: pm_box_crawl.py → ステップ3: pm_embed.py を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
 │   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
@@ -228,3 +230,7 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_inge
 ---
 
 @docs/argus_system.md
+
+---
+
+@docs/distill_policy.md
