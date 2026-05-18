@@ -306,6 +306,9 @@ async function loadActionItems() {
   const del = document.getElementById('f-ai-del').value;
   const since = document.getElementById('f-ai-since').value;
   const qs = new URLSearchParams({ status, milestone: ms, deleted: del, since });
+  const sf = sourceFilter.ai;
+  (sf.channels || []).forEach(c => qs.append('channels', c));
+  (sf.meeting_kinds || []).forEach(k => qs.append('meeting_kinds', k));
   const data = await api('GET', '/action-items?' + qs);
   aiGrid.setGridOption('rowData', data.rows);
   bulkState.ai = { done: false, deleted: false };
@@ -427,6 +430,9 @@ async function loadDecisions() {
   const del = document.getElementById('f-dec-del').value;
   const since = document.getElementById('f-dec-since').value;
   const qs = new URLSearchParams({ acknowledged: 'すべて', deleted: del, since });
+  const sf = sourceFilter.dec;
+  (sf.channels || []).forEach(c => qs.append('channels', c));
+  (sf.meeting_kinds || []).forEach(k => qs.append('meeting_kinds', k));
   const data = await api('GET', '/decisions?' + qs);
   decGrid.setGridOption('rowData', data.rows);
 }
@@ -549,15 +555,230 @@ async function loadFiles() {
 }
 
 // ----------------------------------------------------------------
+// Source filter (channel / meeting_kind multi-select)
+// ----------------------------------------------------------------
+let filterPresets = { channels: [], meeting_kinds: [], channel_names: {} };
+let sourceFilter = {
+  ai:  { channels: [], meeting_kinds: [] },
+  dec: { channels: [], meeting_kinds: [] },
+};
+let _sourceFilterTarget = 'ai';
+
+function _saveSourceFilter() {
+  try { localStorage.setItem('pm_source_filter', JSON.stringify(sourceFilter)); } catch (_) {}
+}
+function _loadSourceFilter() {
+  try {
+    const raw = localStorage.getItem('pm_source_filter');
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === 'object') {
+        for (const k of ['ai', 'dec']) {
+          if (obj[k]) sourceFilter[k] = {
+            channels: Array.isArray(obj[k].channels) ? obj[k].channels : [],
+            meeting_kinds: Array.isArray(obj[k].meeting_kinds) ? obj[k].meeting_kinds : [],
+          };
+        }
+      }
+    }
+  } catch (_) {}
+}
+
+async function loadFilterPresets() {
+  try {
+    const data = await api('GET', '/filter-presets');
+    filterPresets.channels = data.channels || [];
+    filterPresets.meeting_kinds = data.meeting_kinds || [];
+    filterPresets.channel_names = data.channel_names || {};
+  } catch (_) {}
+}
+
+function _channelLabel(id) {
+  return filterPresets.channel_names[id] ? `${filterPresets.channel_names[id]} (${id})` : id;
+}
+
+function _updateSourceFilterButtonLabel(target) {
+  const sf = sourceFilter[target];
+  const n = (sf.channels?.length || 0) + (sf.meeting_kinds?.length || 0);
+  const btn = document.getElementById(`btn-${target}-source`);
+  if (!btn) return;
+  if (n === 0) {
+    btn.textContent = 'すべて';
+    btn.classList.remove('bg-blue-50', 'border-blue-400', 'text-blue-700');
+  } else {
+    const ch = sf.channels?.length || 0;
+    const mk = sf.meeting_kinds?.length || 0;
+    btn.textContent = `絞り込み中 (ch:${ch}, 会議:${mk})`;
+    btn.classList.add('bg-blue-50', 'border-blue-400', 'text-blue-700');
+  }
+}
+
+function openSourceFilter(target) {
+  _sourceFilterTarget = target;
+  document.getElementById('source-filter-target').textContent =
+    target === 'ai' ? '— アクションアイテム' : '— 決定事項';
+
+  // Presets
+  const presetEl = document.getElementById('source-presets');
+  presetEl.innerHTML = '';
+  const allPresets = [
+    ...filterPresets.channels.map(p => ({ ...p, kind: 'channels' })),
+    ...filterPresets.meeting_kinds.map(p => ({ ...p, kind: 'meeting_kinds' })),
+  ];
+  if (allPresets.length === 0) {
+    presetEl.innerHTML = '<span class="text-xs text-gray-400">プリセットなし（argus_config.yaml の filter_presets を確認）</span>';
+  }
+  allPresets.forEach(p => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    const label = p.kind === 'meeting_kinds' ? `会議: ${p.name}` : p.name;
+    btn.textContent = label;
+    btn.className = 'border rounded-full px-3 py-0.5 text-xs bg-white hover:bg-blue-50 hover:border-blue-400';
+    btn.onclick = () => {
+      const sf = sourceFilter[_sourceFilterTarget];
+      const arr = sf[p.kind];
+      // Toggle: 全て含まれていれば外す、そうでなければ追加
+      const allIncluded = p.values.every(v => arr.includes(v));
+      if (allIncluded) {
+        sf[p.kind] = arr.filter(v => !p.values.includes(v));
+      } else {
+        const merged = new Set([...arr, ...p.values]);
+        sf[p.kind] = [...merged];
+      }
+      renderSourceFilterDialog();
+    };
+    presetEl.appendChild(btn);
+  });
+
+  // Channel checklist (sourced from presets values + channel_names keys)
+  const chSet = new Set();
+  filterPresets.channels.forEach(p => p.values.forEach(v => chSet.add(v)));
+  Object.keys(filterPresets.channel_names).forEach(v => chSet.add(v));
+  const chList = [...chSet].sort();
+  const chEl = document.getElementById('source-channels');
+  chEl.innerHTML = '';
+  chList.forEach(id => {
+    const lbl = document.createElement('label');
+    lbl.className = 'flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-50 px-1 rounded';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = id;
+    cb.dataset.kind = 'channels';
+    cb.checked = sourceFilter[_sourceFilterTarget].channels.includes(id);
+    cb.onchange = () => {
+      const sf = sourceFilter[_sourceFilterTarget];
+      if (cb.checked) {
+        if (!sf.channels.includes(id)) sf.channels.push(id);
+      } else {
+        sf.channels = sf.channels.filter(x => x !== id);
+      }
+      renderSourceFilterChips();
+    };
+    lbl.appendChild(cb);
+    const span = document.createElement('span');
+    span.textContent = _channelLabel(id);
+    span.className = 'truncate';
+    lbl.appendChild(span);
+    chEl.appendChild(lbl);
+  });
+
+  // Meeting kinds checklist (from presets values)
+  const mkSet = new Set();
+  filterPresets.meeting_kinds.forEach(p => p.values.forEach(v => mkSet.add(v)));
+  const mkList = [...mkSet].sort();
+  const mkEl = document.getElementById('source-meetings');
+  mkEl.innerHTML = '';
+  mkList.forEach(name => {
+    const lbl = document.createElement('label');
+    lbl.className = 'flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-50 px-1 rounded';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = name;
+    cb.dataset.kind = 'meeting_kinds';
+    cb.checked = sourceFilter[_sourceFilterTarget].meeting_kinds.includes(name);
+    cb.onchange = () => {
+      const sf = sourceFilter[_sourceFilterTarget];
+      if (cb.checked) {
+        if (!sf.meeting_kinds.includes(name)) sf.meeting_kinds.push(name);
+      } else {
+        sf.meeting_kinds = sf.meeting_kinds.filter(x => x !== name);
+      }
+      renderSourceFilterChips();
+    };
+    lbl.appendChild(cb);
+    const span = document.createElement('span');
+    span.textContent = name;
+    lbl.appendChild(span);
+    mkEl.appendChild(lbl);
+  });
+
+  renderSourceFilterChips();
+  document.getElementById('dialog-source-filter').showModal();
+}
+
+function renderSourceFilterChips() {
+  const sf = sourceFilter[_sourceFilterTarget];
+  const el = document.getElementById('source-chips');
+  el.innerHTML = '';
+  const items = [
+    ...sf.channels.map(c => ({ kind: 'channels', value: c, label: _channelLabel(c) })),
+    ...sf.meeting_kinds.map(k => ({ kind: 'meeting_kinds', value: k, label: `会議: ${k}` })),
+  ];
+  document.getElementById('source-selected-count').textContent =
+    items.length > 0 ? `(${items.length} 件)` : '';
+  if (items.length === 0) {
+    el.innerHTML = '<span class="text-xs text-gray-400">未選択（全件対象）</span>';
+    return;
+  }
+  items.forEach(it => {
+    const chip = document.createElement('span');
+    chip.className = 'inline-flex items-center gap-1 bg-blue-100 text-blue-800 rounded-full px-2 py-0.5 text-xs';
+    chip.textContent = it.label;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '×';
+    x.className = 'ml-1 text-blue-600 hover:text-blue-900 font-bold';
+    x.onclick = () => {
+      sf[it.kind] = sf[it.kind].filter(v => v !== it.value);
+      renderSourceFilterDialog();
+    };
+    chip.appendChild(x);
+    el.appendChild(chip);
+  });
+}
+
+function renderSourceFilterDialog() {
+  // Re-render the dialog body for the same target without closing it
+  openSourceFilter(_sourceFilterTarget);
+}
+
+function clearSourceFilter() {
+  sourceFilter[_sourceFilterTarget] = { channels: [], meeting_kinds: [] };
+  renderSourceFilterDialog();
+}
+
+function applySourceFilter() {
+  _saveSourceFilter();
+  _updateSourceFilterButtonLabel(_sourceFilterTarget);
+  document.getElementById('dialog-source-filter').close();
+  if (_sourceFilterTarget === 'ai') loadActionItems();
+  else loadDecisions();
+}
+
+// ----------------------------------------------------------------
 // Initialization
 // ----------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
+  _loadSourceFilter();
   await loadDatabases();
+  await loadFilterPresets();
   await loadMilestones();
   initAiGrid();
   initDecGrid();
   initFilesGrid();
   initFilesChannelFilter();
+  _updateSourceFilterButtonLabel('ai');
+  _updateSourceFilterButtonLabel('dec');
   await loadActionItems();
   await loadDecisions();
   // ファイルグリッドも初期データ取得（domLayout:autoHeight はデータがないと高さ0になるため）

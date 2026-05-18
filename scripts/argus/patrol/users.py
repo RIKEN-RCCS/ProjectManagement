@@ -149,37 +149,36 @@ class UserResolver:
         return None
 
     def _mine_slack_dbs(self, name: str) -> str | None:
-        """Slack DB ({channel_id}.db) から user_name で user_id を検索。"""
+        """統合 Slack DB (data/slack.db) から user_name で user_id を検索。"""
         try:
             import sys
             sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
             from db_utils import open_db
         except Exception:
             open_db = None
-        for db_file in self._data_dir.glob("C*.db"):
-            try:
-                if open_db is not None:
-                    conn = open_db(db_file, encrypt=True)
-                else:
-                    conn = sqlite3.connect(str(db_file))
-                    conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT user_id FROM messages"
-                    " WHERE user_name LIKE ? AND user_id IS NOT NULL AND user_id != ''"
-                    " LIMIT 1",
-                    (f"%{name}%",),
-                ).fetchone()
-                conn.close()
-                if row:
-                    logger.info(
-                        "Slack DB マイニング: %s → %s (%s)",
-                        name,
-                        row["user_id"],
-                        db_file.name,
-                    )
-                    return row["user_id"]
-            except Exception:
-                continue
+
+        db_file = self._data_dir / "slack.db"
+        if not db_file.exists():
+            return None
+
+        try:
+            if open_db is not None:
+                conn = open_db(db_file, encrypt=True)
+            else:
+                conn = sqlite3.connect(str(db_file))
+                conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT user_id FROM messages"
+                " WHERE user_name LIKE ? AND user_id IS NOT NULL AND user_id != ''"
+                " LIMIT 1",
+                (f"%{name}%",),
+            ).fetchone()
+            conn.close()
+            if row:
+                logger.info("Slack DB マイニング: %s → %s", name, row["user_id"])
+                return row["user_id"]
+        except Exception:
+            pass
         return None
 
     def _search_api(self, name: str) -> str | None:

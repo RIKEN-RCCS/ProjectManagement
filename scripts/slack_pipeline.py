@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument("--since", type=parse_date_arg,
                         help="この日付以降のメッセージのみ対象 (YYYY-MM-DD, JST)")
     parser.add_argument("--db", default=None,
-                        help="SQLite DB ファイルパス (デフォルト: {channel_id}.db)")
+                        help="SQLite DB ファイルパス (デフォルト: data/slack.db)")
     parser.add_argument("--no-permalink", action="store_true", default=False,
                         help="パーマリンク取得を無効化")
     parser.add_argument("--skip-fetch", action="store_true", default=False,
@@ -475,7 +475,7 @@ def main():
     args = parse_args()
     channel_id = args.channel
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    db_path = args.db or os.path.join(repo_root, "data", f"{channel_id}.db")
+    db_path = args.db or os.path.join(repo_root, "data", "slack.db")
 
     print(f"DB: {db_path}")
     conn = init_db(db_path, no_encrypt=args.no_encrypt)

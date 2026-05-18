@@ -258,11 +258,12 @@ def extract_json(text: str) -> dict:
 
 
 def extract_from_thread(row: dict, context: str, milestones: list[dict], repo_root: Path = None) -> dict:
-    # ナレッジ検索（Phase 2追加）
+    # ナレッジ検索（Phase 2追加）— 統合 qa_index.db の pm-all で全件横断
     knowledge_context = retrieve_knowledge_for_extraction(
         row["thread_text"],
-        qa_db_path=(repo_root or REPO_ROOT) / "data" / "qa_pm-all.db",
+        qa_db_path=(repo_root or REPO_ROOT) / "data" / "qa_index.db",
         top_k=3,
+        index_name="pm-all",
     )
 
     prompt = EXTRACT_PROMPT.format(
@@ -297,9 +298,10 @@ def save_slack_items(
             continue
         decided_at = d.get("decided_at") or post_date
         pm_conn.execute(
-            "INSERT INTO decisions (meeting_id, content, decided_at, source, source_ref, extracted_at)"
-            " VALUES (?, ?, ?, 'slack', ?, ?)",
-            (None, d["content"], decided_at, source_ref, post_date),
+            "INSERT INTO decisions (meeting_id, content, decided_at, source, source_ref,"
+            " extracted_at, channel_id)"
+            " VALUES (?, ?, ?, 'slack', ?, ?, ?)",
+            (None, d["content"], decided_at, source_ref, post_date, channel_id),
         )
         d_count += 1
 
@@ -309,10 +311,11 @@ def save_slack_items(
             continue
         pm_conn.execute(
             "INSERT INTO action_items"
-            " (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at, milestone_id)"
-            " VALUES (?, ?, ?, ?, 'open', 'slack', ?, ?, ?)",
+            " (meeting_id, content, assignee, due_date, status, source, source_ref,"
+            " extracted_at, milestone_id, channel_id)"
+            " VALUES (?, ?, ?, ?, 'open', 'slack', ?, ?, ?, ?)",
             (None, a["content"], normalize_assignee(a.get("assignee")), a.get("due_date"),
-             source_ref, post_date, a.get("milestone_id")),
+             source_ref, post_date, a.get("milestone_id"), channel_id),
         )
         a_count += 1
 
@@ -366,7 +369,7 @@ class SlackIngestPlugin:
         parser.add_argument(
             "--slack-db", default=None,
             metavar="PATH",
-            help="{channel_id}.db のパス（slack ソース用、省略時は data/{channel_id}.db）",
+            help="Slack DB のパス（slack ソース用、省略時は data/slack.db）",
         )
         parser.add_argument(
             "--slack-force-reextract", action="store_true",
@@ -381,7 +384,7 @@ class SlackIngestPlugin:
         channel_id = args.slack_channel
         slack_db_path = (
             Path(args.slack_db) if args.slack_db
-            else ctx.repo_root / "data" / f"{channel_id}.db"
+            else ctx.repo_root / "data" / "slack.db"
         )
 
         slack_conn = open_slack_db(slack_db_path, no_encrypt=ctx.no_encrypt)

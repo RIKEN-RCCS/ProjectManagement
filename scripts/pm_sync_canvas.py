@@ -671,7 +671,7 @@ def main() -> None:
 
     if not args.db:
         print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
-        print("  例: --db data/pm.db / --db data/pm-hpc.db", file=sys.stderr)
+        print("  例: --db data/pm.db", file=sys.stderr)
         sys.exit(1)
     db_path = Path(args.db)
     log, close_log = make_logger(args.output)

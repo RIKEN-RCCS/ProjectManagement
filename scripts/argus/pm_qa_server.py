@@ -136,7 +136,8 @@ _default_index: str = "pm"
 
 
 def load_qa_config(config_path: Path) -> None:
-    """argus_config.yaml（旧 qa_config.yaml）を読み込み、グローバルマップを初期化する。"""
+    """argus_config.yaml（旧 qa_config.yaml）を読み込み、グローバルマップを初期化する。
+    全インデックスは統合 qa_index.db を共有し、検索時に index_name でフィルタする。"""
     global _channel_index_map, _index_db_map, _pm_db_map, _default_index
 
     with open(config_path) as f:
@@ -145,9 +146,11 @@ def load_qa_config(config_path: Path) -> None:
     _default_index = cfg.get("default_index", "pm")
     _channel_index_map = cfg.get("channel_map") or {}
 
+    qa_unified = _REPO_ROOT / "data" / "qa_index.db"
     for name, index_cfg in (cfg.get("indices") or {}).items():
-        db_path = _REPO_ROOT / index_cfg["db"]
-        _index_db_map[name] = db_path
+        # qa_*.db への個別パス指定があっても無視し、統合 DB を使う。
+        # 検索クエリが index_name でフィルタする前提。
+        _index_db_map[name] = qa_unified
         pm_db_list = index_cfg.get("pm_db", [])
         _pm_db_map[name] = [_REPO_ROOT / p for p in pm_db_list]
 
@@ -157,14 +160,13 @@ def load_qa_config(config_path: Path) -> None:
 
 
 def resolve_index_db(channel_id: str) -> tuple[str, Path, list[Path]]:
-    """チャンネルIDからインデックス名・FTS DBパス・pm.dbパスリストを返す。"""
+    """チャンネルIDからインデックス名・FTS DBパス（統合）・pm.dbパスリストを返す。
+    DBパスは全インデックス共通で data/qa_index.db。検索時に index_name で絞り込む。"""
     index_name = _channel_index_map.get(channel_id, _default_index)
     db_path = _index_db_map.get(index_name)
     if db_path is None:
-        if _index_db_map:
-            index_name, db_path = next(iter(_index_db_map.items()))
-        else:
-            return index_name, Path("data/qa_pm.db"), []
+        # 設定ロード前 / インデックス未定義時のフォールバック
+        db_path = _REPO_ROOT / "data" / "qa_index.db"
     pm_db_paths = _pm_db_map.get(index_name, [])
     return index_name, db_path, pm_db_paths
 
@@ -183,25 +185,41 @@ def sanitize_fts_query(q: str) -> str:
     return " ".join(tokens)
 
 
-def _fts5_search(conn: sqlite3.Connection, query: str, k: int, date_filter: str = "1=1", date_params: list = []) -> list[dict]:
+def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
+                 date_filter: str = "1=1", date_params: list = [],
+                 index_name: str | None = None) -> list[dict]:
     try:
-        rows = conn.execute(
-            f"""SELECT c.source_type, c.source_db, c.record_id, c.held_at,
-                      c.content, c.source_ref, fts.rank
-               FROM fts
-               JOIN chunks c ON fts.rowid = c.id
-               WHERE fts MATCH ? AND {date_filter}
-               ORDER BY rank
-               LIMIT ?""",
-            [query] + date_params + [k],
-        ).fetchall()
+        if index_name:
+            sql = (
+                "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
+                "       c.content, c.source_ref, fts.rank"
+                " FROM fts"
+                " JOIN chunks c ON fts.rowid = c.id"
+                " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
+                " WHERE fts MATCH ? AND ci.index_name = ? AND " + date_filter +
+                " ORDER BY rank LIMIT ?"
+            )
+            params = [query, index_name] + date_params + [k]
+        else:
+            sql = (
+                "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
+                "       c.content, c.source_ref, fts.rank"
+                " FROM fts"
+                " JOIN chunks c ON fts.rowid = c.id"
+                " WHERE fts MATCH ? AND " + date_filter +
+                " ORDER BY rank LIMIT ?"
+            )
+            params = [query] + date_params + [k]
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError as e:
         logger.debug(f"FTS5クエリエラー: {e} (query={query!r})")
         return []
 
 
-def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int, date_filter: str = "1=1", date_params: list = []) -> list[dict]:
+def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
+                       date_filter: str = "1=1", date_params: list = [],
+                       index_name: str | None = None) -> list[dict]:
     """fts_tokens（SudachiPy形態素解析）テーブルで段階的AND検索を行う。"""
     # 全トークン → 先頭3 → 先頭2 → 先頭1 の順で試行
     token_sets = [tokens]
@@ -215,16 +233,28 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int, date
     for tset in token_sets:
         query = " ".join(tset)
         try:
-            rows = conn.execute(
-                f"""SELECT c.source_type, c.source_db, c.record_id, c.held_at,
-                          c.content, c.source_ref, fts_tokens.rank
-                   FROM fts_tokens
-                   JOIN chunks c ON fts_tokens.rowid = c.id
-                   WHERE fts_tokens MATCH ? AND {date_filter}
-                   ORDER BY rank
-                   LIMIT ?""",
-                [query] + date_params + [k],
-            ).fetchall()
+            if index_name:
+                sql = (
+                    "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
+                    "       c.content, c.source_ref, fts_tokens.rank"
+                    " FROM fts_tokens"
+                    " JOIN chunks c ON fts_tokens.rowid = c.id"
+                    " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
+                    " WHERE fts_tokens MATCH ? AND ci.index_name = ? AND " + date_filter +
+                    " ORDER BY rank LIMIT ?"
+                )
+                params = [query, index_name] + date_params + [k]
+            else:
+                sql = (
+                    "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
+                    "       c.content, c.source_ref, fts_tokens.rank"
+                    " FROM fts_tokens"
+                    " JOIN chunks c ON fts_tokens.rowid = c.id"
+                    " WHERE fts_tokens MATCH ? AND " + date_filter +
+                    " ORDER BY rank LIMIT ?"
+                )
+                params = [query] + date_params + [k]
+            rows = conn.execute(sql, params).fetchall()
             if rows:
                 return [dict(r) for r in rows]
         except sqlite3.OperationalError as e:
@@ -233,8 +263,10 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int, date
     return []
 
 
-def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, since_date: str | None = None) -> list[dict]:
-    """指定インデックスDBから関連チャンクを取得する。
+def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
+                    since_date: str | None = None,
+                    index_name: str | None = None) -> list[dict]:
+    """統合 qa_index.db から関連チャンクを取得する。
 
     検索戦略（順番に試行）:
     1. SudachiPy形態素解析 → fts_tokens AND検索（段階的トークン削減）
@@ -244,9 +276,10 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, sinc
 
     Args:
         question: 検索クエリ
-        index_db: FTS5インデックスDBのパス
+        index_db: 統合インデックスDBのパス（通常 data/qa_index.db）
         k: 取得件数上限
         since_date: YYYY-MM-DD形式。指定時はこの日付以降のレコードのみ検索
+        index_name: 指定すると chunk_indexes 経由で当該 index に紐づくチャンクのみ
     """
     if not index_db.exists():
         logger.warning(f"インデックスDBが見つかりません: {index_db}")
@@ -256,8 +289,20 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, sinc
     conn.row_factory = sqlite3.Row
     try:
         # 日付フィルタ条件句の構築
-        date_filter = "held_at >= ?" if since_date else "1=1"
+        date_filter = "c.held_at >= ?" if since_date else "1=1"
         date_params = [since_date] if since_date else []
+
+        # LIKE/最新フォールバック用に、index_name フィルタの SQL 片を組み立てる
+        if index_name:
+            ci_join = " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
+            ci_where = "ci.index_name = ? AND "
+            ci_params = [index_name]
+        else:
+            ci_join = ""
+            ci_where = ""
+            ci_params: list = []
+
+        idx_label = f"{index_db.name}[{index_name}]" if index_name else index_db.name
 
         # --- Step 1: SudachiPy形態素解析 + fts_tokens 検索 ---
         sudachi_tokens = sudachi_tokenize_query(question)
@@ -267,10 +312,14 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, sinc
             ).fetchone() is not None
 
             if has_fts_tokens:
-                rows = _fts_tokens_search(conn, sudachi_tokens, k, date_filter, date_params)
+                rows = _fts_tokens_search(
+                    conn, sudachi_tokens, k,
+                    date_filter.replace("c.held_at", "c.held_at"),
+                    date_params, index_name=index_name,
+                )
                 if rows:
                     logger.info(
-                        f"SudachiPy FTSマッチ ({len(rows)}件): {sudachi_tokens} in {index_db.name}"
+                        f"SudachiPy FTSマッチ ({len(rows)}件): {sudachi_tokens} in {idx_label}"
                     )
                     return rows
                 logger.debug(f"SudachiPy FTS: ヒットなし ({sudachi_tokens})")
@@ -291,31 +340,40 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE, sinc
 
         for tset in token_sets:
             q = " ".join(tset)
-            rows = _fts5_search(conn, q, k, date_filter, date_params)
+            rows = _fts5_search(
+                conn, q, k, date_filter, date_params, index_name=index_name,
+            )
             if rows:
-                logger.info(f"trigram FTSマッチ ({len(rows)}件): [{q}] in {index_db.name}")
+                logger.info(f"trigram FTSマッチ ({len(rows)}件): [{q}] in {idx_label}")
                 return rows
 
         # --- Step 3: LIKE 検索 ---
         keyword = (sudachi_tokens[0] if sudachi_tokens else
                    (valid_tokens[0] if valid_tokens else ""))
         if keyword:
-            rows = conn.execute(
-                f"""SELECT source_type, source_db, record_id, held_at, content, source_ref, 0 AS rank
-                   FROM chunks WHERE {date_filter} AND content LIKE ? LIMIT ?""",
-                date_params + [f"%{keyword}%", k],
-            ).fetchall()
+            sql = (
+                "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
+                " c.content, c.source_ref, 0 AS rank"
+                " FROM chunks c" + ci_join +
+                " WHERE " + ci_where + date_filter + " AND c.content LIKE ? LIMIT ?"
+            )
+            params = ci_params + date_params + [f"%{keyword}%", k]
+            rows = conn.execute(sql, params).fetchall()
             if rows:
                 logger.info(f"LIKE検索フォールバック ({len(rows)}件): [{keyword}]")
                 return [dict(r) for r in rows]
 
         # --- Step 4: 最新記録フォールバック ---
         logger.info(f"マッチなし → 最新記録フォールバック (sudachi={sudachi_tokens})")
-        rows = conn.execute(
-            f"""SELECT source_type, source_db, record_id, held_at, content, source_ref, 0 AS rank
-               FROM chunks WHERE {date_filter} AND held_at IS NOT NULL ORDER BY held_at DESC LIMIT ?""",
-            date_params + [k],
-        ).fetchall()
+        sql = (
+            "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
+            " c.content, c.source_ref, 0 AS rank"
+            " FROM chunks c" + ci_join +
+            " WHERE " + ci_where + date_filter +
+            " AND c.held_at IS NOT NULL ORDER BY c.held_at DESC LIMIT ?"
+        )
+        params = ci_params + date_params + [k]
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     finally:
@@ -449,6 +507,7 @@ def expand_query_hyde(query: str, n_extra: int = 2, timeout: int = 30) -> list[s
 def retrieve_chunks_hyde(
     question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     since_date: str | None = None, n_extra: int = 2, max_merged: int = 60,
+    index_name: str | None = None,
 ) -> list[dict]:
     """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。retrieve_chunks のラッパ。
 
@@ -462,7 +521,8 @@ def retrieve_chunks_hyde(
     seen: set = set()
     merged: list[dict] = []
     for q in queries:
-        for c in retrieve_chunks(q, index_db, k=k, since_date=since_date):
+        for c in retrieve_chunks(q, index_db, k=k, since_date=since_date,
+                                 index_name=index_name):
             key = (c.get("source_db"), c.get("record_id"), c.get("content", "")[:80])
             if key in seen:
                 continue
@@ -883,7 +943,7 @@ def _run_qa(question: str, respond, index_name: str, index_db: Path,
                 logger.info("  構造化クエリ: 結果なし")
 
         if intent in ("text", "hybrid") or (intent == "structured" and not structured_context):
-            chunks = retrieve_chunks_hyde(question, index_db)
+            chunks = retrieve_chunks_hyde(question, index_db, index_name=index_name)
             logger.info(f"  {len(chunks)} チャンク取得（HyDE拡張後）")
             chunks = rerank_chunks(question, chunks)
             logger.info(f"  re-rank後: {len(chunks)} チャンク")
@@ -1176,7 +1236,7 @@ def build_app():
 
             today = date.today().isoformat()
             since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
-            index_db, channels, pm_db_paths = _resolve_index_and_channels(channel_id)
+            index_db, channels, pm_db_paths, index_name = _resolve_index_and_channels(channel_id)
             conns = [open_pm_db(p) for p in pm_db_paths]
 
             # スレッド文脈の取り込み（メンションがスレッド内にある場合）
@@ -1242,7 +1302,7 @@ def build_app():
             ctx = AgentContext(
                 conns=conns, today=today, since=since_date,
                 no_encrypt=False, data_dir=_DATA_DIR, minutes_dir=_MINUTES_DIR,
-                index_db=index_db, channels=channels,
+                index_db=index_db, index_name=index_name, channels=channels,
             )
 
             # 実行者情報をシードに注入（search_mentions ツールに使わせる）
@@ -1356,12 +1416,23 @@ def _init_common() -> None:
     else:
         logger.warning(f"argus_config.yaml が見つかりません: {config_path}")
 
-    for name, db_path in _index_db_map.items():
-        if db_path.exists():
-            count = sqlite3.connect(str(db_path)).execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            logger.info(f"  [{name}] {db_path.name}: {count} チャンク")
-        else:
-            logger.warning(f"  [{name}] {db_path.name}: 未構築（pm_embed.py を実行してください）")
+    # 統合 qa_index.db のチャンク数を index_name 別で表示
+    qa_index = _REPO_ROOT / "data" / "qa_index.db"
+    if qa_index.exists():
+        try:
+            ic = sqlite3.connect(str(qa_index))
+            counts = dict(ic.execute(
+                "SELECT index_name, COUNT(*) FROM chunk_indexes GROUP BY index_name"
+            ).fetchall())
+            ic.close()
+        except Exception as e:
+            logger.warning(f"  qa_index.db クエリ失敗: {e}")
+            counts = {}
+        for name in _index_db_map.keys():
+            n = counts.get(name, 0)
+            logger.info(f"  [{name}] qa_index.db: {n} チャンク")
+    else:
+        logger.warning(f"  data/qa_index.db: 未構築（pm_embed.py を実行してください）")
 
     try:
         _PROJECT_CONTEXT = load_claude_md_context()
@@ -1378,7 +1449,7 @@ def test_hybrid(question: str) -> None:
     if not _OPENAI_BASE:
         logger.warning("OPENAI_API_BASE が未設定です")
 
-    index_name, index_db = resolve_index_db("")
+    index_name, index_db, _pm_dbs = resolve_index_db("")
     print(f"\n質問: {question}")
     print(f"インデックス: [{index_name}] {index_db}")
     print("-" * 60)
@@ -1402,7 +1473,7 @@ def test_hybrid(question: str) -> None:
             print("\n[構造化クエリ結果] なし")
 
     if intent in ("text", "hybrid") or (intent == "structured" and not structured_context):
-        chunks = retrieve_chunks_hyde(question, index_db)
+        chunks = retrieve_chunks_hyde(question, index_db, index_name=index_name)
         print(f"\n[FTS検索] {len(chunks)} チャンク取得（HyDE拡張後）")
         chunks = rerank_chunks(question, chunks)
         print(f"[re-rank後] {len(chunks)} チャンク")

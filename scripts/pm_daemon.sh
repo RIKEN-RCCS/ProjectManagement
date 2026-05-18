@@ -81,6 +81,10 @@ cmd_start() {
         source "$HOME/.secrets/rivault_tokens.sh"
     fi
     if [[ "$SVC_DEFAULT_LLM" == "1" ]]; then
+        if [[ -f "$HOME/.secrets/localLLM.sh" ]]; then
+            # shellcheck disable=SC1091
+            source "$HOME/.secrets/localLLM.sh"
+        fi
         export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
         export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
         export QA_INDEX_DB="${QA_INDEX_DB:-$REPO_ROOT/data/qa_index.db}"

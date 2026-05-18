@@ -38,9 +38,9 @@
 生データ（Slack・議事録・goals.yaml）から構造化データ（`decisions` / `action_items` / `milestones`）を作る。
 
 ```
-[Slack] ──→ slack_pipeline.py ──→ {channel_id}.db ──┐
-                                                     ├──→ pm_ingest.py ──→ pm.db
-[議事録] ──→ pm_minutes_import.py ──→ minutes/*.db  ┤
+[Slack] ──→ slack_pipeline.py ──→ data/slack.db ─────┐
+                                  (全チャンネル統合)  ├──→ pm_ingest.py ──→ pm.db
+[議事録] ──→ pm_minutes_import.py ──→ minutes/*.db  ┤    (channel_id 列で絞り込み)
                                                      │
 [goals.yaml] ──────────────────────────────────────┘
 ```
@@ -115,6 +115,8 @@ pm.db の新規 decisions/action_items
 | `pm_minutes_import.py` | 議事録 Markdown → `data/minutes/{kind}.db` |
 | `pm_minutes_catalog.py` | 議事録を Box にアップロード + Canvas 目録生成 |
 | `pm_slack_box_links.py` | Slack投稿中のBOXリンク → `docs_*.db`（メタデータ）|
+| `pm_box_crawl.py` | BOXフォルダを走査 → 本文を Markdown 化 → `box_docs.db`（pptx/docx/pdf/xlsx/boxnote）|
+| `pm_box_relevance.py` | `box_docs.db` を LLM で relevance 判定（core/related/noise/unknown）|
 | `pm_web_fetch.py` | 外部Webサイト → `web_articles.db` |
 | `generate_minutes_local.py` | 文字起こし → 議事録（ローカルLLM。`--vtt`・`--slide-context` 対応）|
 | `transcribe_pipeline.py` / `whisper_vad.py` | 音声/動画ファイル → 文字起こし（`--initial-prompt-extra` で固有名詞注入）|
@@ -136,7 +138,9 @@ scripts/
 │   │   └── ingest_plugin.py           プラグインインタフェース
 │   ├── pm_minutes_import.py           議事録MD → 議事録DB
 │   ├── pm_minutes_catalog.py          議事録 Box アップロード・Canvas 目録
-│   ├── pm_slack_box_links.py         BOXリンク → docs_*.db
+│   ├── pm_slack_box_links.py         Slack上のBOXリンク → docs_*.db (メタデータ)
+│   ├── pm_box_crawl.py                BOX本文 → box_docs.db (Markdown化)
+│   ├── pm_box_relevance.py            box_docs.db の relevance 判定
 │   └── pm_web_fetch.py                外部Web → web_articles.db
 │
 ├── enrich/ (Pass 2)                   エンリッチメントパッケージ
@@ -190,12 +194,13 @@ scripts/
 
 | DB | 役割 | 暗号化 |
 |---|---|---|
-| `{channel_id}.db` | Slack 生データ（チャンネル単位）| ✅ |
+| `data/slack.db` | Slack 生データ（**全チャンネル統合**。`channel_id` 列で絞り込む。2026-05-18 に `{channel_id}.db` 分割を廃止）| ✅ |
 | `data/minutes/{kind}.db` | 議事録詳細（会議名単位）| ✅ |
-| `data/pm.db` | PM 統合データ（横断）| ✅ |
-| `data/docs_*.db` | BOXドキュメントメタデータ | ✅ |
+| `data/pm.db` | PM 統合データ（**action_items / decisions / meetings / goals / milestones の唯一の正本**。2026-05-17 に pm-hpc.db / pm-pmo.db / pm-personal.db への分割を廃止し pm.db に一本化。`action_items.channel_id` / `decisions.channel_id` で出典チャンネルを保持）| ✅ |
+| `data/docs_*.db` | BOXドキュメントメタデータ（Slackリンク経由）| ✅ |
+| `data/box_docs.db` | BOXドキュメント本文（Markdown化）+ relevance（core/related/noise/unknown）| ✅ |
 | `data/web_articles.db` | 外部Web記事 | ❌（公開情報）|
-| `data/qa_pm*.db` | FTS5検索インデックス | ❌（導出データ）|
+| `data/qa_index.db` | FTS5 統合検索インデックス（`chunks` + `chunk_indexes(chunk_id, index_name)` で論理 index を分離。2026-05-18 に `qa_pm*.db` 分割を廃止）| ❌（導出データ）|
 | `data/patrol_state.db` | Patrol 冪等性・承認待ち | ❌（機密なし）|
 
 **詳細**: `docs/schema.md`
@@ -205,8 +210,8 @@ scripts/
 ## データの流れ全体図
 
 ```
-       ┌─── Slack ───→ {channel_id}.db ──────┐
-       │                                       │
+       ┌─── Slack ───→ data/slack.db ─────────┐
+       │              (全チャンネル統合)        │
 [一次情報]──── 音声 ──→ 文字起こし ──→ 議事録MD ─┤
        │                                       │
        └─── goals.yaml ────────────────────┐  │
@@ -220,8 +225,8 @@ scripts/
                                  ┌─── pm_embed.py ───┐
                                  │                    │
                                  ▼                    ▼
-                           qa_pm*.db          enrich_items.py
-                           (FTS5)              ＋ナレッジ文脈
+                          qa_index.db         enrich_items.py
+                       (FTS5 統合 + index_name)  ＋ナレッジ文脈
                                  │                    │
                                  └────────┬───────────┘
                                           ▼

@@ -43,7 +43,7 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 ```
            [Pass 1: 抽出]                         [Pass 2: エンリッチメント]
 
-[Slack] ─→ slack_pipeline.py ─→ {channel_id}.db ─┐
+[Slack] ─→ slack_pipeline.py ─→ data/slack.db ───┐
                                                    │
 [議事録]                                           ├─→ pm_ingest.py ─→ pm.db ─┐
  meetings/*.md ─→ pm_minutes_import.py ─→ minutes/*.db                        │
@@ -64,9 +64,11 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 `pm_from_recording.sh --meeting-name` は `generate_minutes_local.py`（ローカルLLMで高品質議事録生成）→ `pm_minutes_import.py --no-llm`（DB保存）→ `pm_ingest.py minutes`（pm.db転記）の順で呼び出す。Zoom VTT ファイルが同名で存在する場合は自動検出し、話者情報を議事録生成に活用する（`--vtt` オプション、解像度サフィックス `_3840x2160` 等を剥がすフォールバックあり）。mp4 の場合は `slide_ocr.py` を冒頭で自動実行し、スライド文脈と固有名詞リストを Stage 1/2/3 プロンプト・Whisper initial_prompt の両方に同梱して ASR/LLM 両段階で品質を向上させる（`--no-slide-ocr` で無効化可能）。
 
 **各DBの役割分担**:
-- `{channel_id}.db` — Slackデータ専用。チャンネルごとに独立。
-- `pm.db` — PM情報専用。複数チャンネル・複数会議を横断して統合。
+- `data/slack.db` — Slackデータ専用（**全チャンネル横断**。`messages` / `replies` の `channel_id` 列で絞り込む）。2026-05-18 にチャンネル別 `{channel_id}.db` の分割を廃止し統合。旧DBは `data/*.db.bak` として保管。
+- `pm.db` — PM情報専用（**action_items / decisions / meetings / goals / milestones の唯一の正本**）。2026-05-17 に pm-hpc.db / pm-pmo.db / pm-personal.db への分割を廃止し pm.db に一本化。`action_items.channel_id` / `decisions.channel_id` で出典チャンネルを保持。
 - `data/minutes/{kind}.db` — 議事録詳細専用。会議名ごとに独立。決定・AIの背景を含む。
+- `data/box_docs.db` — Box フォルダから取得したドキュメント本文（Markdown化）+ relevance（core/related/noise/unknown）。`pm_box_crawl.py` が登録、`pm_box_relevance.py` が判定。
+- `data/qa_index.db` — FTS5 検索インデックスの統合DB。`chunks` + `chunk_indexes(chunk_id, index_name)` の junction で論理 index（`pm` / `pm-hpc` / `pm-pmo` / `pm-all`）を表現。2026-05-18 に `qa_pm*.db` への DB 分割を廃止し統合。
 
 ---
 
@@ -112,8 +114,10 @@ slack/
 │   ├── cli_utils.py                 # 共通CLIユーティリティ（argparse ヘルパー・make_logger・load_claude_md・call_claude・call_local_llm・strip_think_blocks・VTTパース・話者マッピング）。OPENAI_API_BASE が設定されている場合はローカルLLMを使用
 │   ├── format_utils.py              # Markdownテーブル整形の共通ユーティリティ（マイルストーン進捗・期限超過・担当者負荷・週次トレンド・決定事項）
 │   ├── web_utils.py                 # pm_api.py 用のDB読み書き・楽観的排他制御（scan_pm_dbs・get_conn・load_action_items・do_save_action_items 等）
-│   ├── pm_slack_box_links.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存。Canvas投稿・FTS5連携対応
-│   ├── pm_box_update.sh        # BOXリンク抽出（pm_slack_box_links.py）→ FTS5更新（pm_embed.py）を連続実行
+│   ├── pm_slack_box_links.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存（メタデータのみ）。Canvas投稿・FTS5連携対応
+│   ├── pm_box_crawl.py             # BOXフォルダを走査して本文を Markdown 化（pptx/docx/pdf/xlsx/boxnote）→ box_docs.db に保存。box_sources.yaml で対象フォルダ定義
+│   ├── pm_box_relevance.py         # box_docs.db の各ファイルをローカルLLMで relevance 判定（core/related/noise/unknown）。noise は pm_embed.py が索引除外
+│   ├── pm_box_update.sh        # ステップ1: pm_slack_box_links.py → ステップ2: pm_box_crawl.py → ステップ3: pm_embed.py を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
 │   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
 │   ├── pm_argus_daily.sh            # cron用: argus/pm_argus.py --brief-to-canvas / --risk を平日朝7:47に実行
@@ -129,15 +133,17 @@ slack/
 │   ├── canvas_report.sh             # Canvas同期 → PMレポート生成・Canvas投稿（pm_sync_canvas.py + pm_report.py）
 │   └── slack_post_minutes.sh        # 議事録DBの内容をSlackチャンネルに投稿（pm_minutes_import.py --post-to-slack）
 └── data/                            # DBと出力ファイル
-    ├── {channel_id}.db              # Slackデータ（例: C0A9KG036CS.db）
+    ├── slack.db                     # Slackデータ（全チャンネル統合、channel_id列で絞り込み）
     ├── pm.db                        # PM統合データ
     ├── minutes/                     # 詳細議事録DB（会議名ごとに独立）
     │   └── {kind}.db                # 例: Leader_Meeting.db
-    ├── docs_*.db                     # ドキュメントレジストリDB（BOXリンクのメタデータ、暗号化）
+    ├── docs_*.db                    # ドキュメントレジストリDB（Slack上のBOXリンクのメタデータ、暗号化）
+    ├── box_docs.db                  # BOX本文DB（Markdown化したpptx/docx/pdf/xlsx/boxnote本文 + relevance、暗号化）
+    ├── box_sources.yaml             # BOXソース定義（folder_id・index_names・除外パターン等）
     ├── web_articles.db              # 外部Web記事DB（平文sqlite3、公開情報なので暗号化不要）
     ├── web_sources.yaml             # 外部Webソース定義（URL・キーワードフィルタ・対象インデックス）
     ├── argus_config.yaml            # Argus 統合設定（インデックス定義・チャンネルマッピング・pm.dbパス・会議ごとの Box/Canvas ID）
-    ├── qa_pm*.db                    # QAインデックスDB（FTS5、インデックスごとに独立。議事録・Slack・docs・web記事を含む）
+    ├── qa_index.db                  # FTS5 統合インデックスDB（chunks + chunk_indexes junction で論理 index_name を分離）
     ├── secretary_canvas_id.txt      # Argus の Canvas 投稿先ID
     ├── patrol_config.yaml           # Patrol Agent 設定（検出器の有効/無効・閾値・通知チャンネル）
     ├── patrol_state.db              # Patrol Agent 冪等性DB（通知履歴・承認待ち・ユーザーキャッシュ、平文sqlite3）

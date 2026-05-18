@@ -94,13 +94,74 @@ def load_milestones(conn) -> dict[str, str]:
         return {}
 
 
-def load_action_items(conn, status_f, ms_f, since, del_f="非削除") -> pd.DataFrame:
-    """フィルタ条件に合うアクションアイテムを DataFrame で返す。"""
+# --------------------------------------------------------------------------- #
+# フィルタプリセット (argus_config.yaml の filter_presets セクション)
+# --------------------------------------------------------------------------- #
+
+def _load_argus_config() -> dict:
+    """argus_config.yaml を読み込んで dict を返す（失敗時は空 dict）。"""
+    try:
+        import yaml
+        path = _REPO / "data" / "argus_config.yaml"
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def load_filter_presets() -> dict:
+    """フィルタプリセット定義を返す。
+
+    返却形式:
+      {
+        "channels": [{"name": "リーダー会議系", "values": [...]}, ...],
+        "meeting_kinds": [{"name": "リーダー会議", "values": [...]}, ...],
+        "channel_names": {"C08...": "20_アプリケーション開発エリア", ...},
+      }
+    order でソート済み。order 未指定は 999 として末尾に。
+    """
+    cfg = _load_argus_config()
+    presets = cfg.get("filter_presets", {}) or {}
+    channel_names = cfg.get("channel_names", {}) or {}
+
+    def _sorted(items: dict) -> list[dict]:
+        out = []
+        for name, body in (items or {}).items():
+            body = body or {}
+            out.append({
+                "name": name,
+                "order": body.get("order", 999),
+                "values": list(body.get("values", []) or []),
+            })
+        out.sort(key=lambda x: (x["order"], x["name"]))
+        return [{"name": x["name"], "values": x["values"]} for x in out]
+
+    return {
+        "channels": _sorted(presets.get("channels", {})),
+        "meeting_kinds": _sorted(presets.get("meeting_kinds", {})),
+        "channel_names": dict(channel_names),
+    }
+
+
+def load_action_items(
+    conn, status_f, ms_f, since, del_f="非削除",
+    channels: list[str] | None = None,
+    meeting_kinds: list[str] | None = None,
+) -> pd.DataFrame:
+    """フィルタ条件に合うアクションアイテムを DataFrame で返す。
+
+    channels:      指定された channel_id のみ
+    meeting_kinds: 指定された meetings.kind のみ
+    両方指定された場合は OR 結合（どちらかに合致するレコードを返す）。
+    """
     q = ("SELECT a.id, a.content, a.assignee, a.due_date, a.milestone_id, a.status, a.note,"
          " a.extracted_at, a.source, COALESCE(a.deleted,0) AS deleted,"
          " COALESCE(a.source_ref,'') AS source_ref,"
          " COALESCE(a.meeting_id,'') AS meeting_id,"
          " COALESCE(m.kind,'') AS meeting_kind,"
+         " COALESCE(a.channel_id,'') AS channel_id,"
          " COALESCE(a.requested_by,'') AS requested_by,"
          " COALESCE(a.requested_by_confidence,'') AS requested_by_confidence,"
          " COALESCE(a.rationale,'') AS rationale,"
@@ -120,12 +181,25 @@ def load_action_items(conn, status_f, ms_f, since, del_f="非削除") -> pd.Data
         q += " AND a.milestone_id=?"; p.append(ms_f)
     if since:
         q += " AND a.extracted_at >= ?"; p.append(since)
+    # channels / meeting_kinds は OR 結合
+    or_clauses = []
+    if channels:
+        ph = ",".join("?" * len(channels))
+        or_clauses.append(f"a.channel_id IN ({ph})")
+        p.extend(channels)
+    if meeting_kinds:
+        ph = ",".join("?" * len(meeting_kinds))
+        or_clauses.append(f"m.kind IN ({ph})")
+        p.extend(meeting_kinds)
+    if or_clauses:
+        q += " AND (" + " OR ".join(or_clauses) + ")"
     q += " ORDER BY a.id DESC"
     df = pd.DataFrame(conn.execute(q, p).fetchall(),
                       columns=["id", "content", "assignee", "due_date",
                                "milestone_id", "status", "note",
                                "extracted_at", "source", "deleted",
                                "source_ref", "meeting_id", "meeting_kind",
+                               "channel_id",
                                "requested_by", "requested_by_confidence",
                                "rationale", "source_context", "related_ids"])
     df = df.fillna("")
@@ -135,32 +209,56 @@ def load_action_items(conn, status_f, ms_f, since, del_f="非削除") -> pd.Data
     return df
 
 
-def load_decisions(conn, ack_f, since, del_f="非削除") -> pd.DataFrame:
-    """フィルタ条件に合う決定事項を DataFrame で返す。"""
-    q = ("SELECT id, content, decided_at, acknowledged_at, extracted_at, source,"
-         " COALESCE(deleted,0) AS deleted,"
-         " COALESCE(source_ref,'') AS source_ref,"
-         " COALESCE(decided_by,'') AS decided_by,"
-         " COALESCE(decided_by_confidence,'') AS decided_by_confidence,"
-         " COALESCE(rationale,'') AS rationale,"
-         " COALESCE(source_context,'') AS source_context,"
-         " COALESCE(related_ids,'') AS related_ids"
-         " FROM decisions WHERE 1=1")
+def load_decisions(
+    conn, ack_f, since, del_f="非削除",
+    channels: list[str] | None = None,
+    meeting_kinds: list[str] | None = None,
+) -> pd.DataFrame:
+    """フィルタ条件に合う決定事項を DataFrame で返す。
+
+    channels / meeting_kinds は load_action_items と同様、指定時 OR 結合。
+    """
+    q = ("SELECT d.id, d.content, d.decided_at, d.acknowledged_at, d.extracted_at, d.source,"
+         " COALESCE(d.deleted,0) AS deleted,"
+         " COALESCE(d.source_ref,'') AS source_ref,"
+         " COALESCE(d.meeting_id,'') AS meeting_id,"
+         " COALESCE(m.kind,'') AS meeting_kind,"
+         " COALESCE(d.channel_id,'') AS channel_id,"
+         " COALESCE(d.decided_by,'') AS decided_by,"
+         " COALESCE(d.decided_by_confidence,'') AS decided_by_confidence,"
+         " COALESCE(d.rationale,'') AS rationale,"
+         " COALESCE(d.source_context,'') AS source_context,"
+         " COALESCE(d.related_ids,'') AS related_ids"
+         " FROM decisions d"
+         " LEFT JOIN meetings m ON d.meeting_id = m.meeting_id"
+         " WHERE 1=1")
     p: list = []
     if del_f == "非削除":
-        q += " AND COALESCE(deleted,0)=0"
+        q += " AND COALESCE(d.deleted,0)=0"
     elif del_f == "削除のみ":
-        q += " AND deleted=1"
+        q += " AND d.deleted=1"
     if ack_f == "未確認のみ":
-        q += " AND (acknowledged_at IS NULL OR acknowledged_at='')"
+        q += " AND (d.acknowledged_at IS NULL OR d.acknowledged_at='')"
     elif ack_f == "確認済みのみ":
-        q += " AND acknowledged_at IS NOT NULL AND acknowledged_at!=''"
+        q += " AND d.acknowledged_at IS NOT NULL AND d.acknowledged_at!=''"
     if since:
-        q += " AND extracted_at >= ?"; p.append(since)
-    q += " ORDER BY id DESC"
+        q += " AND d.extracted_at >= ?"; p.append(since)
+    or_clauses = []
+    if channels:
+        ph = ",".join("?" * len(channels))
+        or_clauses.append(f"d.channel_id IN ({ph})")
+        p.extend(channels)
+    if meeting_kinds:
+        ph = ",".join("?" * len(meeting_kinds))
+        or_clauses.append(f"m.kind IN ({ph})")
+        p.extend(meeting_kinds)
+    if or_clauses:
+        q += " AND (" + " OR ".join(or_clauses) + ")"
+    q += " ORDER BY d.id DESC"
     df = pd.DataFrame(conn.execute(q, p).fetchall(),
                       columns=["id", "content", "decided_at", "acknowledged_at",
                                "extracted_at", "source", "deleted", "source_ref",
+                               "meeting_id", "meeting_kind", "channel_id",
                                "decided_by", "decided_by_confidence", "rationale",
                                "source_context", "related_ids"])
     df = df.fillna("")

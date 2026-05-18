@@ -33,9 +33,23 @@ CREATE TABLE IF NOT EXISTS chunks (
     record_id   TEXT,
     held_at     TEXT,
     content     TEXT NOT NULL,
+    tokens      TEXT,
     source_ref  TEXT,
     indexed_at  TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_chunks_source_record
+    ON chunks(source_db, record_id);
+"""
+
+SCHEMA_CHUNK_INDEXES = """
+CREATE TABLE IF NOT EXISTS chunk_indexes (
+    chunk_id   INTEGER NOT NULL,
+    index_name TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, index_name),
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chunk_indexes_index_name
+    ON chunk_indexes(index_name);
 """
 
 SCHEMA_FTS = """
@@ -49,8 +63,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
 
 SCHEMA_INDEX_STATE = """
 CREATE TABLE IF NOT EXISTS index_state (
-    source_db    TEXT PRIMARY KEY,
-    last_indexed TEXT
+    source_db    TEXT NOT NULL,
+    index_name   TEXT NOT NULL,
+    last_indexed TEXT,
+    PRIMARY KEY (source_db, index_name)
 );
 """
 
@@ -134,13 +150,16 @@ def load_qa_config(config_path: Path) -> dict:
 
 
 def open_index_db(index_db_path: Path) -> sqlite3.Connection:
-    """インデックスDB（平文sqlite3）を開く。"""
+    """統合インデックスDB qa_index.db（平文sqlite3）を開く。"""
     conn = sqlite3.connect(str(index_db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(SCHEMA_CHUNKS)
-    conn.execute(SCHEMA_FTS)
-    conn.execute(SCHEMA_INDEX_STATE)
+    conn.execute("PRAGMA foreign_keys=ON")
+    for ddl in (SCHEMA_CHUNKS, SCHEMA_CHUNK_INDEXES, SCHEMA_FTS, SCHEMA_INDEX_STATE):
+        for stmt in ddl.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                conn.execute(stmt)
     # tokens カラムの追加（既存DBの移行）
     try:
         conn.execute(SCHEMA_ADD_TOKENS_COLUMN)
@@ -181,33 +200,75 @@ def split_into_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int 
     return chunks
 
 
-def get_last_indexed(index_conn: sqlite3.Connection, source_db: str) -> str | None:
+def get_last_indexed(index_conn: sqlite3.Connection, source_db: str,
+                     index_name: str) -> str | None:
     row = index_conn.execute(
-        "SELECT last_indexed FROM index_state WHERE source_db = ?", (source_db,)
+        "SELECT last_indexed FROM index_state WHERE source_db = ? AND index_name = ?",
+        (source_db, index_name),
     ).fetchone()
     return row["last_indexed"] if row else None
 
 
-def set_last_indexed(index_conn: sqlite3.Connection, source_db: str, ts: str) -> None:
+def set_last_indexed(index_conn: sqlite3.Connection, source_db: str,
+                     index_name: str, ts: str) -> None:
     index_conn.execute(
-        "INSERT OR REPLACE INTO index_state (source_db, last_indexed) VALUES (?, ?)",
-        (source_db, ts),
+        "INSERT OR REPLACE INTO index_state (source_db, index_name, last_indexed)"
+        " VALUES (?, ?, ?)",
+        (source_db, index_name, ts),
     )
 
 
-def insert_chunks(index_conn: sqlite3.Connection, chunk_rows: list[dict]) -> int:
+def insert_chunks(index_conn: sqlite3.Connection, chunk_rows: list[dict],
+                  index_name: str) -> int:
+    """chunk_rows を INSERT し、それぞれを chunk_indexes に index_name で紐付ける。
+    重複（同じ source_db / record_id / source_type / content）は既存 chunk を再利用する。
+    """
     if not chunk_rows:
         return 0
-    index_conn.executemany(
-        """INSERT INTO chunks (source_type, source_db, record_id, held_at, content, tokens, source_ref, indexed_at)
-           VALUES (:source_type, :source_db, :record_id, :held_at, :content, :tokens, :source_ref, :indexed_at)""",
-        chunk_rows,
+    inserted = 0
+    for r in chunk_rows:
+        existing = index_conn.execute(
+            "SELECT id FROM chunks WHERE source_db = ? AND record_id IS ? AND"
+            " source_type = ? AND content = ?",
+            (r["source_db"], r["record_id"], r["source_type"], r["content"]),
+        ).fetchone()
+        if existing:
+            chunk_id = existing["id"]
+        else:
+            cur = index_conn.execute(
+                "INSERT INTO chunks"
+                " (source_type, source_db, record_id, held_at, content, tokens,"
+                "  source_ref, indexed_at)"
+                " VALUES (:source_type, :source_db, :record_id, :held_at,"
+                "         :content, :tokens, :source_ref, :indexed_at)",
+                r,
+            )
+            chunk_id = cur.lastrowid
+            inserted += 1
+        index_conn.execute(
+            "INSERT OR IGNORE INTO chunk_indexes (chunk_id, index_name) VALUES (?, ?)",
+            (chunk_id, index_name),
+        )
+    return inserted
+
+
+def delete_source_chunks(index_conn: sqlite3.Connection, source_db: str,
+                         index_name: str) -> None:
+    """指定 source_db のチャンクを 1 つの index_name から外す。
+    他 index にも属していればチャンク本体は残す。どこからも参照されなくなった
+    チャンクのみ削除する。"""
+    # まず junction だけ外す
+    index_conn.execute(
+        "DELETE FROM chunk_indexes WHERE chunk_id IN ("
+        " SELECT id FROM chunks WHERE source_db = ?) AND index_name = ?",
+        (source_db, index_name),
     )
-    return len(chunk_rows)
-
-
-def delete_source_chunks(index_conn: sqlite3.Connection, source_db: str) -> None:
-    index_conn.execute("DELETE FROM chunks WHERE source_db = ?", (source_db,))
+    # どの index からも参照されなくなったチャンクを削除
+    index_conn.execute(
+        "DELETE FROM chunks WHERE source_db = ? AND id NOT IN ("
+        " SELECT chunk_id FROM chunk_indexes)",
+        (source_db,),
+    )
 
 
 def rebuild_fts(index_conn: sqlite3.Connection) -> None:
@@ -220,6 +281,7 @@ def rebuild_fts(index_conn: sqlite3.Connection) -> None:
 def index_minutes_content(
     index_conn: sqlite3.Connection,
     db_path: Path,
+    index_name: str,
     full_rebuild: bool,
     dry_run: bool,
     logger: logging.Logger,
@@ -259,14 +321,14 @@ def index_minutes_content(
             })
 
     src_conn.close()
-    logger.info(f"    minutes_content {db_path.stem}: {len(chunk_rows)} チャンク")
+    logger.info(f"    minutes_content {db_path.stem} → {index_name}: {len(chunk_rows)} チャンク")
 
     if dry_run:
         return len(chunk_rows)
 
-    delete_source_chunks(index_conn, source_db)
-    count = insert_chunks(index_conn, chunk_rows)
-    set_last_indexed(index_conn, source_db, now)
+    delete_source_chunks(index_conn, source_db, index_name)
+    count = insert_chunks(index_conn, chunk_rows, index_name)
+    set_last_indexed(index_conn, source_db, index_name, now)
     return count
 
 
@@ -275,23 +337,34 @@ def index_minutes_content(
 def index_slack_raw(
     index_conn: sqlite3.Connection,
     db_path: Path,
+    index_name: str,
     full_rebuild: bool,
     dry_run: bool,
     logger: logging.Logger,
+    channel_id: str,
 ) -> int:
-    """Slack チャンネルDBの messages + replies テーブルをスレッド単位で索引化する。
+    """統合 Slack DB (data/slack.db) の messages + replies を、
+    指定チャンネル分だけスレッド単位で索引化する。
+
+    source_db キーは "{channel_id}.db" 形式（過去の C*.db 索引と互換）。
 
     差分更新: index_state の last_indexed より新しい fetched_at を持つ
     スレッド（messages.thread_ts）のみ再処理する。
     """
-    source_db = db_path.name
-    last_indexed = None if full_rebuild else get_last_indexed(index_conn, source_db)
+    source_db = f"{channel_id}.db"
+    last_indexed = None if full_rebuild else get_last_indexed(
+        index_conn, source_db, index_name)
 
     try:
         src_conn = open_db(db_path)
     except Exception as e:
         logger.warning(f"    {source_db}: 開けませんでした - {e}")
         return 0
+
+    # WHERE 句のベース（チャンネル絞り込み）
+    base_msg = "WHERE channel_id = ?"
+    base_rep = "WHERE channel_id = ?"
+    base_params: list = [channel_id]
 
     chunk_rows: list[dict] = []
     now = now_iso()
@@ -300,39 +373,46 @@ def index_slack_raw(
     if last_indexed:
         target_threads = {
             row[0] for row in src_conn.execute(
-                """SELECT DISTINCT thread_ts FROM messages WHERE fetched_at > ?
-                   UNION
-                   SELECT DISTINCT thread_ts FROM replies WHERE fetched_at > ?""",
-                (last_indexed, last_indexed),
+                f"""SELECT DISTINCT thread_ts FROM messages {base_msg} AND fetched_at > ?
+                    UNION
+                    SELECT DISTINCT thread_ts FROM replies {base_rep} AND fetched_at > ?""",
+                base_params + [last_indexed] + base_params + [last_indexed],
             )
         }
         if not target_threads:
             src_conn.close()
             logger.info(f"    slack_raw {source_db}: 差分なし")
             return 0
-        # 差分対象スレッドの古いチャンクを削除（再生成するため）
+        # 差分対象スレッドの古いチャンクをこの index から外す
         if not dry_run:
             for ts in target_threads:
                 index_conn.execute(
-                    "DELETE FROM chunks WHERE source_db = ? AND record_id = ?",
+                    "DELETE FROM chunk_indexes"
+                    " WHERE index_name = ? AND chunk_id IN ("
+                    "  SELECT id FROM chunks WHERE source_db = ? AND record_id = ?)",
+                    (index_name, source_db, ts),
+                )
+                # どの index からも参照されなくなったら本体も削除
+                index_conn.execute(
+                    "DELETE FROM chunks WHERE source_db = ? AND record_id = ?"
+                    " AND id NOT IN (SELECT chunk_id FROM chunk_indexes)",
                     (source_db, ts),
                 )
     else:
         target_threads = None  # 全件対象
 
     # スレッドごとにメッセージを集約
-    # messages: 親投稿（thread_ts が PK）
     if target_threads is not None:
         placeholders = ",".join("?" * len(target_threads))
-        where_msg = f"WHERE thread_ts IN ({placeholders})"
-        where_rep = f"WHERE thread_ts IN ({placeholders})"
-        params_msg = list(target_threads)
-        params_rep = list(target_threads)
+        where_msg = f"{base_msg} AND thread_ts IN ({placeholders})"
+        where_rep = f"{base_rep} AND thread_ts IN ({placeholders})"
+        params_msg = base_params + list(target_threads)
+        params_rep = base_params + list(target_threads)
     else:
-        where_msg = ""
-        where_rep = ""
-        params_msg = []
-        params_rep = []
+        where_msg = base_msg
+        where_rep = base_rep
+        params_msg = list(base_params)
+        params_rep = list(base_params)
 
     # 親メッセージを取得
     parents: dict[str, dict] = {}
@@ -383,15 +463,15 @@ def index_slack_raw(
                 "indexed_at": now,
             })
 
-    logger.info(f"    slack_raw {source_db}: {len(chunk_rows)} チャンク（{len(parents)} スレッド）")
+    logger.info(f"    slack_raw {source_db} → {index_name}: {len(chunk_rows)} チャンク（{len(parents)} スレッド）")
 
     if dry_run:
         return len(chunk_rows)
 
     if full_rebuild:
-        delete_source_chunks(index_conn, source_db)
-    count = insert_chunks(index_conn, chunk_rows)
-    set_last_indexed(index_conn, source_db, now)
+        delete_source_chunks(index_conn, source_db, index_name)
+    count = insert_chunks(index_conn, chunk_rows, index_name)
+    set_last_indexed(index_conn, source_db, index_name, now)
     return count
 
 
@@ -476,9 +556,9 @@ def index_box_doc_content(
     if dry_run:
         return len(chunk_rows)
 
-    delete_source_chunks(index_conn, source_db)
-    count = insert_chunks(index_conn, chunk_rows)
-    set_last_indexed(index_conn, source_db, now)
+    delete_source_chunks(index_conn, source_db, index_name)
+    count = insert_chunks(index_conn, chunk_rows, index_name)
+    set_last_indexed(index_conn, source_db, index_name, now)
     return count
 
 
@@ -542,9 +622,9 @@ def index_web(
     if dry_run:
         return len(chunk_rows)
 
-    delete_source_chunks(index_conn, source_db)
-    count = insert_chunks(index_conn, chunk_rows)
-    set_last_indexed(index_conn, source_db, now)
+    delete_source_chunks(index_conn, source_db, index_name)
+    count = insert_chunks(index_conn, chunk_rows, index_name)
+    set_last_indexed(index_conn, source_db, index_name, now)
     return count
 
 
@@ -554,18 +634,18 @@ def build_index(
     index_name: str,
     index_cfg: dict,
     data_dir: Path,
+    index_conn: sqlite3.Connection,
     full_rebuild: bool,
     dry_run: bool,
     logger: logging.Logger,
     *,
     web_only: bool = False,
 ) -> int:
-    """1つのインデックスを構築する。追加したチャンク数を返す。"""
-    db_path = Path(index_cfg["db"])
+    """1つの index_name を統合 qa_index.db に取り込む。追加したチャンク数を返す。"""
     minutes_kinds = index_cfg.get("minutes") or []
     channel_ids = index_cfg.get("channels") or []
 
-    logger.info(f"[{index_name}] → {db_path}")
+    logger.info(f"[{index_name}] → qa_index.db")
 
     if not web_only:
         logger.info(f"  minutes: {minutes_kinds or '(なし)'}")
@@ -575,12 +655,14 @@ def build_index(
             logger.warning(f"  ソースが未設定です。argus_config.yaml を編集してください。")
             return 0
 
-    index_conn = open_index_db(db_path)
-
     if full_rebuild and not dry_run and not web_only:
-        logger.info(f"  全件再構築: 既存インデックスをクリア")
-        index_conn.execute("DELETE FROM chunks")
-        index_conn.execute("DELETE FROM index_state")
+        logger.info(f"  全件再構築: {index_name} に紐づく chunk_indexes をクリア")
+        index_conn.execute("DELETE FROM chunk_indexes WHERE index_name = ?", (index_name,))
+        index_conn.execute("DELETE FROM index_state WHERE index_name = ?", (index_name,))
+        # どの index からも参照されなくなったチャンクは削除
+        index_conn.execute(
+            "DELETE FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_indexes)"
+        )
         index_conn.commit()
 
     total = 0
@@ -592,35 +674,39 @@ def build_index(
             if not minutes_path.exists():
                 logger.warning(f"  {minutes_path} が見つかりません")
                 continue
-            total += index_minutes_content(index_conn, minutes_path, full_rebuild, dry_run, logger)
+            total += index_minutes_content(
+                index_conn, minutes_path, index_name,
+                full_rebuild, dry_run, logger,
+            )
 
-        # slack_raw（生メッセージ）
-        for channel_id in channel_ids:
-            channel_path = data_dir / f"{channel_id}.db"
-            if not channel_path.exists():
-                logger.warning(f"  {channel_path} が見つかりません")
-                continue
-            total += index_slack_raw(index_conn, channel_path, full_rebuild, dry_run, logger)
+        # slack_raw（生メッセージ）: 統合 DB (data/slack.db) からチャンネル別に索引化
+        slack_db = data_dir / "slack.db"
+        if not slack_db.exists():
+            logger.warning(f"  {slack_db} が見つかりません — slack_raw 索引化をスキップ")
+        else:
+            for channel_id in channel_ids:
+                total += index_slack_raw(
+                    index_conn, slack_db, index_name,
+                    full_rebuild, dry_run, logger,
+                    channel_id=channel_id,
+                )
 
         # box_documents（BOXドキュメント本文）
         box_docs_path = data_dir / "box_docs.db"
         if box_docs_path.exists():
-            total += index_box_doc_content(index_conn, box_docs_path, index_name, full_rebuild, dry_run, logger)
+            total += index_box_doc_content(
+                index_conn, box_docs_path, index_name,
+                full_rebuild, dry_run, logger,
+            )
 
     # web（外部記事）
     web_articles_path = data_dir / "web_articles.db"
     if web_articles_path.exists():
-        total += index_web(index_conn, web_articles_path, index_name, full_rebuild, dry_run, logger)
+        total += index_web(
+            index_conn, web_articles_path, index_name,
+            full_rebuild, dry_run, logger,
+        )
 
-    if not dry_run:
-        index_conn.commit()
-        logger.info(f"  FTS5 再構築中...")
-        rebuild_fts(index_conn)
-        index_conn.commit()
-        db_total = index_conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        logger.info(f"  完了: {db_total} チャンク in {db_path}")
-
-    index_conn.close()
     return total
 
 
@@ -669,13 +755,32 @@ def main() -> None:
             sys.exit(1)
         indices = {args.index_name: indices[args.index_name]}
 
+    qa_index_path = data_dir / "qa_index.db"
+    logger.info(f"統合インデックス DB: {qa_index_path}")
+    index_conn = open_index_db(qa_index_path)
+
     total = 0
     for index_name, index_cfg in indices.items():
         total += build_index(
-            index_name, index_cfg, data_dir,
+            index_name, index_cfg, data_dir, index_conn,
             args.full_rebuild, args.dry_run, logger,
             web_only=args.web_only,
         )
+
+    if not args.dry_run:
+        index_conn.commit()
+        logger.info(f"FTS5 再構築中...")
+        rebuild_fts(index_conn)
+        index_conn.commit()
+        db_chunks = index_conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        db_links = index_conn.execute("SELECT COUNT(*) FROM chunk_indexes").fetchone()[0]
+        logger.info(f"完了: chunks={db_chunks}, chunk_indexes={db_links} in {qa_index_path}")
+        # index_name 別件数
+        for r in index_conn.execute(
+            "SELECT index_name, COUNT(*) FROM chunk_indexes GROUP BY index_name ORDER BY index_name"
+        ):
+            logger.info(f"  {r[0]}: {r[1]}")
+    index_conn.close()
 
     if args.dry_run:
         logger.info(f"\n[DRY-RUN] 合計 {total} チャンク（書き込みなし）")

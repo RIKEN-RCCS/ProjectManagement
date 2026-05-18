@@ -343,7 +343,7 @@ def call_argus_llm(
     local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
     import requests as _req
     try:
-        _req.get(local_base.rstrip("/v1").rstrip("/") + "/health", timeout=3)
+        _req.get(local_base.removesuffix("/v1").rstrip("/") + "/health", timeout=3)
     except Exception:
         raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません。")
 
@@ -547,18 +547,20 @@ def retrieve_knowledge_for_extraction(
     top_k: int = 5,
     since_days: int = 90,
     logger=None,
+    index_name: str = "pm-all",
 ) -> str:
     """
     抽出処理用のナレッジ検索。
-    FTS5インデックスから関連する過去議論・決定事項を取得し、
+    統合 FTS5 インデックス (data/qa_index.db) から関連する過去議論・決定事項を取得し、
     プロンプト注入用のフォーマット済みテキストを返す。
 
     Args:
         query_text: 検索クエリ（Slackスレッド本文 or 議事録本文）
-        qa_db_path: FTS5インデックスDBパス（Noneの場合は data/qa_pm-all.db）
+        qa_db_path: 統合 FTS5 DB（None なら data/qa_index.db）
         top_k: 返却する最大チャンク数（デフォルト5）
         since_days: 検索対象を直近N日以内に限定（デフォルト90日）
         logger: ロガー（省略時は標準出力）
+        index_name: chunk_indexes でフィルタする論理 index 名（デフォルト pm-all）
 
     Returns:
         フォーマット済みナレッジテキスト。検索失敗時は空文字列。
@@ -569,10 +571,10 @@ def retrieve_knowledge_for_extraction(
     if logger is None:
         logger = logging.getLogger(__name__)
 
-    # デフォルトDB: data/qa_pm-all.db
+    # デフォルトDB: data/qa_index.db
     if qa_db_path is None:
         repo_root = Path(__file__).resolve().parent.parent
-        qa_db_path = repo_root / "data" / "qa_pm-all.db"
+        qa_db_path = repo_root / "data" / "qa_index.db"
 
     # FTS5インデックス未構築時はスキップ
     if not qa_db_path.exists():
@@ -595,10 +597,13 @@ def retrieve_knowledge_for_extraction(
         # 日付カットオフ計算
         cutoff_date = (datetime.now() - timedelta(days=since_days)).strftime("%Y-%m-%d")
 
-        logger.info(f"ナレッジ検索: {cutoff_date} 以降, キーワード={search_query[:100]}")
+        logger.info(f"ナレッジ検索: {cutoff_date} 以降, キーワード={search_query[:100]}, index={index_name}")
 
-        # FTS5検索（HyDE クエリ拡張 + 日付フィルタ付き）
-        chunks = retrieve_chunks_hyde(search_query, qa_db_path, k=20, since_date=cutoff_date)
+        # FTS5検索（HyDE クエリ拡張 + 日付フィルタ + index_name フィルタ）
+        chunks = retrieve_chunks_hyde(
+            search_query, qa_db_path, k=20,
+            since_date=cutoff_date, index_name=index_name,
+        )
         if not chunks:
             logger.debug("ナレッジ検索: 該当なし")
             return "（該当する過去議論なし）"

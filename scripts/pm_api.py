@@ -26,7 +26,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from web_utils import (
     scan_pm_dbs, get_conn, load_milestones, load_action_items, load_decisions,
     load_minutes_content, nv, to_bool, audit, do_save_action_items, do_save_decisions,
+    load_filter_presets,
 )
+from db_utils import open_db
 
 # --------------------------------------------------------------------------- #
 # 設定
@@ -115,6 +117,14 @@ def get_milestones():
     return {"milestones": load_milestones(_get_conn())}
 
 
+# --- Filter presets endpoint --- #
+
+@app.get("/api/filter-presets")
+def get_filter_presets():
+    """argus_config.yaml の filter_presets と channel_names を返す。"""
+    return load_filter_presets()
+
+
 # --- Action Item endpoints --- #
 
 @app.get("/api/action-items")
@@ -123,8 +133,14 @@ def get_action_items(
     milestone: str = Query("すべて"),
     since: str = Query(""),
     deleted: str = Query("非削除"),
+    channels: list[str] = Query(default_factory=list),
+    meeting_kinds: list[str] = Query(default_factory=list),
 ):
-    df = load_action_items(_get_conn(), status, milestone, since or None, deleted)
+    df = load_action_items(
+        _get_conn(), status, milestone, since or None, deleted,
+        channels=channels or None,
+        meeting_kinds=meeting_kinds or None,
+    )
     _state["ai_df"] = df
     return {"rows": df.to_dict("records")}
 
@@ -161,8 +177,14 @@ def get_decisions(
     acknowledged: str = Query("すべて"),
     since: str = Query(""),
     deleted: str = Query("非削除"),
+    channels: list[str] = Query(default_factory=list),
+    meeting_kinds: list[str] = Query(default_factory=list),
 ):
-    df = load_decisions(_get_conn(), acknowledged, since or None, deleted)
+    df = load_decisions(
+        _get_conn(), acknowledged, since or None, deleted,
+        channels=channels or None,
+        meeting_kinds=meeting_kinds or None,
+    )
     _state["dec_df"] = df
     return {"rows": df.to_dict("records")}
 
@@ -301,68 +323,67 @@ def _msg_context(text: str) -> str:
 
 @app.get("/api/files")
 def get_files(channel: str = Query(""), since: str = Query("")):
-    """全 Slack DB から Box リンク・ファイルURLを抽出して一覧を返す"""
+    """統合 Slack DB (data/slack.db) から Box リンク・ファイルURLを抽出して一覧を返す。"""
     data_dir = _REPO / "data"
     results: list[dict] = []
     seen_urls: set[str] = set()
 
-    db_files = sorted(data_dir.glob("C*.db"))
-    for db_file in db_files:
-        ch_id = db_file.stem
-        if channel and ch_id != channel:
-            continue
-        ch_name = _CHANNEL_NAMES.get(ch_id, ch_id)
+    db_path = data_dir / "slack.db"
+    if not db_path.exists():
+        return {"files": [], "total": 0}
+
+    try:
+        conn = open_db(str(db_path), encrypt=not _state["no_encrypt"])
+    except Exception:
+        return {"files": [], "total": 0}
+
+    for table, ts_col in [("messages", "thread_ts"), ("replies", "msg_ts")]:
         try:
-            conn = open_db(str(db_file), encrypt=not _state["no_encrypt"])
+            q = (f"SELECT channel_id, {ts_col}, text, COALESCE(permalink,''), timestamp"
+                 f" FROM {table} WHERE text LIKE '%box.com%'")
+            params: list = []
+            if channel:
+                q += " AND channel_id = ?"
+                params.append(channel)
+            if since:
+                q += " AND timestamp >= ?"
+                params.append(since)
+            rows = conn.execute(q, params).fetchall()
         except Exception:
             continue
-
-        # messages と replies を両方走査
-        for table, ts_col in [("messages", "thread_ts"), ("replies", "msg_ts")]:
-            try:
-                q = f"SELECT {ts_col}, text, COALESCE(permalink,''), timestamp FROM {table} WHERE text LIKE '%box.com%'"
-                params: list = []
-                if since:
-                    q += " AND timestamp >= ?"
-                    params.append(since)
-                rows = conn.execute(q, params).fetchall()
-            except Exception:
+        for row in rows:
+            ch_id = row[0]
+            ch_name = _CHANNEL_NAMES.get(ch_id, ch_id)
+            _ts, text, permalink, timestamp = row[1], row[2], row[3], row[4]
+            if not text:
                 continue
-            for row in rows:
-                _, text, permalink, timestamp = row
-                if not text:
+            context = _msg_context(text)
+            date_str = str(timestamp)[:10] if timestamp else ""
+            for m in _PAT_BOX_URL.finditer(text):
+                if m.group(1):
+                    url = m.group(1).rstrip(".")
+                    inline_label = m.group(2).strip()
+                    pb = _re.search(r"\s*\|?\s*Powered by Box", inline_label, _re.IGNORECASE)
+                    if pb:
+                        inline_label = inline_label[:pb.start()].strip()
+                    label = inline_label
+                else:
+                    url = m.group(3).rstrip(".")
+                    label = _extract_label(text, url, m.start(), m.end())
+                key = f"{ch_id}:{url}"
+                if key in seen_urls:
                     continue
-                context = _msg_context(text)
-                date_str = str(timestamp)[:10] if timestamp else ""
-                for m in _PAT_BOX_URL.finditer(text):
-                    if m.group(1):
-                        # <URL|label> 形式
-                        url = m.group(1).rstrip(".")
-                        inline_label = m.group(2).strip()
-                        # "Powered by Box" を除去
-                        pb = _re.search(r"\s*\|?\s*Powered by Box", inline_label, _re.IGNORECASE)
-                        if pb:
-                            inline_label = inline_label[:pb.start()].strip()
-                        label = inline_label
-                    else:
-                        # plain URL or <URL>
-                        url = m.group(3).rstrip(".")
-                        label = _extract_label(text, url, m.start(), m.end())
-                    # URLの重複チェック（同一URLが複数チャンネルに投稿される場合は含める）
-                    key = f"{ch_id}:{url}"
-                    if key in seen_urls:
-                        continue
-                    seen_urls.add(key)
-                    results.append({
-                        "url": url,
-                        "label": label or "",
-                        "context": context,
-                        "channel_id": ch_id,
-                        "channel_name": ch_name,
-                        "date": date_str,
-                        "permalink": permalink,
-                    })
-        conn.close()
+                seen_urls.add(key)
+                results.append({
+                    "url": url,
+                    "label": label or "",
+                    "context": context,
+                    "channel_id": ch_id,
+                    "channel_name": ch_name,
+                    "date": date_str,
+                    "permalink": permalink,
+                })
+    conn.close()
 
     # 日付降順でソート
     results.sort(key=lambda x: x["date"], reverse=True)

@@ -91,19 +91,23 @@ def all_target_channels(config: dict) -> list[str]:
 
 
 def collect_box_messages(channel_id: str, no_encrypt: bool, since: str | None = None):
-    db_path = DATA_DIR / f"{channel_id}.db"
+    """統合 Slack DB (data/slack.db) から指定チャンネルの BOX リンク投稿を取得する。"""
+    db_path = DATA_DIR / "slack.db"
     if not db_path.exists():
         return []
 
     conn = open_db(db_path, encrypt=not no_encrypt)
     results = []
-    where_clause = "WHERE (text LIKE '%box.com%' OR text LIKE '%box.net%')"
+    where_clause = ("WHERE (text LIKE '%box.com%' OR text LIKE '%box.net%')"
+                    " AND channel_id = ?")
+    ch_params = [channel_id]
     if since:
         where_clause += f" AND timestamp >= '{since}'"
 
     for row in conn.execute(
         f"SELECT thread_ts, channel_id, user_name, text, timestamp, permalink"
-        f" FROM messages {where_clause} ORDER BY timestamp"
+        f" FROM messages {where_clause} ORDER BY timestamp",
+        ch_params,
     ):
         urls = list(dict.fromkeys(
             m.group(0) for m in BOX_URL_PATTERN.finditer(row["text"] or "")
@@ -119,7 +123,8 @@ def collect_box_messages(channel_id: str, no_encrypt: bool, since: str | None = 
 
     for row in conn.execute(
         f"SELECT msg_ts AS thread_ts, channel_id, user_name, text, timestamp, permalink"
-        f" FROM replies {where_clause} ORDER BY timestamp"
+        f" FROM replies {where_clause} ORDER BY timestamp",
+        ch_params,
     ):
         urls = [m.group(0) for m in BOX_URL_PATTERN.finditer(row["text"] or "")]
         link_texts = {m.group(1): m.group(2) for m in SLACK_LINK_PATTERN.finditer(row["text"] or "")}
