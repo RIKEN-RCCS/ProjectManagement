@@ -115,6 +115,29 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
 - 矛盾検知: Patrol Agent `detect_knowledge_conflicts` がリーダー会議チャンネルへ通知
 - 詳細: `docs/distill_policy.md` / `docs/schema.md`「data/knowledge.db」/ `docs/architecture.md`「Pass 3」
 
+#### 5.9 マルチモーダル動画解析による議事録品質向上（実装済み 2026-05）
+
+Zoom 会議の録画動画から、音声・テキスト・映像の複数チャネルを使って議事録の精度を向上させる。
+
+**話者同定（VTT 由来）**:
+- Zoom クラウド録画には自動文字起こし VTT (`*.transcript.vtt`) が同梱され、これに **正確な参加者名** が記載されている
+- `transcribe_pipeline.py` が録画と同名の VTT を自動ダウンロード、`generate_minutes_local.py` の Stage 3 が Whisper の高品質本文と VTT の話者名を統合してアクションアイテムの担当者を推定する
+- 当初検討した「ギャラリービューの画面 OCR で話者を読む」案は不採用 — 現運用の Zoom 録画はクラウド録画のスピーカービュー / 画面共有が主でギャラリー枠が映らないため画像経路は成立しない。VTT 同梱で目的が達成されているため画像 OCR は不要
+- VTT が同梱されない外部ツール録画では Whisper + pyannote の話者分離で `Speaker N` ラベルになり、人手で実名化する運用が残る（VTT 取得経路の整備が解決策。画像 OCR は迂回手段にならない）
+
+**スライド・資料 OCR による専門用語補正**:
+- `scripts/recording/slide_ocr.py` が ffmpeg scene detect でスライド切り替わりのフレームを抽出し、マルチモーダル LLM（`OPENAI_API_BASE`）で Markdown 化する
+- 得られた結果は 2 系統で議事録品質に反映:
+  - 固有名詞リスト（terminology.txt）を `whisper_vad.py` の `--initial-prompt-extra` に渡し ASR 段階で誤変換を抑制
+  - スライド文脈（slide_context.md）を `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱し、LLM に固有名詞の ground truth を与える
+- `pm_from_recording.sh`（ローカル版）と `transcribe_pipeline.py`（Slack 経由）の両方で有効化済み
+- スライドなしの会議（frames=0）や mp4 以外、`OPENAI_API_BASE` 未設定時は自動スキップで既存動作にフォールバック
+- `--no-slide-ocr` で無効化可能（`pm_from_recording.sh`）
+
+**実装上の考慮**:
+- マルチモーダル推論は vLLM の同一サーバーでの逐次処理（または別ポート）で実行
+- フレーム抽出はシーン検出ベースで間引き（5〜10秒間隔の固定間引きより精度が高く、コストも低い）
+
 ---
 
 ## 今後の課題（PMフレームワーク観点での欠落領域）
@@ -169,36 +192,13 @@ PMBOKの観点から現システムを評価した結果、以下の領域が未
   `pm_report.py` の要注意セクションで外部待ちアイテムを自動抽出・強調する
 
 
-### P8: マルチモーダル動画解析による議事録品質向上
-
-Zoom会議の録画動画から、音声・テキスト・映像の複数チャネルを使って議事録の精度を向上させる。
-
-#### 8.1 話者同定（VTT 由来で実装済み、2026-04）
-
-- Zoom クラウド録画には自動文字起こし VTT (`*.transcript.vtt`) が同梱され、これに **正確な参加者名** が記載されている
-- `transcribe_pipeline.py` が録画と同名の VTT を自動ダウンロード、`generate_minutes_local.py` の Stage 3 が Whisper の高品質本文と VTT の話者名を統合してアクションアイテムの担当者を推定する
-- 当初検討していた「ギャラリービューの画面 OCR で話者を読む」案は不採用 — 現運用の Zoom 録画はクラウド録画のスピーカービュー / 画面共有が主で、ギャラリー枠が映らないため画像から話者を特定できない。VTT 同梱で目的が達成されるため画像経路は不要
-- VTT が存在しない録画（手元 mp4 等）では Whisper + pyannote の話者分離で `Speaker 0/1/2...` ラベルになり、人手で実名化する運用は残る
-
-#### 8.2 スライド・資料OCRによる専門用語補正（実装済み、2026-05）
-
-- `scripts/recording/slide_ocr.py` が ffmpeg scene detect でスライド切り替わりのフレームを抽出し、マルチモーダルLLM（`OPENAI_API_BASE`）で Markdown 化する
-- 得られた結果は 2 系統で議事録品質に反映される:
-  - 固有名詞リスト（terminology.txt）を `whisper_vad.py` の `--initial-prompt-extra` に渡し ASR 段階で誤変換を抑制
-  - スライド文脈（slide_context.md）を `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱し、LLM に固有名詞の ground truth を与える
-- `pm_from_recording.sh`（ローカル版）と `transcribe_pipeline.py`（Slack経由）の両方で有効化済み
-- スライドなしの会議（frames=0）や mp4 以外、`OPENAI_API_BASE` 未設定時は自動スキップで既存動作にフォールバック
-- `--no-slide-ocr` で無効化可能（`pm_from_recording.sh`）
-
-#### 実装上の考慮事項
-
-- マルチモーダル推論はvLLMの別ポートまたは同一サーバーでの逐次処理で実行
-- VTT が利用できない録画（外部ツール録画など）では話者ラベルが `Speaker N` になるため、議事録からの担当者抽出精度が落ちる。これは VTT 取得経路の整備が解決策で、画像 OCR は迂回手段にならない
-
 ### 参考: 現時点で対応済みの弱点
 
 | 課題 | 対応状況 |
 |---|---|
 | Canvas編集の上書きで変更前が消える | ✅ audit_log で解決（2026-03） |
 | 会議録が平文でディスクに残る | ✅ --meeting-name オプションで解決（2026-03） |
+| 議事録での話者特定 | ✅ Zoom 同梱 VTT を自動取り込み（2026-04、5.9 参照） |
+| 議事録の固有名詞・数値の誤変換 | ✅ スライド OCR で terminology / slide_context を生成（2026-05、5.9 参照） |
+| 蒸留ナレッジへのノイズ混入 | ✅ Stage 2 の embedding 類似度 + LLM 品質審査で抑制（2026-05、5.8 参照） |
 | LLM抽出品質の保証 | ⚠️ バリデーションサブエージェント未実装（P4以降で検討） |
