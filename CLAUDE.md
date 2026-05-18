@@ -68,6 +68,7 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 - `pm.db` — PM情報専用（**action_items / decisions / meetings / goals / milestones の唯一の正本**）。2026-05-17 に pm-hpc.db / pm-pmo.db / pm-personal.db への分割を廃止し pm.db に一本化。`action_items.channel_id` / `decisions.channel_id` で出典チャンネルを保持。
 - `data/minutes/{kind}.db` — 議事録詳細専用。会議名ごとに独立。決定・AIの背景を含む。
 - `data/box_docs.db` — Box フォルダから取得したドキュメント本文（Markdown化）+ relevance（core/related/noise/unknown）。`pm_box_crawl.py` が登録、`pm_box_relevance.py` が判定。
+- `data/knowledge.db` — **蒸留ナレッジレイヤ**（プロジェクト全体共通、`index_name` 等の分割なし）。BOX 本文・議事録・決定事項を「意思決定 / 制約 / 立場 / 用語」の粒度に LLM 蒸留し、brief/risk のプロンプトに常時同梱できる短文サマリと、investigate でフル展開できる根拠・代替案・制約を保持。詳細は `docs/schema.md` 参照。蒸留スクリプトは未実装。
 - `data/qa_index.db` — FTS5 検索インデックスの統合DB。`chunks` + `chunk_indexes(chunk_id, index_name)` の junction で論理 index（`pm` / `pm-hpc` / `pm-pmo` / `pm-all`）を表現。2026-05-18 に `qa_pm*.db` への DB 分割を廃止し統合。
 
 ---
@@ -139,6 +140,7 @@ slack/
     │   └── {kind}.db                # 例: Leader_Meeting.db
     ├── docs_*.db                    # ドキュメントレジストリDB（Slack上のBOXリンクのメタデータ、暗号化）
     ├── box_docs.db                  # BOX本文DB（Markdown化したpptx/docx/pdf/xlsx/boxnote本文 + relevance、暗号化）
+    ├── knowledge.db                 # 蒸留ナレッジDB（意思決定/制約/立場/用語、プロジェクト全体共通、暗号化）
     ├── box_sources.yaml             # BOXソース定義（folder_id・index_names・除外パターン等）
     ├── web_articles.db              # 外部Web記事DB（平文sqlite3、公開情報なので暗号化不要）
     ├── web_sources.yaml             # 外部Webソース定義（URL・キーワードフィルタ・対象インデックス）
