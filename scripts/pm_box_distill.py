@@ -53,6 +53,15 @@ from db_utils import (
     open_pm_db,
     next_knowledge_id,
 )
+from embed_utils import (
+    embed_batch,
+    embed_one,
+    cosine_similarity_matrix,
+    vector_to_blob,
+    blob_to_vector,
+    healthcheck as embed_healthcheck,
+)
+import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -64,21 +73,44 @@ PM_DB = DATA_DIR / "pm.db"
 # 1 入力あたりにLLMへ渡す最大文字数（プロンプト圧迫を避ける）
 _MAX_INPUT_CHARS = 12000
 
-# 蒸留採否の重要なポリシー（プロンプト直挿し）
+# 蒸留採否の重要なポリシー（プロンプト直挿し）。
+# docs/distill_policy.md の運用基準に加え、実観測のノイズパターン（段階1）を明示する。
 _DISTILL_POLICY = """\
 ## 抽出する対象
-- アーキテクチャ選択（例: Scale-up ドメインサイズの確定）
+- アーキテクチャ選択（例: Scale-up ドメインサイズの確定、CPU-GPU 接続方式）
 - 外部関係者との合意事項（理研 / 富士通 / NVIDIA 三者の決定）
-- 長期にわたって参照される制約・前提条件（例: FP8 ゼタスケール目標、温水冷却前提）
-- 撤回・上書きが起きにくい用語定義
+- 長期にわたって参照される制約・前提条件（FP8 ゼタスケール目標、温水冷却前提など）
+- 富岳NEXT プロジェクト固有の用語定義（独自の略号・概念）
 - 立場の表明（重要ステークホルダーの方針声明）
 
-## 抽出してはいけない対象
+## 抽出してはいけない対象（観測されたノイズパターン）
+**業界標準・記法慣例**
+- 単位表記の慣例（"1EFLOPS = 1,000PFLOPS"、"1Gbps = 1,000Mbps" 等の 10 進表記）
+- 業界標準の数値・単位表記方針
+
+**形式的・定型情報**
+- プロジェクトの正式名称・略称・調達案件名の定義（"富岳NEXT"・"次世代計算基盤技術検証..."）
+- 議事録の冒頭定型文・参加者・配布先・議事録番号
+- 落札方式・契約形態など調達文書の定型条項
+- 形式的な承認（議事録レビュー承認、議事録掲載許可）
+
+**短期・暫定情報**
 - 1 回限りの会議運営事項（時刻変更、開催場所、Zoom URL）
-- 当日中に消費されるアクションアイテム
+- 当日中に消費されるアクションアイテム（pm.db.action_items の領域）
 - 個人の暫定見解（チーム合意に至っていない発言）
-- 既に上書きされた情報
-- 形式的な承認（議事録レビュー承認等）
+- "〜と仮定して見積もる" のような検討中の作業仮定（同じ仮定が他資料で何度も引用されているならそれは作業仮定であって意思決定ではない）
+
+**既知の体制説明**
+- 「理研が主導」「富士通とNVIDIAが協力」のような既存の体制
+- ベンダーの一般的な役割分担
+
+**既に上書きされた情報**
+- 既に新しい意思決定で上書き済みのもの
+
+## judgement の心得
+プロジェクトを知らない PM が読んで「**これは富岳NEXT 固有の意思決定だ**」と
+納得できる内容のみ採用する。ただ書かれているだけ、業界の常識、
+既知の前提のリピートは採用しない。**迷ったら採用しない**。
 
 ## confidence の付け方
 - `high`: 議事録に明示された決定事項、外部関係者との合意、複数ソースで一致
@@ -343,25 +375,338 @@ def distill_one(item: dict, log) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# 段階3: Stage 2 — 採否ゲート（embedding 類似度 + LLM 判定）
+# --------------------------------------------------------------------------- #
+
+# bge-m3 のしきい値（コサイン類似度）
+DEFAULT_MERGE_THRESHOLD = 0.92    # >= はそのまま既存に merge（追加しない）
+DEFAULT_REVIEW_THRESHOLD = 0.85   # >= は LLM に「同じ意味か？」を問う
+
+EMBED_MODEL_NAME = "bge-m3:567m"  # 記録用ラベル
+
+
+_QUALITY_PROMPT = """\
+あなたは富岳NEXTプロジェクトのナレッジ品質審査AIです。
+新規ナレッジ候補が以下の基準を満たすか厳しく判定してください。
+
+## 採用基準（すべてを満たす場合のみ keep）
+1. プロジェクトを知らない PM が読んで「これは富岳NEXT 固有の意思決定だ」と納得できる
+2. 個別議事録に閉じた情報ではない
+3. 既存ナレッジと内容が異なる
+4. 業界標準・形式的情報・短期作業仮定ではない
+
+## 不採用パターン（いずれかに該当したら drop）
+- 業界標準の単位表記・記法慣例
+- プロジェクト名称・調達案件名の定義のような形式情報
+- 議事録の冒頭定型文・落札方式・契約形態
+- "〜と仮定して見積もる" のような短期作業仮定
+- 既知の体制説明（"理研が主導" など）
+- 既に上書きされた情報
+
+## 既存ナレッジ判定
+類似度の高い既存ナレッジが提示されている場合:
+- 内容が**同じ意味**なら verdict="merge_with"、merge_target に既存 KN-XXXX を指定
+- 内容が**異なる**なら verdict="keep" でよい（補強情報として）
+
+## 入力
+{candidates_block}
+
+## 出力（厳密にこの JSON のみを返す。前置き・後置き・コードフェンスなし）
+{{
+  "judgements": [
+    {{
+      "candidate_index": 0,
+      "verdict": "keep" | "drop" | "merge_with",
+      "merge_target": "KN-XXXX (verdict=merge_with の時のみ。それ以外は空文字)",
+      "reason": "1行の根拠"
+    }}
+  ]
+}}
+
+迷ったら drop。candidate_index は入力の通し番号と一致させてください。
+"""
+
+
+def fetch_existing_embeddings(
+    kdb,
+) -> tuple[list[dict], np.ndarray]:
+    """knowledge.db の現役レコード（superseded_by IS NULL かつ deleted=0）の
+    埋め込み済みデータを (records, matrix) で返す。"""
+    rows = kdb.execute(
+        "SELECT k.id, k.kind, k.topic, k.current_state, k.confidence,"
+        "       e.dim, e.vector"
+        " FROM knowledge k"
+        " JOIN knowledge_embeddings e ON e.knowledge_id = k.id"
+        " WHERE COALESCE(k.deleted, 0) = 0 AND k.superseded_by IS NULL"
+    ).fetchall()
+    if not rows:
+        return [], np.zeros((0, 0), dtype=np.float32)
+    records = [
+        {
+            "id": r["id"],
+            "kind": r["kind"],
+            "topic": r["topic"] or "",
+            "current_state": r["current_state"] or "",
+            "confidence": r["confidence"] or "",
+        }
+        for r in rows
+    ]
+    dim = rows[0]["dim"]
+    mat = np.stack([blob_to_vector(r["vector"], dim=dim) for r in rows])
+    return records, mat
+
+
+def upsert_embedding(kdb, knowledge_id: str, vec: np.ndarray) -> None:
+    """knowledge_embeddings に埋め込みを upsert する。"""
+    kdb.execute(
+        "INSERT OR REPLACE INTO knowledge_embeddings"
+        " (knowledge_id, model, dim, vector, embedded_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (knowledge_id, EMBED_MODEL_NAME, vec.shape[0],
+         vector_to_blob(vec), now_iso()),
+    )
+
+
+def find_similar_existing(
+    candidate_vec: np.ndarray,
+    existing_records: list[dict],
+    existing_matrix: np.ndarray,
+    *,
+    top_k: int = 5,
+) -> list[tuple[dict, float]]:
+    """1 候補に対して既存レコードから上位 top_k 件を類似度付きで返す。"""
+    if existing_matrix.size == 0:
+        return []
+    sims = cosine_similarity_matrix(candidate_vec, existing_matrix)
+    order = np.argsort(-sims)[:top_k]
+    return [(existing_records[i], float(sims[i])) for i in order]
+
+
+def llm_quality_judge(
+    candidates: list[dict],
+    similar_lists: list[list[tuple[dict, float]]],
+    log,
+) -> list[dict]:
+    """候補と類似既存リストを LLM に渡して keep/drop/merge_with を判定する。
+    返り値: 各候補に対する judgement dict（candidate_index 順）。
+    LLM 失敗時は全 drop（保守的）。
+    """
+    if not candidates:
+        return []
+
+    blocks = []
+    for i, (cand, sims) in enumerate(zip(candidates, similar_lists)):
+        b = [f"### 候補 {i}"]
+        b.append(f"- kind: {cand['kind']}")
+        b.append(f"- topic: {cand['topic']}")
+        b.append(f"- current_state: {cand['current_state']}")
+        if cand.get("rationale"):
+            b.append(f"- rationale: {cand['rationale']}")
+        if sims:
+            b.append("- 既存類似ナレッジ:")
+            for rec, score in sims:
+                b.append(
+                    f"  • {rec['id']} (sim={score:.3f}, {rec['kind']}/{rec['confidence']}) "
+                    f"{rec['topic']}: {rec['current_state'][:80]}"
+                )
+        else:
+            b.append("- 既存類似ナレッジ: なし")
+        blocks.append("\n".join(b))
+    prompt = _QUALITY_PROMPT.format(candidates_block="\n\n".join(blocks))
+
+    try:
+        raw = call_argus_llm(
+            prompt,
+            timeout=300,
+            max_tokens=4096,
+            system="あなたは富岳NEXT プロジェクトのナレッジ品質審査AIです。",
+        )
+    except Exception as e:
+        log(f"  [WARN] LLM 品質判定エラー: {e}（保守的に全 drop します）")
+        return [
+            {"candidate_index": i, "verdict": "drop",
+             "merge_target": "", "reason": f"LLM error: {e}"}
+            for i in range(len(candidates))
+        ]
+
+    raw = strip_think_blocks(raw or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+        if raw.endswith("```"):
+            raw = raw.rsplit("```", 1)[0]
+        raw = raw.strip()
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        log(f"  [WARN] LLM 品質判定: JSON でない応答（保守的に全 drop）")
+        return [
+            {"candidate_index": i, "verdict": "drop",
+             "merge_target": "", "reason": "LLM 応答が JSON でない"}
+            for i in range(len(candidates))
+        ]
+    try:
+        data = json.loads(raw[start: end + 1])
+    except Exception as e:
+        log(f"  [WARN] LLM 品質判定 JSON parse 失敗: {e}（保守的に全 drop）")
+        return [
+            {"candidate_index": i, "verdict": "drop",
+             "merge_target": "", "reason": "JSON parse failure"}
+            for i in range(len(candidates))
+        ]
+
+    raw_judgements = data.get("judgements") or []
+    by_index = {int(j.get("candidate_index", -1)): j for j in raw_judgements
+                if isinstance(j, dict)}
+    out = []
+    for i in range(len(candidates)):
+        j = by_index.get(i, {})
+        verdict = (j.get("verdict") or "drop").strip().lower()
+        if verdict not in {"keep", "drop", "merge_with"}:
+            verdict = "drop"
+        out.append({
+            "candidate_index": i,
+            "verdict": verdict,
+            "merge_target": (j.get("merge_target") or "").strip(),
+            "reason": (j.get("reason") or "").strip(),
+        })
+    return out
+
+
+def stage2_filter(
+    distilled: list[dict],
+    item: dict,
+    kdb,
+    *,
+    merge_threshold: float,
+    review_threshold: float,
+    log,
+) -> tuple[list[tuple[dict, np.ndarray]], list[tuple[str, str, dict]]]:
+    """Stage 2 ゲート。
+
+    Returns:
+        keep_records: (distilled_record, embedding_vec) のリスト。
+                      呼び出し側で upsert 時に埋め込みもまとめて保存する。
+        merges: 既存に統合する組 (existing_kn_id, reason, distilled_record)
+                ※ 新規 KN は発番せず、既存レコードの knowledge_sources に
+                  当該ソースを追加するだけ。
+    """
+    if not distilled:
+        return [], []
+
+    existing_recs, existing_mat = fetch_existing_embeddings(kdb)
+
+    # 候補テキストを 1 つにまとめて埋め込み
+    cand_texts = [
+        f"{d['topic']} || {d['current_state']}"
+        for d in distilled
+    ]
+    cand_mat = embed_batch(cand_texts)
+
+    keep: list[tuple[dict, np.ndarray]] = []
+    merges: list[tuple[str, str, dict]] = []
+    pending_review: list[int] = []
+    pending_sims: list[list[tuple[dict, float]]] = []
+
+    for i, d in enumerate(distilled):
+        sims = find_similar_existing(cand_mat[i], existing_recs, existing_mat, top_k=5)
+        # 高類似度: 自動 merge
+        if sims and sims[0][1] >= merge_threshold:
+            keeper = sims[0][0]
+            log(f"    auto-merge -> {keeper['id']} (sim={sims[0][1]:.3f})")
+            merges.append((keeper["id"], f"auto-merge sim={sims[0][1]:.3f}", d))
+            continue
+        # 中類似度: LLM に審査
+        if sims and sims[0][1] >= review_threshold:
+            pending_review.append(i)
+            pending_sims.append(sims)
+            continue
+        # 低類似度: 既存類似なしとして LLM 審査
+        pending_review.append(i)
+        pending_sims.append(sims[:3])
+
+    # LLM Stage 2 判定（候補ありの場合のみ）
+    if pending_review:
+        review_cands = [distilled[i] for i in pending_review]
+        judgements = llm_quality_judge(review_cands, pending_sims, log)
+        for j, src_idx in zip(judgements, pending_review):
+            d = distilled[src_idx]
+            if j["verdict"] == "keep":
+                keep.append((d, cand_mat[src_idx]))
+                log(f"    keep      {d['topic'][:50]} ({j['reason'][:60]})")
+            elif j["verdict"] == "merge_with":
+                target = j["merge_target"]
+                if target.startswith("KN-"):
+                    merges.append((target, f"LLM merge: {j['reason']}", d))
+                    log(f"    LLM-merge -> {target} ({j['reason'][:60]})")
+                else:
+                    # 不正な merge_target は keep に倒す
+                    keep.append((d, cand_mat[src_idx]))
+                    log(f"    keep (invalid merge_target) {d['topic'][:50]}")
+            else:
+                log(f"    drop      {d['topic'][:50]} ({j['reason'][:60]})")
+    return keep, merges
+
+
+def apply_merges(
+    kdb,
+    item: dict,
+    merges: list[tuple[str, str, dict]],
+) -> int:
+    """既存 KN-XXXX への merge を knowledge_sources に追加する形で適用。
+    返り値: 実際に追加した行数。"""
+    n = 0
+    now = now_iso()
+    for keeper_id, reason, d in merges:
+        # 既存 keeper が現存かつ非削除であることを確認
+        row = kdb.execute(
+            "SELECT id FROM knowledge"
+            " WHERE id = ? AND COALESCE(deleted, 0) = 0",
+            (keeper_id,),
+        ).fetchone()
+        if not row:
+            continue
+        kdb.execute(
+            "INSERT OR IGNORE INTO knowledge_sources"
+            " (knowledge_id, source_type, source_ref, weight, excerpt, added_at)"
+            " VALUES (?, ?, ?, 'supporting', ?, ?)",
+            (keeper_id, item["source_type"], item["source_ref"],
+             d.get("excerpt") or "", now),
+        )
+        kdb.execute(
+            "INSERT INTO knowledge_audit"
+            " (knowledge_id, field, old_value, new_value, changed_at, source, actor)"
+            " VALUES (?, '__merge_source__', NULL, ?, ?, 'distill_llm', NULL)",
+            (keeper_id,
+             json.dumps({
+                 "from": f"{item['source_type']}/{item['source_ref']}",
+                 "reason": reason,
+             }, ensure_ascii=False),
+             now),
+        )
+        n += 1
+    return n
+
+
+# --------------------------------------------------------------------------- #
 # DB 書き込み
 # --------------------------------------------------------------------------- #
 
 def upsert_knowledge_records(
     kdb,
     item: dict,
-    distilled: list[dict],
+    distilled_with_vec: list[tuple[dict, np.ndarray | None]],
     log,
 ) -> list[str]:
     """蒸留結果を knowledge.db に upsert。produced_knowledge_ids を返す。
-
-    マージ戦略は単純化のため「初回は INSERT、再蒸留時は同じ input_hash なら何もしない」。
-    既存レコードの自動上書きは現フェーズでは行わない（人手 supersede で対応）。
+    distilled_with_vec の各要素は (record_dict, embedding_vec_or_None)。
+    embedding が渡された場合は knowledge_embeddings にも保存する。
     """
     produced: list[str] = []
     today = today_jst()
     now = now_iso()
 
-    for d in distilled:
+    for d, vec in distilled_with_vec:
         new_id = next_knowledge_id(kdb)
         kdb.execute(
             "INSERT INTO knowledge"
@@ -388,6 +733,8 @@ def upsert_knowledge_records(
             " VALUES (?, '__create__', NULL, ?, ?, 'distill_llm', NULL)",
             (new_id, json.dumps({"topic": d["topic"], "kind": d["kind"]}, ensure_ascii=False), now),
         )
+        if vec is not None and vec.size > 0:
+            upsert_embedding(kdb, new_id, vec)
         produced.append(new_id)
         log(f"    + {new_id} [{d['kind']}/{d['confidence']}] {d['topic']}")
     return produced
@@ -440,8 +787,14 @@ def run_distill(
     dry_run: bool,
     no_encrypt: bool,
     log,
+    two_stage: bool = True,
+    merge_threshold: float = DEFAULT_MERGE_THRESHOLD,
+    review_threshold: float = DEFAULT_REVIEW_THRESHOLD,
 ) -> dict:
-    stats = {"scanned": 0, "skipped": 0, "distilled": 0, "produced": 0, "errors": 0}
+    stats = {
+        "scanned": 0, "skipped": 0, "distilled": 0,
+        "produced": 0, "merged": 0, "dropped": 0, "errors": 0,
+    }
 
     # 入力収集
     inputs: list[dict] = []
@@ -467,9 +820,14 @@ def run_distill(
         return stats
 
     if dry_run:
-        # dry-run は LLM すら呼ばずに件数報告で終わる
         log("[INFO] --dry-run: LLM 呼び出し・DB保存なし")
         log(f"  処理予定: {len(inputs)} 件")
+        return stats
+
+    if two_stage and not embed_healthcheck(timeout=10):
+        log("[ERROR] embedding API に接続できません。"
+            "RIVAULT_URL / EMBED_API_BASE を確認してください。"
+            " --no-two-stage で段階1のみ実行することもできます。")
         return stats
 
     kdb = init_knowledge_db(KNOWLEDGE_DB, no_encrypt=no_encrypt)
@@ -487,9 +845,33 @@ def run_distill(
                 kdb.commit()
                 stats["skipped"] += 1
                 continue
+
             try:
-                produced = upsert_knowledge_records(kdb, item, distilled, log)
-                update_distill_state(kdb, item, produced, status="ok")
+                if two_stage:
+                    keep_with_vec, merges = stage2_filter(
+                        distilled, item, kdb,
+                        merge_threshold=merge_threshold,
+                        review_threshold=review_threshold,
+                        log=log,
+                    )
+                    n_merge = apply_merges(kdb, item, merges)
+                    stats["merged"] += n_merge
+                    stats["dropped"] += len(distilled) - len(keep_with_vec) - len(merges)
+                    produced = upsert_knowledge_records(kdb, item, keep_with_vec, log)
+                else:
+                    # 段階1のみ。embedding は計算せず後追い --embed-backfill で対応
+                    produced = upsert_knowledge_records(
+                        kdb, item, [(d, None) for d in distilled], log,
+                    )
+
+                if produced or not two_stage:
+                    update_distill_state(kdb, item, produced, status="ok")
+                else:
+                    # 全件 drop / merge → quality_dropped
+                    update_distill_state(
+                        kdb, item, [], status="quality_dropped",
+                        note=f"all candidates merged or dropped",
+                    )
                 kdb.commit()
                 stats["distilled"] += 1
                 stats["produced"] += len(produced)
@@ -547,6 +929,210 @@ def show_stats(no_encrypt: bool, log) -> None:
         kdb.close()
 
 
+def run_embed_backfill(*, no_encrypt: bool, log) -> dict:
+    """既存レコードのうち knowledge_embeddings がないものに埋め込みを後追い計算する。"""
+    stats = {"target": 0, "embedded": 0, "errors": 0}
+    if not KNOWLEDGE_DB.exists():
+        log("[INFO] knowledge.db が未作成です")
+        return stats
+    if not embed_healthcheck(timeout=10):
+        log("[ERROR] embedding API に接続できません")
+        return stats
+    kdb = open_knowledge_db(KNOWLEDGE_DB, no_encrypt=no_encrypt)
+    try:
+        rows = kdb.execute(
+            "SELECT k.id, k.topic, k.current_state"
+            " FROM knowledge k"
+            " LEFT JOIN knowledge_embeddings e ON e.knowledge_id = k.id"
+            " WHERE COALESCE(k.deleted, 0) = 0 AND e.knowledge_id IS NULL"
+        ).fetchall()
+        stats["target"] = len(rows)
+        log(f"[INFO] 埋め込み未計算: {len(rows)} 件")
+        if not rows:
+            return stats
+        BATCH = 32
+        for chunk_start in range(0, len(rows), BATCH):
+            chunk = rows[chunk_start: chunk_start + BATCH]
+            texts = [f"{r['topic']} || {r['current_state']}" for r in chunk]
+            try:
+                mat = embed_batch(texts)
+            except Exception as e:
+                log(f"  [ERROR] バッチ {chunk_start} 失敗: {e}")
+                stats["errors"] += len(chunk)
+                continue
+            for r, vec in zip(chunk, mat):
+                upsert_embedding(kdb, r["id"], vec)
+                stats["embedded"] += 1
+            kdb.commit()
+            log(f"  ...{chunk_start + len(chunk)}/{len(rows)} 完了")
+    finally:
+        kdb.close()
+    return stats
+
+
+def run_quality_only(
+    *,
+    no_encrypt: bool,
+    merge_threshold: float,
+    review_threshold: float,
+    apply: bool,
+    output_csv: Path | None,
+    log,
+    limit: int | None = None,
+) -> dict:
+    """既存レコードに対する後追い品質審査。各レコードを LLM に judgement させ、
+    drop と判定されたら deleted=1、merge と判定されたら supersede_by を立てる。
+
+    apply=False では CSV にプランを書き出すのみ（DB 変更なし）。
+    """
+    stats = {"target": 0, "kept": 0, "dropped": 0, "merged": 0, "errors": 0}
+    if not KNOWLEDGE_DB.exists():
+        log("[INFO] knowledge.db が未作成です")
+        return stats
+    if not embed_healthcheck(timeout=10):
+        log("[ERROR] embedding API に接続できません")
+        return stats
+
+    kdb = open_knowledge_db(KNOWLEDGE_DB, no_encrypt=no_encrypt)
+    try:
+        # 全現役レコード
+        rows = kdb.execute(
+            "SELECT k.id, k.kind, k.topic, k.current_state, k.confidence,"
+            " e.dim, e.vector"
+            " FROM knowledge k"
+            " LEFT JOIN knowledge_embeddings e ON e.knowledge_id = k.id"
+            " WHERE COALESCE(k.deleted, 0) = 0 AND k.superseded_by IS NULL"
+        ).fetchall()
+        if limit is not None and limit > 0:
+            rows = rows[:limit]
+            log(f"[INFO] --limit {limit} で先頭のみ対象")
+        stats["target"] = len(rows)
+        log(f"[INFO] 審査対象: {len(rows)} 件")
+
+        # 埋め込みがないレコードがあれば事前に backfill
+        missing = [r for r in rows if r["vector"] is None]
+        if missing:
+            log(f"[INFO] {len(missing)} 件に埋め込みがないため事前計算します")
+            run_embed_backfill(no_encrypt=no_encrypt, log=log)
+            # 再取得
+            rows = kdb.execute(
+                "SELECT k.id, k.kind, k.topic, k.current_state, k.confidence,"
+                " e.dim, e.vector"
+                " FROM knowledge k"
+                " LEFT JOIN knowledge_embeddings e ON e.knowledge_id = k.id"
+                " WHERE COALESCE(k.deleted, 0) = 0 AND k.superseded_by IS NULL"
+            ).fetchall()
+
+        # CSV 出力ヘッダ
+        csv_writer = None
+        csv_file = None
+        if output_csv:
+            import csv as _csv
+            csv_file = output_csv.open("w", newline="", encoding="utf-8-sig")
+            csv_writer = _csv.DictWriter(
+                csv_file,
+                fieldnames=["id", "kind", "confidence", "verdict",
+                             "merge_target", "reason", "topic", "current_state"],
+            )
+            csv_writer.writeheader()
+
+        # 1 件ずつ LLM 審査
+        for i, r in enumerate(rows, 1):
+            if r["vector"] is None:
+                stats["errors"] += 1
+                continue
+            cand_vec = blob_to_vector(r["vector"], dim=r["dim"])
+            # 自分以外の現役レコードと類似度比較
+            others = [r2 for r2 in rows if r2["id"] != r["id"] and r2["vector"]]
+            other_recs = [
+                {"id": r2["id"], "kind": r2["kind"], "topic": r2["topic"] or "",
+                 "current_state": r2["current_state"] or "",
+                 "confidence": r2["confidence"] or ""}
+                for r2 in others
+            ]
+            other_mat = (
+                np.stack([blob_to_vector(r2["vector"], dim=r2["dim"]) for r2 in others])
+                if others else np.zeros((0, 0), dtype=np.float32)
+            )
+            sims = find_similar_existing(cand_vec, other_recs, other_mat, top_k=5)
+
+            cand = {
+                "kind": r["kind"], "topic": r["topic"] or "",
+                "current_state": r["current_state"] or "",
+                "rationale": "",
+            }
+            judgements = llm_quality_judge([cand], [sims], log)
+            j = judgements[0] if judgements else {"verdict": "drop", "reason": "no judgement"}
+
+            if csv_writer:
+                csv_writer.writerow({
+                    "id": r["id"], "kind": r["kind"],
+                    "confidence": r["confidence"],
+                    "verdict": j["verdict"],
+                    "merge_target": j["merge_target"],
+                    "reason": j["reason"],
+                    "topic": (r["topic"] or "")[:100],
+                    "current_state": (r["current_state"] or "")[:200],
+                })
+
+            # 集計（apply 有無に関わらず）
+            if j["verdict"] == "drop":
+                stats["dropped"] += 1
+            elif j["verdict"] == "merge_with" and j["merge_target"].startswith("KN-"):
+                stats["merged"] += 1
+            else:
+                stats["kept"] += 1
+
+            if apply:
+                if j["verdict"] == "drop":
+                    kdb.execute(
+                        "UPDATE knowledge SET deleted = 1, updated_at = ? WHERE id = ?",
+                        (now_iso(), r["id"]),
+                    )
+                    kdb.execute(
+                        "INSERT INTO knowledge_audit"
+                        " (knowledge_id, field, old_value, new_value, changed_at, source, actor)"
+                        " VALUES (?, 'deleted', '0', '1', ?, 'distill_llm',"
+                        " 'quality_only')",
+                        (r["id"], now_iso()),
+                    )
+                elif j["verdict"] == "merge_with" and j["merge_target"].startswith("KN-"):
+                    target = j["merge_target"]
+                    if target != r["id"]:
+                        kdb.execute(
+                            "UPDATE knowledge SET superseded_by = ?, updated_at = ?"
+                            " WHERE id = ?",
+                            (target, now_iso(), r["id"]),
+                        )
+                        kdb.execute(
+                            "INSERT OR IGNORE INTO knowledge_relations"
+                            " (from_id, to_id, relation, note, created_at)"
+                            " VALUES (?, ?, 'supersedes', 'quality_only', ?)",
+                            (target, r["id"], now_iso()),
+                        )
+                        kdb.execute(
+                            "INSERT INTO knowledge_audit"
+                            " (knowledge_id, field, old_value, new_value, changed_at, source, actor)"
+                            " VALUES (?, 'superseded_by', NULL, ?, ?, 'merge',"
+                            " 'quality_only')",
+                            (r["id"], target, now_iso()),
+                        )
+                if i % 20 == 0:
+                    kdb.commit()
+
+            if i % 50 == 0:
+                log(f"  ...{i}/{len(rows)}: kept={stats['kept']} "
+                    f"dropped={stats['dropped']} merged={stats['merged']}")
+        if apply:
+            kdb.commit()
+        if csv_file:
+            csv_file.close()
+            log(f"[INFO] プラン CSV: {output_csv}")
+    finally:
+        kdb.close()
+    return stats
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ナレッジ蒸留: 入力ソース → knowledge.db")
     p.add_argument("--source", choices=["box", "minutes", "decisions", "all"],
@@ -563,6 +1149,24 @@ def parse_args() -> argparse.Namespace:
                    help="knowledge.db の統計を表示して終了")
     p.add_argument("--output", default=None, metavar="PATH",
                    help="ログをファイルにも保存")
+    # 段階3 オプション
+    p.add_argument("--no-two-stage", action="store_true",
+                   help="段階2 (LLM 品質審査 + embedding 重複判定) を無効化")
+    p.add_argument("--merge-threshold", type=float, default=DEFAULT_MERGE_THRESHOLD,
+                   help=f"自動 merge のコサイン類似度しきい値 (default: {DEFAULT_MERGE_THRESHOLD})")
+    p.add_argument("--review-threshold", type=float, default=DEFAULT_REVIEW_THRESHOLD,
+                   help=f"LLM 審査対象のコサイン類似度しきい値 (default: {DEFAULT_REVIEW_THRESHOLD})")
+    p.add_argument("--embed-backfill", action="store_true",
+                   help="既存レコードに埋め込みを後追い計算する（蒸留はしない）")
+    p.add_argument("--quality-only", action="store_true",
+                   help="既存レコードに対して LLM 品質審査のみ実行（後追いパージ）")
+    p.add_argument("--quality-plan", default=None, metavar="PATH",
+                   help="--quality-only 時のプラン CSV 出力先")
+    p.add_argument("--apply", action="store_true",
+                   help="--quality-only 時に DB に変更を適用する。"
+                        "未指定時は CSV 出力のみ")
+    p.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="--quality-only 時に先頭 N 件のみ処理（スモークテスト用）")
     return p.parse_args()
 
 
@@ -574,6 +1178,30 @@ def main() -> None:
             show_stats(args.no_encrypt, log)
             return
 
+        if args.embed_backfill:
+            stats = run_embed_backfill(no_encrypt=args.no_encrypt, log=log)
+            log("---")
+            log(f"埋め込み後追い: target={stats['target']} embedded={stats['embedded']}"
+                f" errors={stats['errors']}")
+            return
+
+        if args.quality_only:
+            stats = run_quality_only(
+                no_encrypt=args.no_encrypt,
+                merge_threshold=args.merge_threshold,
+                review_threshold=args.review_threshold,
+                apply=args.apply,
+                output_csv=Path(args.quality_plan) if args.quality_plan else None,
+                log=log,
+                limit=args.limit,
+            )
+            log("---")
+            label = "適用" if args.apply else "プランのみ"
+            log(f"品質審査 ({label}): target={stats['target']} kept={stats['kept']}"
+                f" dropped={stats['dropped']} merged={stats['merged']}"
+                f" errors={stats['errors']}")
+            return
+
         sources = ["box", "minutes", "decisions"] if args.source == "all" else [args.source]
         stats = run_distill(
             sources=sources,
@@ -582,10 +1210,14 @@ def main() -> None:
             dry_run=args.dry_run,
             no_encrypt=args.no_encrypt,
             log=log,
+            two_stage=not args.no_two_stage,
+            merge_threshold=args.merge_threshold,
+            review_threshold=args.review_threshold,
         )
         log("---")
         log(f"処理結果: scanned={stats['scanned']} skipped={stats['skipped']}"
             f" distilled={stats['distilled']} produced={stats['produced']}"
+            f" merged={stats['merged']} dropped={stats['dropped']}"
             f" errors={stats['errors']}")
     finally:
         close_log()

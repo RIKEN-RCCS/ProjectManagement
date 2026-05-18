@@ -302,10 +302,22 @@ CREATE TABLE IF NOT EXISTS distill_state (
     last_input_hash          TEXT,
     last_distilled_at        TEXT,
     produced_knowledge_ids   TEXT,                     -- JSON 配列
-    status                   TEXT NOT NULL DEFAULT 'ok',  -- ok / skipped / error
+    status                   TEXT NOT NULL DEFAULT 'ok',  -- ok / skipped / error / quality_dropped
     note                     TEXT,
     PRIMARY KEY (source_type, source_ref)
 );
+
+CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+    knowledge_id  TEXT PRIMARY KEY,
+    model         TEXT NOT NULL,           -- 例: "bge-m3:567m"
+    dim           INTEGER NOT NULL,
+    vector        BLOB NOT NULL,           -- numpy float32 raw bytes
+    embedded_at   TEXT NOT NULL,
+    FOREIGN KEY (knowledge_id) REFERENCES knowledge(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_model
+    ON knowledge_embeddings(model);
 """
 
 
