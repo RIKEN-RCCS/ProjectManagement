@@ -40,7 +40,8 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from db_utils import (
-    open_db, open_pm_db, fetch_milestone_progress, fetch_assignee_workload,
+    open_db, open_pm_db, open_knowledge_db,
+    fetch_milestone_progress, fetch_assignee_workload,
     fetch_overdue_items, fetch_unacknowledged_decisions,
     fetch_unlinked_items_count, fetch_no_assignee_count,
     fetch_weekly_trends, fetch_summary_stats,
@@ -249,6 +250,86 @@ def fetch_recent_minutes(
     return "\n\n---\n\n".join(sections) if sections else "（対象期間の議事録なし）"
 
 
+# プロンプトに同梱する蒸留ナレッジの上限
+_KNOWLEDGE_MAX_ITEMS_DEFAULT = 30
+_KNOWLEDGE_MAX_CHARS = 4000
+
+
+def fetch_knowledge_summary(
+    *,
+    no_encrypt: bool = False,
+    data_dir: Path | None = None,
+    max_items: int = _KNOWLEDGE_MAX_ITEMS_DEFAULT,
+) -> str:
+    """data/knowledge.db から brief/risk プロンプト同梱用の短文サマリを生成する。
+
+    抽出条件（docs/distill_policy.md 参照）:
+    - deleted = 0
+    - superseded_by IS NULL（現役のみ）
+    - confidence IN ('high', 'medium')（low は書き込まれない想定だが念のためフィルタ）
+
+    並び順: confidence high → medium、その中で last_validated_at 降順。
+    出力は Markdown 箇条書きで、1 行に
+      - **[KN-XXXX | KIND | conf]** topic — current_state（last_validated: YYYY-MM-DD）
+    まで詰める。テキスト全体を _KNOWLEDGE_MAX_CHARS で打ち切る。
+    """
+    data_dir = data_dir or _DATA_DIR
+    db_path = data_dir / "knowledge.db"
+    if not db_path.exists():
+        return ""
+
+    try:
+        conn = open_knowledge_db(db_path, no_encrypt=no_encrypt)
+    except Exception as e:
+        logger.warning(f"knowledge.db 接続失敗: {e}")
+        return ""
+
+    try:
+        rows = conn.execute(
+            """SELECT id, kind, topic, current_state, confidence,
+                       last_validated_at, decided_at, owners, tags
+                  FROM knowledge
+                 WHERE COALESCE(deleted, 0) = 0
+                   AND superseded_by IS NULL
+                   AND confidence IN ('high', 'medium')
+                 ORDER BY CASE confidence WHEN 'high' THEN 0 ELSE 1 END,
+                          COALESCE(last_validated_at, decided_at, '') DESC
+                 LIMIT ?""",
+            (max_items,),
+        ).fetchall()
+    except Exception as e:
+        logger.warning(f"knowledge.db クエリ失敗: {e}")
+        conn.close()
+        return ""
+    conn.close()
+
+    if not rows:
+        return ""
+
+    lines = []
+    for r in rows:
+        kid = r["id"]
+        kind = (r["kind"] or "")[:10]
+        conf = r["confidence"] or ""
+        topic = (r["topic"] or "").strip()
+        cs = (r["current_state"] or "").strip()
+        validated = r["last_validated_at"] or r["decided_at"] or ""
+        validated_str = f" (validated: {validated})" if validated else ""
+        line = f"- **[{kid} | {kind} | {conf}]** {topic} — {cs}{validated_str}"
+        lines.append(line)
+
+    body = "\n".join(lines)
+    if len(body) > _KNOWLEDGE_MAX_CHARS:
+        # 末尾を切り捨てて省略マーカーを付ける
+        truncated = body[:_KNOWLEDGE_MAX_CHARS]
+        last_nl = truncated.rfind("\n")
+        if last_nl > 0:
+            truncated = truncated[:last_nl]
+        omitted = len(rows) - len(truncated.splitlines())
+        body = truncated + f"\n_…他 {omitted} 件は省略_"
+    return body
+
+
 def fetch_pm_stats(conn, today: str, since: str | None = None) -> dict:
     """pm.db から統計データを収集する"""
     return {
@@ -339,6 +420,14 @@ _BRIEF_PROMPT = """\
 ## プロジェクト文脈
 
 {context}
+
+## 確定済みナレッジ（蒸留 / 上書き未済）
+
+これらは富岳NEXTプロジェクト全体に渡って有効と判定されている確定事項です。
+推奨アクションが既存の意思決定 / 制約と整合しているかを必ず照合し、参照したレコードは
+回答中に `KN-XXXX` 形式で引用してください。空の場合は無視して構いません。
+
+{knowledge_summary}
 
 ## 集計日: {today}（{period_desc}）
 
@@ -439,6 +528,13 @@ _DAILY_SUMMARY_PROMPT = """\
 ## プロジェクト文脈
 
 {context}
+
+## 確定済みナレッジ（蒸留 / 上書き未済）
+
+本日の議論が既存の確定事項と矛盾している場合は明示してください。引用は `KN-XXXX` 形式。
+空の場合は無視して構いません。
+
+{knowledge_summary}
 
 ## 本日のSlackメッセージ
 
@@ -605,6 +701,14 @@ _RISK_PROMPT = """\
 
 {context}
 
+## 確定済みナレッジ（蒸留 / 上書き未済）
+
+これらは確定事項です。Slack 上の発言・議事録の議論がこれらと矛盾している場合は、
+それ自体が高優先度のリスクです（不整合・周知漏れ・古い前提に基づく作業）。
+参照したレコードは `KN-XXXX` 形式で引用してください。空の場合は無視して構いません。
+
+{knowledge_summary}
+
 ## 集計日: {today}（{period_desc}）
 
 ## pm.db 統計サマリー
@@ -725,12 +829,14 @@ def build_brief_prompt(
     assignee: str | None = None,
     topic: str | None = None,
     requester: str = "プロジェクトメンバー",
+    knowledge_summary: str = "",
 ) -> str:
     # days == 0 の場合は日次活動サマリープロンプトを使用
     if days == 0:
         return _DAILY_SUMMARY_PROMPT.format(
             today=today,
             context=context,
+            knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
             messages=messages or "（本日のメッセージはありません）",
             minutes=minutes or "（本日の議事録はありません）",
         )
@@ -754,6 +860,7 @@ def build_brief_prompt(
         today=today,
         period_desc=period_desc,
         context=context,
+        knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
         total_open=s["total_open"],
         total_closed=s["total_closed"],
         overdue_count=s["overdue_count"],
@@ -828,6 +935,7 @@ def build_risk_prompt(
     days: int = _DEFAULT_SINCE_DAYS,
     assignee: str | None = None,
     topic: str | None = None,
+    knowledge_summary: str = "",
 ) -> str:
     s = stats["stats"]
     focus_lines = []
@@ -847,6 +955,7 @@ def build_risk_prompt(
         today=today,
         period_desc=period_desc,
         context=context,
+        knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
         total_open=s["total_open"],
         total_closed=s["total_closed"],
         overdue_count=s["overdue_count"],
@@ -883,9 +992,12 @@ def _collect_all_data(
     pm_db_path: Path | None = None,
     pm_db_paths: list[Path] | None = None,
     index_name: str | None = None,
-) -> tuple[str, str, dict, list]:
-    """messages/minutes/stats を一括収集し (messages, minutes, stats, conns) を返す。
+) -> tuple[str, str, dict, list, str]:
+    """messages/minutes/stats/knowledge を一括収集し
+    (messages, minutes, stats, conns, knowledge_summary) を返す。
     conns は呼び出し元で全てクローズすること。
+    knowledge_summary は data/knowledge.db から取得した蒸留サマリ（プロジェクト全体共通、
+    index_name の影響を受けない）。
 
     index_name: argus_config.yaml の indices.{name} を選択する。指定すると
                 その index の channels / minutes / pm_db を絞り込み対象にする。
@@ -921,7 +1033,10 @@ def _collect_all_data(
             print(f"[WARN] pm.db 接続スキップ ({p}): {e}", file=sys.stderr)
 
     stats = merge_pm_stats(stats_list)
-    return messages, minutes, stats, conns
+    knowledge_summary = fetch_knowledge_summary(
+        no_encrypt=no_encrypt, data_dir=data_dir,
+    )
+    return messages, minutes, stats, conns, knowledge_summary
 
 
 def _run_brief(respond, command, *, no_encrypt: bool = False):
@@ -947,7 +1062,7 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-brief] since={since_date}{focus_desc}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conns = _collect_all_data(
+        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
         for c in conns:
@@ -956,6 +1071,7 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         prompt = build_brief_prompt(
             messages, minutes, stats, context, today, days,
             assignee=assignee, topic=topic, requester=requester,
+            knowledge_summary=knowledge_summary,
         )
         logger.info("[argus-brief] LLM 呼び出し中...")
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
@@ -1012,7 +1128,7 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-draft] purpose={purpose} subject={subject} index={index_name}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conns = _collect_all_data(
+        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
@@ -1063,7 +1179,7 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-risk] since={since_date}{focus_desc}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conns = _collect_all_data(
+        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
         for c in conns:
@@ -1072,6 +1188,7 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         prompt = build_risk_prompt(
             messages, minutes, stats, context, today, days,
             assignee=assignee, topic=topic,
+            knowledge_summary=knowledge_summary,
         )
         logger.info("[argus-risk] LLM 呼び出し中...")
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
@@ -1246,7 +1363,7 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-today] requester={requester} user_id={user_id} index={index_name}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conns = _collect_all_data(
+        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
         for c in conns:
@@ -1292,6 +1409,7 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         prompt = build_brief_prompt(
             messages, minutes, stats, context, today, days,
             assignee=None, topic=None, requester=requester,
+            knowledge_summary=knowledge_summary,
         )
 
         # 6. LLM呼び出し (日次サマリープロンプト使用)
@@ -1473,7 +1591,7 @@ def main() -> None:
     print(f"[INFO] since: {since_date} / today: {today} / "
           f"index: {args.index_name or '(default)'}", file=sys.stderr)
 
-    messages, minutes, stats, conns = _collect_all_data(
+    messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
         today, since_date,
         no_encrypt=args.no_encrypt,
         pm_db_paths=pm_db_paths_cli,
@@ -1489,6 +1607,7 @@ def main() -> None:
         prompt = build_brief_prompt(
             messages, minutes, stats, context, today, days,
             assignee=args.assignee, topic=args.topic, requester=requester,
+            knowledge_summary=knowledge_summary,
         )
         print("[INFO] LLM に問い合わせ中（ブリーフィング）...", file=sys.stderr)
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
@@ -1522,6 +1641,7 @@ def main() -> None:
         prompt = build_risk_prompt(
             messages, minutes, stats, context, today, days,
             assignee=args.assignee, topic=args.topic,
+            knowledge_summary=knowledge_summary,
         )
         print("[INFO] LLM に問い合わせ中（リスク分析）...", file=sys.stderr)
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
