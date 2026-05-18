@@ -81,35 +81,58 @@ pm.db の新規 decisions/action_items
 - Pass 2 は「過去のナレッジ全体」から関連情報を引いて紐付ける（FTS5 で事前絞り込みが必要）
 - 分離することで Pass 1 の失敗と Pass 2 の失敗を独立に扱える
 
-### Pass 3: ナレッジ蒸留（Distill）— 設計中
+### Pass 3: ナレッジ蒸留（Distill）— 実装済み（2026-05-18）
 
 `box_docs.db` の本文・議事録・`pm.db.decisions` を入力として、LLM が **意思決定 / 制約 / 立場 / 用語**
 の単位に蒸留し、`data/knowledge.db` に格納する（スキーマは `docs/schema.md` 参照）。
-本文を毎回プロンプトに詰める方式は brief/risk の S/N を下げるため、**蒸留済みの短文要約のみを常時参照**
-する形にする。
+本文を毎回プロンプトに詰める方式は brief/risk の S/N を下げるため、**蒸留済みの短文要約のみを常時参照** する形にする。
 
 ```
 box_docs.db (本文 Markdown)
 data/minutes/{kind}.db                   ┐
-pm.db.decisions                          ├─→ pm_box_distill.py（仮、未実装）
-                                          │     └─ LLM で蒸留 → 1レコード = 1意思決定
-                                          ▼
-                                    knowledge.db
-                                    （プロジェクト全体共通、index 分割なし）
-                                          │
-        ┌─────────────────────────────────┼─────────────────────────────────┐
-        ▼                                 ▼                                 ▼
-  /argus-brief                       /argus-risk                       /argus-investigate
-  プロンプトに current_state を     不整合・古いレコード・矛盾を       get_knowledge ツールで
-  常時同梱                          シグナルとして抽出                rationale / alternatives を引く
+pm.db.decisions                          ├─→ pm_box_distill.py
+                                         │     ├─ Stage 1: gemma4 で意思決定単位に抽出
+                                         │     │           採否ポリシー (docs/distill_policy.md) で
+                                         │     │           業界標準・形式情報・短期作業仮定を除外
+                                         │     │
+                                         │     └─ Stage 2: bge-m3 で埋め込み → 既存ナレッジと類似度比較
+                                         │           ≥ 0.92 → 自動 merge（既存 sources に追加）
+                                         │           ≥ 0.85 → LLM (Kimi) に同一意味判定
+                                         │           < 0.85 → LLM (Kimi) に keep/drop 判定
+                                         │           drop は distill_state.status='quality_dropped'
+                                         ▼
+                                   knowledge.db
+                                   (プロジェクト全体共通、index 分割なし)
+                                         │
+        ┌────────────────────────────────┼──────────────────────────────────┐
+        ▼                                ▼                                  ▼
+  /argus-brief                      /argus-risk                       /argus-investigate
+  current_state を                 不整合・古いレコード・              search_knowledge / get_knowledge
+  プロンプトに常時同梱             矛盾をシグナルとして抽出            ツールで詳細を展開
 ```
 
-**ナレッジ層の設計原則**（詳細は `docs/schema.md`）:
+**ナレッジ層の設計原則**（詳細は `docs/schema.md` / `docs/distill_policy.md`）:
 - **プロジェクト全体共通**: `argus_config.yaml` の `index_name` 等によるチャンネル別分割は持たない。
   ナレッジは富岳NEXTプロジェクト全体に渡って共有される
 - **意思決定単位**: 1 BOX ファイル ≠ 1 レコード。`knowledge_sources` で N:M 結合し、根拠を追跡可能にする
 - **時系列の劣化**: `last_validated_at` と `superseded_by` で版管理。古いレコードは brief で減衰させる
 - **冪等な蒸留**: `distill_state` で入力ハッシュを記録し、変化のあった BOX ファイルのみ再蒸留
+- **二段階ゲート**: Stage 1 のプロンプト基準だけではノイズが残るため、Stage 2 で embedding ベースの
+  類似度判定 + LLM の独立審査を通す。`confidence='low'` は書き込まず、迷ったら drop（保守的）
+
+**人手介入の経路**（詳細は `docs/distill_policy.md`）:
+- **CLI**: `pm_knowledge_edit.py` で `--invalidate` / `--supersede` / `--confidence` / CSV 編集
+- **Slack**: `/argus-knowledge` で同等の操作（`pm_knowledge_edit.py` の関数を再利用）
+- **investigate**: `/argus-investigate` の回答末尾に「## 引用したナレッジ」セクション + 修正導線
+
+**矛盾検知の自動通知**:
+- Patrol Agent (`detect_knowledge_conflicts`) が `knowledge_relations.conflicts_with` の新規行を
+  リーダー会議チャンネルに通知（cooldown 14 日、双方向組み合わせを単一キー扱い）
+
+**運用補助スクリプト**:
+- `pm_knowledge_inspect.py` — knowledge.db の重複・多重抽出を診断（読み取り専用）
+- `pm_knowledge_dedupe.py` — 既存データの後追い dedupe（Stage 2 導入前のデータ整理用）
+
 
 ---
 

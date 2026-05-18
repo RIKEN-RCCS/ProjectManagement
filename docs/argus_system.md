@@ -1032,21 +1032,18 @@ crontab -l | grep argus
 | インデックス更新 | 手動または既存スクリプトへの追記 | crontabで定期自動更新が望ましい |
 | 出典リンク | Slack投稿済み議事録のみリンクあり | `pm_minutes_import.py --post-to-slack` で増やせる |
 
-### P1: セマンティック検索の導入（最大効果）
+### P1: セマンティック検索の導入（部分実現済み 2026-05-18）
 
-現在のFTS5は「単語の一致」のみ。Embeddingモデルで「意味の近さ」による検索を追加する。
+現在の `qa_index.db` 検索（`/argus-investigate` ほか）は依然として FTS5 ベース。
+ただし **ナレッジ蒸留レイヤ（`data/knowledge.db`）の Stage 2 で bge-m3 ベクトル類似度を導入済み**。
+具体的には:
 
-- `sqlite-vec` または `faiss` にチャンクのベクトルを保存
-- 質問もベクトル化して近傍探索
-- FTS5（キーワード）とのハイブリッド検索（BM25 + コサイン類似度）が最も精度が高い
-- **前提**: Embeddingモデル用のGPUメモリが確保できること
-- **候補モデル**: `BAAI/bge-m3`（570M、多言語）、`intfloat/multilingual-e5-large`（560M）、`cl-nagoya/sup-simcse-ja-large`（330M、日本語特化）
-- gemma4（チャットモデル）はEmbeddingに使用不可。別ポートで専用モデルを起動する必要がある
+- `knowledge_embeddings` テーブルに 1024 次元の bge-m3 ベクトルを保存
+- 蒸留時の重複判定（Stage 2: 類似度 ≥ 0.92 で auto-merge / ≥ 0.85 で LLM 同一意味判定）に使用
+- `scripts/embed_utils.py` が OpenAI 互換 `/v1/embeddings` の汎用クライアントを提供
+- bge-m3 は RiVault が `bge-m3:567m` として提供しており、ローカル GPU 不要
 
-```bash
-# 例: 別ポートでEmbeddingモデルを起動
-vllm serve BAAI/bge-m3 --task embed --port 8001
-```
+**残課題**: `/argus-investigate` の `search_text` ツールへのハイブリッド検索（FTS5 + ベクトル類似度）の組み込みは未実装。`qa_index.db.chunks` への埋め込みベクトル追加 + ハイブリッドソートを次のステップで検討する。実装すれば既存の `embed_utils.py` を流用できる。
 
 ### P2: チャンク設計の改善
 

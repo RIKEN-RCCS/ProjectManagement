@@ -957,11 +957,12 @@ python3 scripts/pm_screen.py --include-decisions
 ### 17. ナレッジ蒸留（pm_box_distill.py） — Pass 3
 
 `box_docs.db` 本文・`data/minutes/{kind}.db`・`pm.db.decisions` を入力として、
-ローカル LLM で「**意思決定 / 制約 / 立場 / 用語**」の単位に蒸留して `data/knowledge.db` に
-書き込む。設計原則・採否基準は `docs/distill_policy.md` 参照。
+ローカル LLM (gemma4) で「**意思決定 / 制約 / 立場 / 用語**」の単位に蒸留し、
+`bge-m3` 埋め込みによる類似度判定 + LLM (Kimi) の品質審査の二段ゲートを通して
+`data/knowledge.db` に書き込む。設計原則・採否基準は `docs/distill_policy.md` 参照。
 
 ```sh
-# 全ソース・差分のみ蒸留（distill_state で冪等管理）
+# 全ソース・差分のみ蒸留（distill_state で冪等管理。Stage 2 がデフォルト ON）
 python3 scripts/pm_box_distill.py
 
 # ソースを限定
@@ -978,8 +979,23 @@ python3 scripts/pm_box_distill.py --dry-run
 # distill_state を無視して再蒸留
 python3 scripts/pm_box_distill.py --force
 
+# Stage 2 (類似度判定 + LLM 品質審査) を無効化（デバッグ用、段階1のみ）
+python3 scripts/pm_box_distill.py --no-two-stage
+
 # 統計表示（kind / confidence / status 内訳。500 超で警告）
 python3 scripts/pm_box_distill.py --stats
+
+# 既存レコードに埋め込みを後追い計算（Stage 2 を有効化する前 / 単体運用）
+python3 scripts/pm_box_distill.py --embed-backfill
+
+# 既存レコードに対して LLM 品質審査のみ実行（後追いパージ）
+#   1. プラン CSV を生成（DB変更なし）
+python3 scripts/pm_box_distill.py --quality-only --quality-plan data/quality_plan.csv
+#   2. CSV を人手確認（drop / merge_target が妥当か）
+#   3. 適用
+python3 scripts/pm_box_distill.py --quality-only --apply
+#   スモークテスト（先頭 N 件のみ）
+python3 scripts/pm_box_distill.py --quality-only --limit 10 --quality-plan /tmp/test.csv
 ```
 
 | オプション | デフォルト | 説明 |
@@ -989,13 +1005,98 @@ python3 scripts/pm_box_distill.py --stats
 | `--force` | — | `distill_state` を無視して再蒸留 |
 | `--dry-run` | — | LLM 呼び出し・DB保存なし、件数のみ表示 |
 | `--stats` | — | knowledge.db の統計を表示して終了 |
+| `--no-two-stage` | — | Stage 2 (類似度判定 + LLM 品質審査) を無効化 |
+| `--merge-threshold N` | `0.92` | 自動 merge のコサイン類似度しきい値 |
+| `--review-threshold N` | `0.85` | LLM 審査対象のコサイン類似度しきい値 |
+| `--embed-backfill` | — | 既存レコードに埋め込みを後追い計算（蒸留はしない） |
+| `--quality-only` | — | 既存レコードに対して LLM 品質審査のみ実行 |
+| `--quality-plan PATH` | — | `--quality-only` 時のプラン CSV 出力先 |
+| `--apply` | — | `--quality-only` 時に DB へ変更を適用 |
+| `--limit N` | — | `--quality-only` 時に先頭 N 件のみ処理 |
 | `--no-encrypt` | — | 平文モード |
 | `--output PATH` | — | ログをファイルにも保存 |
 
 **採否ポリシー**:
-- `confidence='low'` のレコードは書き込まない（ノイズ排除）
-- LLM が抽出対象なしと判定した場合は `distill_state.status='skipped'` を記録
+- `confidence='low'` のレコードは書き込まない
+- Stage 2 で `verdict=drop` と判定された候補は `distill_state.status='quality_dropped'` を記録
+- 類似度 ≥ `--merge-threshold` の候補は新規追加せず、既存 `KN-XXXX` の `knowledge_sources` に
+  当該ソースを追加するだけ（補強情報として `weight='supporting'`）
+- LLM 判定が失敗 / 未応答の候補は保守的に drop
 - 物理削除はしない（人手介入時も `deleted=1` のみ）
+
+**環境変数**:
+```sh
+EMBED_API_BASE=$RIVAULT_URL    # 省略時は RIVAULT_URL を流用
+EMBED_API_KEY=$RIVAULT_TOKEN   # 省略時は RIVAULT_TOKEN
+EMBED_MODEL=bge-m3:567m        # 省略時のデフォルト（RiVault が提供）
+```
+
+### 17a. ナレッジ重複・多重抽出の診断（pm_knowledge_inspect.py）
+
+knowledge.db の件数が想定を超えたとき (例: 500 件超) に最初に走らせる読み取り専用ツール。
+蒸留プロンプトの粒度を見直す判断材料を出す。
+
+```sh
+# 全 5 検査を実行
+python3 scripts/pm_knowledge_inspect.py
+
+# 上位件数を変更
+python3 scripts/pm_knowledge_inspect.py --top 50
+
+# 一部だけ
+python3 scripts/pm_knowledge_inspect.py --skip-source --skip-near
+```
+
+検査内容:
+1. **1 source_ref から派生したナレッジ数**（多い順）— BOX ファイル名・フォルダパスも併記
+2. **topic 完全一致**の重複
+3. **topic 先頭 N 文字一致**の重複
+4. **current_state 正規化一致**（空白除去・小文字化後一致）
+5. **同じ source_ref 内で current_state 先頭一致**（1 ファイル多重抽出のうち特に冗長な組）
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--top N` | `30` | (1) で表示する上位件数 |
+| `--topic-prefix N` | `20` | (3) の topic 先頭一致文字数 |
+| `--cs-prefix N` | `30` | (5) の current_state 先頭一致文字数 |
+| `--skip-source` / `--skip-topic` / `--skip-cs` / `--skip-near` | — | 個別検査をスキップ |
+
+### 17b. ナレッジ後追い dedupe（pm_knowledge_dedupe.py）
+
+`current_state` 完全一致でグループ化し、各グループから keeper を 1 件残して他を
+`superseded_by` で連鎖させる。`Stage 2` の embedding ベース dedupe を導入する前の
+ベースライン整理に使う（蒸留時の重複は今後 Stage 2 が防ぐので、このスクリプトは
+段階3導入前の既存データに対してのみ使う想定）。
+
+keeper 選定: confidence(high優先) → last_validated_at 降順 → created_at 昇順 → KN-XXXX 番号小さい順。
+
+```sh
+# まずプラン CSV を出して目で確認（DB変更なし）
+python3 scripts/pm_knowledge_dedupe.py --plan dedupe_plan.csv
+
+# CSV を確認後、そのまま適用（プラン未指定時は内部生成プランを使う）
+python3 scripts/pm_knowledge_dedupe.py --apply
+
+# CSV を編集して keeper を変えたい場合
+python3 scripts/pm_knowledge_dedupe.py --apply --plan dedupe_plan.csv --actor "井上"
+
+# 一致モード切り替え（topic + current_state ペア一致）
+python3 scripts/pm_knowledge_dedupe.py --plan plan.csv --mode topic
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--mode {current_state,topic}` | `current_state` | 重複検出のキー |
+| `--plan PATH` | — | プラン CSV のパス（書き出し / 読み込み） |
+| `--apply` | — | DB へ変更を適用 |
+| `--actor NAME` | `dedupe` | audit の actor 列 |
+
+挙動:
+- 各 loser の `knowledge_sources` を keeper にコピー（`weight='supporting'` 化）
+- loser に `superseded_by = keeper` を立て、`knowledge_relations.supersedes` に
+  `note='auto-dedupe'` 付きで登録
+- `knowledge_audit` に `source='merge'`・`actor=<指定値>` で記録
+- 物理削除はしない
 
 ### 18. ナレッジ人手編集（pm_knowledge_edit.py）
 

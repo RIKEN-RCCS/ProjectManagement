@@ -118,8 +118,11 @@ slack/
 │   ├── pm_slack_box_links.py       # Slack上のBOXリンクを収集・LLMで構造化 → docs_{index_name}.db に保存（メタデータのみ）。Canvas投稿・FTS5連携対応
 │   ├── pm_box_crawl.py             # BOXフォルダを走査して本文を Markdown 化（pptx/docx/pdf/xlsx/boxnote）→ box_docs.db に保存。box_sources.yaml で対象フォルダ定義
 │   ├── pm_box_relevance.py         # box_docs.db の各ファイルをローカルLLMで relevance 判定（core/related/noise/unknown）。noise は pm_embed.py が索引除外
-│   ├── pm_box_distill.py           # [Pass 3] box_docs.db / minutes / pm.db.decisions → knowledge.db への蒸留（意思決定/制約/立場/用語）。distill_state で冪等性管理。confidence='low' は書き込まない
+│   ├── pm_box_distill.py           # [Pass 3] box_docs.db / minutes / pm.db.decisions → knowledge.db への蒸留。Stage 1 (LLM 抽出) → Stage 2 (bge-m3 類似度 ≥0.92 で auto-merge / ≥0.85 で LLM 審査 / それ以外は LLM keep/drop 判定) の二段ゲート。--embed-backfill / --quality-only で既存レコードへの後追い処理も可能
 │   ├── pm_knowledge_edit.py        # knowledge.db の人手編集CLI。--invalidate / --supersede / --confidence / CSV一括編集。全変更は knowledge_audit に記録
+│   ├── pm_knowledge_inspect.py     # knowledge.db の重複・多重抽出を診断（読み取り専用）。1 source_ref からの派生数・topic/current_state 重複を集計
+│   ├── pm_knowledge_dedupe.py      # current_state 完全一致による後追い dedupe。keeper 選定 → 他を superseded_by で連鎖（Stage 2 導入前の既存データ整理用）
+│   ├── embed_utils.py              # OpenAI 互換 /v1/embeddings 呼び出し + コサイン類似度（RiVault の bge-m3:567m がデフォルト）
 │   ├── pm_box_update.sh        # ステップ1: pm_slack_box_links.py → ステップ2: pm_box_crawl.py → ステップ3: pm_embed.py を連続実行
 │   ├── pm_web_fetch.py              # 外部WebサイトのRSS/HTMLを取得 → web_articles.db に保存（web_sources.yaml で定義）。cron毎朝03:30で自動実行
 │   ├── pm_embed.py                  # QAインデックス構築（argus_config.yaml に従いSudachiPy形態素解析+FTS5インデックスを各DBに書き込む。docs_*.db・web_articles.db も索引化）
