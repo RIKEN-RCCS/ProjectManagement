@@ -116,6 +116,12 @@ tail -f logs/pm_qa_server.log
 | `@` 始まり | 担当者フォーカス | `@富岳太郎` → 富岳太郎さんの担当事項を重点分析 |
 | その他テキスト | 話題フォーカス | `Benchpark` → Benchpark 関連を重点分析 |
 
+**収集対象の絞り込み（チャンネル別）**: コマンド実行チャンネルから
+`argus_config.yaml` の `channel_map` を引いて `index_name` を解決し、その index に
+紐付く `channels:` / `minutes:` / `pm_db:` のみを収集対象にする
+（`/argus-investigate` と同じロジック。`pm_argus.py: resolve_index_name()` 経由）。
+`channel_map` にエントリがないチャンネルから実行された場合は `default_index` の対象を読む。
+
 ---
 
 ### `/argus-draft <用途> <件名>` — 文書草案生成
@@ -147,7 +153,7 @@ tail -f logs/pm_qa_server.log
 /argus-risk Benchpark             ← Benchpark 関連リスクにフォーカス
 ```
 
-引数のパース規則は `/argus-brief` と同じ。
+引数のパース規則・チャンネル別の収集対象絞り込みは `/argus-brief` と同じ。
 
 ---
 
@@ -565,6 +571,7 @@ python3 scripts/argus/pm_argus_patrol.py --list-pending
 | `--assignee NAME` | — | 担当者フォーカス（例: `--assignee 富岳太郎`） |
 | `--topic TEXT` | — | 話題フォーカス（例: `--topic Benchpark`） |
 | `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--index-name NAME` | (default_index) | `argus_config.yaml` の `indices.{name}` を選択し、`channels:` / `minutes:` / `pm_db:` を絞り込む（例: `--index-name pm-hpc`）|
 | `--no-encrypt` | — | 平文モード |
 
 ---

@@ -94,6 +94,14 @@ def _load_channel_ids(index_name: str | None = None) -> list[str]:
     return indices.get(target, {}).get("channels", [])
 
 
+def _load_minutes_names(index_name: str | None = None) -> list[str]:
+    """argus_config.yaml から議事録 kind 名リストを読み込む。"""
+    cfg = _load_argus_config()
+    indices = cfg.get("indices") or {}
+    target = index_name or cfg.get("default_index", "pm")
+    return indices.get(target, {}).get("minutes", [])
+
+
 def load_pm_db_paths(index_name: str | None = None) -> list[Path]:
     """argus_config.yaml の pm_db パスリストを読み込む。"""
     cfg = _load_argus_config()
@@ -101,6 +109,19 @@ def load_pm_db_paths(index_name: str | None = None) -> list[Path]:
     target = index_name or cfg.get("default_index", "pm")
     pm_db_list = indices.get(target, {}).get("pm_db", ["data/pm.db"])
     return [_REPO_ROOT / p for p in pm_db_list]
+
+
+def resolve_index_name(channel_id: str | None) -> str:
+    """コマンド実行チャンネルから index_name を解決する。
+    channel_map にエントリがなければ default_index を返す。
+    pm_argus_agent.py:_resolve_index_and_channels と同じ考え方。
+    """
+    cfg = _load_argus_config()
+    default_index = cfg.get("default_index", "pm")
+    channel_map = cfg.get("channel_map") or {}
+    if not channel_id:
+        return default_index
+    return channel_map.get(channel_id, default_index)
 
 
 
@@ -179,15 +200,22 @@ def fetch_recent_minutes(
     *,
     minutes_dir: Path,
     no_encrypt: bool = False,
+    minutes_names: list[str] | None = None,
 ) -> str:
     """
     data/minutes/{kind}.db の instances + minutes_content テーブルから
     held_at >= since_date の議事録本文を取得して返す。
+
+    minutes_names: 指定された kind（DB ファイルの stem）のみを対象にする。
+                   None または空リストの場合は全 kind を対象にする（後方互換）。
     """
     if not minutes_dir.exists():
         return "（議事録ディレクトリが見つかりません）"
 
     db_files = sorted(minutes_dir.glob("*.db"))
+    if minutes_names:
+        wanted = set(minutes_names)
+        db_files = [p for p in db_files if p.stem in wanted]
     if not db_files:
         return "（議事録DBが見つかりません）"
 
@@ -854,16 +882,22 @@ def _collect_all_data(
     minutes_dir: Path | None = None,
     pm_db_path: Path | None = None,
     pm_db_paths: list[Path] | None = None,
+    index_name: str | None = None,
 ) -> tuple[str, str, dict, list]:
     """messages/minutes/stats を一括収集し (messages, minutes, stats, conns) を返す。
     conns は呼び出し元で全てクローズすること。
+
+    index_name: argus_config.yaml の indices.{name} を選択する。指定すると
+                その index の channels / minutes / pm_db を絞り込み対象にする。
+                None の場合は default_index に従う（後方互換）。
     """
     data_dir = data_dir or _DATA_DIR
     minutes_dir = minutes_dir or _MINUTES_DIR
     if pm_db_paths is None:
-        pm_db_paths = [pm_db_path] if pm_db_path else load_pm_db_paths()
+        pm_db_paths = [pm_db_path] if pm_db_path else load_pm_db_paths(index_name)
 
-    channel_ids = _load_channel_ids()
+    channel_ids = _load_channel_ids(index_name)
+    minutes_names = _load_minutes_names(index_name)
     message_parts = []
     for ch_id in channel_ids:
         raw = fetch_raw_messages(ch_id, since_date, data_dir=data_dir, no_encrypt=no_encrypt)
@@ -871,7 +905,10 @@ def _collect_all_data(
             message_parts.append(f"## チャンネル: {ch_id}\n\n{raw}")
     messages = "\n\n---\n\n".join(message_parts)
 
-    minutes = fetch_recent_minutes(since_date, minutes_dir=minutes_dir, no_encrypt=no_encrypt)
+    minutes = fetch_recent_minutes(
+        since_date, minutes_dir=minutes_dir, no_encrypt=no_encrypt,
+        minutes_names=minutes_names or None,
+    )
 
     conns = []
     stats_list = []
@@ -899,8 +936,10 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
 
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=days)).isoformat()
+        index_name = resolve_index_name(command.get("channel_id") or None)
         focus_desc = "".join([
             f" days={days}",
+            f" index={index_name}",
             f" requester={requester}",
             f" assignee={assignee}" if assignee else "",
             f" topic={topic}" if topic else "",
@@ -909,7 +948,7 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
 
         context = load_claude_md_context()
         messages, minutes, stats, conns = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt
+            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
         for c in conns:
             c.close()
@@ -969,11 +1008,12 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
 
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=_DRAFT_REPORT_SINCE_DAYS)).isoformat()
-        logger.info(f"[argus-draft] purpose={purpose} subject={subject}")
+        index_name = resolve_index_name(command.get("channel_id") or None)
+        logger.info(f"[argus-draft] purpose={purpose} subject={subject} index={index_name}")
 
         context = load_claude_md_context()
         messages, minutes, stats, conns = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt
+            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
         prompt = build_draft_prompt(purpose, subject, messages, stats, context, conns=conns, today=today)
@@ -1013,8 +1053,10 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
 
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=days)).isoformat()
+        index_name = resolve_index_name(command.get("channel_id") or None)
         focus_desc = "".join([
             f" days={days}",
+            f" index={index_name}",
             f" assignee={assignee}" if assignee else "",
             f" topic={topic}" if topic else "",
         ])
@@ -1022,7 +1064,7 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
 
         context = load_claude_md_context()
         messages, minutes, stats, conns = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt
+            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
         for c in conns:
             c.close()
@@ -1200,11 +1242,12 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         since_date = today  # --today-only 相当
         days = 0
 
-        logger.info(f"[argus-today] requester={requester} user_id={user_id}")
+        index_name = resolve_index_name(command.get("channel_id") or None)
+        logger.info(f"[argus-today] requester={requester} user_id={user_id} index={index_name}")
 
         context = load_claude_md_context()
         messages, minutes, stats, conns = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt
+            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
         for c in conns:
             c.close()
@@ -1407,6 +1450,10 @@ def main() -> None:
                         help="実行者名（CLI モード用。省略時はシステムユーザー名）")
     parser.add_argument("--db", default=None, metavar="PATH",
                         help="pm.db のパス（デフォルト: data/pm.db）")
+    parser.add_argument("--index-name", default=None, metavar="NAME",
+                        help="argus_config.yaml の indices.{name} を選択して "
+                             "channels / minutes / pm_db を絞り込む（例: pm-hpc）。"
+                             "省略時は default_index。")
     args = parser.parse_args()
 
     today = date.today().isoformat()
@@ -1419,16 +1466,18 @@ def main() -> None:
         # 既存のロジック
         days = args.days if args.days is not None else _DEFAULT_SINCE_DAYS
         since_date = args.since or (date.today() - timedelta(days=days)).isoformat()
-    pm_db_paths_cli = [Path(args.db)] if args.db else load_pm_db_paths()
+    pm_db_paths_cli = [Path(args.db)] if args.db else load_pm_db_paths(args.index_name)
     requester = args.requester or os.environ.get("USER") or "プロジェクトメンバー"
 
     context = load_claude_md_context()
-    print(f"[INFO] since: {since_date} / today: {today}", file=sys.stderr)
+    print(f"[INFO] since: {since_date} / today: {today} / "
+          f"index: {args.index_name or '(default)'}", file=sys.stderr)
 
     messages, minutes, stats, conns = _collect_all_data(
         today, since_date,
         no_encrypt=args.no_encrypt,
         pm_db_paths=pm_db_paths_cli,
+        index_name=args.index_name,
     )
 
     def _close_conns():
