@@ -112,6 +112,7 @@ class AgentContext:
     index_name: str = "pm"
     channels: list[str] = field(default_factory=list)
     cited_chunks: list[dict] = field(default_factory=list)
+    cited_knowledge_ids: set[str] = field(default_factory=set)
 
 
 # =========================================================================== #
@@ -301,6 +302,136 @@ def _tool_search_text(args: dict, ctx: AgentContext) -> str:
         lines.append(f"[{idx}] 出典: {label}{ref_str}")
         lines.append(f"    {chunk['content'].strip()}")
         lines.append("")
+    return "\n".join(lines)
+
+
+def _open_knowledge_db(ctx: AgentContext):
+    """data/knowledge.db を開く。存在しなければ None。"""
+    from db_utils import open_knowledge_db
+    db_path = ctx.data_dir / "knowledge.db"
+    if not db_path.exists():
+        return None
+    try:
+        return open_knowledge_db(db_path, no_encrypt=ctx.no_encrypt)
+    except Exception:
+        return None
+
+
+def _tool_search_knowledge(args: dict, ctx: AgentContext) -> str:
+    """knowledge.db を topic / current_state / tags で検索する。
+    現役レコード（deleted=0 AND superseded_by IS NULL）を優先。
+    """
+    query = (args.get("query") or "").strip()
+    limit = int(args.get("limit") or 10)
+    include_superseded = bool(args.get("include_superseded") or False)
+
+    conn = _open_knowledge_db(ctx)
+    if conn is None:
+        return "（knowledge.db が未構築です）"
+    try:
+        where = ["COALESCE(deleted, 0) = 0"]
+        if not include_superseded:
+            where.append("superseded_by IS NULL")
+        params: list = []
+        if query:
+            where.append("(topic LIKE ? OR current_state LIKE ? OR tags LIKE ? OR rationale LIKE ?)")
+            kw = f"%{query}%"
+            params.extend([kw, kw, kw, kw])
+        sql = (
+            "SELECT id, kind, topic, current_state, confidence,"
+            " last_validated_at, decided_at, superseded_by"
+            " FROM knowledge WHERE " + " AND ".join(where) +
+            " ORDER BY CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,"
+            "          COALESCE(last_validated_at, decided_at, '') DESC"
+            " LIMIT ?"
+        )
+        rows = conn.execute(sql, params + [limit]).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return f"（「{query}」に一致するナレッジなし）" if query else "（ナレッジレコードなし）"
+
+    lines = [f"# ナレッジ検索結果 ({len(rows)} 件)"]
+    for r in rows:
+        ctx.cited_knowledge_ids.add(r["id"])
+        validated = r["last_validated_at"] or r["decided_at"] or "-"
+        super_mark = f" [superseded_by {r['superseded_by']}]" if r["superseded_by"] else ""
+        lines.append(
+            f"- **{r['id']}** [{r['kind']}/{r['confidence']}] {r['topic']}"
+            f"{super_mark} (validated: {validated})"
+        )
+        lines.append(f"    {r['current_state']}")
+    return "\n".join(lines)
+
+
+def _tool_get_knowledge(args: dict, ctx: AgentContext) -> str:
+    """単一ナレッジレコードを ID 指定でフル展開する（rationale / 代替案 / sources / relations）。"""
+    kid = (args.get("id") or "").strip()
+    if not kid:
+        return "id を指定してください（例: KN-0042）"
+
+    conn = _open_knowledge_db(ctx)
+    if conn is None:
+        return "（knowledge.db が未構築です）"
+    try:
+        rec = conn.execute(
+            "SELECT * FROM knowledge WHERE id = ?", (kid,)
+        ).fetchone()
+        if not rec:
+            return f"（{kid} が見つかりません）"
+        ctx.cited_knowledge_ids.add(kid)
+
+        sources = conn.execute(
+            "SELECT source_type, source_ref, weight, excerpt"
+            " FROM knowledge_sources WHERE knowledge_id = ? ORDER BY added_at",
+            (kid,),
+        ).fetchall()
+        relations = conn.execute(
+            "SELECT 'from' AS dir, relation, to_id AS other, note"
+            " FROM knowledge_relations WHERE from_id = ?"
+            " UNION ALL"
+            " SELECT 'to' AS dir, relation, from_id AS other, note"
+            " FROM knowledge_relations WHERE to_id = ?",
+            (kid, kid),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    lines = [f"# {kid} [{rec['kind']}/{rec['confidence']}]"]
+    lines.append(f"- topic: {rec['topic']}")
+    lines.append(f"- current_state: {rec['current_state']}")
+    if rec["rationale"]:
+        lines.append(f"- rationale: {rec['rationale']}")
+    if rec["alternatives_rejected"]:
+        lines.append(f"- alternatives_rejected: {rec['alternatives_rejected']}")
+    if rec["constraints_invariants"]:
+        lines.append(f"- constraints_invariants: {rec['constraints_invariants']}")
+    if rec["owners"]:
+        lines.append(f"- owners: {rec['owners']}")
+    if rec["tags"]:
+        lines.append(f"- tags: {rec['tags']}")
+    if rec["decided_at"]:
+        lines.append(f"- decided_at: {rec['decided_at']}")
+    if rec["last_validated_at"]:
+        lines.append(f"- last_validated_at: {rec['last_validated_at']}")
+    if rec["superseded_by"]:
+        lines.append(f"- **superseded_by**: {rec['superseded_by']}")
+    if rec["deleted"]:
+        lines.append("- **deleted: 1（無効）**")
+
+    if sources:
+        lines.append("\n## sources")
+        for s in sources:
+            excerpt = ((s["excerpt"] or "")[:120].replace("\n", " "))
+            lines.append(f"- [{s['weight']}] {s['source_type']}/{s['source_ref']}"
+                         + (f" — {excerpt}" if excerpt else ""))
+    if relations:
+        lines.append("\n## relations")
+        for rel in relations:
+            arrow = "→" if rel["dir"] == "from" else "←"
+            note = f" ({rel['note']})" if rel["note"] else ""
+            lines.append(f"- {arrow} {rel['relation']}: {rel['other']}{note}")
     return "\n".join(lines)
 
 
@@ -579,6 +710,30 @@ TOOLS: list[ToolDef] = [
         parameters={"channel_id": "SlackチャンネルID（例: <CHANNEL_ID>）", "since": "この日付以降（YYYY-MM-DD）", "max_chars": "最大文字数（デフォルト10000）"},
         fn=_tool_get_slack_messages,
     ),
+    ToolDef(
+        name="search_knowledge",
+        description=(
+            "蒸留ナレッジ knowledge.db を topic / current_state / tags / rationale で検索。"
+            "プロジェクト全体共通の確定事項（意思決定 / 制約 / 立場 / 用語）から該当レコードを返す。"
+            "current_state が短すぎて根拠が必要な場合は、続けて get_knowledge で展開する。"
+        ),
+        parameters={
+            "query": "検索キーワード（自然言語可）。空文字なら全件",
+            "limit": "取得件数（デフォルト10）",
+            "include_superseded": "true なら superseded_by 立ちのレコードも対象（履歴閲覧用）",
+        },
+        fn=_tool_search_knowledge,
+    ),
+    ToolDef(
+        name="get_knowledge",
+        description=(
+            "蒸留ナレッジレコードを id 指定でフル展開する。"
+            "rationale / alternatives_rejected / constraints_invariants / sources / relations を含む。"
+            "search_knowledge で見つけた KN-XXXX を深掘りする際に使う。"
+        ),
+        parameters={"id": "ナレッジ ID（例: KN-0042）"},
+        fn=_tool_get_knowledge,
+    ),
 ]
 
 _TOOL_MAP: dict[str, ToolDef] = {t.name: t for t in TOOLS}
@@ -690,6 +845,7 @@ _AGENT_SYSTEM_PROMPT = """\
 3. 判断材料として **賛否・コスト・代替案・閾値・技術的影響** などの観点が抜けていれば追加検索する。reasoning で抜けに気付くこと。
 4. 結果が薄い（同類クエリ 2 回でも合計 10 件未満）ときは諦めて `<final_answer>` でデータが乏しい旨を述べる。西暦の解釈違い・対象外チャンネル等の可能性に触れる。
 5. 特定日付の議論は `search_text` での日付文字列検索ではなく `get_slack_messages`（チャンネル+期間）や `search_decisions`（since/until）を優先する。
+6. **質問が意思決定 / 制約 / 用語に関する場合は `search_knowledge` を併用**する。蒸留済みの確定事項に該当があれば、回答中で `KN-XXXX` 形式で引用すること。`current_state` だけで根拠が薄ければ `get_knowledge` で `rationale` / `alternatives_rejected` まで展開して引用する。
 
 ## スレッド追質問
 
@@ -1023,46 +1179,94 @@ def _fetch_slack_references_for_box(box_file_id: str, limit: int = 2) -> list[st
     return out
 
 
+_KN_ID_RE = re.compile(r"\bKN-\d{4}\b")
+
+
 def _append_sources_section(answer: str, ctx: AgentContext) -> str:
     """ctx.cited_chunks にあるチャンクから「## 出典」セクションを生成して回答末尾に付与する。
-
-    本文中に [N] 形式の参照がない場合でも、検索したチャンクは追跡情報として末尾に列挙する。
-    重複する (source_type, source_ref, held_at) は1つにまとめる。
+    また、ctx.cited_knowledge_ids または回答本文中の KN-XXXX を検出した場合は、
+    「## 引用したナレッジ」セクションと修正導線を付与する。
     """
     from pm_qa_server import _format_source_label
-    if not ctx.cited_chunks:
-        return answer
 
-    seen: set[tuple] = set()
-    items: list[tuple[int, str]] = []
-    for i, chunk in enumerate(ctx.cited_chunks, 1):
-        key = (chunk.get("source_type"), chunk.get("source_ref"), chunk.get("held_at"))
-        if key in seen:
-            continue
-        seen.add(key)
-        label = _format_source_label(chunk)
-        ref = chunk.get("source_ref") or ""
-        source_type = chunk.get("source_type", "")
-        if source_type == "slack_raw" and ref:
-            link = f"<{ref}|スレッドを開く>"
-        elif source_type == "web" and ref:
-            link = f"<{ref}|リンク>"
-        elif source_type == "box_document" and ref:
-            link = f"<{ref}|Boxで開く>"
-            slack_links = _fetch_slack_references_for_box(chunk.get("record_id") or "")
-            if slack_links:
-                link = link + " / Slack共有: " + ", ".join(slack_links)
-        elif source_type == "minutes_content" and ref:
-            held_at = chunk.get("held_at") or ""
-            link = f"{held_at} {ref}".strip()
-        else:
-            link = ref
-        items.append((i, f"- [{i}] {label}" + (f" — {link}" if link else "")))
+    # 回答本文に出現した KN-XXXX を cited_knowledge_ids にマージする
+    for m in _KN_ID_RE.findall(answer or ""):
+        ctx.cited_knowledge_ids.add(m)
 
-    if not items:
+    extra_sections: list[str] = []
+
+    # ナレッジ引用の追記
+    if ctx.cited_knowledge_ids:
+        kn_lines = ["", "## 引用したナレッジ"]
+        # 詳細を knowledge.db から引いてくる（topic 表示用）
+        topics: dict[str, str] = {}
+        from db_utils import open_knowledge_db
+        db_path = ctx.data_dir / "knowledge.db"
+        if db_path.exists():
+            try:
+                conn = open_knowledge_db(db_path, no_encrypt=ctx.no_encrypt)
+                placeholders = ",".join("?" * len(ctx.cited_knowledge_ids))
+                rows = conn.execute(
+                    f"SELECT id, topic, last_validated_at, deleted, superseded_by"
+                    f" FROM knowledge WHERE id IN ({placeholders})",
+                    list(ctx.cited_knowledge_ids),
+                ).fetchall()
+                conn.close()
+                for r in rows:
+                    label = r["topic"] or ""
+                    suffix = ""
+                    if r["deleted"]:
+                        suffix = " ⚠️ 無効"
+                    elif r["superseded_by"]:
+                        suffix = f" ⚠️ {r['superseded_by']} に上書き済み"
+                    elif r["last_validated_at"]:
+                        suffix = f" (validated: {r['last_validated_at']})"
+                    topics[r["id"]] = f"{label}{suffix}"
+            except Exception:
+                pass
+        for kid in sorted(ctx.cited_knowledge_ids):
+            t = topics.get(kid, "（詳細取得失敗）")
+            kn_lines.append(f"- **{kid}** {t}")
+        kn_lines.append("")
+        kn_lines.append(
+            "_修正が必要な場合: `/argus-knowledge invalidate KN-XXXX`"
+            " または `/argus-knowledge supersede KN-XXXX KN-YYYY` で更新できます。_"
+        )
+        extra_sections.append("\n".join(kn_lines))
+
+    # 出典セクション
+    if ctx.cited_chunks:
+        seen: set[tuple] = set()
+        items: list[tuple[int, str]] = []
+        for i, chunk in enumerate(ctx.cited_chunks, 1):
+            key = (chunk.get("source_type"), chunk.get("source_ref"), chunk.get("held_at"))
+            if key in seen:
+                continue
+            seen.add(key)
+            label = _format_source_label(chunk)
+            ref = chunk.get("source_ref") or ""
+            source_type = chunk.get("source_type", "")
+            if source_type == "slack_raw" and ref:
+                link = f"<{ref}|スレッドを開く>"
+            elif source_type == "web" and ref:
+                link = f"<{ref}|リンク>"
+            elif source_type == "box_document" and ref:
+                link = f"<{ref}|Boxで開く>"
+                slack_links = _fetch_slack_references_for_box(chunk.get("record_id") or "")
+                if slack_links:
+                    link = link + " / Slack共有: " + ", ".join(slack_links)
+            elif source_type == "minutes_content" and ref:
+                held_at = chunk.get("held_at") or ""
+                link = f"{held_at} {ref}".strip()
+            else:
+                link = ref
+            items.append((i, f"- [{i}] {label}" + (f" — {link}" if link else "")))
+        if items:
+            extra_sections.append("\n".join(["", "## 出典"] + [s for _, s in items]))
+
+    if not extra_sections:
         return answer
-    lines = ["", "## 出典"] + [s for _, s in items]
-    return answer.rstrip() + "\n" + "\n".join(lines)
+    return answer.rstrip() + "\n" + "\n\n".join(extra_sections)
 
 
 # =========================================================================== #
