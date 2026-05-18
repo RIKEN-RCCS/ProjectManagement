@@ -122,6 +122,13 @@ tail -f logs/pm_qa_server.log
 （`/argus-investigate` と同じロジック。`pm_argus.py: resolve_index_name()` 経由）。
 `channel_map` にエントリがないチャンネルから実行された場合は `default_index` の対象を読む。
 
+**蒸留ナレッジの同梱（プロジェクト全体共通）**: `data/knowledge.db` の現役レコード
+（`deleted=0` AND `superseded_by IS NULL` AND `confidence ∈ {high, medium}`）を
+`fetch_knowledge_summary()` で短文サマリ化し、プロンプトの「## 確定済みナレッジ」
+セクションに常時同梱する。`index_name` 等のチャンネル別フィルタは適用しない
+（ナレッジはプロジェクト全体に共通）。1 行 1 件、最大 30 件・4000 字で打ち切り。
+詳細は `docs/distill_policy.md` 参照。
+
 ---
 
 ### `/argus-draft <用途> <件名>` — 文書草案生成
