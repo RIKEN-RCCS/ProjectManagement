@@ -12,6 +12,9 @@
 #
 # 有効な全ファイルを1つの sbatch ジョブにまとめて投入する。
 # 投入済みファイルは meetings/processing/ に移動して再投入を防ぐ。
+# 処理が成功した会議種別については pm_minutes_catalog.py --upload --catalog を実行し、
+# argus_config.yaml の meetings.<name> に box_folder_id / catalog_canvas_id が定義されて
+# いる会議について Box アップロード + Canvas 目録更新まで自動で行う。
 # ログは data/pm_from_recording_auto.log に追記する。
 
 set -euo pipefail
@@ -231,6 +234,7 @@ fi
 
 processed=0
 failed=0
+declare -A SUCCEEDED_MEETINGS=()
 
 for i in "${!BATCH_FILES[@]}"; do
     log "[RUN] ${BATCH_FILES[$i]} → meeting=${BATCH_NAMES[$i]}, held_at=${BATCH_HELD_AT[$i]}, db=$(basename "${BATCH_DBS[$i]}")"
@@ -242,6 +246,7 @@ for i in "${!BATCH_FILES[@]}"; do
         2>&1 | tee -a "$LOG_FILE"
     if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
         processed=$((processed + 1))
+        SUCCEEDED_MEETINGS["${BATCH_NAMES[$i]}"]=1
         if [[ -n "$SLACK_CHANNEL" ]]; then
             bash "$SCRIPT_DIR/slack_post_minutes.sh" \
                 --meeting-name "${BATCH_NAMES[$i]}" \
@@ -253,5 +258,23 @@ for i in "${!BATCH_FILES[@]}"; do
         failed=$((failed + 1))
     fi
 done
+
+# --------------------------------------------------------------------------- #
+# Box アップロード + Canvas 目録更新（成功した会議種別のみ）
+#   argus_config.yaml の meetings.<name> に box_folder_id / catalog_canvas_id が
+#   定義されている会議のみ実際に投稿される（未定義はスクリプト側でスキップ）。
+# --------------------------------------------------------------------------- #
+if [[ ${#SUCCEEDED_MEETINGS[@]} -gt 0 ]]; then
+    if [[ -z "${SLACK_USER_TOKEN:-}" ]]; then
+        . ~/.secrets/slack_tokens.sh
+    fi
+    for meeting_name in "${!SUCCEEDED_MEETINGS[@]}"; do
+        log "[CATALOG] Box アップロード + Canvas 目録更新: meeting=${meeting_name}"
+        "$VENV_PYTHON" "$SCRIPT_DIR/pm_minutes_catalog.py" \
+            --upload --catalog \
+            --meeting-name "$meeting_name" 2>&1 | tee -a "$LOG_FILE" || \
+            log "[WARN] pm_minutes_catalog.py 失敗: meeting=${meeting_name}"
+    done
+fi
 
 log "=== 完了: 処理=${processed} 件, 失敗=${failed} 件, スキップ=$skipped 件 ==="
