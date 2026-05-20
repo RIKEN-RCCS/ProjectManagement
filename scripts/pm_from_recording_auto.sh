@@ -26,7 +26,7 @@ REPO_ROOT=/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement
 MEETINGS_DIR="$REPO_ROOT/data"
 PROCESSING_DIR="$MEETINGS_DIR/processing"
 LOG_FILE="$REPO_ROOT/data/pm_from_recording_auto.log"
-VENV_PYTHON="$HOME/.venv_x86_64/bin/python3"
+VENV_PYTHON="$HOME/.venv_$(uname -m)/bin/python3"
 
 # --------------------------------------------------------------------------- #
 # 引数解析
