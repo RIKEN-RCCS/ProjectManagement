@@ -88,6 +88,9 @@ def extract_slide_frames(
     雑談会議（スライドなし）では 0〜数枚に収まる。max_frames を超える場合は全フレーム
     抽出した上で時系列に均等間引きして max_frames 枚に圧縮する（先頭だけ拾って後半を
     捨てることは避ける）。
+
+    テキストスクロール型の画面共有では scene detect が効かず少数枚になるが、
+    固定間隔フォールバックは無関係なフレーム（顔・ギャラリー等）を拾うため行わない。
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,12 +128,9 @@ def extract_slide_frames(
         last_written = 0
         for line in proc.stdout:
             line = line.rstrip()
-            # ffmpeg -progress の出力: out_time=HH:MM:SS.mmm / frame=100 / progress=continue|end
             if line.startswith("out_time="):
                 last_time = line.split("=", 1)[1]
             elif line.startswith("progress="):
-                # ~1 秒ごとにこのキーが来るので、このタイミングで書き出し枚数を確認し
-                # 新規に書き出されたフレームがあるときだけログを出す（1枚単位の粒度）
                 written = len(list(out_dir.glob("slide_*.png")))
                 if written > last_written:
                     logger.info(f"ffmpeg 進捗: written={written} t={last_time}")
