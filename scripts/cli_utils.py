@@ -48,6 +48,64 @@ def add_db_arg(parser: argparse.ArgumentParser, default: str = "data/pm.db") -> 
                         help=f"pm.db のパス（デフォルト: {default}）")
 
 
+def add_filter_arg(parser: argparse.ArgumentParser) -> None:
+    """--filter PRESET を parser に追加する（複数指定可）"""
+    parser.add_argument(
+        "--filter", action="append", default=None, metavar="PRESET",
+        help="argus_config.yaml の filter_presets 名でチャンネル・議事録を絞り込む（複数指定可）",
+    )
+
+
+def resolve_filter_presets(
+    filter_names: list[str] | None,
+    config_path: Path | str = "data/argus_config.yaml",
+) -> tuple[list[str], list[str]]:
+    """filter_presets からチャンネルIDと議事録種別を解決する。
+
+    Returns
+    -------
+    (channel_ids, meeting_kinds)
+        filter_names が None/空の場合は ([], []) を返す（フィルタなし）。
+    """
+    if not filter_names:
+        return [], []
+
+    import yaml  # type: ignore
+
+    cfg_path = Path(config_path)
+    if not cfg_path.is_absolute():
+        cfg_path = Path(__file__).resolve().parent.parent / cfg_path
+    if not cfg_path.exists():
+        print(f"[WARN] argus_config.yaml が見つかりません: {cfg_path}", file=sys.stderr)
+        return [], []
+
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    presets = cfg.get("filter_presets") or {}
+    ch_presets = presets.get("channels") or {}
+    mk_presets = presets.get("meeting_kinds") or {}
+
+    channel_ids: list[str] = []
+    meeting_kinds: list[str] = []
+
+    for name in filter_names:
+        found = False
+        if name in ch_presets:
+            channel_ids.extend(ch_presets[name].get("values") or [])
+            found = True
+        if name in mk_presets:
+            meeting_kinds.extend(mk_presets[name].get("values") or [])
+            found = True
+        if not found:
+            available = sorted(set(list(ch_presets.keys()) + list(mk_presets.keys())))
+            print(f"[ERROR] filter_presets に '{name}' が見つかりません。"
+                  f" 利用可能: {', '.join(available)}", file=sys.stderr)
+            sys.exit(1)
+
+    return list(dict.fromkeys(channel_ids)), list(dict.fromkeys(meeting_kinds))
+
+
 # --------------------------------------------------------------------------- #
 # ロガーユーティリティ
 # --------------------------------------------------------------------------- #
