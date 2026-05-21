@@ -31,7 +31,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db, open_pm_db, fetch_milestone_progress, fetch_assignee_workload
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg, make_logger
+from cli_utils import (add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
+                       add_filter_arg, resolve_filter_presets, make_logger)
 from canvas_utils import sanitize_for_canvas, post_to_canvas
 
 # --------------------------------------------------------------------------- #
@@ -48,7 +49,9 @@ RISK_KEYWORDS = [
 ]
 
 
-def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list[dict]:
+def fetch_open_action_items(conn: sqlite3.Connection, since: str | None,
+                            channel_ids: list[str] | None = None,
+                            meeting_kinds: list[str] | None = None) -> list[dict]:
     query = """
         SELECT a.id, a.content, a.assignee, a.due_date, a.status,
                a.note, a.source, a.source_ref, a.extracted_at, a.meeting_id,
@@ -62,6 +65,17 @@ def fetch_open_action_items(conn: sqlite3.Connection, since: str | None) -> list
     if since:
         query += " AND COALESCE(m.held_at, a.extracted_at) >= ?"
         params.append(since)
+    if channel_ids or meeting_kinds:
+        clauses = []
+        if channel_ids:
+            placeholders = ",".join("?" * len(channel_ids))
+            clauses.append(f"a.channel_id IN ({placeholders})")
+            params.extend(channel_ids)
+        if meeting_kinds:
+            placeholders = ",".join("?" * len(meeting_kinds))
+            clauses.append(f"m.kind IN ({placeholders})")
+            params.extend(meeting_kinds)
+        query += " AND (" + " OR ".join(clauses) + ")"
     query += " ORDER BY a.extracted_at DESC NULLS LAST, a.due_date ASC NULLS LAST"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
@@ -70,6 +84,8 @@ def fetch_recent_decisions(
     conn: sqlite3.Connection,
     since: str | None,
     show_acknowledged: bool = False,
+    channel_ids: list[str] | None = None,
+    meeting_kinds: list[str] | None = None,
 ) -> list[dict]:
     query = """
         SELECT d.id, d.content, d.decided_at, d.source, d.source_ref,
@@ -85,8 +101,18 @@ def fetch_recent_decisions(
     if since:
         query += " AND d.decided_at >= ?"
         params.append(since)
+    if channel_ids or meeting_kinds:
+        clauses = []
+        if channel_ids:
+            placeholders = ",".join("?" * len(channel_ids))
+            clauses.append(f"d.channel_id IN ({placeholders})")
+            params.extend(channel_ids)
+        if meeting_kinds:
+            placeholders = ",".join("?" * len(meeting_kinds))
+            clauses.append(f"m.kind IN ({placeholders})")
+            params.extend(meeting_kinds)
+        query += " AND (" + " OR ".join(clauses) + ")"
     if show_acknowledged:
-        # 未確認を先に、確認済みを後に
         query += " ORDER BY (d.acknowledged_at IS NOT NULL), d.decided_at DESC"
     else:
         query += " ORDER BY d.decided_at DESC"
@@ -326,7 +352,7 @@ def build_report(
 # --------------------------------------------------------------------------- #
 def main() -> None:
     parser = argparse.ArgumentParser(description="pm.db → 進捗レポート・アジェンダ生成・Canvas投稿")
-    parser.add_argument("--db", default=None, help="pm.db のパス")
+    parser.add_argument("--db", default=str(DEFAULT_PM_DB), help=f"pm.db のパス（デフォルト: {DEFAULT_PM_DB}）")
     parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="投稿先 Canvas ID")
     add_since_arg(parser)
     parser.add_argument("--skip-canvas", action="store_true", help="Canvas 投稿をスキップ")
@@ -334,27 +360,30 @@ def main() -> None:
                         help="確認済み決定事項も表示する（デフォルトは非表示）")
     parser.add_argument("--show-workload", action="store_true",
                         help="担当者別負荷セクションを出力する（デフォルトは非表示）")
+    add_filter_arg(parser)
     add_dry_run_arg(parser)
     add_output_arg(parser)
     add_no_encrypt_arg(parser)
     args = parser.parse_args()
 
-    if not args.db:
-        print("[ERROR] --db オプションが未指定です。対象DBを明示してください。", file=sys.stderr)
-        print("  例: --db data/pm.db", file=sys.stderr)
-        sys.exit(1)
     db_path = Path(args.db)
     today = date.today().isoformat()
 
     log, close_log = make_logger(args.output)
 
+    channel_ids, meeting_kinds = resolve_filter_presets(args.filter)
+
     log(f"[INFO] pm.db     : {db_path}")
     log(f"[INFO] since     : {args.since or '全期間'}")
+    if channel_ids or meeting_kinds:
+        log(f"[INFO] filter    : channels={len(channel_ids)}件, meetings={meeting_kinds or '(なし)'}")
     log(f"[INFO] 生成日    : {today}")
 
     conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
-    action_items = fetch_open_action_items(conn, args.since)
-    decisions = fetch_recent_decisions(conn, args.since, show_acknowledged=args.show_acknowledged)
+    action_items = fetch_open_action_items(conn, args.since, channel_ids, meeting_kinds)
+    decisions = fetch_recent_decisions(conn, args.since,
+                                      show_acknowledged=args.show_acknowledged,
+                                      channel_ids=channel_ids, meeting_kinds=meeting_kinds)
     risk_items = detect_risk_items(action_items)
     milestone_progress = fetch_milestone_progress(conn)
     assignee_workload = fetch_assignee_workload(conn, today) if args.show_workload else []
