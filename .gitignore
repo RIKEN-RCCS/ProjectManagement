@@ -4,6 +4,7 @@ logs/
 
 # Meeting transcripts and audio (機密性2)
 meetings/
+reports/
 docs/project.md
 scripts/pm_from_slack_daily.sh
 goals.yaml

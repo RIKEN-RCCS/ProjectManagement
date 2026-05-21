@@ -221,7 +221,6 @@ def main():
             extra_terms = [line.strip() for line in _f if line.strip()]
         if extra_terms:
             extra_str = "スライド由来の固有名詞：" + "、".join(extra_terms) + "。"
-            # Whisper prompt tokenizer の上限 (224 token 程度) を粗く文字数で抑制
             max_extra_chars = max(0, 700 - len(INITIAL_PROMPT))
             extra_str = extra_str[:max_extra_chars]
             initial_prompt = INITIAL_PROMPT + extra_str
@@ -239,18 +238,24 @@ def main():
     processed_waveform, sample_rate, speech_timestamps = remove_silence(args.input_audio, sampling_rate=16000, device=None)
     chunks = chunk_audio(processed_waveform, sample_rate, speech_timestamps, chunk_length_sec=CHUNK_LENGTH)
 
+    # Whisper を先に GPU 実行し、完了後にモデルを解放してから PyAnnote をロードする。
+    # 両モデルを同時に GPU に載せると OOM になるため（GB10 Unified Memory + vLLM 共存時）。
+    processor, model = load_model(args.local, hf_token, device)
+    segments = transcribe_chunks(chunks, processor, model, device, initial_prompt=initial_prompt)
+    del processor, model
+    torch.cuda.empty_cache()
+
     print("[INFO] Running speaker diarization (PyAnnote)...")
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1",
                                         token=hf_token).to(device)
     audio_np, sr = sf.read(args.input_audio, dtype="float32", always_2d=True)
     original_waveform = torch.from_numpy(audio_np.T)  # (channels, samples)
     diarization = pipeline({"waveform": original_waveform, "sample_rate": sr})
-    # 新しい pyannote は DiarizeOutput を返す。Annotation を取り出す。
     if not hasattr(diarization, "itertracks"):
         diarization = diarization.speaker_diarization
+    del pipeline
+    torch.cuda.empty_cache()
 
-    processor, model = load_model(args.local, hf_token, device)
-    segments = transcribe_chunks(chunks, processor, model, device, initial_prompt=initial_prompt)
     labeled = assign_speaker_labels(segments, diarization)
     write_output(args.output_text, labeled)
 
