@@ -26,6 +26,7 @@ Usage:
 import argparse
 import logging
 import os
+import re
 import sys
 import threading
 
@@ -1455,7 +1456,19 @@ def _run_transcribe(respond, command):
     進捗はスレッドへの chat_postMessage で可視投稿し、
     完了・エラー通知は respond() で ephemeral 返信する。
     """
-    filename = (command.get("text") or "").strip()
+    text = (command.get("text") or "").strip()
+
+    # `consensus=N` を空白区切りトークンとして抽出（位置不問）。残りをファイル名扱い。
+    consensus_n = 1
+    consensus_match = re.search(r"(?:^|\s)consensus=(\d+)(?:\s|$)", text)
+    if consensus_match:
+        try:
+            consensus_n = max(1, int(consensus_match.group(1)))
+        except ValueError:
+            consensus_n = 1
+        text = (text[: consensus_match.start()] + " " + text[consensus_match.end():]).strip()
+
+    filename = text
     # Slack の装飾記法（*bold*, _italic_, `code`, ~strike~）や貼り付け時のゼロ幅/引用符を剥がす
     if filename:
         # 前後の装飾マーカー・引用符を剥がす
@@ -1517,7 +1530,7 @@ def _run_transcribe(respond, command):
 
     try:
         logger.info(f"[argus-transcribe] 開始: filename={filename} channel={channel_id}")
-        _run_transcribe_pipeline(bot_client, channel_id, filename, thread_ts)
+        _run_transcribe_pipeline(bot_client, channel_id, filename, thread_ts, consensus_n=consensus_n)
         logger.info(f"[argus-transcribe] 完了: filename={filename}")
         respond(
             text=f":white_check_mark: `{filename}` の議事録生成が完了しました。スレッドをご確認ください。",

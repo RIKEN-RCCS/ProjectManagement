@@ -14,14 +14,18 @@ Options:
   --model MODEL       使用するモデル名（必須）
   --think             思考モードを有効化（デフォルト: 無効）
   --output DIR        議事録の出力ディレクトリ（デフォルト: minutes）
-  --url URL           ローカルLLMのURL（RIVAULT_URL 環境変数でも可）
-  --token TOKEN       APIトークン（RIVAULT_TOKEN 環境変数でも可）
+  --url URL           ローカルLLMのURL（OPENAI_API_BASE 環境変数でも可）
+  --token TOKEN       APIトークン（OPENAI_API_KEY 環境変数でも可）
   --timeout SEC       LLM呼び出しタイムアウト秒数（デフォルト: 600）
 
 認証情報の読み込み順序:
   1. --url / --token 引数
-  2. RIVAULT_URL / RIVAULT_TOKEN 環境変数
-  3. ~/.secrets/rivault_tokens.sh の内容をパース
+  2. OPENAI_API_BASE / OPENAI_API_KEY 環境変数
+  3. デフォルト: http://localhost:8000/v1 / "dummy"
+
+ローカル LLM (vLLM gemma4) 用と RiVault Embedding (bge-m3) 用は環境変数を分離する:
+  - OPENAI_API_BASE / OPENAI_API_KEY    — vLLM gemma4（議事録生成）
+  - RIVAULT_URL / RIVAULT_TOKEN          — RiVault（embed_utils 経由で embedding 取得）
 """
 
 import argparse
@@ -175,34 +179,14 @@ Write "（未定）" ONLY when none of the above heuristics yield a name.
 # --------------------------------------------------------------------------- #
 # 認証情報の読み込み
 # --------------------------------------------------------------------------- #
-def load_rivault_tokens() -> tuple[str, str]:
-    """RIVAULT_URL と RIVAULT_TOKEN を返す。読み込み順: 環境変数 → トークンファイル"""
-    url = os.environ.get("RIVAULT_URL")
-    token = os.environ.get("RIVAULT_TOKEN")
+def load_local_llm_endpoint() -> tuple[str, str]:
+    """vLLM gemma4 のエンドポイント (URL, token) を返す。
 
-    if url and token:
-        return url, token
-
-    token_file = Path.home() / ".secrets" / "rivault_tokens.sh"
-    if token_file.exists():
-        content = token_file.read_text(encoding="utf-8")
-        for line in content.splitlines():
-            m = re.match(r'^\s*export\s+RIVAULT_URL=["\']?(.*?)["\']?\s*$', line)
-            if m:
-                url = url or m.group(1).strip()
-            m = re.match(r'^\s*export\s+RIVAULT_TOKEN=["\']?(.*?)["\']?\s*$', line)
-            if m:
-                token = token or m.group(1).strip()
-
-    if not url:
-        print("ERROR: RIVAULT_URL が設定されていません。", file=sys.stderr)
-        print("  環境変数 RIVAULT_URL を設定するか --url で指定してください。", file=sys.stderr)
-        sys.exit(1)
-    if not token:
-        print("ERROR: RIVAULT_TOKEN が設定されていません。", file=sys.stderr)
-        print("  環境変数 RIVAULT_TOKEN を設定するか --token で指定してください。", file=sys.stderr)
-        sys.exit(1)
-
+    ローカル vLLM は OPENAI_API_BASE / OPENAI_API_KEY を使う。
+    RiVault (embedding 用) との混同を避けるため RIVAULT_URL は参照しない。
+    """
+    url = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+    token = os.environ.get("OPENAI_API_KEY", "dummy")
     return url, token
 
 
@@ -344,6 +328,467 @@ def extract_from_chunk(
 
 
 # --------------------------------------------------------------------------- #
+# Self-consistency: N サンプリング + embedding クラスタリング + LLM 集約
+#   --consensus N が指定された場合のみ Stage 2 / Stage 3 で適用される
+# --------------------------------------------------------------------------- #
+CONSENSUS_SECTION_TEMPLATE = """\
+You are merging {n_drafts} independent draft summaries of the same Japanese meeting topic
+into a single canonical section.
+
+The drafts below were produced by sampling the same LLM at slightly different temperatures.
+Treat each draft as an independent witness. Your job:
+- Keep ONLY facts that appear in {min_vote} or more drafts (cross-verified majority).
+- Drop facts unique to a single draft (likely hallucination or sampling artifact).
+- When phrasing differs but the underlying fact is the same, choose the most precise wording.
+- Keep numeric figures, dates, and proper nouns EXACTLY as they appear (do not round, do not infer).
+- Output Japanese prose only. No bullet lists, no speaker attribution, no SPEAKER_XX tokens.
+- Preserve the topic title `{title}` (do not rename it).
+
+Output format (begin immediately, no preamble):
+### {title}
+
+(2〜4 段落、各段落 2〜3 文)
+
+## Drafts
+{drafts_block}
+"""
+
+
+CONSENSUS_DECISIONS_TEMPLATE = """\
+You are merging {n_drafts} independent decision lists from the same meeting into a canonical list.
+
+Rules:
+- Keep ONLY decisions supported by {min_vote} or more independent drafts.
+- A decision is the same across drafts if it refers to the same subject and outcome,
+  even if the wording differs. Merge phrasing variants into one entry.
+- Drop entries unique to a single draft.
+- Preserve numeric figures, dates, and proper nouns exactly as they appear.
+- Vary the Japanese sentence ending naturally (〜することになった / 〜と合意した /
+  〜する方針となった / 〜をキャンセルした). Do not end every line with 〜が決定された.
+- If no decision survives the vote: write a single line `（なし）`.
+- Output Japanese only. Begin immediately with `## 決定事項` — no preamble, no thinking.
+
+Output format:
+## 決定事項
+
+- （決定事項1）
+- （決定事項2）
+
+## Drafts
+{drafts_block}
+"""
+
+
+CONSENSUS_ACTIONS_TEMPLATE = """\
+You are merging {n_drafts} independent action item tables from the same meeting into a canonical table.
+
+Rules:
+- Keep ONLY action items supported by {min_vote} or more independent drafts.
+- Two rows refer to the same item if the assignee matches AND the task content is
+  semantically equivalent (even if the wording differs). Merge phrasing variants.
+- Drop rows unique to a single draft.
+- Preserve numeric figures, dates, and proper nouns exactly as they appear.
+- タスク内容: 2-3 sentences (40-80 chars each), background + deliverable.
+  Do NOT include deadline expressions in タスク内容 — those belong in 期限 only.
+- 担当者: normalize using the Participant List below; if unclear write `（未定）`.
+- If no action item survives the vote: write a single line `（なし）`.
+- Output Japanese only. Begin immediately with `## アクションアイテム` — no preamble.
+
+Output format (EXACTLY 3 columns):
+## アクションアイテム
+
+| 担当者 | タスク内容 | 期限 |
+|---|---|---|
+| ... | ... | ... |
+
+## Participant List
+{claude_md_context}
+
+## Drafts
+{drafts_block}
+"""
+
+
+def _sample_n_times(
+    prompt: str,
+    n: int,
+    *,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int,
+    think: bool,
+    max_tokens: int,
+    no_stream: bool,
+    no_chat_template_kwargs: bool,
+    base_temperature: Optional[float],
+    label: str,
+) -> list[str]:
+    """同一プロンプトを n 回サンプリングし、空でない結果のリストを返す。
+
+    各サンプルで temperature を僅かにずらしてサンプリング多様性を確保する
+    （base ± 0.1 程度の範囲）。空応答（reasoning parser の streaming 問題等）は
+    no_stream=True でリトライする。
+    """
+    base_t = base_temperature if base_temperature is not None else (0.6 if think else 0.8)
+    if n <= 1:
+        deltas = [0.0]
+    elif n == 2:
+        deltas = [-0.05, 0.05]
+    else:
+        # n=3 → -0.1, 0, +0.1 / n=5 → -0.1, -0.05, 0, +0.05, +0.1
+        step = 0.2 / (n - 1)
+        deltas = [-0.1 + step * i for i in range(n)]
+
+    drafts: list[str] = []
+    for i, d in enumerate(deltas, 1):
+        t = max(0.05, min(1.5, base_t + d))
+        print(f"[INFO] {label} サンプル {i}/{n} (temperature={t:.2f}) 生成中...", file=sys.stderr)
+        try:
+            text = call_local_llm(
+                prompt, model, base_url, api_key, timeout,
+                think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs, temperature=t,
+            )
+            if not text and not no_stream:
+                print(f"[WARN] {label} サンプル {i} が空のためリトライ（no_stream=True）", file=sys.stderr)
+                text = call_local_llm(
+                    prompt, model, base_url, api_key, timeout,
+                    think=think, max_tokens=max_tokens, no_stream=True,
+                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=t,
+                )
+        except Exception as e:
+            print(f"[WARN] {label} サンプル {i} 失敗: {e}", file=sys.stderr)
+            text = ""
+        if text and text.strip():
+            drafts.append(text)
+        else:
+            print(f"[WARN] {label} サンプル {i} は空。残りで集約します", file=sys.stderr)
+    print(f"[INFO] {label}: {len(drafts)}/{n} 件のドラフトを取得", file=sys.stderr)
+    return drafts
+
+
+def _split_sections(text: str) -> list[tuple[str, str]]:
+    """`## 議事内容` 配下を `### タイトル` で分解して [(title, body), ...] を返す。"""
+    if not text:
+        return []
+    body = text
+    # `## 議事内容` 以降を抽出（先頭の前置き除去）
+    m = re.search(r"^##\s*議事内容\s*$", body, flags=re.MULTILINE)
+    if m:
+        body = body[m.end():]
+    # `## XXX` で始まる別セクションが現れたらそこで切る
+    m = re.search(r"^##\s+(?!議事内容)\S", body, flags=re.MULTILINE)
+    if m:
+        body = body[: m.start()]
+    sections = []
+    pattern = re.compile(r"^###\s+(.+?)\s*$", flags=re.MULTILINE)
+    matches = list(pattern.finditer(body))
+    for i, mm in enumerate(matches):
+        title = mm.group(1).strip()
+        start = mm.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        section_body = body[start:end].strip()
+        if section_body:
+            sections.append((title, section_body))
+    return sections
+
+
+def _split_decisions_list(text: str) -> list[str]:
+    """`## 決定事項` 配下の箇条書き行を抽出する。"""
+    if not text:
+        return []
+    m = re.search(r"^##\s*決定事項\s*$", text, flags=re.MULTILINE)
+    if not m:
+        return []
+    body = text[m.end():]
+    # 次の `## ` で切る
+    m2 = re.search(r"^##\s+\S", body, flags=re.MULTILINE)
+    if m2:
+        body = body[: m2.start()]
+    items = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(("- ", "* ", "・")):
+            content = re.sub(r"^[-*・]\s*", "", line).strip()
+            if content and content != "（なし）":
+                items.append(content)
+    return items
+
+
+def _split_action_rows(text: str) -> list[tuple[str, str, str]]:
+    """`## アクションアイテム` のテーブル行を [(担当者, タスク内容, 期限), ...] で返す。"""
+    if not text:
+        return []
+    m = re.search(r"^##\s*アクションアイテム\s*$", text, flags=re.MULTILINE)
+    if not m:
+        return []
+    body = text[m.end():]
+    m2 = re.search(r"^##\s+\S", body, flags=re.MULTILINE)
+    if m2:
+        body = body[: m2.start()]
+    rows = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        # ヘッダ行・セパレータ行をスキップ
+        if re.match(r"^\|\s*[-:]+\s*\|", line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        # ヘッダ「担当者 | タスク内容 | 期限」をスキップ
+        if cells[0] in ("担当者", "Assignee") and "タスク" in cells[1]:
+            continue
+        assignee, task, deadline = cells[0], cells[1], cells[2]
+        if not task or task in ("（なし）", "なし"):
+            continue
+        rows.append((assignee, task, deadline))
+    return rows
+
+
+def _greedy_cluster(
+    items: list[str],
+    threshold: float,
+    *,
+    label: str,
+) -> list[list[int]]:
+    """embedding コサイン類似度に基づくグリーディクラスタリング。
+
+    items[i] に最も近い既存クラスタの中心との類似度が threshold 以上ならそのクラスタに
+    所属させ、そうでなければ新規クラスタを作る。中心はクラスタ内の embedding 平均。
+    """
+    if not items:
+        return []
+    from embed_utils import embed_batch, cosine_similarity_matrix
+    vecs = embed_batch(items)
+
+    import numpy as np
+    clusters: list[list[int]] = []
+    centers: list[np.ndarray] = []
+    for i, v in enumerate(vecs):
+        if not clusters:
+            clusters.append([i])
+            centers.append(v.copy())
+            continue
+        sims = cosine_similarity_matrix(v, np.stack(centers))
+        best = int(np.argmax(sims))
+        if float(sims[best]) >= threshold:
+            clusters[best].append(i)
+            # 中心を更新（インクリメンタル平均）
+            n_old = len(clusters[best]) - 1
+            centers[best] = (centers[best] * n_old + v) / (n_old + 1)
+        else:
+            clusters.append([i])
+            centers.append(v.copy())
+    return clusters
+
+
+def _consensus_stage2(
+    drafts: list[str],
+    *,
+    min_vote: int,
+    threshold: float,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int,
+    think: bool,
+    max_tokens: int,
+    no_stream: bool,
+    no_chat_template_kwargs: bool,
+    temperature: Optional[float],
+) -> str:
+    """Stage 2 のドラフト群を集約して `## 議事内容` 全体の Markdown を返す。"""
+    # 各ドラフトをセクションに分解
+    all_sections: list[tuple[int, str, str]] = []  # (draft_idx, title, body)
+    for di, d in enumerate(drafts):
+        for title, body in _split_sections(d):
+            all_sections.append((di, title, body))
+    if not all_sections:
+        # 集約に失敗したら最長のドラフトを返す
+        print("[WARN] Stage 2 ドラフトからセクション抽出失敗、最長ドラフトを採用", file=sys.stderr)
+        return max(drafts, key=len) if drafts else ""
+
+    # タイトル＋本文先頭でクラスタリング（タイトルだけだと曖昧なため本文も含める）
+    keys = [f"{t}\n{b[:300]}" for _, t, b in all_sections]
+    try:
+        clusters = _greedy_cluster(keys, threshold, label="Stage 2 セクション")
+    except Exception as e:
+        print(f"[ERROR] Stage 2 embedding 失敗、最長ドラフトを採用: {e}", file=sys.stderr)
+        return max(drafts, key=len) if drafts else ""
+
+    # 各クラスタ: 含むユニーク draft 数で投票
+    accepted: list[list[int]] = []
+    for cl in clusters:
+        unique_drafts = {all_sections[i][0] for i in cl}
+        if len(unique_drafts) >= min_vote:
+            accepted.append(cl)
+    if not accepted:
+        # 投票で全部切られたら閾値を緩めて再クラスタリング
+        print(f"[WARN] Stage 2: 投票閾値 {min_vote} で全クラスタ却下。閾値 {threshold:.2f} → {threshold-0.05:.2f} で再試行", file=sys.stderr)
+        clusters = _greedy_cluster(keys, max(0.5, threshold - 0.05), label="Stage 2 セクション (緩和)")
+        for cl in clusters:
+            unique_drafts = {all_sections[i][0] for i in cl}
+            if len(unique_drafts) >= min_vote:
+                accepted.append(cl)
+    if not accepted:
+        print("[WARN] Stage 2 集約: 投票通過クラスタなし、最長ドラフトを採用", file=sys.stderr)
+        return max(drafts, key=len) if drafts else ""
+
+    # 各クラスタを LLM に集約させる
+    print(f"[INFO] Stage 2 集約: {len(accepted)} クラスタを LLM に投入", file=sys.stderr)
+    merged_sections: list[str] = []
+    for ci, cl in enumerate(accepted, 1):
+        cluster_drafts = [all_sections[i] for i in cl]
+        # タイトルは出現頻度最多のものを採用
+        title_counts: dict[str, int] = {}
+        for _, t, _ in cluster_drafts:
+            title_counts[t] = title_counts.get(t, 0) + 1
+        title = max(title_counts.items(), key=lambda x: x[1])[0]
+        drafts_block = "\n\n".join(
+            f"### Draft {idx + 1}\n{cluster_drafts[idx][2]}"
+            for idx in range(len(cluster_drafts))
+        )
+        prompt = CONSENSUS_SECTION_TEMPLATE.format(
+            n_drafts=len(cluster_drafts),
+            min_vote=min_vote,
+            title=title,
+            drafts_block=drafts_block,
+        )
+        print(f"[INFO]   クラスタ {ci}/{len(accepted)}: '{title}' ({len(cluster_drafts)} ドラフト)", file=sys.stderr)
+        try:
+            merged = call_local_llm(
+                prompt, model, base_url, api_key, timeout,
+                think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            )
+        except Exception as e:
+            print(f"[WARN] Stage 2 集約失敗（'{title}'）: {e}、最長ドラフトを採用", file=sys.stderr)
+            longest = max(cluster_drafts, key=lambda x: len(x[2]))
+            merged = f"### {longest[1]}\n\n{longest[2]}"
+        merged = merged.strip()
+        if not merged.startswith("### "):
+            merged = f"### {title}\n\n{merged}"
+        merged_sections.append(merged)
+    return "## 議事内容\n\n" + "\n\n".join(merged_sections)
+
+
+def _consensus_stage3(
+    drafts: list[str],
+    *,
+    min_vote: int,
+    threshold: float,
+    claude_md_context: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int,
+    think: bool,
+    max_tokens: int,
+    no_stream: bool,
+    no_chat_template_kwargs: bool,
+    temperature: Optional[float],
+) -> str:
+    """Stage 3 のドラフト群を集約して `## 決定事項` + `## アクションアイテム` を返す。"""
+    # 決定事項とアクションアイテムをドラフトごとに分離
+    all_decisions: list[tuple[int, str]] = []
+    all_actions: list[tuple[int, str, str, str]] = []
+    for di, d in enumerate(drafts):
+        for item in _split_decisions_list(d):
+            all_decisions.append((di, item))
+        for assignee, task, deadline in _split_action_rows(d):
+            all_actions.append((di, assignee, task, deadline))
+
+    # --- 決定事項の集約 --- #
+    if all_decisions:
+        keys = [item for _, item in all_decisions]
+        try:
+            clusters = _greedy_cluster(keys, threshold, label="Stage 3 決定事項")
+        except Exception as e:
+            print(f"[ERROR] Stage 3 決定事項 embedding 失敗、最長ドラフトを採用: {e}", file=sys.stderr)
+            return max(drafts, key=len) if drafts else ""
+        accepted = [cl for cl in clusters
+                    if len({all_decisions[i][0] for i in cl}) >= min_vote]
+        if accepted:
+            drafts_block_lines = []
+            for ci, cl in enumerate(accepted, 1):
+                bullets = "\n".join(f"- {all_decisions[i][1]}" for i in cl)
+                drafts_block_lines.append(f"### Cluster {ci}\n{bullets}")
+            drafts_block = "\n\n".join(drafts_block_lines)
+            prompt = CONSENSUS_DECISIONS_TEMPLATE.format(
+                n_drafts=len(drafts), min_vote=min_vote, drafts_block=drafts_block,
+            )
+            print(f"[INFO] Stage 3 決定事項集約: {len(accepted)} クラスタを LLM に投入", file=sys.stderr)
+            try:
+                decisions_md = call_local_llm(
+                    prompt, model, base_url, api_key, timeout,
+                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+                )
+            except Exception as e:
+                print(f"[WARN] Stage 3 決定事項集約失敗: {e}、最長ドラフトを採用", file=sys.stderr)
+                decisions_md = ""
+        else:
+            print(f"[WARN] Stage 3 決定事項: 投票閾値 {min_vote} 通過なし → 「（なし）」", file=sys.stderr)
+            decisions_md = "## 決定事項\n\n（なし）"
+    else:
+        decisions_md = "## 決定事項\n\n（なし）"
+
+    # --- アクションアイテムの集約 --- #
+    if all_actions:
+        # 担当者を embedding キーに混ぜて、同一担当者の似た内容だけクラスタ化
+        keys = [f"[{a}] {t}" for _, a, t, _ in all_actions]
+        try:
+            clusters = _greedy_cluster(keys, threshold, label="Stage 3 AI")
+        except Exception as e:
+            print(f"[ERROR] Stage 3 AI embedding 失敗、最長ドラフトを採用: {e}", file=sys.stderr)
+            return max(drafts, key=len) if drafts else ""
+        accepted = [cl for cl in clusters
+                    if len({all_actions[i][0] for i in cl}) >= min_vote]
+        if accepted:
+            drafts_block_lines = []
+            for ci, cl in enumerate(accepted, 1):
+                lines = ["| 担当者 | タスク内容 | 期限 |", "|---|---|---|"]
+                for i in cl:
+                    _, a, t, dl = all_actions[i]
+                    lines.append(f"| {a} | {t} | {dl} |")
+                drafts_block_lines.append(f"### Cluster {ci}\n" + "\n".join(lines))
+            drafts_block = "\n\n".join(drafts_block_lines)
+            prompt = CONSENSUS_ACTIONS_TEMPLATE.format(
+                n_drafts=len(drafts), min_vote=min_vote,
+                claude_md_context=claude_md_context, drafts_block=drafts_block,
+            )
+            print(f"[INFO] Stage 3 AI集約: {len(accepted)} クラスタを LLM に投入", file=sys.stderr)
+            try:
+                actions_md = call_local_llm(
+                    prompt, model, base_url, api_key, timeout,
+                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+                )
+            except Exception as e:
+                print(f"[WARN] Stage 3 AI集約失敗: {e}", file=sys.stderr)
+                actions_md = "## アクションアイテム\n\n（なし）"
+        else:
+            print(f"[WARN] Stage 3 AI: 投票閾値 {min_vote} 通過なし → 「（なし）」", file=sys.stderr)
+            actions_md = "## アクションアイテム\n\n（なし）"
+    else:
+        actions_md = "## アクションアイテム\n\n（なし）"
+
+    # 決定事項と AI を結合（既存の単発出力と同じ並び）
+    decisions_md = decisions_md.strip() if decisions_md else "## 決定事項\n\n（なし）"
+    actions_md = actions_md.strip() if actions_md else "## アクションアイテム\n\n（なし）"
+    # decisions_md に既に AI セクションが混入している場合は削る
+    m = re.search(r"^##\s*アクションアイテム", decisions_md, flags=re.MULTILINE)
+    if m:
+        decisions_md = decisions_md[: m.start()].strip()
+    return decisions_md + "\n\n" + actions_md
+
+
+# --------------------------------------------------------------------------- #
 # 議事録生成
 # --------------------------------------------------------------------------- #
 def generate_minutes(
@@ -363,6 +808,9 @@ def generate_minutes(
     temperature: Optional[float] = None,
     vtt_path: Optional[str] = None,
     slide_context: Optional[str] = None,
+    consensus_n: int = 1,
+    consensus_threshold: float = 0.78,
+    consensus_min_vote: Optional[int] = None,
 ) -> str:
     """文字起こしファイルから議事録を生成してファイルに保存する。
 
@@ -371,7 +819,19 @@ def generate_minutes(
 
     vtt_path が指定された場合は Stage 3 で Zoom VTT の話者帰属情報を付加して
     担当者特定の精度を向上させる。
+
+    consensus_n >= 2 の場合は Stage 2 / Stage 3 をそれぞれ N 回サンプリングし
+    embedding クラスタリング + LLM 集約で表現ブレを吸収する（self-consistency）。
+    consensus_n == 1（デフォルト）は完全に従来動作。
     """
+    consensus_enabled = consensus_n is not None and consensus_n >= 2
+    if consensus_enabled and consensus_min_vote is None:
+        consensus_min_vote = (consensus_n + 1) // 2  # ceil(N/2)
+    if consensus_enabled:
+        print(
+            f"[INFO] Self-consistency 有効: N={consensus_n}, threshold={consensus_threshold}, "
+            f"min_vote={consensus_min_vote}"
+        )
     print(f"[INFO] 文字起こしファイルを読み込み中: {transcript_path}")
     segments = parse_transcript(transcript_path)
     if not segments and from_combined is None:
@@ -412,11 +872,29 @@ def generate_minutes(
             transcript=combined,
             slide_context_block=slide_context_block,
         )
-        minutes_text = call_local_llm(
-            prompt, model, base_url, api_key, timeout,
-            think=think, max_tokens=max_tokens, no_stream=no_stream,
-            no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
-        )
+        if consensus_enabled:
+            drafts = _sample_n_times(
+                prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
+                timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs,
+                base_temperature=temperature, label="Stage 2 (from-combined)",
+            )
+            if len(drafts) >= 2:
+                minutes_text = _consensus_stage2(
+                    drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
+                    model=model, base_url=base_url, api_key=api_key, timeout=timeout,
+                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+                )
+            else:
+                print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
+                minutes_text = drafts[0] if drafts else ""
+        else:
+            minutes_text = call_local_llm(
+                prompt, model, base_url, api_key, timeout,
+                think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            )
         input_text = combined
 
     elif multi_stage:
@@ -477,11 +955,29 @@ def generate_minutes(
             transcript=combined,
             slide_context_block=slide_context_block,
         )
-        minutes_text = call_local_llm(
-            prompt, model, base_url, api_key, timeout,
-            think=think, max_tokens=max_tokens, no_stream=no_stream,
-            no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
-        )
+        if consensus_enabled:
+            drafts = _sample_n_times(
+                prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
+                timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs,
+                base_temperature=temperature, label="Stage 2 (multi-stage)",
+            )
+            if len(drafts) >= 2:
+                minutes_text = _consensus_stage2(
+                    drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
+                    model=model, base_url=base_url, api_key=api_key, timeout=timeout,
+                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+                )
+            else:
+                print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
+                minutes_text = drafts[0] if drafts else ""
+        else:
+            minutes_text = call_local_llm(
+                prompt, model, base_url, api_key, timeout,
+                think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            )
         input_text = combined
     else:
         # ------------------------------------------------------------------ #
@@ -494,11 +990,29 @@ def generate_minutes(
         )
         think_label = "有効" if think else "無効"
         print(f"[INFO] ローカルLLM（{model}）で議事録を生成中... （思考モード: {think_label}）")
-        minutes_text = call_local_llm(
-            prompt, model, base_url, api_key, timeout,
-            think=think, max_tokens=max_tokens, no_stream=no_stream,
-            no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
-        )
+        if consensus_enabled:
+            drafts = _sample_n_times(
+                prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
+                timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs,
+                base_temperature=temperature, label="Stage 2 (single-pass)",
+            )
+            if len(drafts) >= 2:
+                minutes_text = _consensus_stage2(
+                    drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
+                    model=model, base_url=base_url, api_key=api_key, timeout=timeout,
+                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+                )
+            else:
+                print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
+                minutes_text = drafts[0] if drafts else ""
+        else:
+            minutes_text = call_local_llm(
+                prompt, model, base_url, api_key, timeout,
+                think=think, max_tokens=max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            )
         input_text = transcript_text
 
     # ------------------------------------------------------------------ #
@@ -539,19 +1053,38 @@ def generate_minutes(
     decisions_max_tokens = max_tokens if (think or no_chat_template_kwargs) else 1024
     # Stage 3 は入力が大きいため timeout を 2 倍にして余裕を持たせる
     decisions_timeout = timeout * 2
-    decisions_text = call_local_llm(
-        decisions_prompt, model, base_url, api_key, decisions_timeout,
-        think=think, max_tokens=decisions_max_tokens, no_stream=no_stream,
-        no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
-    )
-    # 空の場合は no_stream でリトライ（reasoning parser の streaming 問題に対応）
-    if not decisions_text and not no_stream:
-        print("[WARN] 決定事項が空のためリトライ（no_stream=True）...")
+    if consensus_enabled:
+        drafts = _sample_n_times(
+            decisions_prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
+            timeout=decisions_timeout, think=think, max_tokens=decisions_max_tokens,
+            no_stream=no_stream, no_chat_template_kwargs=no_chat_template_kwargs,
+            base_temperature=temperature, label="Stage 3",
+        )
+        if len(drafts) >= 2:
+            decisions_text = _consensus_stage3(
+                drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
+                claude_md_context=claude_md_context,
+                model=model, base_url=base_url, api_key=api_key, timeout=decisions_timeout,
+                think=think, max_tokens=decisions_max_tokens, no_stream=no_stream,
+                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            )
+        else:
+            print("[WARN] Stage 3 ドラフトが不足、単発フォールバック", file=sys.stderr)
+            decisions_text = drafts[0] if drafts else ""
+    else:
         decisions_text = call_local_llm(
             decisions_prompt, model, base_url, api_key, decisions_timeout,
-            think=think, max_tokens=decisions_max_tokens, no_stream=True,
+            think=think, max_tokens=decisions_max_tokens, no_stream=no_stream,
             no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
         )
+        # 空の場合は no_stream でリトライ（reasoning parser の streaming 問題に対応）
+        if not decisions_text and not no_stream:
+            print("[WARN] 決定事項が空のためリトライ（no_stream=True）...")
+            decisions_text = call_local_llm(
+                decisions_prompt, model, base_url, api_key, decisions_timeout,
+                think=think, max_tokens=decisions_max_tokens, no_stream=True,
+                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            )
     # 決定事項のスクラッチパッド除去
     for marker in ("## 決定事項\n\n", "## 決定事項\n"):
         idx = decisions_text.find(marker)
@@ -627,8 +1160,8 @@ def main() -> int:
         dest="no_chat_template_kwargs",
         help="chat_template_kwargs を送信しない（常時 reasoning モデル向け: Qwen3-Swallow 等）",
     )
-    parser.add_argument("--url", default=None, help="ローカルLLMのURL（RIVAULT_URL 環境変数でも可）")
-    parser.add_argument("--token", default=None, help="APIトークン（RIVAULT_TOKEN 環境変数でも可）")
+    parser.add_argument("--url", default=None, help="ローカルLLMのURL（OPENAI_API_BASE 環境変数でも可）")
+    parser.add_argument("--token", default=None, help="APIトークン（OPENAI_API_KEY 環境変数でも可）")
     parser.add_argument("--timeout", type=int, default=600, help="LLM呼び出しタイムアウト秒数（デフォルト: 600）")
     parser.add_argument("--max-tokens", type=int, default=8192, help="最大出力トークン数（デフォルト: 8192）")
     parser.add_argument("--multi-stage", action="store_true", help="マルチステージ（分割→抽出→統合）モードを有効化")
@@ -655,18 +1188,42 @@ def main() -> int:
         help="スライドOCR から得た文脈テキスト（slide_ocr.py の --context-out 出力）。"
              "Stage 1/2/3 プロンプトに同梱して固有名詞の誤変換を補正する",
     )
+    parser.add_argument(
+        "--consensus",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Self-consistency サンプリング数。N>=2 で Stage 2 / Stage 3 を N 回サンプリング → "
+             "embedding クラスタリング + LLM 集約で表現ブレを吸収する。デフォルト 1 (従来動作)。"
+             "コストは ~5-8x になるため重要会議のみ推奨",
+    )
+    parser.add_argument(
+        "--consensus-threshold",
+        type=float,
+        default=0.78,
+        metavar="FLOAT",
+        help="Self-consistency クラスタリングのコサイン類似度閾値（デフォルト: 0.78）",
+    )
+    parser.add_argument(
+        "--consensus-min-vote",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Self-consistency クラスタ採用に必要な最小独立サンプル数（デフォルト: ceil(N/2)）",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.transcript):
         print(f"[ERROR] ファイルが見つかりません: {args.transcript}", file=sys.stderr)
         return 1
 
-    # 認証情報の読み込み（引数 > 環境変数 > トークンファイル）
+    # 認証情報: vLLM gemma4 (議事録生成) は OPENAI_API_BASE / OPENAI_API_KEY を使う。
+    # RiVault (embed_utils 経由の embedding) は RIVAULT_URL / RIVAULT_TOKEN をそのまま使う。
     if args.url:
-        os.environ["RIVAULT_URL"] = args.url
+        os.environ["OPENAI_API_BASE"] = args.url
     if args.token:
-        os.environ["RIVAULT_TOKEN"] = args.token
-    base_url, api_key = load_rivault_tokens()
+        os.environ["OPENAI_API_KEY"] = args.token
+    base_url, api_key = load_local_llm_endpoint()
 
     if not args.model:
         args.model = detect_vllm_model(base_url)
@@ -687,6 +1244,8 @@ def main() -> int:
         print(f"[INFO] VTT ファイル  : {args.vtt}")
     if args.slide_context:
         print(f"[INFO] スライド文脈  : {args.slide_context}")
+    if args.consensus and args.consensus >= 2:
+        print(f"[INFO] consensus    : N={args.consensus}, threshold={args.consensus_threshold}")
     print(f"[INFO] LLM URL     : {base_url}")
 
     try:
@@ -702,6 +1261,9 @@ def main() -> int:
             slide_context=(Path(args.slide_context).read_text(encoding="utf-8")
                            if args.slide_context and Path(args.slide_context).exists()
                            else None),
+            consensus_n=args.consensus,
+            consensus_threshold=args.consensus_threshold,
+            consensus_min_vote=args.consensus_min_vote,
         )
         print(f"[完了] {output_path}")
         return 0

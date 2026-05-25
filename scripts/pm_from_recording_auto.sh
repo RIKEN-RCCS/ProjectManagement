@@ -20,6 +20,8 @@
 set -euo pipefail
 
 . ~/.secrets/hf_tokens.sh
+# RiVault トークン（Self-consistency の embedding 取得に必要）
+[ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT=/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement
@@ -32,9 +34,11 @@ VENV_PYTHON="$HOME/.venv_$(uname -m)/bin/python3"
 # 引数解析
 # --------------------------------------------------------------------------- #
 SLACK_CHANNEL=""
+CONSENSUS_N=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -c|--channel) SLACK_CHANNEL="$2"; shift 2 ;;
+        --consensus)  CONSENSUS_N="$2"; shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -238,11 +242,16 @@ declare -A SUCCEEDED_MEETINGS=()
 
 for i in "${!BATCH_FILES[@]}"; do
     log "[RUN] ${BATCH_FILES[$i]} → meeting=${BATCH_NAMES[$i]}, held_at=${BATCH_HELD_AT[$i]}, db=$(basename "${BATCH_DBS[$i]}")"
+    CONSENSUS_OPT=()
+    if [[ -n "$CONSENSUS_N" ]]; then
+        CONSENSUS_OPT=(--consensus "$CONSENSUS_N")
+    fi
     bash "$SCRIPT_DIR/pm_from_recording.sh" \
         "${BATCH_FILES[$i]}" \
         --held-at "${BATCH_HELD_AT[$i]}" \
         --meeting-name "${BATCH_NAMES[$i]}" \
         --db "${BATCH_DBS[$i]}" \
+        "${CONSENSUS_OPT[@]}" \
         2>&1 | tee -a "$LOG_FILE"
     if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
         processed=$((processed + 1))

@@ -15,6 +15,7 @@ config.py への依存を除去し、PM側の環境変数体系（OPENAI_API_BAS
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -113,29 +114,39 @@ def download_audio(client, channel_id, filename,
     return save_path
 
 
-def download_vtt(client, channel_id, audio_filename,
+def download_vtt(client, channel_id, audio_filename, thread_ts=None,
                  max_retries: int = 6, retry_delay: float = 10.0):
     """音声ファイルと同名の .vtt をチャンネルから検索・ダウンロードする。見つからなければ None。
 
-    検索順: {stem}.transcript.vtt → {stem}.vtt → {base_name}.transcript {paren}.vtt
-    括弧を含むファイル名に対応（例: "Recording (1).m4a" → "Recording.transcript (1).vtt"）
-    VTT ファイルは音声後に別途アップロードされる可能性があるため、リトライに対応
+    検索順:
+      1) {stem}.transcript.vtt / {stem}.vtt
+      2) 解像度サフィックス (_3840x2160 等) を剥がした stem
+      3) ブラウザ重複DLサフィックス ((1), (12) 等) を剥がした stem
+      4) {base_name}.transcript {paren}.vtt / {base_name}{paren}.transcript.vtt
+         （例: "Recording (1).m4a" → "Recording.transcript (1).vtt"）
+
+    VTT ファイルは音声後に別途アップロードされる可能性があるため、リトライに対応。
+    未検出時、thread_ts が指定されていればスレッドに警告を投稿する。
     """
     import re
 
     stem = Path(audio_filename).stem
-    vtt_candidates = [f"{stem}.transcript.vtt", f"{stem}.vtt"]
 
-    # 解像度サフィックス（例: _3840x2160, _1920x1080）を剥がした stem も候補に加える
+    # stem の派生バリエーションを生成（重複は除外）
     stem_nores = re.sub(r"_\d+x\d+$", "", stem)
-    if stem_nores != stem:
-        vtt_candidates.extend([
-            f"{stem_nores}.transcript.vtt",
-            f"{stem_nores}.vtt",
-        ])
+    stem_nodup = re.sub(r" ?\(\d+\)$", "", stem)
+    stem_bare = re.sub(r" ?\(\d+\)$", "", stem_nores)
+    stem_variants = []
+    for s in (stem, stem_nores, stem_nodup, stem_bare):
+        if s and s not in stem_variants:
+            stem_variants.append(s)
 
-    # 括弧を含むファイル名の場合、括弧部分を分離して追加パターンを生成
-    match = re.match(r"^(.+?)\s*(\([^)]*\))$", stem)
+    vtt_candidates = []
+    for s in stem_variants:
+        vtt_candidates.extend([f"{s}.transcript.vtt", f"{s}.vtt"])
+
+    # 括弧を含むファイル名の場合、Zoom の "{base}.transcript (N).vtt" 形式にも対応
+    match = re.match(r"^(.+?)\s*(\(\d+\))$", stem)
     if match:
         base_name, paren = match.groups()
         vtt_candidates.extend([
@@ -168,6 +179,16 @@ def download_vtt(client, channel_id, audio_filename,
                 time.sleep(retry_delay)
 
         logger.info(f"VTT ファイルはチャンネルに存在しません（検索: {', '.join(vtt_candidates[:2])}、{max_retries}回試行）")
+        if thread_ts is not None:
+            try:
+                _post(
+                    client, channel_id, thread_ts,
+                    f":warning: VTT ファイルが見つかりませんでした（`{audio_filename}`）。"
+                    f"Whisper のみで担当者を推定します。\n"
+                    f"検索した stem: {', '.join(stem_variants)}",
+                )
+            except Exception as e:
+                logger.warning(f"VTT 未検出通知の投稿に失敗: {e}")
         return None
     except Exception as e:
         logger.warning(f"VTT ダウンロードでエラー（スキップ）: {e}")
@@ -274,27 +295,58 @@ python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' {extr
     env = os.environ.copy()
     env["SINGULARITY_BIND"] = "/lvs0"
 
-    output_lines = []
-    try:
-        proc = subprocess.Popen(
-            ["singularity", "run", "--nv", str(SIF_FILE), "sh", str(run_sh)],
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        for line in proc.stdout:
-            line = line.rstrip()
-            logger.info("[whisper] %s", line)
-            output_lines.append(line)
-        proc.wait(timeout=7200)
+    # GPU OOM は再実行で成功することが多い（vLLM 等の他プロセスのメモリ占有が変動するため）。
+    # OOM パターンを検出した場合のみリトライする。
+    max_retries = int(os.environ.get("WHISPER_MAX_RETRIES", "3"))
+    retry_sleep = int(os.environ.get("WHISPER_RETRY_SLEEP", "30"))
+    oom_pattern = re.compile(
+        r"out of memory|CUDA out of memory|OutOfMemoryError|CUDA error: out of memory",
+        re.IGNORECASE,
+    )
 
-        if proc.returncode != 0:
-            tail = "\n".join(output_lines[-50:])
+    last_exit = 1
+    last_tail = ""
+    try:
+        for attempt in range(1, max_retries + 1):
+            logger.info(f"Whisper 試行 {attempt} / {max_retries}")
+            output_lines = []
+            proc = subprocess.Popen(
+                ["singularity", "run", "--nv", str(SIF_FILE), "sh", str(run_sh)],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                line = line.rstrip()
+                logger.info("[whisper] %s", line)
+                output_lines.append(line)
+            proc.wait(timeout=7200)
+
+            last_exit = proc.returncode
+            last_tail = "\n".join(output_lines[-50:])
+            if last_exit == 0:
+                break
+
+            joined = "\n".join(output_lines[-200:])
+            is_oom = bool(oom_pattern.search(joined)) or last_exit == 137
+            if is_oom and attempt < max_retries:
+                logger.warning(
+                    f"OOM 検出 (exit={last_exit})。{retry_sleep}s 待機後にリトライします"
+                )
+                time.sleep(retry_sleep)
+                continue
+            if is_oom:
+                logger.error(f"OOM のため {max_retries} 回リトライしましたが成功しませんでした")
+            else:
+                logger.error(f"OOM 以外の失敗 (exit={last_exit})。リトライしません")
+            break
+
+        if last_exit != 0:
             raise RuntimeError(
-                f"Whisperエラー (exit={proc.returncode}):\n"
-                f"```{tail[-2000:]}```"
+                f"Whisperエラー (exit={last_exit}):\n"
+                f"```{last_tail[-2000:]}```"
             )
     finally:
         run_sh.unlink(missing_ok=True)
@@ -305,8 +357,13 @@ python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' {extr
 
 
 def run_minutes(transcript_path, client, channel_id, thread_ts,
-                vtt_path=None, slide_context_path=None):
-    """generate_minutes_local.py をコンテナ外のPythonで実行し、議事録パスを返す。"""
+                vtt_path=None, slide_context_path=None, consensus_n=1):
+    """generate_minutes_local.py をコンテナ外のPythonで実行し、議事録パスを返す。
+
+    consensus_n >= 2 の場合は --consensus N を渡して self-consistency サンプリング
+    を有効化する（Stage 2 / Stage 3 を N 回サンプリング → embedding クラスタリング
+    + LLM 集約）。
+    """
     audio_save_dir = _get_audio_save_dir()
     vllm_api_base = _get_vllm_api_base()
     try:
@@ -330,6 +387,8 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
         cmd.extend(["--vtt", str(vtt_path)])
     if slide_context_path:
         cmd.extend(["--slide-context", str(slide_context_path)])
+    if consensus_n and consensus_n >= 2:
+        cmd.extend(["--consensus", str(consensus_n)])
 
     proc = subprocess.Popen(
         cmd,
@@ -408,8 +467,11 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
     return minutes_path
 
 
-def run_pipeline(client, channel_id, filename, thread_ts):
-    """ダウンロード → 文字起こし → 議事録生成 → Slack投稿 の全体パイプライン。"""
+def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=1):
+    """ダウンロード → 文字起こし → 議事録生成 → Slack投稿 の全体パイプライン。
+
+    consensus_n >= 2 の場合は議事録生成を self-consistency モードで実行する。
+    """
     audio_path = None
     transcript_path = None
     vtt_path = None
@@ -417,13 +479,20 @@ def run_pipeline(client, channel_id, filename, thread_ts):
         audio_path = download_audio(client, channel_id, filename)
         file_size_mb = audio_path.stat().st_size / (1024 * 1024)
 
-        vtt_path = download_vtt(client, channel_id, filename)
+        vtt_path = download_vtt(client, channel_id, filename, thread_ts=thread_ts)
         vtt_msg = ""
         if vtt_path:
             vtt_msg = f"\nVTT ファイル検出: `{vtt_path.name}`（話者情報を議事録に活用します）"
 
+        consensus_msg = ""
+        if consensus_n and consensus_n >= 2:
+            consensus_msg = (
+                f"\n:repeat: Self-consistency 有効: N={consensus_n}"
+                f"（生成時間が ~5-8x になります）"
+            )
+
         _post(client, channel_id, thread_ts,
-              f"ダウンロード完了: `{filename}` ({file_size_mb:.1f} MB){vtt_msg}\n"
+              f"ダウンロード完了: `{filename}` ({file_size_mb:.1f} MB){vtt_msg}{consensus_msg}\n"
               f"文字起こしを開始します...")
 
         slide_context_path, terminology_path = run_slide_ocr(audio_path)
@@ -438,7 +507,8 @@ def run_pipeline(client, channel_id, filename, thread_ts):
 
         minutes_path = run_minutes(transcript_path, client, channel_id, thread_ts,
                                    vtt_path=vtt_path,
-                                   slide_context_path=slide_context_path)
+                                   slide_context_path=slide_context_path,
+                                   consensus_n=consensus_n)
 
         client.files_upload_v2(
             channel=channel_id,

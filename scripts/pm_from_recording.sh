@@ -17,6 +17,7 @@
 #   --scene-threshold N  ffmpeg scene detect 閾値（デフォルト: 0.25）
 #   --max-frames N       OCR に渡すフレーム数上限。超過時は時系列に均等間引き（デフォルト: 200）
 #   --ocr-workers N      OCR 並列ワーカー数（デフォルト: 8）
+#   --consensus N        Self-consistency サンプリング数（N>=2 で表現ブレ吸収。デフォルト 1 = 従来動作）
 #
 # 例:
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
@@ -61,6 +62,7 @@ SLIDE_OCR=1
 SCENE_THRESHOLD="0.25"
 MAX_FRAMES="200"
 OCR_WORKERS="8"
+CONSENSUS_N="1"
 FILES=()
 
 while [[ $# -gt 0 ]]; do
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --scene-threshold) SCENE_THRESHOLD="$2"; shift 2 ;;
     --max-frames)   MAX_FRAMES="$2"; shift 2 ;;
     --ocr-workers)  OCR_WORKERS="$2"; shift 2 ;;
+    --consensus)    CONSENSUS_N="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
       exit 0 ;;
@@ -101,6 +104,8 @@ mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 . ~/.secrets/hf_tokens.sh
+# RiVault トークン（Self-consistency の embedding 取得に必要）
+[ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
 
 SUCCESS=0
 FAIL=0
@@ -173,10 +178,38 @@ ffprobe -v error -show_format -show_streams -i $WAV_FILE
 python3 $WHISPER_VAD $WAV_FILE $BASENAME.md $WHISPER_EXTRA_OPT
 EOF
 
-  time singularity run --nv "$SIFFILE1" sh "$WORKDIR/run.sh"
-  STATUS=$?
+  # GPU OOM は再実行で成功することが多い（vLLM 等の他プロセスのメモリ占有が変動するため）。
+  # OOM パターンを検出した場合のみリトライする。コード起因の失敗をリトライしないように
+  # OOM 以外の失敗は即座に中断する。
+  MAX_RETRIES="${WHISPER_MAX_RETRIES:-3}"
+  RETRY_SLEEP="${WHISPER_RETRY_SLEEP:-30}"
+  RUN_LOG="$WORKDIR/whisper_run.log"
+  STATUS=1
+  for ((attempt = 1; attempt <= MAX_RETRIES; attempt++)); do
+    echo "[INFO] Whisper 試行 $attempt / $MAX_RETRIES"
+    set +e
+    time singularity run --nv "$SIFFILE1" sh "$WORKDIR/run.sh" 2>&1 | tee "$RUN_LOG"
+    STATUS=${PIPESTATUS[0]}
+    set -e
+    if [[ $STATUS -eq 0 ]]; then
+      break
+    fi
+    if grep -qE "out of memory|CUDA out of memory|OutOfMemoryError|CUDA error: out of memory" "$RUN_LOG" \
+       || [[ $STATUS -eq 137 ]]; then
+      if [[ $attempt -lt $MAX_RETRIES ]]; then
+        echo "[WARN] OOM 検出 (exit=$STATUS)。${RETRY_SLEEP}s 待機後にリトライします"
+        sleep "$RETRY_SLEEP"
+        continue
+      else
+        echo "[ERROR] OOM のため $MAX_RETRIES 回リトライしましたが成功しませんでした"
+      fi
+    else
+      echo "[ERROR] OOM 以外の失敗 (exit=$STATUS)。リトライしません"
+    fi
+    break
+  done
 
-  rm -f "$TMP_FILE" "$WAV_FILE" "$WORKDIR/run.sh"
+  rm -f "$TMP_FILE" "$WAV_FILE" "$WORKDIR/run.sh" "$RUN_LOG"
 
   if [[ $STATUS -ne 0 ]]; then
     echo "失敗 (exit=$STATUS): $INPUT_ABS"
@@ -212,8 +245,11 @@ EOF
   fi
 
   # --------------------------------------------------------------------------- #
-  # VTT ファイルの検出（--vtt 指定 > {stem}.transcript.vtt > {stem}.vtt）
-  # 例: 2026-04-28_Leader_Meeting.m4a → .transcript.vtt → .vtt の順で検索
+  # VTT ファイルの検出
+  #   優先度: --vtt 指定 > {stem}.transcript.vtt > {stem}.vtt
+  #   stem の派生: 元 stem / 解像度サフィックス剥がし (_3840x2160 等) /
+  #               ブラウザ重複DLサフィックス剥がし ( (1), (12) 等) / 両方剥がし
+  #   さらに Zoom が ".transcript (N).vtt" の形で生成するパターンにも対応
   # --------------------------------------------------------------------------- #
   VTT_FILE=""
   if [[ -n "$VTT_FILE_ARG" ]]; then
@@ -226,18 +262,36 @@ EOF
   else
     INPUT_DIR=$(dirname "$INPUT_ABS")
     INPUT_STEM=$(basename "$INPUT_ABS" | sed 's/\.[^.]*$//')
-    # 解像度サフィックス（例: _3840x2160, _1920x1080）を剥がした stem も候補に加える
     INPUT_STEM_NORES=$(echo "$INPUT_STEM" | sed -E 's/_[0-9]+x[0-9]+$//')
-    VTT_CANDIDATES=(
-        "$INPUT_DIR/${INPUT_STEM}.transcript.vtt" "$DATA_DIR/${INPUT_STEM}.transcript.vtt"
-        "$INPUT_DIR/${INPUT_STEM}.vtt"            "$DATA_DIR/${INPUT_STEM}.vtt"
-    )
-    if [[ "$INPUT_STEM_NORES" != "$INPUT_STEM" ]]; then
+    INPUT_STEM_NODUP=$(echo "$INPUT_STEM" | sed -E 's/ ?\([0-9]+\)$//')
+    INPUT_STEM_BARE=$(echo "$INPUT_STEM_NORES" | sed -E 's/ ?\([0-9]+\)$//')
+
+    declare -A SEEN_STEMS=()
+    STEM_CANDIDATES=()
+    for s in "$INPUT_STEM" "$INPUT_STEM_NORES" "$INPUT_STEM_NODUP" "$INPUT_STEM_BARE"; do
+        if [[ -n "$s" && -z "${SEEN_STEMS[$s]:-}" ]]; then
+            SEEN_STEMS[$s]=1
+            STEM_CANDIDATES+=("$s")
+        fi
+    done
+
+    VTT_CANDIDATES=()
+    for stem in "${STEM_CANDIDATES[@]}"; do
         VTT_CANDIDATES+=(
-            "$INPUT_DIR/${INPUT_STEM_NORES}.transcript.vtt" "$DATA_DIR/${INPUT_STEM_NORES}.transcript.vtt"
-            "$INPUT_DIR/${INPUT_STEM_NORES}.vtt"            "$DATA_DIR/${INPUT_STEM_NORES}.vtt"
+            "$INPUT_DIR/${stem}.transcript.vtt" "$DATA_DIR/${stem}.transcript.vtt"
+            "$INPUT_DIR/${stem}.vtt"            "$DATA_DIR/${stem}.vtt"
+        )
+    done
+    # Zoom が "Recording (1).m4a" に対し "Recording.transcript (1).vtt" を生成するパターン
+    if [[ "$INPUT_STEM" =~ ^(.+)\ (\([0-9]+\))$ ]]; then
+        BASE="${BASH_REMATCH[1]}"
+        PAREN="${BASH_REMATCH[2]}"
+        VTT_CANDIDATES+=(
+            "$INPUT_DIR/${BASE}.transcript ${PAREN}.vtt" "$DATA_DIR/${BASE}.transcript ${PAREN}.vtt"
+            "$INPUT_DIR/${BASE}.transcript${PAREN}.vtt"  "$DATA_DIR/${BASE}.transcript${PAREN}.vtt"
         )
     fi
+
     for vtt_candidate in "${VTT_CANDIDATES[@]}"; do
       if [[ -f "$vtt_candidate" ]]; then
         VTT_FILE="$vtt_candidate"
@@ -246,7 +300,9 @@ EOF
       fi
     done
     if [[ -z "$VTT_FILE" ]]; then
-      echo "[INFO] VTT ファイルなし（Whisper のみで担当者を推定します）"
+      echo "[WARN] VTT ファイルなし（Whisper のみで担当者を推定します）"
+      echo "[WARN]   検索した stem: ${STEM_CANDIDATES[*]}"
+      echo "[WARN]   検索ディレクトリ: $INPUT_DIR, $DATA_DIR"
     fi
   fi
 
@@ -258,6 +314,12 @@ EOF
   SLIDE_OPT=""
   if [[ -n "$SLIDE_CONTEXT_FILE" && -s "$SLIDE_CONTEXT_FILE" ]]; then
     SLIDE_OPT="--slide-context $SLIDE_CONTEXT_FILE"
+  fi
+
+  CONSENSUS_OPT=""
+  if [[ "$CONSENSUS_N" =~ ^[0-9]+$ && "$CONSENSUS_N" -ge 2 ]]; then
+    CONSENSUS_OPT="--consensus $CONSENSUS_N"
+    echo "[INFO] Self-consistency 有効: N=$CONSENSUS_N（生成時間が ~5-8x になります）"
   fi
 
   # --------------------------------------------------------------------------- #
@@ -273,6 +335,7 @@ EOF
     --multi-stage --chunk-minutes 10 \
     $VTT_OPT \
     $SLIDE_OPT \
+    $CONSENSUS_OPT \
     2>&1 | tee "$TMPLOG"
   GEN_EXIT=${PIPESTATUS[0]}
 
