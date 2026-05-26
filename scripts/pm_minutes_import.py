@@ -33,12 +33,12 @@ Usage:
 
     # Slack にアップロード（Files タブに表示）
     python3 scripts/pm_minutes_import.py \\
-        --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c <CHANNEL_ID>
+        --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c CHANNEL_ID
 
     # 特定スレッドにアップロード（スレッドに集約、Files タブには表示されない）
     python3 scripts/pm_minutes_import.py \\
         --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
-        -c <CHANNEL_ID> --thread-ts 1741234567.123456
+        -c CHANNEL_ID --thread-ts 1741234567.123456
 
     # 議事録DBから削除
     python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting
@@ -837,22 +837,22 @@ def main():
 
   # Slack にアップロード（Files タブに表示）
   python3 scripts/pm_minutes_import.py \\
-      --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c <CHANNEL_ID>
+      --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c CHANNEL_ID
 
   # 特定スレッドにアップロード（スレッドに集約、Files タブには表示されない）
   python3 scripts/pm_minutes_import.py \\
       --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
-      -c <CHANNEL_ID> --thread-ts 1741234567.123456
+      -c CHANNEL_ID --thread-ts 1741234567.123456
 
   # 確認のみ（Slack API 呼び出しなし）
   python3 scripts/pm_minutes_import.py \\
       --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
-      -c <CHANNEL_ID> --dry-run
+      -c CHANNEL_ID --dry-run
 
   # 再アップロード（投稿済みフラグを無視）
   python3 scripts/pm_minutes_import.py \\
       --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \\
-      -c <CHANNEL_ID> --force
+      -c CHANNEL_ID --force
 """,
     )
     parser.add_argument("input_file", nargs="?",

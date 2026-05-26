@@ -8,6 +8,9 @@ reports/
 docs/project.md
 scripts/pm_from_slack_daily.sh
 scripts/pm_biweekly_report.sh
+scripts/pm_argus_daily.sh
+scripts/run_full_reextract.sh
+scripts/slack_post_minutes.sh
 goals.yaml
 
 # HuggingFace cache

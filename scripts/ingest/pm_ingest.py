@@ -6,8 +6,8 @@ pm_ingest.py — pm.db 統合インジェストランナー
 新しいソースは ingest_*.py を作成して PLUGINS に1行追加するだけで追加できる。
 
 Usage:
-    python3 scripts/pm_ingest.py slack  --slack-channel <CHANNEL_ID>
-    python3 scripts/pm_ingest.py slack  --slack-channel <CHANNEL_ID> --dry-run
+    python3 scripts/pm_ingest.py slack  --slack-channel CHANNEL_ID
+    python3 scripts/pm_ingest.py slack  --slack-channel CHANNEL_ID --dry-run
     python3 scripts/pm_ingest.py minutes --minutes-name Leader_Meeting
     python3 scripts/pm_ingest.py minutes --since 2026-01-01
     python3 scripts/pm_ingest.py goals  --goals-file goals.yaml
@@ -63,7 +63,7 @@ def main() -> None:
   goals    goals.yaml → goals/milestones テーブル同期
 
 使用例:
-  python3 scripts/pm_ingest.py slack --slack-channel <CHANNEL_ID>
+  python3 scripts/pm_ingest.py slack --slack-channel CHANNEL_ID
   python3 scripts/pm_ingest.py minutes --since 2026-01-01 --db data/pm.db
   python3 scripts/pm_ingest.py goals --dry-run
   python3 scripts/pm_ingest.py --list

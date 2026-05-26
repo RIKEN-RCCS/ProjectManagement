@@ -4,12 +4,12 @@
 # Slack取得 (slack_pipeline.py) → pm.db抽出 (pm_ingest.py slack) を連続実行する。
 #
 # Usage:
-#   bash scripts/pm_from_slack.sh -c <CHANNEL_ID>
-#   bash scripts/pm_from_slack.sh -c <CHANNEL_ID> --since 2026-01-01
-#   bash scripts/pm_from_slack.sh -c <CHANNEL_ID> --dry-run
+#   bash scripts/pm_from_slack.sh -c CHANNEL_ID
+#   bash scripts/pm_from_slack.sh -c CHANNEL_ID --since 2026-01-01
+#   bash scripts/pm_from_slack.sh -c CHANNEL_ID --dry-run
 #
 # Options:
-#   -c CHANNEL_ID         対象チャンネルID（デフォルト: <CHANNEL_ID>）
+#   -c CHANNEL_ID         対象チャンネルID（未指定時は環境変数 PM_DEFAULT_SLACK_CHANNEL）
 #   --since YYYY-MM-DD    この日付以降のみ対象（両スクリプトに渡す）
 #   --dry-run             DB保存なし・確認のみ（両スクリプトに渡す）
 #   --no-encrypt          平文モード（両スクリプトに渡す）
@@ -42,7 +42,7 @@ export OPENAI_API_KEY="dummy"
 # --------------------------------------------------------------------------- #
 # 引数パース
 # --------------------------------------------------------------------------- #
-CHANNEL="<CHANNEL_ID>"
+CHANNEL="${PM_DEFAULT_SLACK_CHANNEL:-}"
 SINCE=""
 DRY_RUN=""
 NO_ENCRYPT=""
@@ -50,6 +50,11 @@ SKIP_FETCH=""
 FORCE_REEXTRACT=""
 DB_SLACK=""
 DB_PM=""
+
+if [[ -z "$CHANNEL" && "$#" -eq 0 ]]; then
+    echo "[ERROR] -c CHANNEL_ID または PM_DEFAULT_SLACK_CHANNEL を指定してください" >&2
+    exit 1
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

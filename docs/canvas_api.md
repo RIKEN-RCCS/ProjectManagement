@@ -122,7 +122,7 @@ def collect_section_ids(client, canvas_id, include_h1=False):
 チャンネルID → Canvas ID のマッピングを `data/canvas_map.json` で管理。`--recreate` 時に自動更新。
 
 ```json
-{"<CHANNEL_ID>": {"canvas_id": "<CANVAS_ID>", "title": "Summary", "updated_at": "..."}}
+{"CHANNEL_ID": {"canvas_id": "CANVAS_ID", "title": "Summary", "updated_at": "..."}}
 ```
 
 操作コマンド:

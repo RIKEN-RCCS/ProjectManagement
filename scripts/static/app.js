@@ -480,23 +480,12 @@ document.getElementById('form-dec-new').addEventListener('submit', async (e) => 
 // ----------------------------------------------------------------
 // Files (AG Grid)
 // ----------------------------------------------------------------
-const FILES_CHANNEL_NAMES = {
-  '<CHANNEL_ID>': '20_アプリケーション開発エリア',
-  '<CHANNEL_ID>': '20_1_リーダ会議メンバ',
-  '<CHANNEL_ID>': '21_hpcアプリケーションwg',
-  '<CHANNEL_ID>': '21_1_hpcアプリケーションwg_ブロック1',
-  '<CHANNEL_ID>': '21_2_hpcアプリケーションwg_ブロック2',
-  '<CHANNEL_ID>': '22_ベンチマークwg',
-  '<CHANNEL_ID>': '23_benchmark_framework',
-  '<CHANNEL_ID>': '24_ai-hpc-application',
-  '<CHANNEL_ID>': 'personal',
-  '<CHANNEL_ID>': 'pmo',
-};
-
+// チャンネル名は /api/filter-presets が返す channel_names を使う
+// （argus_config.yaml の channel_names: が一次定義）。
 function initFilesChannelFilter() {
   const sel = document.getElementById('f-files-ch');
   sel.innerHTML = '<option value="">すべて</option>';
-  Object.entries(FILES_CHANNEL_NAMES).forEach(([id, name]) => {
+  Object.entries(filterPresets.channel_names || {}).forEach(([id, name]) => {
     const opt = document.createElement('option');
     opt.value = id;
     opt.textContent = name;

@@ -235,18 +235,9 @@ def get_minutes(id: str = Query(""), kind: str = Query("")):
 
 # --- Files endpoint --- #
 
-_CHANNEL_NAMES: dict[str, str] = {
-    "<CHANNEL_ID>": "20_アプリケーション開発エリア",
-    "<CHANNEL_ID>": "20_1_リーダ会議メンバ",
-    "<CHANNEL_ID>": "21_hpcアプリケーションwg",
-    "<CHANNEL_ID>": "21_1_hpcアプリケーションwg_ブロック1",
-    "<CHANNEL_ID>": "21_2_hpcアプリケーションwg_ブロック2",
-    "<CHANNEL_ID>": "22_ベンチマークwg",
-    "<CHANNEL_ID>": "23_benchmark_framework",
-    "<CHANNEL_ID>": "24_ai-hpc-application",
-    "<CHANNEL_ID>": "personal",
-    "<CHANNEL_ID>": "pmo",
-}
+# channel_id → 表示名は argus_config.yaml の channel_names を参照する
+# （実値はチャンネル機密のためソース内に持たない）。
+_CHANNEL_NAMES: dict[str, str] = load_filter_presets().get("channel_names", {}) or {}
 
 import re as _re
 

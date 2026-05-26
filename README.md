@@ -54,7 +54,7 @@
 bash scripts/pm_from_recording_auto.sh
 
 # Slack投稿も自動化
-bash scripts/pm_from_recording_auto.sh -c <CHANNEL_ID>
+bash scripts/pm_from_recording_auto.sh -c CHANNEL_ID
 ```
 
 処理フロー: 音声 → Whisper文字起こし → ローカルLLMで議事録生成 → 議事録DB保存 → pm.db転記（平文ファイルはディスクに残らない）
@@ -64,7 +64,7 @@ bash scripts/pm_from_recording_auto.sh -c <CHANNEL_ID>
 **Slack → pm.db**
 
 ```sh
-bash scripts/pm_from_slack.sh -c <CHANNEL_ID>
+bash scripts/pm_from_slack.sh -c CHANNEL_ID
 ```
 
 処理フロー: Slackメッセージ差分取得 → 生メッセージから決定事項・アクションアイテム抽出 → pm.db保存

@@ -707,7 +707,7 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="get_slack_messages",
         description="特定チャンネルの生Slackメッセージを取得する",
-        parameters={"channel_id": "SlackチャンネルID（例: <CHANNEL_ID>）", "since": "この日付以降（YYYY-MM-DD）", "max_chars": "最大文字数（デフォルト10000）"},
+        parameters={"channel_id": "SlackチャンネルID（C で始まる文字列）", "since": "この日付以降（YYYY-MM-DD）", "max_chars": "最大文字数（デフォルト10000）"},
         fn=_tool_get_slack_messages,
     ),
     ToolDef(

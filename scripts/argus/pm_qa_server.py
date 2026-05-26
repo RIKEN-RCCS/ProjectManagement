@@ -133,18 +133,23 @@ _channel_index_map: dict[str, str] = {}   # channel_id → index_name
 _index_db_map: dict[str, Path] = {}       # index_name → Path
 _pm_db_map: dict[str, list[Path]] = {}    # index_name → [pm.db Paths]
 _default_index: str = "pm"
+_channel_names: dict[str, str] = {}       # channel_id → 表示名
+_mention_allowed_channels: set[str] = set()  # @mention 応答を許可するチャンネル集合
 
 
 def load_qa_config(config_path: Path) -> None:
     """argus_config.yaml（旧 qa_config.yaml）を読み込み、グローバルマップを初期化する。
     全インデックスは統合 qa_index.db を共有し、検索時に index_name でフィルタする。"""
     global _channel_index_map, _index_db_map, _pm_db_map, _default_index
+    global _channel_names, _mention_allowed_channels
 
     with open(config_path) as f:
         cfg = yaml.safe_load(f) or {}
 
     _default_index = cfg.get("default_index", "pm")
     _channel_index_map = cfg.get("channel_map") or {}
+    _channel_names = cfg.get("channel_names") or {}
+    _mention_allowed_channels = set(cfg.get("mention_allowed_channels") or [])
 
     qa_unified = _REPO_ROOT / "data" / "qa_index.db"
     for name, index_cfg in (cfg.get("indices") or {}).items():
@@ -605,18 +610,8 @@ _SOURCE_TYPE_LABEL = {
     "web": "Web記事",
 }
 
-_CHANNEL_NAMES: dict[str, str] = {
-    "<CHANNEL_ID>": "20_アプリケーション開発エリア",
-    "<CHANNEL_ID>": "20_1_リーダ会議メンバ",
-    "<CHANNEL_ID>": "21_hpcアプリケーションwg",
-    "<CHANNEL_ID>": "21_1_hpcアプリケーションwg_ブロック1",
-    "<CHANNEL_ID>": "21_2_hpcアプリケーションwg_ブロック2",
-    "<CHANNEL_ID>": "22_ベンチマークwg",
-    "<CHANNEL_ID>": "23_benchmark_framework",
-    "<CHANNEL_ID>": "24_ai-hpc-application",
-    "<CHANNEL_ID>": "pmo",
-    "<CHANNEL_ID>": "personal",
-}
+# channel_id → 表示名は argus_config.yaml の channel_names から動的に解決する
+# （実値はチャンネル機密のため source 内に持たない）。
 
 
 def _format_source_label(chunk: dict) -> str:
@@ -641,7 +636,7 @@ def _format_source_label(chunk: dict) -> str:
     db_name = chunk["source_db"].replace("minutes/", "").replace(".db", "")
     # Slack チャンネルIDを人名称に変換
     if source_type == "slack_raw":
-        db_name = _CHANNEL_NAMES.get(db_name, db_name)
+        db_name = _channel_names.get(db_name, db_name)
     held_at = chunk["held_at"] or "日付不明"
     return f"{db_name} / {label} ({held_at})"
 
@@ -1273,13 +1268,13 @@ def build_app():
             )
 
     # --- app_mention ハンドラ（常駐AIとしての @mention 応答） ---
-    # 当面は <CHANNEL_ID>（personal/debug）のみで有効。動作確認後に拡大する。
-    _MENTION_ALLOWED_CHANNELS = {"<CHANNEL_ID>"}
+    # 許可チャンネルは argus_config.yaml の mention_allowed_channels から取得。
+    # 動作確認段階ではデバッグ用 personal チャンネルのみを設定する想定。
 
     @app.event("app_mention")
     def handle_app_mention(event, client):
         channel_id = event.get("channel", "")
-        if channel_id not in _MENTION_ALLOWED_CHANNELS:
+        if channel_id not in _mention_allowed_channels:
             logger.info(f"[mention] 許可外チャンネル {channel_id} からのメンションを無視")
             return
 

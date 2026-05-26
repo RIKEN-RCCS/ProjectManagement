@@ -34,7 +34,9 @@ from ingest.ingest_plugin import IngestContext
 # --------------------------------------------------------------------------- #
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
-DEFAULT_CHANNEL = "<CHANNEL_ID>"
+# 既定チャンネルは環境変数 PM_DEFAULT_SLACK_CHANNEL から取得する。
+# （実値はチャンネル機密のためソース内に持たない）。
+DEFAULT_CHANNEL = os.environ.get("PM_DEFAULT_SLACK_CHANNEL", "")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS slack_extractions (
@@ -635,7 +637,7 @@ class SlackIngestPlugin:
         parser.add_argument(
             "--slack-channel", default=DEFAULT_CHANNEL,
             metavar="CHANNEL_ID",
-            help="対象チャンネルID（slack ソース用、デフォルト: <CHANNEL_ID>）",
+            help="対象チャンネルID（slack ソース用、未指定時は環境変数 PM_DEFAULT_SLACK_CHANNEL）",
         )
         parser.add_argument(
             "--slack-db", default=None,

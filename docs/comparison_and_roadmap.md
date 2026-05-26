@@ -67,7 +67,7 @@
 
 ```sh
 # 平日朝8時: Slack取得・抽出
-0 8 * * 1-5  bash ~/ProjectManagement/slack/scripts/pm_from_slack.sh -c <CHANNEL_ID>
+0 8 * * 1-5  bash ~/ProjectManagement/slack/scripts/pm_from_slack.sh -c CHANNEL_ID
 
 # 月曜朝9時: 週次レポート生成・Canvas投稿
 0 9 * * 1    bash ~/ProjectManagement/slack/scripts/canvas_report.sh

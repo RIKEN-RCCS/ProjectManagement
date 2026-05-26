@@ -27,7 +27,9 @@ from slack_sdk.errors import SlackApiError
 
 # ------------------------------------------------------------------ 定数
 JST = timezone(timedelta(hours=9))
-DEFAULT_CHANNEL = "<CHANNEL_ID>"
+# 既定チャンネルは環境変数 PM_DEFAULT_SLACK_CHANNEL から取得する。
+# （実値はチャンネル機密のためソース内に持たない）。
+DEFAULT_CHANNEL = os.environ.get("PM_DEFAULT_SLACK_CHANNEL", "")
 
 # ------------------------------------------------------------------ メモリキャッシュ
 user_cache: dict = {}
@@ -67,7 +69,7 @@ def parse_args():
         """,
     )
     parser.add_argument("-c", "--channel", default=DEFAULT_CHANNEL,
-                        help=f"チャンネルID (デフォルト: {DEFAULT_CHANNEL})")
+                        help="チャンネルID (未指定時は環境変数 PM_DEFAULT_SLACK_CHANNEL)")
     parser.add_argument("-l", "--limit", type=int, default=100,
                         help="取得するメッセージ数の上限 (デフォルト: 100)")
     parser.add_argument("--since", type=parse_date_arg,

@@ -201,7 +201,7 @@ bash scripts/canvas_report.sh --db data/pm.db --canvas-id <CANVAS_ID> --dry-run
 
 ```sh
 # 1. Slack 取り込み + pm.db 反映
-bash scripts/pm_from_slack.sh -c <CHANNEL_ID> --since 2026-05-14
+bash scripts/pm_from_slack.sh -c CHANNEL_ID --since 2026-05-14
 
 # 2. リーダー会議系の進捗レポートを Canvas に投稿
 bash scripts/canvas_report.sh --db data/pm.db --canvas-id <CANVAS_ID>

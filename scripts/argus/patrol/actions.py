@@ -159,6 +159,11 @@ def send_reminder(
 # --------------------------------------------------------------------------- #
 def send_channel_alert(ctx, channel_id: str, text: str) -> bool:
     """チャンネルにアラートメッセージを投稿する。"""
+    if not channel_id:
+        logger.warning(
+            "patrol.leader_channel が argus_config.yaml に未設定のためアラート送信をスキップ"
+        )
+        return False
     if ctx.dry_run:
         logger.info("[DRY] チャンネル通知 → %s:\n%s", channel_id, text)
         return True
@@ -224,7 +229,7 @@ def _send_dm_or_fallback(
         return ("", "")
 
     leader_ch = ctx.config.get("patrol", {}).get(
-        "leader_channel", "<CHANNEL_ID>"
+        "leader_channel", ""
     )
 
     if not text and blocks:

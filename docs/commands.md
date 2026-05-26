@@ -8,18 +8,18 @@
 
 ```sh
 # 通常運用: 差分のみ取得（統合DB data/slack.db に書き込まれる）
-python3 scripts/slack_pipeline.py -c <CHANNEL_ID>
+python3 scripts/slack_pipeline.py -c CHANNEL_ID
 
 # 初回・過去分の取り込み（oldest をAPIに渡してページネーション全件取得）
-python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --since 2025-04-01
+python3 scripts/slack_pipeline.py -c CHANNEL_ID --since 2025-04-01
 
 # DB内のスレッド一覧を表示
-python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --list
+python3 scripts/slack_pipeline.py -c CHANNEL_ID --list
 ```
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `-c CHANNEL_ID` | `<CHANNEL_ID>` | 対象チャンネルID |
+| `-c CHANNEL_ID` | `CHANNEL_ID` | 対象チャンネルID |
 | `--db PATH` | `data/slack.db` | SQLite DBファイルパス（全チャンネル統合） |
 | `--since YYYY-MM-DD` | なし（全件） | この日付以降のメッセージのみ取得（APIに oldest として渡す） |
 | `-l N` | `100` | 1ページあたりの取得件数上限（最大999） |
@@ -34,18 +34,18 @@ python3 scripts/slack_pipeline.py -c <CHANNEL_ID> --list
 
 ```sh
 # 通常運用
-bash scripts/pm_from_slack.sh -c <CHANNEL_ID>
+bash scripts/pm_from_slack.sh -c CHANNEL_ID
 
 # 日付フィルタ付き
-bash scripts/pm_from_slack.sh -c <CHANNEL_ID> --since 2026-01-01
+bash scripts/pm_from_slack.sh -c CHANNEL_ID --since 2026-01-01
 
 # 確認用（DB保存なし）
-bash scripts/pm_from_slack.sh -c <CHANNEL_ID> --dry-run
+bash scripts/pm_from_slack.sh -c CHANNEL_ID --dry-run
 ```
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `-c CHANNEL_ID` | `<CHANNEL_ID>` | 対象チャンネルID（両スクリプトに渡す） |
+| `-c CHANNEL_ID` | `CHANNEL_ID` | 対象チャンネルID（両スクリプトに渡す） |
 | `--since YYYY-MM-DD` | なし | この日付以降のみ対象（両スクリプトに渡す） |
 | `--dry-run` | - | DB保存なし・確認のみ（両スクリプトに渡す） |
 | `--no-encrypt` | - | 平文モード（両スクリプトに渡す） |
@@ -126,12 +126,12 @@ python3 scripts/pm_minutes_import.py --delete 2026-03-10_Leader_Meeting --meetin
 
 # Slack にアップロード（Files タブに表示）
 python3 scripts/pm_minutes_import.py \
-    --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c <CHANNEL_ID>
+    --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 -c CHANNEL_ID
 
 # 特定スレッドにアップロード（スレッドに集約、Files タブには表示されない）
 python3 scripts/pm_minutes_import.py \
     --post-to-slack --meeting-name Leader_Meeting --held-at 2026-03-10 \
-    -c <CHANNEL_ID> --thread-ts 1741234567.123456
+    -c CHANNEL_ID --thread-ts 1741234567.123456
 ```
 
 | オプション | デフォルト | 説明 |
@@ -228,10 +228,10 @@ meetings:
 python3 scripts/ingest/pm_ingest.py --list
 
 # Slack 生メッセージ → 決定事項・アクションアイテム抽出
-python3 scripts/ingest/pm_ingest.py slack --slack-channel <CHANNEL_ID>
-python3 scripts/ingest/pm_ingest.py slack --slack-channel <CHANNEL_ID> --since 2026-01-01
-python3 scripts/ingest/pm_ingest.py slack --slack-channel <CHANNEL_ID> --slack-force-reextract
-python3 scripts/ingest/pm_ingest.py slack --slack-channel <CHANNEL_ID> --slack-list
+python3 scripts/ingest/pm_ingest.py slack --slack-channel CHANNEL_ID
+python3 scripts/ingest/pm_ingest.py slack --slack-channel CHANNEL_ID --since 2026-01-01
+python3 scripts/ingest/pm_ingest.py slack --slack-channel CHANNEL_ID --slack-force-reextract
+python3 scripts/ingest/pm_ingest.py slack --slack-channel CHANNEL_ID --slack-list
 python3 scripts/ingest/pm_ingest.py slack --dry-run --output result.txt
 
 # 議事録DB → pm.db 転記（LLM不使用、担当者・期限を直接コピー）
@@ -262,7 +262,7 @@ python3 scripts/ingest/pm_ingest.py goals --goals-list
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `--slack-channel CHANNEL_ID` | `<CHANNEL_ID>` | 対象チャンネルID |
+| `--slack-channel CHANNEL_ID` | `CHANNEL_ID` | 対象チャンネルID |
 | `--slack-db PATH` | `data/slack.db` | Slack DBのパス（全チャンネル統合） |
 | `--slack-force-reextract` | - | 抽出済みスレッドも再処理 |
 | `--slack-list` | - | 抽出済みスレッド一覧を表示して終了 |
@@ -433,7 +433,7 @@ python3 scripts/db_utils.py --gen-key
 # → ~/.secrets/pm_db_key.txt に 64文字のランダム鍵を生成（chmod 600）
 
 # 既存の平文DBを暗号化DBに変換（初回のみ）
-python3 scripts/db_utils.py --migrate data/pm.db data/<CHANNEL_ID>.db data/<CHANNEL_ID>.db
+python3 scripts/db_utils.py --migrate data/pm.db data/CHANNEL_ID.db data/CHANNEL_ID.db
 # → 各 .bak にバックアップを作成してから変換・検証
 
 # 変換内容を確認のみ（変換しない）

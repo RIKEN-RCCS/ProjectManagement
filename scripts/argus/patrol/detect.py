@@ -212,7 +212,7 @@ def detect_unacknowledged_decisions(ctx) -> int:
     if not to_notify:
         return 0
 
-    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "<CHANNEL_ID>")
+    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
     items_text = "\n".join(
         f"• *D#{d['id']}* ({d.get('decided_at', '?')}): {(d.get('content') or '')[:100]}"
         for d in to_notify[:10]
@@ -282,7 +282,7 @@ def detect_stale_items(ctx) -> int:
     for assignee, items in by_assignee.items():
         send_reminder(ctx, assignee, items, "stale")
 
-    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "<CHANNEL_ID>")
+    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
     summary = (
         f":zzz: *長期停滞アラート（{len(stale_items)}件）*\n"
         f"{stale_days}日以上更新のないアクションアイテムが{len(stale_items)}件あります。\n"
@@ -352,13 +352,13 @@ def detect_milestone_health(ctx) -> int:
             if not ctx.dry_run:
                 ctx.state.record_notification(
                     "milestone_alert", target_key,
-                    ctx.config.get("patrol", {}).get("leader_channel", "<CHANNEL_ID>"),
+                    ctx.config.get("patrol", {}).get("leader_channel", ""),
                 )
 
     if not alerts:
         return 0
 
-    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "<CHANNEL_ID>")
+    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
     text = (
         f":chart_with_downwards_trend: *マイルストーン健全性アラート*\n"
         f"以下のマイルストーンの進捗が期待を下回っています:\n"
@@ -402,7 +402,7 @@ def detect_weekly_trend_alert(ctx) -> int:
     if ctx.state.already_notified("weekly_trend_alert", target_key, cooldown_days=7):
         return 0
 
-    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "<CHANNEL_ID>")
+    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
     text = (
         f":chart_with_downwards_trend: *週次トレンド悪化アラート*\n"
         f"直近2週の完了件数（{recent_closed}件）が前2週（{prev_closed}件）より"
@@ -466,7 +466,7 @@ def detect_knowledge_conflicts(ctx) -> int:
     if not rows:
         return 0
 
-    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "<CHANNEL_ID>")
+    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
     sent = 0
     for r in rows:
         # 双方向の組み合わせを 1 つのキーで管理（A↔B と B↔A は同じ通知扱い）

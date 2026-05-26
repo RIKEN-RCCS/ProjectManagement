@@ -15,7 +15,7 @@ Usage:
   python3 scripts/pm_slack_box_links.py
 
   # 特定チャンネル / 全件再処理
-  python3 scripts/pm_slack_box_links.py -c <CHANNEL_ID>
+  python3 scripts/pm_slack_box_links.py -c CHANNEL_ID
   python3 scripts/pm_slack_box_links.py --force
 
   # 確認用（DB保存なし）
