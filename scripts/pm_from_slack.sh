@@ -21,6 +21,8 @@
 set -euo pipefail
 
 . ~/.secrets/slack_tokens.sh
+# RiVault トークン（Self-Consistency の embedding 取得に必要）
+[ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
 
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
