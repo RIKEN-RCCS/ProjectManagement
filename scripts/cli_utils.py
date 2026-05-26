@@ -9,7 +9,6 @@ argparse ヘルパー関数・make_logger() を提供する。
 import argparse
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -146,16 +145,18 @@ def make_logger(output_path: str | None):
 
 def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
     """
-    LLM を呼び出す。OPENAI_API_BASE が設定されている場合は OpenAI 互換 API を使用し、
-    未設定の場合は Claude CLI（subprocess）を使用する。
+    LLM を呼び出す。プロジェクトのスクリプトは Claude API を使用してはならない
+    （コスト管理・情報セキュリティの観点から CLAUDE.md で禁止）。
+    本関数はローカル LLM (OPENAI_API_BASE) を優先し、未設定または接続失敗時は
+    RiVault にフォールバックする。
 
     Parameters
     ----------
     prompt : str
         LLM に渡すプロンプト
     model : str | None
-        使用するモデル名。OpenAI互換モード時は OPENAI_MODEL 環境変数 → vLLM 自動取得の順で
-        フォールバックする。Claude CLI モード時は Claude CLI のデフォルトを使用する。
+        OpenAI 互換モード時のモデル名（None なら OPENAI_MODEL → vLLM 自動取得）。
+        RiVault フォールバック時は無視され、RIVAULT_MODEL が使われる。
     timeout : int
         タイムアウト秒数（デフォルト: 120秒）
 
@@ -167,24 +168,17 @@ def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) ->
     Raises
     ------
     RuntimeError
-        Claude CLI モードで returncode != 0 の場合
-    requests.HTTPError
-        OpenAI互換モードで HTTP エラーが発生した場合
-    subprocess.TimeoutExpired / requests.Timeout
-        タイムアウトした場合（呼び出し元でキャッチすること）
+        ローカル LLM も RiVault も利用できない場合
     """
     if os.environ.get("OPENAI_API_BASE"):
         return _call_openai_compat(prompt, model=model, timeout=timeout)
-    # CLAUDECODE 環境変数が設定されているとネストセッション判定でエラーになるため除外する
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    cmd = ["claude"]
-    if model:
-        cmd += ["--model", model]
-    cmd += ["-p", prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-    if result.returncode != 0:
-        raise RuntimeError(f"claude failed: {result.stderr[:500]}")
-    return result.stdout.strip()
+    if os.environ.get("RIVAULT_URL"):
+        return call_rivault(prompt, timeout=timeout)
+    raise RuntimeError(
+        "LLM エンドポイントが未設定です。OPENAI_API_BASE（ローカル vLLM）または "
+        "RIVAULT_URL（RiVault）のいずれかを設定してください。"
+        "Claude API はプロジェクトポリシーにより使用禁止です。"
+    )
 
 
 def strip_think_blocks(text: str) -> str:
