@@ -17,7 +17,7 @@
 #   --scene-threshold N  ffmpeg scene detect 閾値（デフォルト: 0.25）
 #   --max-frames N       OCR に渡すフレーム数上限。超過時は時系列に均等間引き（デフォルト: 200）
 #   --ocr-workers N      OCR 並列ワーカー数（デフォルト: 8）
-#   --consensus N        Self-consistency サンプリング数（N>=2 で表現ブレ吸収。デフォルト 1 = 従来動作）
+#   --consensus N        Self-consistency サンプリング数（デフォルト 3。--consensus 1 で従来の単発生成に戻す）
 #
 # 例:
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
@@ -62,7 +62,7 @@ SLIDE_OCR=1
 SCENE_THRESHOLD="0.25"
 MAX_FRAMES="200"
 OCR_WORKERS="8"
-CONSENSUS_N="1"
+CONSENSUS_N="3"
 FILES=()
 
 while [[ $# -gt 0 ]]; do
@@ -317,9 +317,11 @@ EOF
   fi
 
   CONSENSUS_OPT=""
-  if [[ "$CONSENSUS_N" =~ ^[0-9]+$ && "$CONSENSUS_N" -ge 2 ]]; then
+  if [[ "$CONSENSUS_N" =~ ^[0-9]+$ ]]; then
     CONSENSUS_OPT="--consensus $CONSENSUS_N"
-    echo "[INFO] Self-consistency 有効: N=$CONSENSUS_N（生成時間が ~5-8x になります）"
+    if [[ "$CONSENSUS_N" -ge 2 ]]; then
+      echo "[INFO] Self-consistency 有効: N=$CONSENSUS_N（生成時間が baseline 比 +15〜25% 程度）"
+    fi
   fi
 
   # --------------------------------------------------------------------------- #

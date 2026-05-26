@@ -34,6 +34,7 @@ VENV_PYTHON="$HOME/.venv_$(uname -m)/bin/python3"
 # 引数解析
 # --------------------------------------------------------------------------- #
 SLACK_CHANNEL=""
+# 未指定なら pm_from_recording.sh のデフォルト (consensus=3) に委譲する
 CONSENSUS_N=""
 while [[ $# -gt 0 ]]; do
     case "$1" in

@@ -1459,13 +1459,13 @@ def _run_transcribe(respond, command):
     text = (command.get("text") or "").strip()
 
     # `consensus=N` を空白区切りトークンとして抽出（位置不問）。残りをファイル名扱い。
-    consensus_n = 1
+    consensus_n = 3
     consensus_match = re.search(r"(?:^|\s)consensus=(\d+)(?:\s|$)", text)
     if consensus_match:
         try:
             consensus_n = max(1, int(consensus_match.group(1)))
         except ValueError:
-            consensus_n = 1
+            consensus_n = 3
         text = (text[: consensus_match.start()] + " " + text[consensus_match.end():]).strip()
 
     filename = text
