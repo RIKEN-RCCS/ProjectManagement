@@ -438,12 +438,29 @@ def _tool_get_knowledge(args: dict, ctx: AgentContext) -> str:
 def _tool_get_slack_messages(args: dict, ctx: AgentContext) -> str:
     from pm_argus import fetch_raw_messages
     channel_id = args.get("channel_id", "")
+    ch_names = _load_channel_names()
+
+    def _fmt_channels(ids: list[str]) -> str:
+        return ", ".join(
+            f"{cid}({ch_names[cid]})" if cid in ch_names else cid
+            for cid in ids
+        )
+
+    # 表示名（または #表示名）で指定された場合は channel_id に解決を試みる
+    if channel_id and not channel_id.startswith("C"):
+        norm = channel_id.lstrip("#").strip()
+        for cid, name in ch_names.items():
+            if name == norm:
+                channel_id = cid
+                break
+
     if not channel_id:
-        return f"channel_id が必要です。利用可能なチャンネル: {', '.join(ctx.channels)}"
+        return f"channel_id が必要です。利用可能なチャンネル: {_fmt_channels(ctx.channels)}"
     if ctx.channels and channel_id not in ctx.channels:
+        ch_label = f"{channel_id}({ch_names[channel_id]})" if channel_id in ch_names else channel_id
         return (
-            f"チャンネル {channel_id} は現在のインデックスの対象外です。"
-            f" 利用可能なチャンネル: {', '.join(ctx.channels)}"
+            f"チャンネル {ch_label} は現在のインデックスの対象外です。"
+            f" 利用可能なチャンネル: {_fmt_channels(ctx.channels)}"
         )
     since = args.get("since", ctx.since)
     max_chars = int(args.get("max_chars", 10000))
@@ -457,21 +474,31 @@ _CHANNEL_NAME_CACHE: dict[str, str] | None = None
 
 
 def _load_channel_names() -> dict[str, str]:
-    """argus_config.yaml のコメント行 `# Cxxx some_name` から channel_id→name を収集。"""
+    """argus_config.yaml の `channel_names:` セクションから channel_id→表示名を取得。
+    pm_qa_server.load_qa_config() が先に呼ばれていればそのモジュール変数を再利用し、
+    未ロードなら自前で yaml を読む。"""
     global _CHANNEL_NAME_CACHE
-    if _CHANNEL_NAME_CACHE is not None:
+    if _CHANNEL_NAME_CACHE:
         return _CHANNEL_NAME_CACHE
+    # まず pm_qa_server に読み込み済みのものがあれば借用
+    try:
+        import pm_qa_server
+        if pm_qa_server._channel_names:
+            _CHANNEL_NAME_CACHE = dict(pm_qa_server._channel_names)
+            return _CHANNEL_NAME_CACHE
+    except Exception:
+        pass
+    # フォールバック: yaml を直接読む
     names: dict[str, str] = {}
     cfg_path = _ARGUS_CONFIG if _ARGUS_CONFIG.exists() else _QA_CONFIG_LEGACY
     if cfg_path.exists():
         try:
-            for line in cfg_path.read_text(encoding="utf-8").splitlines():
-                s = line.strip()
-                if not s.startswith("#"):
-                    continue
-                m = re.match(r"#\s*(C[A-Z0-9]{5,})\s+(.+?)\s*$", s)
-                if m:
-                    names[m.group(1)] = m.group(2)
+            import yaml
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            cn = cfg.get("channel_names") or {}
+            if isinstance(cn, dict):
+                names = {str(k): str(v) for k, v in cn.items()}
         except Exception as e:
             logger.warning("channel name load error: %s", e)
     _CHANNEL_NAME_CACHE = names
@@ -847,6 +874,15 @@ _AGENT_SYSTEM_PROMPT = """\
 5. 特定日付の議論は `search_text` での日付文字列検索ではなく `get_slack_messages`（チャンネル+期間）や `search_decisions`（since/until）を優先する。
 6. **質問が意思決定 / 制約 / 用語に関する場合は `search_knowledge` を併用**する。蒸留済みの確定事項に該当があれば、回答中で `KN-XXXX` 形式で引用すること。`current_state` だけで根拠が薄ければ `get_knowledge` で `rationale` / `alternatives_rejected` まで展開して引用する。
 
+## 早期終了の判断（最重要）
+
+**ツール呼び出しは「不足が明確なときだけ」追加する。** 無駄なステップは回答品質を下げる:
+
+- **既に質問に答えられる材料が揃っていれば、残りステップ数に関係なく即 `<final_answer>` を出す**。「念のためもう一回検索」は禁止。
+- 直前のツール結果が **500 chars 未満 / ヒット 0 件** の場合、同種ツールでの追加検索は**1 回まで**。それでも薄ければ final_answer に進む。
+- 3 ステップ目に入る前に必ず自問: 「次のツールが返す情報は、回答にどう使うか？」答えられないなら呼ばずに final_answer。
+- 同じツール（例: `search_text`）を 3 回以上連続で呼ぶことは**禁止**。視点を変える（`search_knowledge` / `search_decisions` / `get_slack_messages` 等）か final_answer。
+
 ## スレッド追質問
 
 「## スレッド内の過去のやり取り」が含まれる場合は会話の続きと解釈する。指示語は過去発言から解決し、ツールを呼ばずに答えられるなら直接答える。
@@ -1004,6 +1040,76 @@ def execute_tool(name: str, args: dict, ctx: AgentContext) -> str:
         return f"エラー: {name} の実行に失敗しました — {e}"
 
 
+_QUERY_REWRITE_PROMPT = """\
+あなたは富岳NEXTプロジェクト（理研×富士通×NVIDIA、次世代スーパーコンピュータ開発）の AI アシスタントです。
+ユーザーが Slack の `/argus-investigate` に投げた **短く曖昧な質問** を、社内ナレッジ検索エージェント向けに展開します。
+
+質問:
+{question}
+
+このプロジェクトに登場する固有名詞の例（参考、すべて社内用語）:
+- EEA (Early Evaluation Application): 評価対象アプリ群、EEA-1 / EEA-2 などのフェーズあり
+- コデザイン: 富岳NEXT のハード・ソフト協調設計活動
+- スケールアウトネットワーク: ノード間相互接続
+- HBM, ノード構成, ベンチマーク, 性能予測, LQCD, GENESIS, NICAM, Petsy, PyTorch 等
+
+以下を JSON で出力してください（コードブロック禁止、JSON のみ）:
+
+{{
+  "intent": "ユーザーが本当に知りたいこと（1〜2文、推測でよい）",
+  "entities": ["質問に含まれる/想起される固有名詞や略語の正規形（最大6個）"],
+  "search_queries": ["検索エンジンに投げる具体クエリ（2〜4個、日本語/英語混在可、固有名詞優先）"]
+}}
+
+注意:
+- ユーザー語彙を一般用語に置き換えない（例: 「EEA」を「欧州経済領域」と展開してはいけない。これは社内略語）。
+- タイプミス・省略形は元のまま entities に残し、正規形を**併記**する。
+- 推測が不確実なら intent に「（推測）」を付ける。
+"""
+
+
+def _rewrite_query(question: str) -> dict | None:
+    """ユーザー質問を意図 / 固有名詞 / 検索クエリに展開する。失敗時は None。"""
+    prompt = _QUERY_REWRITE_PROMPT.format(question=question.strip())
+    try:
+        t0 = time.time()
+        response = call_argus_llm(prompt, max_tokens=512, timeout=30, think=False)
+        elapsed = time.time() - t0
+        logger.info(f"[rewrite] LLM応答 {len(response)} chars, {elapsed:.1f}s")
+        # JSON 抽出（前後の余計な文字を許容）
+        m = re.search(r"\{.*\}", response, re.DOTALL)
+        if not m:
+            logger.warning(f"[rewrite] JSON 抽出失敗: {response[:200]}")
+            return None
+        data = json.loads(m.group(0))
+        if not isinstance(data, dict):
+            return None
+        intent = str(data.get("intent", "")).strip()
+        entities = [str(x) for x in data.get("entities", []) if x][:6]
+        queries = [str(x) for x in data.get("search_queries", []) if x][:4]
+        if not intent and not entities and not queries:
+            return None
+        return {"intent": intent, "entities": entities, "search_queries": queries}
+    except Exception as e:
+        logger.warning(f"[rewrite] 失敗: {e}")
+        return None
+
+
+def _format_rewrite_for_seed(rewrite: dict) -> str:
+    """seed_data 冒頭に注入する形式に整形。"""
+    parts = ["## 質問の解釈（自動展開）\n"]
+    if rewrite.get("intent"):
+        parts.append(f"- **意図**: {rewrite['intent']}")
+    if rewrite.get("entities"):
+        parts.append(f"- **関連語**: {', '.join(rewrite['entities'])}")
+    if rewrite.get("search_queries"):
+        parts.append(f"- **推奨検索クエリ**: {', '.join(rewrite['search_queries'])}")
+    parts.append("")
+    parts.append("（上記は LLM による自動展開。原質問の語を優先しつつ、固有名詞や言い換えで補完して検索すること）")
+    parts.append("")
+    return "\n".join(parts)
+
+
 def run_agent(
     question: str,
     seed_data: str,
@@ -1019,11 +1125,31 @@ def run_agent(
         max_steps=max_steps,
     )
 
+    progress = _make_progress_updater(None)
+
+    # 質問リライト（意図解釈 → 関連語 → 推奨クエリ）
+    progress("質問の意図を解釈中...")
+    rewrite = _rewrite_query(question)
+    rewrite_block = ""
+    if rewrite:
+        rewrite_block = _format_rewrite_for_seed(rewrite)
+        logger.info(
+            f"[rewrite] intent={rewrite.get('intent', '')[:80]!r}"
+            f" entities={rewrite.get('entities')}"
+            f" queries={rewrite.get('search_queries')}"
+        )
+
     messages: list[dict] = [
-        {"role": "user", "content": f"## 調査依頼\n\n{question}\n\n{seed_data}"},
+        {"role": "user", "content": f"## 調査依頼\n\n{question}\n\n{rewrite_block}{seed_data}"},
     ]
 
-    progress = _make_progress_updater(None)
+    intent_header = ""
+    if rewrite and rewrite.get("intent"):
+        intent_header = f"> **ご質問の解釈**: {rewrite['intent']}\n\n"
+
+    def _finalize(answer: str) -> str:
+        return intent_header + _append_sources_section(answer, ctx)
+
     progress(f"シードデータ収集完了。調査開始（最大{max_steps}ステップ）")
 
     call_history: list[str] = []
@@ -1069,7 +1195,7 @@ def run_agent(
         final = parse_final_answer(response)
         if final:
             logger.info(f"[investigate] <final_answer> 検出 (Step {step})")
-            return _append_sources_section(final, ctx)
+            return _finalize(final)
 
         tool_calls = parse_tool_calls(response)
 
@@ -1078,7 +1204,7 @@ def run_agent(
             if parse_error_count >= 2:
                 logger.warning("[investigate] 2回連続でツール呼び出し/最終回答なし。生テキストを返却")
                 clean = re.sub(r"<[^>]+>", "", response).strip()
-                return _append_sources_section(clean if clean else response, ctx)
+                return _finalize(clean if clean else response)
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": (
                 "[System] ツール呼び出しか最終回答が検出できませんでした。\n"
@@ -1132,12 +1258,45 @@ def run_agent(
 
         messages.append({"role": "user", "content": "\n\n".join(result_parts)})
 
-    # ステップ上限到達: 最後のアシスタント応答を使う
+    # ステップ上限到達: ここまでのツール結果で最終回答を強制合成する
+    progress("ステップ上限到達。これまでの結果で最終回答を合成します")
+    messages.append({"role": "user", "content": (
+        "[System] 調査ステップの上限に到達しました。これ以上ツールは呼べません。\n"
+        "**ここまでの全ツール結果を根拠**に、必ず `<final_answer>...</final_answer>` で回答を出力してください。\n"
+        "情報が乏しい場合でも、得られた事実と不足している点を率直にまとめること。"
+    )})
+    if _estimate_chars(messages) > _CONTEXT_CHAR_LIMIT:
+        messages = _compact_messages(messages)
+    final_prompt = _serialize_conversation(system_prompt, messages)
+    logger.info(f"[investigate] 強制合成: LLM呼び出し ({len(final_prompt)} chars)")
+    try:
+        elapsed = time.monotonic() - start_time
+        synth_response = call_argus_llm(
+            final_prompt,
+            max_tokens=32768,
+            timeout=max(30, int(timeout - elapsed)) if elapsed < timeout else 60,
+            think=True,
+        )
+        logger.info(
+            f"[investigate] 強制合成 応答 {len(synth_response)} chars\n"
+            f"----8<---- raw response ----8<----\n{synth_response}\n----8<---- end ----8<----"
+        )
+        final = parse_final_answer(synth_response)
+        if final:
+            return _finalize(final)
+        clean = re.sub(r"<tool_call>.*?</tool_call>", "", synth_response, flags=re.DOTALL)
+        clean = re.sub(r"<[^>]+>", "", clean).strip()
+        if clean:
+            return _finalize(clean)
+    except Exception as e:
+        logger.exception(f"[investigate] 強制合成エラー: {e}")
+
+    # 強制合成も失敗した場合のフォールバック: 最後のアシスタント応答を使う
     for msg in reversed(messages):
         if msg["role"] == "assistant":
             clean = re.sub(r"<tool_call>.*?</tool_call>", "", msg["content"], flags=re.DOTALL).strip()
             if clean:
-                return _append_sources_section(clean, ctx)
+                return _finalize(clean)
     return "調査が完了しませんでした。より具体的な質問で再度お試しください。"
 
 
