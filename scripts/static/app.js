@@ -274,6 +274,8 @@ const aiColumnDefs = [
 
 function initAiGrid() {
   const el = document.getElementById('grid-ai');
+  const msCol = aiColumnDefs.find(c => c.field === 'milestone_id');
+  if (msCol) msCol.cellEditorParams = { values: ['', ...Object.keys(milestones)] };
   aiGrid = agGrid.createGrid(el, {
     columnDefs: aiColumnDefs,
     defaultColDef: {
