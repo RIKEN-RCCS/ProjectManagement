@@ -7,6 +7,41 @@
 
 ---
 
+## 2026-05-28 argus-today のチャンネル ID / ユーザー ID を表示名に解決
+
+**背景**: `/argus-today` の出力でチャンネル ID (`Cxxx`) と Slack user_id (`U0xxxxxxxxx`) が
+そのまま露出していた。原因は 2 つ。(1) `_build_channel_name_map()` が argus_config.yaml の
+**コメント行**から `# Cxxx 名前` を拾う旧仕様で、df27935 で機密削除されコメントが除去されて以降
+0 件返していた。(2) slack_pipeline.py の users_info 失敗時に user_id を user_name にフォールバックしており、
+slack.db 上で 99 user_id 中 55 件が `user_name=user_id` のまま。Argus 側で逆引きが効かない。
+
+**決定**: argus_config.yaml に `user_names:` セクションを新設し正本とする（slack.db はフォールバック扱い）。
+更新は新規 `scripts/pm_users_sync.py` で `users.list` API を 1 回叩いて流し込む（既存値は --force なしで保護、
+yaml の他セクションのコメント・順序はテキスト置換で温存）。`cli_utils` に `resolve_user_names()` /
+`resolve_channel_names()` を共通実装し、`_build_channel_name_map()` をコメント抽出から正規キー読み込みに
+置き換え。`_filter_mentions_for_user` でメンション本文中の `Cxxx` / `<#Cxxx>` / `<#Cxxx|name>` も
+`#name` に展開。`## チャンネル: Cxxx` 見出しも `Cxxx (#name)` 形式に変更し LLM プロンプト全体で生 ID を減らす。
+別案として「slack_pipeline 側の users_info 失敗時に user_id をフォールバックしない」も検討したが、
+取り込みパイプラインを壊すリスクと既存 55 件への対応にならないため不採用。
+
+**影響**: 表示名は yaml で一元管理・手動修正が容易に。argus_agent と argus-today で channel_names の
+読み出しが統一された。pm_qa_server 再起動で新コードが反映される。
+
+## 2026-05-28 議事録 Stage 3 集約のフォールバック修正（途中結果の破棄を解消）
+
+**背景**: 4ba721c で修正した `/argus-investigate` の「ステップ上限到達時に最後のツール結果が捨てられる」
+バグと同種のものが `recording/generate_minutes_local.py::_consensus_stage3` にあった。
+embedding 失敗時に関数全体を `return max(drafts, key=len)` で抜けるため、決定事項側でエラーが
+出ると AI 集約に進まず、AI 側でエラーが出ると既に合成した決定事項が捨てられる。LLM 集約失敗時も
+`decisions_md=""` で「（なし）」化され、投票通過済みクラスタの中間情報がすべて消えていた。
+
+**決定**: フォールバックを 4 種類に分離する。embedding 失敗 → 最長ドラフトから当該セクションだけ
+抜き出す（他方の集約は通常通り続行）。LLM 集約失敗 → 投票通過済みクラスタの代表 bullet/行で
+Markdown を直接組み立てる（LLM 不使用）。`_extract_section()` ヘルパーを追加。
+
+**影響**: 議事録生成中に部分的な障害が起きても、可能な限り中間結果を保持して出力する。
+ボツ案: 「失敗時に LLM をリトライ」は採らず（タイムアウト既に長く、二重に時間がかかる）。
+
 ## 2026-05-28 ドキュメント運用ルールを CLAUDE.md に集約、log.md → LOG.md にリネーム
 
 **背景**: 運用ルールが PLAN.md / LOG.md の両方に重複していた。Claude が毎会話で参照するのは CLAUDE.md
