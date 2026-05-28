@@ -105,6 +105,79 @@ def resolve_filter_presets(
     return list(dict.fromkeys(channel_ids)), list(dict.fromkeys(meeting_kinds))
 
 
+def _resolve_name_section(
+    section_key: str,
+    config_path: Path | str = "data/argus_config.yaml",
+) -> dict[str, str]:
+    """argus_config.yaml の指定セクション（`channel_names` / `user_names` 等）を dict で返す。
+    yaml が無い・空・キー不在のいずれでも空 dict を返す（呼び出し側でフォールバック）。
+    """
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return {}
+    cfg_path = Path(config_path)
+    if not cfg_path.is_absolute():
+        cfg_path = Path(__file__).resolve().parent.parent / cfg_path
+    if not cfg_path.exists():
+        return {}
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+    sec = cfg.get(section_key) or {}
+    if not isinstance(sec, dict):
+        return {}
+    return {str(k): str(v) for k, v in sec.items() if v}
+
+
+def resolve_user_names(
+    config_path: Path | str = "data/argus_config.yaml",
+) -> dict[str, str]:
+    """argus_config.yaml の `user_names:` セクションから user_id → 表示名 dict を返す。"""
+    return _resolve_name_section("user_names", config_path)
+
+
+def resolve_channel_names(
+    config_path: Path | str = "data/argus_config.yaml",
+) -> dict[str, str]:
+    """argus_config.yaml の `channel_names:` セクションから channel_id → 表示名 dict を返す。"""
+    return _resolve_name_section("channel_names", config_path)
+
+
+def resolve_report_canvas_id(
+    fallback: str | None = None,
+    config_path: Path | str = "data/argus_config.yaml",
+) -> str | None:
+    """pm_report / pm_sync_canvas が扱う Canvas ID を解決する。
+
+    優先順位: 環境変数 PM_REPORT_CANVAS_ID > argus_config.yaml の report.canvas_id > fallback
+    """
+    env_val = os.environ.get("PM_REPORT_CANVAS_ID")
+    if env_val:
+        return env_val
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return fallback
+    cfg_path = Path(config_path)
+    if not cfg_path.is_absolute():
+        cfg_path = Path(__file__).resolve().parent.parent / cfg_path
+    if not cfg_path.exists():
+        return fallback
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        return fallback
+    report = cfg.get("report") or {}
+    cid = report.get("canvas_id")
+    if isinstance(cid, str) and cid:
+        return cid
+    return fallback
+
+
 # --------------------------------------------------------------------------- #
 # ロガーユーティリティ
 # --------------------------------------------------------------------------- #

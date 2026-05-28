@@ -1011,11 +1011,13 @@ def _collect_all_data(
 
     channel_ids = _load_channel_ids(index_name)
     minutes_names = _load_minutes_names(index_name)
+    channel_names = _build_channel_name_map()
     message_parts = []
     for ch_id in channel_ids:
         raw = fetch_raw_messages(ch_id, since_date, data_dir=data_dir, no_encrypt=no_encrypt)
         if raw:
-            message_parts.append(f"## チャンネル: {ch_id}\n\n{raw}")
+            label = f"{ch_id} (#{channel_names[ch_id]})" if ch_id in channel_names else ch_id
+            message_parts.append(f"## チャンネル: {label}\n\n{raw}")
     messages = "\n\n---\n\n".join(message_parts)
 
     minutes = fetch_recent_minutes(
@@ -1219,31 +1221,16 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
 
 
 def _build_channel_name_map() -> dict[str, str]:
-    """argus_config.yaml からチャンネルID -> 名前のマッピングを生成"""
-    channel_map = {}
-    config_path = Path(_REPO_ROOT) / "data" / "argus_config.yaml"
-
-    try:
-        with open(config_path) as f:
-            for line in f:
-                # コメント行から抽出: # C0XXXXXXX チャンネル名
-                if line.startswith("#") and line.lstrip("#").startswith(" C0"):
-                    parts = line.lstrip("# ").strip().split(None, 1)
-                    if len(parts) == 2:
-                        ch_id, ch_name = parts
-                        if ch_id not in channel_map:  # 重複は先出を優先
-                            channel_map[ch_id] = ch_name
-    except Exception:
-        pass
-
-    # pm_qa_server.py の _CHANNEL_NAMES をフォールバック
+    """argus_config.yaml の `channel_names:` セクションから channel_id → 表示名を取得。
+    yaml に無い場合は pm_qa_server._CHANNEL_NAMES をフォールバック。"""
+    from cli_utils import resolve_channel_names
+    channel_map = dict(resolve_channel_names())
     if not channel_map:
         try:
             from argus.pm_qa_server import _CHANNEL_NAMES
             channel_map.update(_CHANNEL_NAMES)
         except ImportError:
             pass
-
     return channel_map
 
 
@@ -1290,9 +1277,11 @@ def _filter_mentions_for_user(
         if not ch_section.strip():
             continue
 
-        # チャンネルID取得 (先頭行)
+        # チャンネルID取得 (先頭行は "Cxxx" または "Cxxx (#name)" 形式)
         lines = ch_section.strip().split("\n")
-        ch_id = lines[0].strip()
+        header = lines[0].strip()
+        m_ch = re.match(r"^(C[A-Z0-9]+)", header)
+        ch_id = m_ch.group(1) if m_ch else header
         ch_name = channel_names.get(ch_id, ch_id)
 
         # メッセージ行を走査
@@ -1326,6 +1315,14 @@ def _filter_mentions_for_user(
                 expanded_line = line
                 for uid, uname in user_id_map.items():
                     expanded_line = expanded_line.replace(uid, uname)
+                # テキスト内のチャンネルID (C0XXXXXXX、<#C..>、<#C..|name>) を展開
+                for cid, cname in channel_names.items():
+                    expanded_line = re.sub(
+                        rf"<#{re.escape(cid)}(?:\|[^>]*)?>",
+                        f"#{cname}",
+                        expanded_line,
+                    )
+                    expanded_line = expanded_line.replace(cid, f"#{cname}")
 
                 # チャンネル名付きで記録
                 mention_lines.append(f"{ch_name} {expanded_line}")
@@ -1371,24 +1368,24 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
             c.close()
 
         # 3. ユーザーIDマップを構築（テキスト内のID展開用）
+        # 優先順位: argus_config.yaml の user_names: > slack.db の messages.user_name
         import re
-        user_id_map = {}
+        from cli_utils import resolve_user_names
+        user_id_map: dict[str, str] = dict(resolve_user_names())
         try:
             from db_utils import open_db
 
-            # 統合 DB (data/slack.db) からユーザーID展開用マップを構築
             unified_db = _REPO_ROOT / "data" / "slack.db"
             uid_pattern = re.compile(r'(U0[A-Z0-9]{9})')
-            text_uids = set()
+            text_uids: set[str] = set()
 
             try:
                 conn = open_db(unified_db, encrypt=not no_encrypt)
-                # テキスト内のユーザーIDパターン (U0XXXXXXXXX = 10文字) を抽出
                 for row in conn.execute("SELECT text FROM messages WHERE text IS NOT NULL").fetchall():
                     if row[0]:
                         text_uids.update(uid_pattern.findall(row[0]))
-                # テキストに出現した user_id の display_name を引く
-                for uid in text_uids:
+                # yaml で未解決の user_id だけ slack.db から引く
+                for uid in text_uids - user_id_map.keys():
                     result = conn.execute(
                         "SELECT user_name FROM messages WHERE user_id = ?"
                         " AND user_name IS NOT NULL AND user_name != ? AND user_name NOT LIKE 'U0%' LIMIT 1",
