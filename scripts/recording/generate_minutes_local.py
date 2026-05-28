@@ -550,6 +550,20 @@ def _split_action_rows(text: str) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _extract_section(text: str, header: str) -> str:
+    """`## {header}` セクションだけ抜き出して返す。見つからなければ空文字。"""
+    if not text:
+        return ""
+    m = re.search(rf"^##\s*{re.escape(header)}\s*$", text, flags=re.MULTILINE)
+    if not m:
+        return ""
+    body = text[m.end():]
+    m2 = re.search(r"^##\s+\S", body, flags=re.MULTILINE)
+    if m2:
+        body = body[: m2.start()]
+    return f"## {header}\n{body.rstrip()}"
+
+
 def _greedy_cluster(
     items: list[str],
     threshold: float,
@@ -704,16 +718,34 @@ def _consensus_stage3(
             all_actions.append((di, assignee, task, deadline))
 
     # --- 決定事項の集約 --- #
+    def _decisions_fallback_from_clusters(accepted_cls: list[list[int]]) -> str:
+        """投票通過済みクラスタから代表 bullet を組み立てる（LLM 不使用フォールバック）。"""
+        bullets: list[str] = []
+        for cl in accepted_cls:
+            # クラスタ内で最長の決定事項を代表として採用
+            rep = max(cl, key=lambda i: len(all_decisions[i][1]))
+            bullets.append(f"- {all_decisions[rep][1]}")
+        return "## 決定事項\n\n" + ("\n".join(bullets) if bullets else "（なし）")
+
+    def _decisions_fallback_from_longest() -> str:
+        """最長ドラフトから決定事項セクションだけ抜き出す。"""
+        if not drafts:
+            return "## 決定事項\n\n（なし）"
+        longest = max(drafts, key=len)
+        section = _extract_section(longest, "決定事項")
+        return section or "## 決定事項\n\n（なし）"
+
     if all_decisions:
         keys = [item for _, item in all_decisions]
         try:
             clusters = _greedy_cluster(keys, threshold, label="Stage 3 決定事項")
         except Exception as e:
             print(f"[ERROR] Stage 3 決定事項 embedding 失敗、最長ドラフトを採用: {e}", file=sys.stderr)
-            return max(drafts, key=len) if drafts else ""
+            decisions_md = _decisions_fallback_from_longest()
+            clusters = []
         accepted = [cl for cl in clusters
                     if len({all_decisions[i][0] for i in cl}) >= min_vote]
-        if accepted:
+        if clusters and accepted:
             drafts_block_lines = []
             for ci, cl in enumerate(accepted, 1):
                 bullets = "\n".join(f"- {all_decisions[i][1]}" for i in cl)
@@ -730,15 +762,42 @@ def _consensus_stage3(
                     no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
                 )
             except Exception as e:
-                print(f"[WARN] Stage 3 決定事項集約失敗: {e}、最長ドラフトを採用", file=sys.stderr)
-                decisions_md = ""
-        else:
+                print(
+                    f"[WARN] Stage 3 決定事項集約 LLM 失敗: {e}、"
+                    f"投票通過済みクラスタ {len(accepted)} 件の代表 bullet で代替",
+                    file=sys.stderr,
+                )
+                decisions_md = _decisions_fallback_from_clusters(accepted)
+        elif clusters:
             print(f"[WARN] Stage 3 決定事項: 投票閾値 {min_vote} 通過なし → 「（なし）」", file=sys.stderr)
             decisions_md = "## 決定事項\n\n（なし）"
     else:
         decisions_md = "## 決定事項\n\n（なし）"
 
     # --- アクションアイテムの集約 --- #
+    def _actions_fallback_from_clusters(accepted_cls: list[list[int]]) -> str:
+        """投票通過済みクラスタから代表行を組み立てる（LLM 不使用フォールバック）。"""
+        rows: list[str] = ["| 担当者 | タスク内容 | 期限 |", "|---|---|---|"]
+        for cl in accepted_cls:
+            # 期限が埋まっており、タスク内容が最長のものを代表として採用
+            rep = max(cl, key=lambda i: (
+                bool(all_actions[i][3]),  # 期限あり優先
+                len(all_actions[i][2]),  # タスク内容の長さ
+            ))
+            _, a, t, dl = all_actions[rep]
+            rows.append(f"| {a} | {t} | {dl} |")
+        if len(rows) == 2:
+            return "## アクションアイテム\n\n（なし）"
+        return "## アクションアイテム\n\n" + "\n".join(rows)
+
+    def _actions_fallback_from_longest() -> str:
+        """最長ドラフトから AI セクションだけ抜き出す。"""
+        if not drafts:
+            return "## アクションアイテム\n\n（なし）"
+        longest = max(drafts, key=len)
+        section = _extract_section(longest, "アクションアイテム")
+        return section or "## アクションアイテム\n\n（なし）"
+
     if all_actions:
         # 担当者を embedding キーに混ぜて、同一担当者の似た内容だけクラスタ化
         keys = [f"[{a}] {t}" for _, a, t, _ in all_actions]
@@ -746,10 +805,11 @@ def _consensus_stage3(
             clusters = _greedy_cluster(keys, threshold, label="Stage 3 AI")
         except Exception as e:
             print(f"[ERROR] Stage 3 AI embedding 失敗、最長ドラフトを採用: {e}", file=sys.stderr)
-            return max(drafts, key=len) if drafts else ""
+            actions_md = _actions_fallback_from_longest()
+            clusters = []
         accepted = [cl for cl in clusters
                     if len({all_actions[i][0] for i in cl}) >= min_vote]
-        if accepted:
+        if clusters and accepted:
             drafts_block_lines = []
             for ci, cl in enumerate(accepted, 1):
                 lines = ["| 担当者 | タスク内容 | 期限 |", "|---|---|---|"]
@@ -770,9 +830,13 @@ def _consensus_stage3(
                     no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
                 )
             except Exception as e:
-                print(f"[WARN] Stage 3 AI集約失敗: {e}", file=sys.stderr)
-                actions_md = "## アクションアイテム\n\n（なし）"
-        else:
+                print(
+                    f"[WARN] Stage 3 AI 集約 LLM 失敗: {e}、"
+                    f"投票通過済みクラスタ {len(accepted)} 件の代表行で代替",
+                    file=sys.stderr,
+                )
+                actions_md = _actions_fallback_from_clusters(accepted)
+        elif clusters:
             print(f"[WARN] Stage 3 AI: 投票閾値 {min_vote} 通過なし → 「（なし）」", file=sys.stderr)
             actions_md = "## アクションアイテム\n\n（なし）"
     else:
