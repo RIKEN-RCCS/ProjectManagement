@@ -96,6 +96,14 @@ EXTRACTOR_OPTS=("${COMMON_OPTS[@]}")
 # --------------------------------------------------------------------------- #
 # 実行
 # --------------------------------------------------------------------------- #
+# Canvas 上の人手編集を ingest 前に pm.db に取り込む（dry-run 時はスキップ）。
+if [[ -z "$DRY_RUN" ]]; then
+    # shellcheck source=_lib_sync_canvas.sh
+    source "$SCRIPT_DIR/_lib_sync_canvas.sh"
+    sync_canvas_before_pm_update "$DB_PM"
+    echo ""
+fi
+
 echo "================================================================"
 echo "ステップ1: Slack取得 (slack_pipeline.py)"
 echo "  チャンネル : $CHANNEL"

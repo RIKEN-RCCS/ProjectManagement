@@ -32,7 +32,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db, open_pm_db, fetch_milestone_progress, fetch_assignee_workload
 from cli_utils import (add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-                       add_filter_arg, resolve_filter_presets, make_logger)
+                       add_filter_arg, resolve_filter_presets, resolve_report_canvas_id,
+                       make_logger)
 from canvas_utils import sanitize_for_canvas, post_to_canvas
 
 # --------------------------------------------------------------------------- #
@@ -353,7 +354,11 @@ def build_report(
 def main() -> None:
     parser = argparse.ArgumentParser(description="pm.db → 進捗レポート・アジェンダ生成・Canvas投稿")
     parser.add_argument("--db", default=str(DEFAULT_PM_DB), help=f"pm.db のパス（デフォルト: {DEFAULT_PM_DB}）")
-    parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="投稿先 Canvas ID")
+    parser.add_argument(
+        "--canvas-id",
+        default=resolve_report_canvas_id(fallback=DEFAULT_CANVAS_ID),
+        help="投稿先 Canvas ID（未指定時は argus_config.yaml の report.canvas_id を参照）",
+    )
     add_since_arg(parser)
     parser.add_argument("--skip-canvas", action="store_true", help="Canvas 投稿をスキップ")
     parser.add_argument("--show-acknowledged", action="store_true",

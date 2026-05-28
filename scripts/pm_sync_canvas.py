@@ -43,7 +43,8 @@ from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_utils import open_db
-from cli_utils import add_output_arg, add_no_encrypt_arg, add_dry_run_arg, make_logger
+from cli_utils import (add_output_arg, add_no_encrypt_arg, add_dry_run_arg,
+                       resolve_report_canvas_id, make_logger)
 
 # --------------------------------------------------------------------------- #
 # 定数
@@ -655,7 +656,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Canvas の「対応状況」列を読み取り pm.db を更新する"
     )
-    parser.add_argument("--canvas-id", default=DEFAULT_CANVAS_ID, help="対象 Canvas ID")
+    parser.add_argument(
+        "--canvas-id",
+        default=resolve_report_canvas_id(fallback=DEFAULT_CANVAS_ID),
+        help="対象 Canvas ID（未指定時は argus_config.yaml の report.canvas_id を参照）",
+    )
     parser.add_argument("--db", default=None, help="pm.db のパス")
     parser.add_argument("--debug-canvas", action="store_true",
                         help="Canvas から取得した生コンテンツを表示して終了（デバッグ用）")

@@ -96,6 +96,16 @@ fi
 
 echo "処理対象: ${#FILES[@]} ファイル"
 
+# Canvas → pm.db 同期（ループに入る前に1回。--meeting-name 未指定なら
+# pm.db への転記は行わないのでスキップする）。
+if [[ -n "$MEETING_NAME" ]]; then
+    DB_PM_FOR_SYNC="${DB_PATH:-$REPO_ROOT/data/pm.db}"
+    # shellcheck source=_lib_sync_canvas.sh
+    source "$SCRIPT_DIR/_lib_sync_canvas.sh"
+    sync_canvas_before_pm_update "$DB_PM_FOR_SYNC"
+    echo ""
+fi
+
 # --------------------------------------------------------------------------- #
 # 作業ディレクトリ
 # --------------------------------------------------------------------------- #
