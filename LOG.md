@@ -7,6 +7,29 @@
 
 ---
 
+## 2026-05-29 `/argus-narrate` — PPTX/PDF をスライド要約読み上げ mp4 化
+
+**背景**: argus-today/brief/risk の音声化が好評。PPTX/PDF も全文読み上げは間延びするが、
+スライドごとに 2-3 文の要約読み上げ + スライド画像を組合せた mp4 なら「概観の skim」用途に有効。
+
+**決定**:
+- `scripts/build_slide_video.py` を新設。各スライドについて (A) PPTX→python-pptx で本文+notes /
+  PDF→pdftotext / PyMuPDF で抽出、(B) `slide_ocr.ocr_slide_image` でマルチモーダル OCR、両方を
+  併記して LLM に投げ「(A) 優先・(B) は補完」で要約。`pm_tts.synth_chunk` / `concat_wavs` を直接
+  使ってスライド粒度で WAV を作り、`ffmpeg -loop 1` で静止画+音声→セグメント mp4、concat demuxer
+  で 1 本に結合。
+- Slack エンドポイント `/argus-narrate <filename.pptx|pdf>` を `pm_qa_server.py` に追加。
+  `_run_narrate` は `/argus-transcribe` を雛形にしつつ排他制御は `_narrate_lock` で軽量に。
+  生成 mp4 は `_post_argus_video` (`_post_argus_voice` を mp4 用に派生) でチャンネルに投稿し、
+  `voice_uploads.record_upload(kind="narrate")` で履歴記録。`:wastebasket:` リアクションと
+  `/argus-delete` スレッド一括削除は既存コードで自動的に対象になる。
+- OCR とテキスト抽出を併用したのは、画像 OCR 単独だと数式・表・小さい文字で誤認識が出るため。
+
+**影響**: PPTX/PDF を Slack に上げて `/argus-narrate slides.pptx` を叩くと要約 mp4 がスレッドに
+投稿される。Slack App 側で `/argus-narrate` の登録が必要。VOICEVOX エンジンが必須。
+
+---
+
 ## 2026-05-29 argus 出力の音声化 (VOICEVOX) と削除 UX 整備
 
 **背景**: `/argus-today` `/argus-brief` `/argus-risk` および議事録パイプラインの出力テキストを

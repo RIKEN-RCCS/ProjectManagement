@@ -27,7 +27,9 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
 import threading
 
 import yaml
@@ -71,6 +73,10 @@ _DRAFT_REPORT_SINCE_DAYS = 14
 # --------------------------------------------------------------------------- #
 _transcribe_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, channel_id)
 _transcribe_lock = threading.Lock()
+
+# /argus-narrate ジョブ排他制御 (PPTX/PDF → mp4)
+_narrate_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, channel_id)
+_narrate_lock = threading.Lock()
 
 from recording.transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
 
@@ -1463,20 +1469,20 @@ def _post_argus_voice(
         # アップロード履歴を記録（reaction_added の対象判定に使う）
         try:
             import voice_uploads
-            file_id = ""
-            message_ts = ""
-            files_field = upload_resp.get("files") or []
-            if files_field:
-                f0 = files_field[0]
-                file_id = f0.get("id") or f0.get("file", {}).get("id", "")
-                shares = f0.get("shares") or {}
-                for visibility in ("public", "private"):
-                    visible = shares.get(visibility) or {}
-                    if channel_id in visible:
-                        ts_list = visible[channel_id]
-                        if ts_list:
-                            message_ts = ts_list[0].get("ts", "")
-                            break
+            file_id, message_ts = _extract_share_ts(upload_resp, channel_id)
+            if file_id and not message_ts:
+                import time as _time
+                for delay in (0.5, 1.0, 2.0):
+                    _time.sleep(delay)
+                    try:
+                        info = client.files_info(file=file_id)
+                    except Exception as exc:
+                        logger.debug(f"[argus-{kind}] voice: files_info 失敗 {exc}")
+                        continue
+                    file_obj = info.get("file") or {}
+                    _, message_ts = _extract_share_ts({"files": [file_obj]}, channel_id)
+                    if message_ts:
+                        break
             if file_id and message_ts:
                 voice_uploads.record_upload(
                     message_ts=message_ts,
@@ -1489,7 +1495,8 @@ def _post_argus_voice(
                 logger.info(f"[argus-{kind}] voice: 履歴記録 file_id={file_id} ts={message_ts}")
             else:
                 logger.warning(
-                    f"[argus-{kind}] voice: file_id / message_ts を取得できず履歴未記録"
+                    f"[argus-{kind}] voice: file_id / message_ts を取得できず履歴未記録 "
+                    f"(file_id={file_id!r} message_ts={message_ts!r})"
                 )
         except Exception as exc:
             logger.warning(f"[argus-{kind}] voice: 履歴記録失敗 {exc}")
@@ -1503,6 +1510,113 @@ def _post_argus_voice(
                 mp3_path.unlink()
         except Exception:
             pass
+
+
+def _post_argus_video(
+    command: dict,
+    *,
+    kind: str,
+    mp4_path: Path,
+    title: str,
+    initial_comment: str,
+) -> None:
+    """argus-* コマンドが生成した mp4 をコマンド実行チャンネルに投稿する。
+
+    _post_argus_voice の動画版。voice_uploads.db に kind を記録し、
+    :wastebasket: リアクションや /argus-delete スレッド一括削除の対象にする。
+    """
+    user_id = command.get("user_id") or ""
+    channel_id = command.get("channel_id") or ""
+    if not channel_id:
+        logger.warning(f"[argus-{kind}] video: channel_id 不明、スキップ")
+        return
+
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not bot_token:
+        logger.warning(f"[argus-{kind}] video: SLACK_BOT_TOKEN 未設定、スキップ")
+        return
+
+    try:
+        from slack_sdk import WebClient
+    except ImportError as exc:
+        logger.warning(f"[argus-{kind}] video: import 失敗 ({exc})、スキップ")
+        return
+
+    try:
+        client = WebClient(token=bot_token)
+        upload_resp = client.files_upload_v2(
+            channel=channel_id,
+            file=str(mp4_path),
+            filename=mp4_path.name,
+            title=title,
+            initial_comment=initial_comment,
+        )
+
+        try:
+            import voice_uploads
+            file_id, message_ts = _extract_share_ts(upload_resp, channel_id)
+            # files_upload_v2 のレスポンスに shares が入らないことがあるため、
+            # file_id だけ取れて message_ts が空なら files_info でフォールバック取得。
+            # それでも取れない場合 (shares 反映が遅延) は再試行してから諦める。
+            if file_id and not message_ts:
+                import time as _time
+                for delay in (0.5, 1.0, 2.0):
+                    _time.sleep(delay)
+                    try:
+                        info = client.files_info(file=file_id)
+                    except Exception as exc:
+                        logger.debug(f"[argus-{kind}] video: files_info 失敗 {exc}")
+                        continue
+                    file_obj = info.get("file") or {}
+                    _, message_ts = _extract_share_ts({"files": [file_obj]}, channel_id)
+                    if message_ts:
+                        break
+            if file_id and message_ts:
+                voice_uploads.record_upload(
+                    message_ts=message_ts,
+                    channel_id=channel_id,
+                    file_id=file_id,
+                    user_id=user_id,
+                    kind=kind,
+                    title=title,
+                )
+                logger.info(f"[argus-{kind}] video: 履歴記録 file_id={file_id} ts={message_ts}")
+            else:
+                logger.warning(
+                    f"[argus-{kind}] video: file_id / message_ts を取得できず履歴未記録 "
+                    f"(file_id={file_id!r} message_ts={message_ts!r})"
+                )
+        except Exception as exc:
+            logger.warning(f"[argus-{kind}] video: 履歴記録失敗 {exc}")
+
+        logger.info(f"[argus-{kind}] video: チャンネルアップロード完了 ch={channel_id}")
+    except Exception as exc:
+        logger.exception(f"[argus-{kind}] video: 失敗 {exc}")
+
+
+def _extract_share_ts(upload_resp: dict, channel_id: str) -> tuple[str, str]:
+    """files_upload_v2 / files_info のレスポンスから (file_id, message_ts) を取り出す。
+
+    取れない場合は空文字を返す。message_ts は files.shares.{public,private}.{channel_id}
+    にあるため、レスポンスの形が違っても両方を試す。
+    """
+    file_id = ""
+    message_ts = ""
+    files_field = upload_resp.get("files") or []
+    if not files_field:
+        return file_id, message_ts
+    f0 = files_field[0]
+    file_id = f0.get("id") or f0.get("file", {}).get("id", "")
+    shares = f0.get("shares") or {}
+    for visibility in ("public", "private"):
+        visible = shares.get(visibility) or {}
+        if channel_id in visible:
+            ts_list = visible[channel_id]
+            if ts_list:
+                message_ts = ts_list[0].get("ts", "")
+                if message_ts:
+                    return file_id, message_ts
+    return file_id, message_ts
 
 
 def _post_today_voice(command: dict, today: str, result_md: str) -> None:
@@ -1726,6 +1840,180 @@ def _run_transcribe(respond, command):
     finally:
         with _transcribe_lock:
             _transcribe_jobs.pop(thread_ts, None)
+
+
+# --------------------------------------------------------------------------- #
+# /argus-narrate: PPTX/PDF → 要約読み上げ付き mp4
+# --------------------------------------------------------------------------- #
+
+def _run_narrate(respond, command):
+    """Slack /argus-narrate のバックグラウンド処理。
+
+    実行チャンネルにアップロードされた PPTX/PDF をダウンロードし、
+    build_slide_video で要約読み上げ付き mp4 を生成してチャンネルに投稿する。
+    """
+    text = (command.get("text") or "").strip()
+    text = text.strip("*_`~'\"「」​‌‍﻿")
+    filename = text
+    if filename and not Path(filename).suffix:
+        filename += ".pptx"
+    channel_id = command.get("channel_id", "")
+
+    if not filename:
+        respond(
+            text=(
+                "ファイル名を指定してください。\n"
+                "例: `/argus-narrate slides.pptx` / `/argus-narrate handout.pdf`"
+            ),
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".pptx", ".pdf"):
+        respond(
+            text=f":warning: 対応形式は .pptx / .pdf です（指定: `{filename}`）",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not bot_token:
+        respond(
+            text=":warning: SLACK_BOT_TOKEN が設定されていません。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    try:
+        from slack_sdk import WebClient
+        bot_client = WebClient(token=bot_token)
+    except ImportError:
+        respond(
+            text=":warning: slack_sdk がインストールされていません。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    # チャンネルからファイルを検索
+    try:
+        listing = bot_client.files_list(channel=channel_id, types="all")
+        files = listing.get("files", [])
+    except Exception as exc:
+        respond(
+            text=f":warning: files_list 失敗: {exc}",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    matched = [f for f in files if f.get("name") == filename]
+    if not matched:
+        respond(
+            text=f":warning: `{filename}` がこのチャンネルに見つかりません。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    url = matched[0].get("url_private_download")
+    if not url:
+        respond(
+            text=f":warning: `{filename}` のダウンロードURLが取得できません。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    # 進捗をスレッドで知らせる
+    try:
+        progress = bot_client.chat_postMessage(
+            channel=channel_id,
+            text=f":hourglass_flowing_sand: `{filename}` の要約動画を生成しています...",
+        )
+        thread_ts = progress["ts"]
+    except Exception as exc:
+        respond(
+            text=f":warning: Slack 投稿失敗: {exc}",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        return
+
+    with _narrate_lock:
+        _narrate_jobs[thread_ts] = (filename, channel_id)
+
+    work_dir = Path(tempfile.mkdtemp(prefix="argus_narrate_"))
+    try:
+        import requests as _req
+        src_path = work_dir / filename
+        dl = _req.get(
+            url,
+            headers={"Authorization": f"Bearer {bot_token}"},
+            stream=True, timeout=300,
+        )
+        dl.raise_for_status()
+        with open(src_path, "wb") as f:
+            for chunk in dl.iter_content(chunk_size=1024 * 1024):
+                f.write(chunk)
+
+        try:
+            from build_slide_video import build_slide_video
+        except ImportError as exc:
+            raise RuntimeError(f"build_slide_video の import 失敗: {exc}")
+
+        mp4_path = work_dir / (Path(filename).stem + ".narrate.mp4")
+        logger.info(f"[argus-narrate] 開始: {filename}")
+        build_slide_video(src_path, mp4_path, quiet=True)
+        logger.info(
+            f"[argus-narrate] mp4 生成完了 size={mp4_path.stat().st_size} bytes"
+        )
+
+        try:
+            import pm_tts
+            credit = pm_tts.credit_line(pm_tts.DEFAULT_SPEAKER)
+        except Exception:
+            credit = ""
+        initial_comment = (
+            ":movie_camera: スライド要約動画です。\n"
+            + (f"_{credit}_\n" if credit else "")
+            + "削除する場合はこのメッセージに :wastebasket: リアクションを付けてください。"
+        )
+        _post_argus_video(
+            command,
+            kind="narrate",
+            mp4_path=mp4_path,
+            title=f"{Path(filename).stem} 要約動画",
+            initial_comment=initial_comment,
+        )
+
+        respond(
+            text=f":white_check_mark: `{filename}` の要約動画を投稿しました。",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+    except Exception as exc:
+        logger.exception("[argus-narrate] エラー")
+        try:
+            bot_client.chat_postMessage(
+                channel=channel_id, thread_ts=thread_ts,
+                text=f":warning: 要約動画の生成に失敗しました: {exc}",
+            )
+        except Exception:
+            pass
+        respond(
+            text=f":warning: 要約動画生成エラー: {exc}",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+    finally:
+        with _narrate_lock:
+            _narrate_jobs.pop(thread_ts, None)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #

@@ -36,7 +36,7 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_local_llm, load_claude_md_context
 from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
-from argus.pm_argus import _run_brief, _run_draft, _run_risk, _run_today_only, _run_transcribe, _transcribe_jobs, _transcribe_lock
+from argus.pm_argus import _run_brief, _run_draft, _run_risk, _run_today_only, _run_transcribe, _transcribe_jobs, _transcribe_lock, _run_narrate, _narrate_jobs, _narrate_lock
 from argus.pm_argus_agent import _run_investigate
 from argus.patrol.confirm import handle_approve_close, handle_reject_close
 from argus.patrol.state import PatrolState
@@ -1206,6 +1206,36 @@ def build_app():
     def handle_transcribe(ack, respond, command):
         _handle_transcribe_command(ack, respond, command, "/transcribe")
 
+    @app.command("/argus-narrate")
+    def handle_argus_narrate(ack, respond, command):
+        ack()
+        filename = (command.get("text") or "").strip()
+        if not filename:
+            respond(
+                text=(
+                    "ファイル名を指定してください。\n"
+                    "例: `/argus-narrate slides.pptx` / `/argus-narrate handout.pdf`"
+                ),
+                response_type="ephemeral",
+            )
+            return
+        with _narrate_lock:
+            if _narrate_jobs:
+                running = ", ".join(
+                    f"`{fname}` (ch={chid})"
+                    for _, (fname, chid) in _narrate_jobs.items()
+                )
+                respond(
+                    text=f":warning: 現在処理中の要約動画ジョブがあります。完了後に再実行してください。\n処理中: {running}",
+                    response_type="ephemeral",
+                )
+                return
+        respond(
+            text=f":hourglass_flowing_sand: `{filename}` の要約動画生成を開始します...",
+            response_type="ephemeral",
+        )
+        executor.submit(_run_narrate, respond, command)
+
     def _delete_thread_files(client, channel_id: str, thread_ts: str) -> tuple[int, list[str]]:
         """スレッド配下の全 reply に添付された files を削除する。
 
@@ -1367,17 +1397,38 @@ def build_app():
 
         # 対象メッセージを取得して bot 自身の投稿か確認する。
         # （他人の投稿に誤って付けたリアクションで削除事故を起こさない）
+        # conversations_history は親メッセージのみ取得できるため、
+        # スレッド reply の場合は conversations_replies にフォールバックする。
+        target: dict | None = None
         try:
             hist = client.conversations_history(
                 channel=channel_id, latest=message_ts, inclusive=True, limit=1,
             )
+            for m in hist.get("messages") or []:
+                if m.get("ts") == message_ts:
+                    target = m
+                    break
         except Exception as e:
             logger.warning(f"[reaction-delete] history 取得失敗 ch={channel_id} ts={message_ts}: {e}")
+
+        if target is None:
+            try:
+                rep = client.conversations_replies(
+                    channel=channel_id, ts=message_ts, latest=message_ts,
+                    inclusive=True, limit=1,
+                )
+                for m in rep.get("messages") or []:
+                    if m.get("ts") == message_ts:
+                        target = m
+                        break
+            except Exception as e:
+                logger.warning(f"[reaction-delete] replies 取得失敗 ch={channel_id} ts={message_ts}: {e}")
+                return
+
+        if target is None:
+            logger.info(f"[reaction-delete] 対象メッセージが見つからない ch={channel_id} ts={message_ts}")
             return
-        msgs = hist.get("messages") or []
-        if not msgs:
-            return
-        target = msgs[0]
+
         bot_authored = bool(target.get("bot_id")) or target.get("subtype") == "bot_message"
         try:
             sys.path.insert(0, str(_REPO_ROOT / "scripts"))
