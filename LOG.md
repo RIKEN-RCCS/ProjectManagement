@@ -7,6 +7,40 @@
 
 ---
 
+## 2026-05-29 argus 出力の音声化 (VOICEVOX) と削除 UX 整備
+
+**背景**: `/argus-today` `/argus-brief` `/argus-risk` および議事録パイプラインの出力テキストを
+通勤・移動中に聴き流したい、という要望。VOICEVOX エンジン (http://localhost:50021) はローカルで
+稼働済み。素のテキストをそのまま合成すると(a) 数百チャンクで再生時間が延びる、(b) URL や記号が
+不自然に読まれる、という問題。さらに「ephemeral と整合的に音声をどう届けるか」「削除手段は」も
+個別に決める必要があった。
+
+**決定**:
+- `scripts/pm_tts.py` を新規追加。VOICEVOX `audio_query` → `synthesis` をチャンク化して呼び出し、
+  `wave` で結合し ffmpeg で MP3 化。default speaker=74 (琴詠ニア) / speed=1.3。
+- LLM 要約モードを 3 つ実装: `auto` (見出し/番号付き) / `minutes` (## 決定事項・## 議事内容→### 単位・
+  ## アクションアイテム) / `priority` (`- **[優先度: 高/中/低]**` 単位)。argus-today=auto, brief・risk=
+  priority, 議事録=minutes をハンドラ側でハードコード。要約は `cli_utils.call_argus_llm` で 1 セクション
+  あたり 2 文 / 120 字以内に圧縮。
+- 投稿先は当初 `conversations_open` で実行者 DM にしていたが、Slack の "App" セクションに隔離されて
+  視認性が悪いとの指摘で `command.channel_id` への chat に変更（テキストは ephemeral・mp3 はチャンネル
+  公開）。
+- 削除はスラッシュコマンドではスレッド `thread_ts` が取れないため `:wastebasket:` リアクション式に変更。
+  `voice_uploads.db` (新規・非暗号化) に file_id / message_ts / channel_id を記録し、
+  `app.event("reaction_added")` で本人投稿または記録済みメッセージのみを `_delete_thread_files` で
+  一括削除。bot メッセージ自体も `chat_delete`。
+- VOICEVOX 利用規約遵守のため `pm_tts.credit_line(speaker_id)` を `/speakers` API から動的解決し、
+  `initial_comment` に "音声合成に『VOICEVOX:話者名』を使用" を埋め込み。
+- Slack section block は先頭スペースを表示しないため、入れ子箇条書きが Canvas と差が出ていた。
+  `_to_slack_mrkdwn` を改修し `- ` → `•`、`  - ` → `　　◦`、`    - ` → `　　　　▪` に NBSP+Unicode
+  ブレットで階層化。
+
+**影響**: argus 系コマンド・議事録投稿に音声 mp3 が併投され、Canvas と Slack の見え方が揃う。
+`pm_qa_server` 再起動が必要。Bot Token Scopes に `reactions:read` 追加と Event Subscriptions の
+`reaction_added` 購読が前提。`pm_from_recording.sh` (ローカル CLI) は対象外で従来通り。各コマンドの
+音声無効化用に `ARGUS_TODAY_VOICE` / `ARGUS_BRIEF_VOICE` / `ARGUS_RISK_VOICE` / `MINUTES_VOICE`
+環境変数を用意。テスト用に `scripts/pm_tts_test_upload.py` を同梱。
+
 ## 2026-05-28 argus-today のチャンネル ID / ユーザー ID を表示名に解決
 
 **背景**: `/argus-today` の出力でチャンネル ID (`Cxxx`) と Slack user_id (`U0xxxxxxxxx`) が

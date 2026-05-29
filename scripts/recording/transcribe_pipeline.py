@@ -65,6 +65,61 @@ def _post(client, channel_id, thread_ts, text):
     client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=text)
 
 
+def _post_minutes_voice(client, channel_id: str, thread_ts: str, minutes_path: Path) -> None:
+    """議事録 Markdown を音声化してスレッドにアップロードする。
+
+    失敗してもパイプライン全体を落とさないよう、内側で例外を握りつぶす。
+    無効化したい場合は MINUTES_VOICE=0 を設定。
+    """
+    try:
+        import sys as _sys
+        if str(_SCRIPT_DIR) not in _sys.path:
+            _sys.path.insert(0, str(_SCRIPT_DIR))
+        import pm_tts
+    except ImportError as exc:
+        logger.warning(f"voice: pm_tts import 失敗 ({exc})、スキップ")
+        return
+
+    mp3_path = minutes_path.with_suffix(".mp3")
+    speaker_id = pm_tts.DEFAULT_SPEAKER
+    try:
+        _post(client, channel_id, thread_ts, "音声版を生成しています...")
+        markdown = minutes_path.read_text(encoding="utf-8")
+        pm_tts.synthesize_markdown(
+            markdown,
+            mp3_path,
+            speaker=speaker_id,
+            summarize=True,
+            summarize_mode="minutes",
+            quiet=True,
+        )
+        credit = pm_tts.credit_line(speaker_id)
+        client.files_upload_v2(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            file=str(mp3_path),
+            filename=mp3_path.name,
+            title=f"{minutes_path.stem} (音声版)",
+            initial_comment=(
+                ":sound: 議事録の音声版（要約・短縮）です。\n"
+                f"_{credit}_\n"
+                "削除する場合はこのメッセージに :wastebasket: リアクションを付けてください。"
+            ),
+        )
+    except Exception as exc:
+        logger.exception(f"voice: 失敗 {exc}")
+        try:
+            _post(client, channel_id, thread_ts, f":warning: 音声版の生成に失敗しました: {exc}")
+        except Exception:
+            pass
+    finally:
+        try:
+            if mp3_path.exists():
+                mp3_path.unlink()
+        except Exception:
+            pass
+
+
 def _download_slack_file(url, save_path):
     """Slack ファイルをダウンロードして save_path に保存する。"""
     bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -518,6 +573,9 @@ def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=3):
             title=minutes_path.stem,
             initial_comment="要約完了しました。",
         )
+
+        if os.environ.get("MINUTES_VOICE", "1") != "0":
+            _post_minutes_voice(client, channel_id, thread_ts, minutes_path)
 
     except Exception as e:
         logger.exception("Pipeline failed")

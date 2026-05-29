@@ -1206,25 +1206,91 @@ def build_app():
     def handle_transcribe(ack, respond, command):
         _handle_transcribe_command(ack, respond, command, "/transcribe")
 
-    @app.command("/argus-delete")
-    def handle_argus_delete(ack, client, command):
-        handle_delete(ack, client, command)
+    def _delete_thread_files(client, channel_id: str, thread_ts: str) -> tuple[int, list[str]]:
+        """スレッド配下の全 reply に添付された files を削除する。
 
-    @app.command("/delete")
-    def handle_delete(ack, client, command):
-        filename = (command.get("text") or "").strip()
+        Returns: (削除件数, エラーメッセージ list)
+        """
+        try:
+            replies = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=200)
+        except Exception as e:
+            return 0, [f"スレッド取得に失敗: {e}"]
+
+        file_ids: list[str] = []
+        for msg in replies.get("messages", []) or []:
+            for f in msg.get("files", []) or []:
+                fid = f.get("id")
+                if fid:
+                    file_ids.append(fid)
+
+        deleted = 0
+        errors: list[str] = []
+        for fid in file_ids:
+            try:
+                client.files_delete(file=fid)
+                deleted += 1
+            except Exception as e:
+                errors.append(f"{fid}: {e}")
+
+        # voice_uploads.db のエントリも掃除する
+        try:
+            sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+            import voice_uploads
+            for fid in file_ids:
+                voice_uploads.delete_record(channel_id=channel_id, message_ts=thread_ts, file_id=fid)
+        except Exception as e:
+            logger.debug(f"[delete] voice_uploads cleanup failed: {e}")
+
+        return deleted, errors
+
+    def _handle_delete(ack, client, command):
+        """/argus-delete /delete 共通ハンドラ。
+
+        - スレッド内で引数なし → スレッド配下の全添付ファイルを削除（議事録 md + mp3 や argus-* 音声）
+        - 引数あり (filename / file_id) → 後方互換: ファイル名検索で削除、F0... なら直接削除
+        - スレッド外で引数なし → 使い方
+        """
+        text = (command.get("text") or "").strip().strip("*")
         channel_id = command.get("channel_id", "")
+        thread_ts = command.get("thread_ts", "")
 
-        if not filename:
-            ack("使い方: `/delete <ファイル名>`")
+        # 1. スレッド内 + 引数なし: スレッド配下を一括削除
+        if thread_ts and not text:
+            ack(":wastebasket: スレッド内のファイルを削除します...")
+            deleted, errors = _delete_thread_files(client, channel_id, thread_ts)
+            if deleted == 0 and not errors:
+                client.chat_postMessage(
+                    channel=channel_id, thread_ts=thread_ts,
+                    text="このスレッドに削除対象のファイルが見つかりませんでした。",
+                )
+                return
+            msg = f":white_check_mark: {deleted} 件のファイルを削除しました。"
+            if errors:
+                msg += "\n失敗:\n" + "\n".join(f"• {e}" for e in errors[:5])
+            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=msg)
             return
 
-        # Bold書式のアスタリスクを除去（例: *foo.md* → foo.md）
-        filename = filename.strip("*")
-        # 拡張子がなければ .md を付加
-        if "." not in filename:
-            filename += ".md"
+        if not text:
+            ack(
+                "使い方:\n"
+                "• 削除したいファイルがあるスレッド内で引数なしで `/argus-delete` を実行 → そのスレッドの全添付ファイルを削除\n"
+                "• `/argus-delete <ファイル名>` → チャンネルからファイル名で検索して削除（後方互換）\n"
+                "• `/argus-delete F0123ABCD` → file_id を直接指定して削除"
+            )
+            return
 
+        # 2. 引数が file_id らしい (F で始まり英数字)
+        if re.fullmatch(r"F[A-Z0-9]+", text):
+            ack(f"`{text}` を削除します...")
+            try:
+                client.files_delete(file=text)
+                client.chat_postMessage(channel=channel_id, text=f":white_check_mark: file_id `{text}` を削除しました。")
+            except Exception as e:
+                client.chat_postMessage(channel=channel_id, text=f":warning: file_id `{text}` の削除に失敗: {e}")
+            return
+
+        # 3. 引数がファイル名 (既存挙動)
+        filename = text if "." in text else f"{text}.md"
         ack(f"`{filename}` を検索して削除します...")
 
         files = []
@@ -1256,16 +1322,95 @@ def build_app():
         file_id = matched[0]["id"]
         try:
             client.files_delete(file=file_id)
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"`{filename}` を削除しました。",
-            )
+            client.chat_postMessage(channel=channel_id, text=f"`{filename}` を削除しました。")
         except Exception as e:
             logger.error("ファイル削除に失敗: %s", e)
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"`{filename}` の削除に失敗しました: {e}",
+            client.chat_postMessage(channel=channel_id, text=f"`{filename}` の削除に失敗しました: {e}")
+
+    @app.command("/argus-delete")
+    def handle_argus_delete(ack, client, command):
+        _handle_delete(ack, client, command)
+
+    @app.command("/delete")
+    def handle_delete(ack, client, command):
+        _handle_delete(ack, client, command)
+
+    # --- デバッグ用: 受信した event を全てログ ---
+    # （Slack App の Event Subscriptions に reaction_added が登録されているか
+    # 切り分けるための一時フック。負担は軽微なので常時有効でも問題ない）
+    @app.event({"type": "reaction_removed"})
+    def handle_reaction_removed_log(event, logger=logger):
+        logger.info(f"[event] reaction_removed reaction={event.get('reaction')}")
+
+    # --- reaction_added ハンドラ: :wastebasket: で添付ファイル一括削除 ---
+    # スラッシュコマンドはスレッド reply 入力欄から呼んでも thread_ts が
+    # 渡らないため、Bot 投稿に🗑️リアクションを付けることで
+    # 「このメッセージ（とそのスレッドの添付）を削除」を表現する。
+    _DELETE_REACTIONS = {"wastebasket", "x", "no_entry_sign"}
+
+    @app.event("reaction_added")
+    def handle_reaction_delete(event, client):
+        logger.info(
+            f"[reaction-delete] received reaction={event.get('reaction')} "
+            f"item={event.get('item')} user={event.get('user')}"
+        )
+        if event.get("reaction") not in _DELETE_REACTIONS:
+            logger.info(f"[reaction-delete] スキップ (対象外リアクション {event.get('reaction')})")
+            return
+        item = event.get("item") or {}
+        if item.get("type") != "message":
+            return
+        channel_id = item.get("channel") or ""
+        message_ts = item.get("ts") or ""
+        if not (channel_id and message_ts):
+            return
+
+        # 対象メッセージを取得して bot 自身の投稿か確認する。
+        # （他人の投稿に誤って付けたリアクションで削除事故を起こさない）
+        try:
+            hist = client.conversations_history(
+                channel=channel_id, latest=message_ts, inclusive=True, limit=1,
             )
+        except Exception as e:
+            logger.warning(f"[reaction-delete] history 取得失敗 ch={channel_id} ts={message_ts}: {e}")
+            return
+        msgs = hist.get("messages") or []
+        if not msgs:
+            return
+        target = msgs[0]
+        bot_authored = bool(target.get("bot_id")) or target.get("subtype") == "bot_message"
+        try:
+            sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+            import voice_uploads
+            recorded = voice_uploads.find_by_thread(channel_id=channel_id, message_ts=message_ts)
+        except Exception as e:
+            logger.debug(f"[reaction-delete] voice_uploads lookup failed: {e}")
+            recorded = []
+
+        # bot 投稿でも、voice_uploads.db に記録されている投稿でもない場合は無視
+        if not (bot_authored or recorded):
+            logger.info(f"[reaction-delete] 対象外 (non-bot non-recorded) ch={channel_id} ts={message_ts}")
+            return
+
+        # 親メッセージとそのスレッド配下の添付を全て削除
+        thread_ts = target.get("thread_ts") or message_ts
+        deleted, errors = _delete_thread_files(client, channel_id, thread_ts)
+
+        # Bot メッセージ自体も削除する（mp3 は files_delete で消えるが、
+        # ファイルなしの bot 通知メッセージが残ることがあるため）
+        try:
+            client.chat_delete(channel=channel_id, ts=message_ts)
+        except Exception as e:
+            logger.debug(f"[reaction-delete] chat_delete skipped ts={message_ts}: {e}")
+
+        user_id = event.get("user") or ""
+        try:
+            ephemeral_text = f":white_check_mark: {deleted} 件のファイルを削除しました。"
+            if errors:
+                ephemeral_text += "\n失敗:\n" + "\n".join(f"• {e}" for e in errors[:5])
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text=ephemeral_text)
+        except Exception:
+            pass
 
     # --- app_mention ハンドラ（常駐AIとしての @mention 応答） ---
     # 許可チャンネルは argus_config.yaml の mention_allowed_channels から取得。

@@ -479,15 +479,38 @@ _BRIEF_PROMPT = """\
 def _to_slack_mrkdwn(text: str) -> str:
     """GitHub Flavored Markdown を Slack mrkdwn に変換。
 
-    - `**bold**` → `*bold*`
     - `## heading` / `### heading` → `*heading*`
-    - `- item` はそのまま（Slackでも箇条書きとして表示される）
+    - `**bold**` → `*bold*`
+    - 入れ子箇条書き (`- ` / `  - ` / `    - `) は section block では
+      先頭スペースが消えてフラット表示になるため、Unicode のブレット文字と
+      NBSP (　) インデントに置換して階層感を保つ:
+        `- item`     → `• item`
+        `  - item`   → `　　◦ item`
+        `    - item` → `　　　　▪ item`
     """
     import re
     # ヘッダー (## ... / ### ...) を太字に変換
     text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
-    # **bold** → *bold*（ただし *...* と衝突しないよう一時置換）
+    # **bold** → *bold*
     text = re.sub(r'\*\*([^*\n]+?)\*\*', r'*\1*', text)
+
+    # 箇条書きを Unicode ブレット + NBSP インデントに変換
+    def _bullet(m: 're.Match') -> str:
+        leading = m.group(1)
+        # 先頭の空白量からインデント階層を推定（4 sp / 2 sp / tab を 1 段とみなす）
+        spaces = leading.replace("\t", "    ")
+        depth = len(spaces) // 2
+        if depth >= 2:
+            marker = "▪"
+        elif depth == 1:
+            marker = "◦"
+        else:
+            marker = "•"
+        # NBSP (U+3000 全角空白) で深さ × 2 段の見た目を作る
+        indent = "　　" * depth
+        return f"{indent}{marker} "
+    text = re.sub(r'^([ \t]*)[-*]\s+', _bullet, text, flags=re.MULTILINE)
+
     return text
 
 
@@ -1087,6 +1110,18 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         blocks = _split_mrkdwn_to_blocks(full_text)
         logger.info(f"[argus-brief] respond text={len(full_text)} chars, blocks={len(blocks)}")
         respond(blocks=blocks)
+
+        # 音声版 (mp3) を生成して実行者の DM にアップロード
+        _post_argus_voice(
+            command,
+            kind="brief",
+            today=today,
+            result_md=result,
+            summarize_mode="priority",
+            title=f"Argus ブリーフィング (音声版) {today}",
+            enable_env="ARGUS_BRIEF_VOICE",
+        )
+
         logger.info("[argus-brief] 完了")
     except Exception as e:
         logger.exception("[argus-brief] エラー")
@@ -1204,6 +1239,18 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         blocks = _split_mrkdwn_to_blocks(full_text)
         logger.info(f"[argus-risk] respond text={len(full_text)} chars, blocks={len(blocks)}")
         respond(blocks=blocks)
+
+        # 音声版 (mp3) を生成して実行者の DM にアップロード
+        _post_argus_voice(
+            command,
+            kind="risk",
+            today=today,
+            result_md=result,
+            summarize_mode="priority",
+            title=f"Argus リスク分析 (音声版) {today}",
+            enable_env="ARGUS_RISK_VOICE",
+        )
+
         logger.info("[argus-risk] 完了")
     except Exception as e:
         logger.exception("[argus-risk] エラー")
@@ -1339,6 +1386,138 @@ def _filter_mentions_for_user(
     return messages, mention_section
 
 
+def _post_argus_voice(
+    command: dict,
+    *,
+    kind: str,
+    today: str,
+    result_md: str,
+    summarize_mode: str = "auto",
+    title: str,
+    enable_env: str = "",
+) -> None:
+    """argus-* コマンドの本文を音声合成し、コマンドを叩いたチャンネルにアップロードする。
+
+    DM (conversations_open) に投稿すると Slack 上は "App" セクションに隔離され
+    視認性が悪いため、コマンドを実行したチャンネル (command.channel_id) に
+    chat_postMessage / files_upload_v2 でそのまま投稿する。
+    テキスト本文は ephemeral だが、音声 mp3 はチャンネル全員に見える点に注意。
+
+    失敗してもコマンド全体を落とさないよう例外は内側で握りつぶす。
+    """
+    import logging
+    logger = logging.getLogger("pm_argus")
+
+    if enable_env and os.environ.get(enable_env, "1") == "0":
+        logger.info(f"[argus-{kind}] voice: {enable_env}=0 によりスキップ")
+        return
+
+    user_id = command.get("user_id") or ""
+    channel_id = command.get("channel_id") or ""
+    if not channel_id:
+        logger.warning(f"[argus-{kind}] voice: channel_id 不明、スキップ")
+        return
+
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not bot_token:
+        logger.warning(f"[argus-{kind}] voice: SLACK_BOT_TOKEN 未設定、スキップ")
+        return
+
+    try:
+        import pm_tts
+        from slack_sdk import WebClient
+    except ImportError as exc:
+        logger.warning(f"[argus-{kind}] voice: import 失敗 ({exc})、スキップ")
+        return
+
+    mp3_path = Path(f"/tmp/argus_{kind}_{today}_{user_id or 'anon'}.mp3")
+    speaker_id = pm_tts.DEFAULT_SPEAKER
+    try:
+        logger.info(f"[argus-{kind}] voice: 要約・合成を開始 mode={summarize_mode}")
+        pm_tts.synthesize_markdown(
+            result_md,
+            mp3_path,
+            speaker=speaker_id,
+            summarize=True,
+            summarize_mode=summarize_mode,
+            quiet=True,
+        )
+        logger.info(f"[argus-{kind}] voice: mp3 生成完了 size={mp3_path.stat().st_size} bytes")
+
+        client = WebClient(token=bot_token)
+        credit = pm_tts.credit_line(speaker_id)
+        initial_comment = (
+            ":sound: 音声版（要約・短縮）です。\n"
+            f"_{credit}_\n"
+            "削除する場合はこのメッセージに :wastebasket: リアクションを付けてください。"
+        )
+
+        upload_resp = client.files_upload_v2(
+            channel=channel_id,
+            file=str(mp3_path),
+            filename=mp3_path.name,
+            title=title,
+            initial_comment=initial_comment,
+        )
+
+        # アップロード履歴を記録（reaction_added の対象判定に使う）
+        try:
+            import voice_uploads
+            file_id = ""
+            message_ts = ""
+            files_field = upload_resp.get("files") or []
+            if files_field:
+                f0 = files_field[0]
+                file_id = f0.get("id") or f0.get("file", {}).get("id", "")
+                shares = f0.get("shares") or {}
+                for visibility in ("public", "private"):
+                    visible = shares.get(visibility) or {}
+                    if channel_id in visible:
+                        ts_list = visible[channel_id]
+                        if ts_list:
+                            message_ts = ts_list[0].get("ts", "")
+                            break
+            if file_id and message_ts:
+                voice_uploads.record_upload(
+                    message_ts=message_ts,
+                    channel_id=channel_id,
+                    file_id=file_id,
+                    user_id=user_id,
+                    kind=kind,
+                    title=title,
+                )
+                logger.info(f"[argus-{kind}] voice: 履歴記録 file_id={file_id} ts={message_ts}")
+            else:
+                logger.warning(
+                    f"[argus-{kind}] voice: file_id / message_ts を取得できず履歴未記録"
+                )
+        except Exception as exc:
+            logger.warning(f"[argus-{kind}] voice: 履歴記録失敗 {exc}")
+
+        logger.info(f"[argus-{kind}] voice: チャンネルアップロード完了 ch={channel_id}")
+    except Exception as exc:
+        logger.exception(f"[argus-{kind}] voice: 失敗 {exc}")
+    finally:
+        try:
+            if mp3_path.exists():
+                mp3_path.unlink()
+        except Exception:
+            pass
+
+
+def _post_today_voice(command: dict, today: str, result_md: str) -> None:
+    """argus-today 用の薄いラッパ（後方互換）。"""
+    _post_argus_voice(
+        command,
+        kind="today",
+        today=today,
+        result_md=result_md,
+        summarize_mode="auto",
+        title=f"Argus 今日の活動サマリー (音声版) {today}",
+        enable_env="ARGUS_TODAY_VOICE",
+    )
+
+
 def _run_today_only(respond, command, *, no_encrypt: bool = False):
     """Slack /argus-today のバックグラウンド処理。
     本日のデータのみ収集し、実行者宛メンションを別トピック化。
@@ -1427,6 +1606,9 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         blocks = _split_mrkdwn_to_blocks(full_text)
         logger.info(f"[argus-today] respond text={len(full_text)} chars, blocks={len(blocks)}")
         respond(blocks=blocks)
+
+        # 9. 音声版 (mp3) を生成して実行者の DM にアップロード
+        _post_today_voice(command, today, result)
 
         logger.info("[argus-today] 完了")
 
