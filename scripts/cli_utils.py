@@ -243,6 +243,9 @@ def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) ->
     RuntimeError
         ローカル LLM も RiVault も利用できない場合
     """
+    # ARGUS_PREFER_RIVAULT=1 が設定されていれば RiVault を優先
+    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and os.environ.get("RIVAULT_URL"):
+        return call_rivault(prompt, timeout=timeout)
     if os.environ.get("OPENAI_API_BASE"):
         return _call_openai_compat(prompt, model=model, timeout=timeout)
     if os.environ.get("RIVAULT_URL"):
@@ -386,12 +389,18 @@ def call_local_llm(
     return stripped
 
 
-def detect_vllm_model(base_url: str) -> str:
-    """vLLM の /v1/models エンドポイントからモデル名を自動取得する。"""
+def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
+    """vLLM の /v1/models エンドポイントからモデル名を自動取得する。
+
+    api_key が None の場合は RIVAULT_TOKEN → OPENAI_API_KEY の順で環境変数から取得する。
+    """
     import urllib.request, json  # noqa: E401
     url = base_url.rstrip("/") + "/models"
+    if api_key is None:
+        api_key = os.environ.get("RIVAULT_TOKEN") or os.environ.get("OPENAI_API_KEY", "dummy")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
         models = [m["id"] for m in data.get("data", [])]
         if not models:

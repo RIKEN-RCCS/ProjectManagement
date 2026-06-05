@@ -19,6 +19,8 @@
 #   --ocr-workers N      OCR 並列ワーカー数（デフォルト: 8）
 #   --consensus N        Self-consistency サンプリング数（デフォルト 3。--consensus 1 で従来の単発生成に戻す）
 #
+# RiVault を使う場合は ARGUS_PREFER_RIVAULT=1 を環境変数で設定すること（フラグ不要）。
+#
 # 例:
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --skip 30 --meeting-name Leader_Meeting
@@ -39,8 +41,12 @@ fi
 
 export SINGULARITY_BIND=/lvs0
 
-export OPENAI_API_BASE="http://localhost:8000/v1"
-export OPENAI_API_KEY="dummy"
+# ARGUS_PREFER_RIVAULT=1 時は OPENAI_API_BASE を設定しない
+# (call_claude / call_argus_llm が RIVAULT_URL を使うようにする)
+if [[ "${ARGUS_PREFER_RIVAULT:-0}" != "1" ]]; then
+  export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
+  export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -114,7 +120,7 @@ mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 . ~/.secrets/hf_tokens.sh
-# RiVault トークン（Self-consistency の embedding 取得に必要）
+# RiVault トークン（Self-consistency の embedding 取得・ARGUS_PREFER_RIVAULT=1 時の LLM 呼び出しに必要）
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
 
 SUCCESS=0
@@ -340,8 +346,6 @@ EOF
   echo "[INFO] generate_minutes_local.py で議事録を生成中: $MEETING_NAME ($DATE_TO_USE)"
   TMPLOG=$(mktemp)
   "$PYTHON3" "$GENERATE_MINUTES_LOCAL" "$BASENAME.md" \
-    --url        "$OPENAI_API_BASE" \
-    --token      "$OPENAI_API_KEY" \
     --output     "$(dirname "$BASENAME")" \
     --max-tokens 16384 \
     --multi-stage --chunk-minutes 10 \

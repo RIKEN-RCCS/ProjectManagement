@@ -7,6 +7,23 @@
 
 ---
 
+## 2026-06-05 RiVault 移行: 環境変数一本制御 + V4-Flash のアクションアイテム過剰抽出対策
+
+**背景**: `ARGUS_PREFER_RIVAULT=1` で全 LLM 呼び出しを RiVault に切り替える実装を進めた際、
+(1) 各スクリプトに `--rivault` CLI フラグを追加する案が出たが、フラグ増殖を嫌いユーザー判断で却下。
+(2) V4-Flash は gemma4 より多弁で、アクションアイテムを 8-10 件抽出してしまう傾向が発覚。
+
+**決定**:
+- CLI フラグは一切追加せず `ARGUS_PREFER_RIVAULT=1` + `RIVAULT_URL/TOKEN/MODEL` 環境変数のみで制御。
+  `call_claude()` / `call_local_llm()` / `detect_vllm_model()` / `slide_ocr` / `transcribe_pipeline` すべて
+  この環境変数を見て分岐する。`pm_daemon.sh` は `rivault_tokens.sh` 読み込み後に自動 export。
+- アクションアイテム過剰抽出は `DECISIONS_TEMPLATE` と `CONSENSUS_ACTIONS_TEMPLATE` に「通常 3-4 件、最大 5 件」
+  の個数上限を明示して抑制。LLM の自己判断に任せると V4-Flash は寛容方向に振れるため明示的上限が必要。
+
+**捨てた案**: `--rivault` フラグ — スクリプトごとに追加が必要で保守コスト大。環境変数ならデーモン起動時に 1 箇所で済む。
+
+---
+
 ## 2026-06-05 Argus 主力 LLM を gemma4 → DeepSeek-V4-Flash に切替判断
 
 **背景**: GB200 NVL4 で RiVault 経由の DeepSeek-V4-Flash が利用可能になり、現行 gemma4

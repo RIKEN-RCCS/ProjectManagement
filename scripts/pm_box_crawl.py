@@ -642,10 +642,15 @@ def _ocr_image(img_path: Path, base_url: str, prompt: str | None = None) -> str 
     with open(img_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
 
-    api_key = os.environ.get("OPENAI_API_KEY", "dummy")
+    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and os.environ.get("RIVAULT_TOKEN"):
+        api_key = os.environ["RIVAULT_TOKEN"]
+    else:
+        api_key = os.environ.get("OPENAI_API_KEY", "dummy")
     from cli_utils import detect_vllm_model
     try:
-        model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(base_url)
+        model = (os.environ.get("OPENAI_MODEL")
+                 or (os.environ.get("RIVAULT_MODEL") if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" else None)
+                 or detect_vllm_model(base_url))
     except Exception:
         return None
 

@@ -126,6 +126,7 @@ CRITICAL: "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in ou
 - If no significant decisions found: write a single line "（なし）"
 
 ## アクションアイテム rules:
+- **Typical meeting: 3-4 action items. Maximum 5.** If you find more than 5, you are likely including routine or low-importance tasks — re-evaluate and keep only the most impactful ones.
 - An action item is a task that is **essential to project progress** and produces a **concrete deliverable** (report, design doc, code, estimate, proposal, etc.).
 - List only specific tasks explicitly assigned or delegated to an identifiable person.
 - Do NOT infer tasks that were not explicitly assigned in the summaries.
@@ -180,11 +181,18 @@ Write "（未定）" ONLY when none of the above heuristics yield a name.
 # 認証情報の読み込み
 # --------------------------------------------------------------------------- #
 def load_local_llm_endpoint() -> tuple[str, str]:
-    """vLLM gemma4 のエンドポイント (URL, token) を返す。
+    """LLM エンドポイント (URL, token) を返す。
 
-    ローカル vLLM は OPENAI_API_BASE / OPENAI_API_KEY を使う。
-    RiVault (embedding 用) との混同を避けるため RIVAULT_URL は参照しない。
+    ARGUS_PREFER_RIVAULT=1 の場合は RIVAULT_URL / RIVAULT_TOKEN を優先する。
+    それ以外は OPENAI_API_BASE / OPENAI_API_KEY（ローカル vLLM）を使う。
     """
+    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
+        url = os.environ.get("RIVAULT_URL", "").rstrip("/")
+        token = os.environ.get("RIVAULT_TOKEN", "")
+        if url and token:
+            return url, token
+        print("[WARN] ARGUS_PREFER_RIVAULT=1 だが RIVAULT_URL/TOKEN 未設定。ローカルにフォールバック",
+              file=sys.stderr)
     url = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
     token = os.environ.get("OPENAI_API_KEY", "dummy")
     return url, token
@@ -343,13 +351,14 @@ Treat each draft as an independent witness. Your job:
 - Keep numeric figures, dates, and proper nouns EXACTLY as they appear (do not round, do not infer).
 - Output Japanese prose only. No bullet lists, no speaker attribution, no SPEAKER_XX tokens.
 - Preserve the topic title `{title}` (do not rename it).
+- Do NOT reproduce the source drafts or any section other than `### {title}` in your output.
 
-Output format (begin immediately, no preamble):
+Output format (output this section ONLY, begin immediately, no preamble):
 ### {title}
 
 (2〜4 段落、各段落 2〜3 文)
 
-## Drafts
+## Source Drafts (input only — do NOT output this section)
 {drafts_block}
 """
 
@@ -367,14 +376,15 @@ Rules:
   〜する方針となった / 〜をキャンセルした). Do not end every line with 〜が決定された.
 - If no decision survives the vote: write a single line `（なし）`.
 - Output Japanese only. Begin immediately with `## 決定事項` — no preamble, no thinking.
+- Do NOT reproduce the source clusters or any section other than `## 決定事項` in your output.
 
-Output format:
+Output format (output this section ONLY):
 ## 決定事項
 
 - （決定事項1）
 - （決定事項2）
 
-## Drafts
+## Source Clusters (input only — do NOT output this section)
 {drafts_block}
 """
 
@@ -383,6 +393,7 @@ CONSENSUS_ACTIONS_TEMPLATE = """\
 You are merging {n_drafts} independent action item tables from the same meeting into a canonical table.
 
 Rules:
+- **Typical meeting: 3-4 action items. Maximum 5.** If more survive the vote, keep only the most impactful ones.
 - Keep ONLY action items supported by {min_vote} or more independent drafts.
 - Two rows refer to the same item if the assignee matches AND the task content is
   semantically equivalent (even if the wording differs). Merge phrasing variants.
@@ -393,18 +404,20 @@ Rules:
 - 担当者: normalize using the Participant List below; if unclear write `（未定）`.
 - If no action item survives the vote: write a single line `（なし）`.
 - Output Japanese only. Begin immediately with `## アクションアイテム` — no preamble.
+- Do NOT reproduce the source clusters, participant list, or any section other than
+  `## アクションアイテム` in your output.
 
-Output format (EXACTLY 3 columns):
+Output format (output this section ONLY, EXACTLY 3 columns):
 ## アクションアイテム
 
 | 担当者 | タスク内容 | 期限 |
 |---|---|---|
 | ... | ... | ... |
 
-## Participant List
+## Participant List (input only — do NOT output this section)
 {claude_md_context}
 
-## Drafts
+## Source Clusters (input only — do NOT output this section)
 {drafts_block}
 """
 
@@ -845,10 +858,20 @@ def _consensus_stage3(
     # 決定事項と AI を結合（既存の単発出力と同じ並び）
     decisions_md = decisions_md.strip() if decisions_md else "## 決定事項\n\n（なし）"
     actions_md = actions_md.strip() if actions_md else "## アクションアイテム\n\n（なし）"
-    # decisions_md に既に AI セクションが混入している場合は削る
+    # decisions_md に AI セクションが混入している場合は削る
     m = re.search(r"^##\s*アクションアイテム", decisions_md, flags=re.MULTILINE)
     if m:
         decisions_md = decisions_md[: m.start()].strip()
+    # LLM がプロンプト内の ## Drafts / ### Cluster セクションを出力に混入させた場合に除去
+    m = re.search(r"^##\s*Drafts?", decisions_md, flags=re.MULTILINE | re.IGNORECASE)
+    if m:
+        print("[WARN] decisions_md に ## Drafts セクションが混入、除去します", file=sys.stderr)
+        decisions_md = decisions_md[: m.start()].strip()
+    # actions_md 側も同様にチェック
+    m = re.search(r"^##\s*Drafts?", actions_md, flags=re.MULTILINE | re.IGNORECASE)
+    if m:
+        print("[WARN] actions_md に ## Drafts セクションが混入、除去します", file=sys.stderr)
+        actions_md = actions_md[: m.start()].strip()
     return decisions_md + "\n\n" + actions_md
 
 
@@ -1282,17 +1305,28 @@ def main() -> int:
         print(f"[ERROR] ファイルが見つかりません: {args.transcript}", file=sys.stderr)
         return 1
 
-    # 認証情報: vLLM gemma4 (議事録生成) は OPENAI_API_BASE / OPENAI_API_KEY を使う。
-    # RiVault (embed_utils 経由の embedding) は RIVAULT_URL / RIVAULT_TOKEN をそのまま使う。
     if args.url:
         os.environ["OPENAI_API_BASE"] = args.url
     if args.token:
         os.environ["OPENAI_API_KEY"] = args.token
     base_url, api_key = load_local_llm_endpoint()
 
+    # RiVault は think モード・chat_template_kwargs 非対応のため自動で無効化する
+    using_rivault = os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and base_url == os.environ.get("RIVAULT_URL", "").rstrip("/")
+    if using_rivault:
+        if args.think:
+            print("[INFO] ARGUS_PREFER_RIVAULT=1: think モードを自動無効化します", file=sys.stderr)
+            args.think = False
+        args.no_chat_template_kwargs = True
+        print(f"[INFO] RiVault モード: {base_url}")
+
     if not args.model:
-        args.model = detect_vllm_model(base_url)
-        print(f"[INFO] モデル      : {args.model}（自動取得）")
+        if using_rivault and os.environ.get("RIVAULT_MODEL", "").strip():
+            args.model = os.environ["RIVAULT_MODEL"].strip()
+            print(f"[INFO] モデル      : {args.model}（RIVAULT_MODEL）")
+        else:
+            args.model = detect_vllm_model(base_url)
+            print(f"[INFO] モデル      : {args.model}（自動取得）")
     else:
         print(f"[INFO] モデル      : {args.model}")
     print(f"[INFO] 思考モード  : {'有効' if args.think else '無効'}")

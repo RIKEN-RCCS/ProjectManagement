@@ -48,7 +48,18 @@ MEETING_FRAME_OCR_PROMPT = """\
 - Slack / チャット / メール
 - 図表 / グラフ / ホワイトボード
 
-種別に関わらず、画面上に読み取れるテキストをできるだけ漏れなく抽出して Markdown で出力してください。
+# 重要: アプリケーション UI 要素の除外
+画面上に「LibreOffice / PowerPoint / Excel 等のアプリ自身のメニューバー・
+ステータスバー・タスクバー・サイドバー (例: 'ファイル(F) 編集(E) 表示(V)' / 'スライド N / N' /
+'文字スタイル' / フォント名 / ズーム倍率 / 時計表示 / 通知ポップアップ /
+ニュース速報 / バッテリー警告 / OS タスクバーのアプリ一覧)」が見えていても、
+それらは抽出しないでください。
+
+抽出するのはあくまで **コンテンツとして表示されている本文** (スライド本体・表の中身・
+ドキュメント本文・コード・チャット本文) のテキストのみです。
+
+種別に関わらず、コンテンツ本文上に読み取れるテキストをできるだけ漏れなく抽出して
+Markdown で出力してください。
 
 出力ルール:
 1. タイトル・見出しらしき部分は `##` / `###` で表現
@@ -183,7 +194,15 @@ def ocr_slides(
     """
     if not frames:
         return []
-    base_url = base_url or os.environ.get("OPENAI_API_BASE")
+    if base_url is None:
+        if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
+            base_url = os.environ.get("RIVAULT_URL", "").rstrip("/") or None
+            if base_url:
+                # RIVAULT_TOKEN を OPENAI_API_KEY に強制設定（既存の "dummy" を上書き）
+                token = os.environ.get("RIVAULT_TOKEN", "")
+                if token:
+                    os.environ["OPENAI_API_KEY"] = token
+        base_url = base_url or os.environ.get("OPENAI_API_BASE")
     if not base_url:
         logger.warning("OPENAI_API_BASE 未設定のため OCR をスキップします")
         return [""] * len(frames)

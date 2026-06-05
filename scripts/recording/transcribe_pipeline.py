@@ -49,10 +49,19 @@ def _get_audio_save_dir() -> str:
 
 
 def _get_vllm_api_base() -> str:
+    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
+        url = os.environ.get("RIVAULT_URL", "").rstrip("/")
+        token = os.environ.get("RIVAULT_TOKEN", "")
+        if url and token:
+            return url
     return os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
 
 
 def _get_vllm_model() -> str:
+    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
+        model = os.environ.get("RIVAULT_MODEL", "").strip()
+        if model:
+            return model
     from cli_utils import detect_vllm_model
     return detect_vllm_model(_get_vllm_api_base())
 
@@ -434,10 +443,19 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
     cmd = [sys.executable, str(_RECORDING_DIR / "generate_minutes_local.py"),
            str(transcript_path),
            "--model", vllm_model,
-           "--url", vllm_api_base,
            "--output", str(minutes_dir),
            "--multi-stage", "--chunk-minutes", "10",
            "--max-tokens", "16384"]
+    # ARGUS_PREFER_RIVAULT=1 かつ RIVAULT_URL/TOKEN が揃っている場合は --url を渡さない
+    # (load_local_llm_endpoint() が RIVAULT_URL を返すため --url で上書きすると壊れる)
+    # それ以外は常に --url を明示する（子プロセスの環境変数に依存しない）
+    rivault_active = (
+        os.environ.get("ARGUS_PREFER_RIVAULT") == "1"
+        and os.environ.get("RIVAULT_URL", "").strip()
+        and os.environ.get("RIVAULT_TOKEN", "").strip()
+    )
+    if not rivault_active:
+        cmd.extend(["--url", vllm_api_base])
     if vtt_path:
         cmd.extend(["--vtt", str(vtt_path)])
     if slide_context_path:
@@ -564,6 +582,13 @@ def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=3):
                                    vtt_path=vtt_path,
                                    slide_context_path=slide_context_path,
                                    consensus_n=consensus_n)
+
+        minutes_size = minutes_path.stat().st_size if minutes_path and minutes_path.exists() else 0
+        if minutes_size < 2:
+            raise RuntimeError(
+                f"議事録が空です（{minutes_size} bytes）: {minutes_path}\n"
+                "LLM の呼び出しに失敗した可能性があります。ログを確認してください。"
+            )
 
         client.files_upload_v2(
             channel=channel_id,

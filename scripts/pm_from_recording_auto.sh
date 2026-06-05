@@ -52,7 +52,7 @@ is_valid_meeting_name() {
     local name="$1"
     case "$name" in
         Leader_Meeting|Block1_Meeting|Block2_Meeting|SubWG_Meeting|\
-        BenchmarkWG_Meeting|Co-design_Review_Meeting|ApplicationDiscussion)
+        BenchmarkWG_Meeting|Co-design_Review_Meeting|Co-design_Syncup_Meeting|ApplicationDiscussion)
             return 0 ;;
         SubWG[0-9]*_Meeting)
             return 0 ;;

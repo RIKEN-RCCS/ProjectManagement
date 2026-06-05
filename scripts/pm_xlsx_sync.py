@@ -359,6 +359,13 @@ def main() -> None:
 def _process_xlsx(xlsx_path: Path, db_path: Path, args, log) -> None:
     log(f"[INFO] XLSX        : {xlsx_path}")
     log(f"[INFO] pm.db       : {db_path}")
+
+    # 議事録 DB (data/minutes/*.db) は pm.db とスキーマが異なるため対象外
+    if "minutes" in str(db_path):
+        log(f"[ERROR] --db に議事録 DB が指定されています: {db_path}")
+        log("[ERROR] pm_xlsx_sync.py は pm.db 専用です。--db data/pm.db を指定してください。")
+        sys.exit(1)
+
     wb = load_workbook(xlsx_path, data_only=True)
     ai_rows = _read_sheet(wb, SHEET_AI, AI_FIELD_MAP)
     dec_rows = _read_sheet(wb, SHEET_DEC, DEC_FIELD_MAP)

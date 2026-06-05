@@ -79,6 +79,9 @@ cmd_start() {
     if [[ "$SVC_RIVAULT" == "1" && -f "$HOME/.secrets/rivault_tokens.sh" ]]; then
         # shellcheck disable=SC1091
         source "$HOME/.secrets/rivault_tokens.sh"
+        if [[ -n "${RIVAULT_URL:-}" && -n "${RIVAULT_TOKEN:-}" ]]; then
+            export ARGUS_PREFER_RIVAULT=1
+        fi
     fi
     if [[ "$SVC_DEFAULT_LLM" == "1" ]]; then
         if [[ -f "$HOME/.secrets/localLLM.sh" ]]; then
