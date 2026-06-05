@@ -260,9 +260,10 @@ scripts/
 | `data/docs_*.db` | BOXドキュメントメタデータ（Slackリンク経由）| ✅ |
 | `data/box_docs.db` | BOXドキュメント本文（Markdown化）+ relevance（core/related/noise/unknown）| ✅ |
 | `data/knowledge.db` | **蒸留ナレッジレイヤ**（プロジェクト全体共通。意思決定 / 制約 / 立場 / 用語の正規化済みレコード）| ✅ |
-| `data/web_articles.db` | 外部Web記事 | ❌（公開情報）|
-| `data/qa_index.db` | FTS5 統合検索インデックス（`chunks` + `chunk_indexes(chunk_id, index_name)` で論理 index を分離。2026-05-18 に `qa_pm*.db` 分割を廃止）| ❌（導出データ）|
-| `data/patrol_state.db` | Patrol 冪等性・承認待ち | ❌（機密なし）|
+| `data/web_articles.db` | 外部Web記事 | ✅ |
+| `data/qa_index.db` | FTS5 統合検索インデックス（`chunks` + `chunk_indexes(chunk_id, index_name)` で論理 index を分離。2026-05-18 に `qa_pm*.db` 分割を廃止）| ✅ |
+| `data/patrol_state.db` | Patrol 冪等性・承認待ち | ✅ |
+| `data/voice_uploads.db` | TTS 音声ファイル投稿履歴（削除用） | ✅ |
 
 **詳細**: `docs/schema.md`
 
