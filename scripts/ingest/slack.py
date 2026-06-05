@@ -22,7 +22,7 @@ from db_utils import open_db, normalize_assignee
 from cli_utils import (
     load_claude_md,
     call_claude,
-    call_local_llm,
+    call_argus_llm,
     detect_vllm_model,
     retrieve_knowledge_for_extraction,
 )
@@ -341,42 +341,27 @@ def _sample_extractions(prompt: str, n: int) -> list[dict]:
         except Exception:
             return []
 
-    base_url = os.environ.get("OPENAI_API_BASE")
-    if not base_url:
-        # ローカル vLLM が無い場合は temperature 多様化できないため単発に縮退
-        try:
-            return [extract_json(call_claude(prompt))]
-        except Exception:
-            return []
-
-    api_key = os.environ.get("OPENAI_API_KEY", "dummy")
-    model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(base_url)
     max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
 
-    # n=3 → -0.1, 0, +0.1
+    # n=3 → -0.1, 0, +0.1。Self-Consistency でクラスタ化に必要な多様性を確保する。
     if n == 2:
         deltas = [-0.05, 0.05]
     else:
         step = 0.2 / (n - 1)
         deltas = [-0.1 + step * i for i in range(n)]
-    base_t = 0.6  # gemma4 reasoning モードの推奨温度
+    # ベース温度: V4-Flash / GLM-4.7-Flash 等の Non-think モデルは 0.6 だと発散しがちなので
+    # 0.4 に抑える。gemma4 (think) フォールバック時は cli_utils.py が think=True を内部で
+    # 0.6 デフォルトに合わせるため、ここで指定した temperature がそのまま使われる。
+    base_t = 0.4
 
     drafts: list[dict] = []
     for i, d in enumerate(deltas, 1):
         t = max(0.05, min(1.5, base_t + d))
         try:
-            text = call_local_llm(
-                prompt, model=model, base_url=base_url, api_key=api_key,
-                timeout=600, think=True, max_tokens=max_tokens,
+            text = call_argus_llm(
+                prompt, timeout=600, think=True, max_tokens=max_tokens,
                 temperature=t,
             )
-            if not text:
-                # 空応答はストリーミング崩れの可能性 → 非ストリーミングでリトライ
-                text = call_local_llm(
-                    prompt, model=model, base_url=base_url, api_key=api_key,
-                    timeout=600, think=True, max_tokens=max_tokens,
-                    no_stream=True, temperature=t,
-                )
         except Exception as e:
             print(f"[WARN] Slack 抽出サンプル {i}/{n} 失敗: {e}", file=sys.stderr)
             continue
