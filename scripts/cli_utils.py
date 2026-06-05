@@ -298,6 +298,8 @@ def call_local_llm(
     """
     import requests
     import json as _json
+    print(f"[INFO] LLM call: backend=local model={model} url={base_url} think={think}",
+          file=sys.stderr)
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -453,37 +455,65 @@ def call_argus_llm(
     max_tokens: int = 4096,
     system: str = "",
     think: bool = False,
+    temperature: float | None = None,
+    no_chat_template_kwargs: bool = False,
+    fallback: bool = True,
 ) -> str:
     """
     Argus 用 LLM 呼び出し。
 
-    - prefer_rivault() コンテキスト内 または ARGUS_PREFER_RIVAULT=1 の場合 → RiVault を直接使用
-    - それ以外 → ローカル vLLM を使用（未起動なら RuntimeError）
+    ルーティング:
+    - prefer_rivault() コンテキスト内 または ARGUS_PREFER_RIVAULT=1 → RiVault を優先
+    - それ以外 → ローカル vLLM を優先
+
+    fallback=True (既定) の場合、優先 backend が失敗したら他方にフォールバックする。
+    fallback=False を渡せば従来どおり優先 backend のみで失敗時は例外。
+
+    引数:
+        temperature: 明示指定時のみ送信。RiVault では既定 0.3 (Stage 6 検証)。
+        no_chat_template_kwargs: ローカル vLLM 用 (Qwen3-Swallow 等)。RiVault では無視。
     """
     prefer_rv = _prefer_rivault.get() or os.environ.get("ARGUS_PREFER_RIVAULT") == "1"
+    reason = "ARGUS_PREFER_RIVAULT=1" if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" \
+        else ("prefer_rivault()" if _prefer_rivault.get() else "default-local")
+    print(f"[INFO] call_argus_llm: route={'rivault' if prefer_rv else 'local'} "
+          f"reason={reason} think={think} fallback={fallback}", file=sys.stderr)
 
-    if prefer_rv:
-        return call_rivault(prompt, timeout=timeout, max_tokens=max_tokens, system=system)
+    def _try_rivault() -> str:
+        return call_rivault(
+            prompt, timeout=timeout, max_tokens=max_tokens, system=system,
+            temperature=temperature,
+        )
 
-    local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
-    import requests as _req
+    def _try_local() -> str:
+        local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+        import requests as _req
+        try:
+            _req.get(local_base.removesuffix("/v1").rstrip("/") + "/health", timeout=3)
+        except Exception as exc:
+            raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません: {exc}")
+        model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(local_base)
+        return call_local_llm(
+            prompt, model=model, base_url=local_base,
+            api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+            timeout=timeout, max_tokens=max_tokens, system=system,
+            no_stream=True, think=think,
+            no_chat_template_kwargs=no_chat_template_kwargs,
+            temperature=temperature,
+        )
+
+    primary, secondary = (_try_rivault, _try_local) if prefer_rv else (_try_local, _try_rivault)
+    primary_name = "rivault" if prefer_rv else "local"
+    secondary_name = "local" if prefer_rv else "rivault"
+
     try:
-        _req.get(local_base.removesuffix("/v1").rstrip("/") + "/health", timeout=3)
-    except Exception:
-        raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません。")
-
-    model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(local_base)
-    return call_local_llm(
-        prompt,
-        model=model,
-        base_url=local_base,
-        api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
-        timeout=timeout,
-        max_tokens=max_tokens,
-        system=system,
-        no_stream=True,
-        think=think,
-    )
+        return primary()
+    except Exception as exc:
+        if not fallback:
+            raise
+        print(f"[WARN] call_argus_llm: {primary_name} 失敗 ({type(exc).__name__}: {exc})。"
+              f"{secondary_name} にフォールバック", file=sys.stderr)
+        return secondary()
 
 
 def call_rivault(
@@ -492,6 +522,7 @@ def call_rivault(
     model: str | None = None,
     timeout: int = 300,
     max_tokens: int = 8192,
+    temperature: float | None = None,
     system: str = "",
 ) -> str:
     """
@@ -511,6 +542,7 @@ def call_rivault(
     api_key = os.environ.get("RIVAULT_TOKEN", "dummy")
     if model is None:
         model = os.environ.get("RIVAULT_MODEL", "zai-org/GLM-4.7-Flash")
+    print(f"[INFO] LLM call: backend=rivault model={model} url={base_url}", file=sys.stderr)
     # GLM-4.7-Flash は thinking モデルのため enable_thinking=False で thinking を無効化する。
     # 非ストリーミングはゲートウェイタイムアウト(504)が発生するためストリーミングを使用する。
     import requests as _requests
@@ -527,15 +559,18 @@ def call_rivault(
     }
     # モデル別の thinking 制御
     # - GLM-4.7-Flash: thinking.type=disabled / enable_thinking=False で無効化可能
+    # - DeepSeek-V4-Flash: 同じく enable_thinking=False で Non-think モード。
+    #   Stage 6 検証 (2026-06-05) で Non-think の方が品質高いため既定で OFF。
     # - Kimi-K2-Thinking: thinking は常時ON（無効化不可）。
     #   Moonshot 公式は temperature=1.0 推奨だが、Argus は事実検索・回答用途のため
     #   再現性を優先して 0.3 に下げる（同一質問の回答揺れを抑制）。
     #   RiVault は temperature を尊重することを 2026-05-14 に確認済み。
+    payload["temperature"] = temperature if temperature is not None else 0.3
     model_lower = model.lower()
     if "kimi" in model_lower:
-        payload["temperature"] = 0.3
+        pass
     else:
-        # Z.ai GLM 系など thinking 無効化可能なモデル
+        # Z.ai GLM / DeepSeek-V4 など thinking 無効化可能なモデル
         payload["thinking"] = {"type": "disabled"}
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = {

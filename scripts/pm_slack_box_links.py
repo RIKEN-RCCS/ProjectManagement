@@ -41,7 +41,7 @@ from cli_utils import (
     add_no_encrypt_arg,
     add_output_arg,
     add_since_arg,
-    call_local_llm,
+    call_argus_llm,
 )
 from db_utils import open_db
 
@@ -219,16 +219,6 @@ def format_message_for_prompt(msg: dict, idx: int) -> str:
             f"{link_text_info}本文: {(msg['text'] or '')[:600]}")
 
 
-def _llm_params():
-    import os
-    base_url = os.environ.get("OPENAI_API_BASE")
-    if not base_url:
-        raise RuntimeError("OPENAI_API_BASE が未設定です")
-    api_key = os.environ.get("OPENAI_API_KEY", "dummy")
-    from cli_utils import detect_vllm_model
-    return detect_vllm_model(base_url), base_url, api_key
-
-
 def extract_context_batch(messages: list[dict], logger) -> dict[str, dict]:
     """{url: {description, related_topic}} を返す。LLM失敗時は空dict。"""
     if not messages:
@@ -236,9 +226,7 @@ def extract_context_batch(messages: list[dict], logger) -> dict[str, dict]:
     msg_texts = "\n\n".join(format_message_for_prompt(m, i) for i, m in enumerate(messages))
     prompt = EXTRACT_PROMPT.format(messages=msg_texts)
     try:
-        model, base_url, api_key = _llm_params()
-        result = call_local_llm(prompt, model=model, base_url=base_url, api_key=api_key,
-                                max_tokens=1024, timeout=120)
+        result = call_argus_llm(prompt, max_tokens=1024, timeout=120)
     except Exception as e:
         logger.error(f"LLM呼び出しエラー: {e}")
         return {}

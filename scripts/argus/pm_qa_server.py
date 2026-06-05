@@ -34,7 +34,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_local_llm, load_claude_md_context
+from cli_utils import call_argus_llm, load_claude_md_context
 from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
 from argus.pm_argus import _run_brief, _run_draft, _run_risk, _run_today_only, _run_transcribe, _transcribe_jobs, _transcribe_lock, _run_narrate, _narrate_jobs, _narrate_lock
 from argus.pm_argus_agent import _run_investigate
@@ -569,14 +569,11 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
     )
 
     try:
-        result = call_local_llm(
+        result = call_argus_llm(
             prompt=prompt,
-            model=_OPENAI_MODEL,
-            base_url=_OPENAI_BASE,
-            api_key=_OPENAI_KEY,
             max_tokens=30,
-            no_stream=True,
-            timeout=60,  # 30 → 60秒
+            timeout=60,
+            temperature=0.0,
         )
         indices: list[int] = []
         for token in result.strip().split():
@@ -636,9 +633,39 @@ def _format_source_label(chunk: dict) -> str:
     db_name = chunk["source_db"].replace("minutes/", "").replace(".db", "")
     # Slack チャンネルIDを人名称に変換
     if source_type == "slack_raw":
-        db_name = _channel_names.get(db_name, db_name)
+        # サブプロセスで load_qa_config を通っていない場合の lazy load フォールバック
+        if not _channel_names:
+            _ensure_channel_names_loaded()
+        resolved = _channel_names.get(db_name)
+        if resolved is None and db_name.startswith("C"):
+            logger.warning(
+                "channel_names 未解決: %s (channel_names entries=%d)",
+                db_name, len(_channel_names),
+            )
+        db_name = resolved or db_name
     held_at = chunk["held_at"] or "日付不明"
     return f"{db_name} / {label} ({held_at})"
+
+
+def _ensure_channel_names_loaded() -> None:
+    """`_channel_names` が空の場合、argus_config.yaml から直接 channel_names だけ読み込む。
+    load_qa_config() を経由しないインポートパス（pm_argus_agent から _format_source_label のみ
+    import するケース等）で表示名が空にならないためのフォールバック。"""
+    global _channel_names
+    if _channel_names:
+        return
+    cfg_path = _REPO_ROOT / "data" / "argus_config.yaml"
+    if not cfg_path.exists():
+        return
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        names = cfg.get("channel_names") or {}
+        if isinstance(names, dict) and names:
+            _channel_names = {str(k): str(v) for k, v in names.items()}
+            logger.info("channel_names lazy-load: %d entries", len(_channel_names))
+    except Exception as exc:
+        logger.warning("channel_names lazy-load failed: %s", exc)
 
 
 def format_context(chunks: list[dict]) -> str:
@@ -703,13 +730,9 @@ def classify_intent(question: str) -> dict:
 
     prompt = _CLASSIFY_PROMPT + question
     try:
-        result = call_local_llm(
+        result = call_argus_llm(
             prompt=prompt,
-            model=_OPENAI_MODEL,
-            base_url=_OPENAI_BASE,
-            api_key=_OPENAI_KEY,
             max_tokens=80,
-            no_stream=True,
             timeout=15,
             temperature=0.1,
         )
@@ -888,13 +911,9 @@ def generate_answer(question: str, chunks: list[dict], *, structured_context: st
     user_prompt = f"## 取得した関連情報\n\n{context_str}\n---\n\n## 質問\n\n{question}"
 
     try:
-        answer = call_local_llm(
+        answer = call_argus_llm(
             prompt=user_prompt,
-            model=_OPENAI_MODEL,
-            base_url=_OPENAI_BASE,
-            api_key=_OPENAI_KEY,
             max_tokens=MAX_TOKENS,
-            no_stream=True,
             system=system,
             timeout=LLM_TIMEOUT,
         )

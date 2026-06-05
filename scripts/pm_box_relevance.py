@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cli_utils import add_no_encrypt_arg, call_local_llm
+from cli_utils import add_no_encrypt_arg, call_argus_llm
 from db_utils import open_db
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -98,18 +98,6 @@ def format_doc_for_prompt(row) -> str:
     return "\n".join(parts)
 
 
-def _get_llm_params():
-    import os
-    base_url = os.environ.get("OPENAI_API_BASE")
-    if not base_url:
-        raise RuntimeError(
-            "OPENAI_API_BASE 未設定。export OPENAI_API_BASE='http://localhost:8000/v1'"
-        )
-    api_key = os.environ.get("OPENAI_API_KEY", "dummy")
-    from cli_utils import detect_vllm_model
-    return detect_vllm_model(base_url), base_url, api_key
-
-
 def judge_batch(rows: list, logger) -> dict[str, tuple[str, str]]:
     """Returns {box_file_id: (relevance, reason)}."""
     if not rows:
@@ -117,11 +105,7 @@ def judge_batch(rows: list, logger) -> dict[str, tuple[str, str]]:
     doc_lines = "\n\n".join(format_doc_for_prompt(r) for r in rows)
     prompt = JUDGE_PROMPT.format(documents=doc_lines)
     try:
-        model, base_url, api_key = _get_llm_params()
-        result = call_local_llm(
-            prompt, model=model, base_url=base_url, api_key=api_key,
-            max_tokens=2048, timeout=300,
-        )
+        result = call_argus_llm(prompt, max_tokens=2048, timeout=300)
     except Exception as e:
         logger.error(f"LLMエラー: {e}")
         return {}

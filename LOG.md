@@ -7,6 +7,36 @@
 
 ---
 
+## 2026-06-05 Argus 主力 LLM を gemma4 → DeepSeek-V4-Flash に切替判断
+
+**背景**: GB200 NVL4 で RiVault 経由の DeepSeek-V4-Flash が利用可能になり、現行 gemma4
+(GB10 上 vLLM、Whisper と同居) と比べて品質・速度ともに乗り換える価値があるか検証した。
+本番非影響で進めるため `scripts/eval/argus_ab.py` / `argus_ab_judge.py` を新設し、pm.db /
+knowledge.db から brief/risk/investigate 30 件を合成、4 モデル × 2 judge で採点した。
+
+**決定**: V4-Flash (Non-think) に全面切替。`call_rivault` の thinking 無効化分岐を V4 系にも
+適用（`enable_thinking=False` がそのまま効く）。`~/.secrets/rivault_tokens.sh` で
+`RIVAULT_MODEL=deepseek-ai/DeepSeek-V4-Flash` + `ARGUS_PREFER_RIVAULT=1` を設定し、
+`pm_qa_server.py` を再起動するだけで切替完了。Pass1 抽出 (Slack/議事録) は
+`call_local_llm` を直接叩いているため当面 gemma4 のまま (要 follow-up)。
+
+**根拠** (judge 横断、5 段階 overall):
+- DeepSeek-V4-Flash Non-think: 4.57 / think: 4.27 / GLM-4.7-Flash: 3.24 / **gemma4 think: 1.92**
+- gemma4 vs V4-Flash 直接 A/B: V4-Flash 17 勝 / gemma4 3 勝 / tie 1 (think 同士)
+- 速度: V4-Flash 1-7 秒, gemma4 think 62 秒 (8-10 倍速)
+- think モードは brief/risk のような構造化タスクで Non-think より低スコアだったため Non-think 既定
+
+**捨てた案**:
+- GLM-5.1-NVFP4 (754B): GB200 1 ノードでは active 効率に対する重さがネックで V4-Flash 優位
+- think モード ON 既定: -0.30pt の品質劣化 + 5 倍 latency。investigate のみ将来検証
+- gemma4 の Non-think 検証: deep-research では gemma-3-27B GPQA 24.3 で見劣りが明白だったため省略
+
+**影響**: investigate / brief / risk / patrol / Pass3 蒸留が V4-Flash に切替。GB10 の vLLM は
+Whisper 単独で稼働するためメモリ余裕が出る (gpu_memory_utilization 上げ可)。検証データは
+`data/eval/v4flash_ab.db` に保管、再評価可能。
+
+---
+
 ## 2026-05-29 `/argus-narrate` — PPTX/PDF をスライド要約読み上げ mp4 化
 
 **背景**: argus-today/brief/risk の音声化が好評。PPTX/PDF も全文読み上げは間延びするが、
