@@ -18,8 +18,10 @@
 #   --max-frames N       OCR に渡すフレーム数上限。超過時は時系列に均等間引き（デフォルト: 200）
 #   --ocr-workers N      OCR 並列ワーカー数（デフォルト: 8）
 #   --consensus N        Self-consistency サンプリング数（デフォルト 3。--consensus 1 で従来の単発生成に戻す）
+#   --no-triage          抽出候補のトリアージ（2次審査）を無効化
 #
-# RiVault を使う場合は ARGUS_PREFER_RIVAULT=1 を環境変数で設定すること（フラグ不要）。
+# 環境変数:
+#   ARGUS_PREFER_RIVAULT=1  LLM バックエンドを RiVault に切替（デフォルト: ローカル vLLM）
 #
 # 例:
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
@@ -41,8 +43,6 @@ fi
 
 export SINGULARITY_BIND=/lvs0
 
-# ARGUS_PREFER_RIVAULT=1 時は OPENAI_API_BASE を設定しない
-# (call_claude / call_argus_llm が RIVAULT_URL を使うようにする)
 if [[ "${ARGUS_PREFER_RIVAULT:-0}" != "1" ]]; then
   export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
   export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
@@ -69,6 +69,7 @@ SCENE_THRESHOLD="0.25"
 MAX_FRAMES="200"
 OCR_WORKERS="8"
 CONSENSUS_N="3"
+NO_TRIAGE=0
 FILES=()
 
 while [[ $# -gt 0 ]]; do
@@ -83,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --max-frames)   MAX_FRAMES="$2"; shift 2 ;;
     --ocr-workers)  OCR_WORKERS="$2"; shift 2 ;;
     --consensus)    CONSENSUS_N="$2"; shift 2 ;;
+    --no-triage)    NO_TRIAGE=1; shift ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
       exit 0 ;;
@@ -340,18 +342,30 @@ EOF
     fi
   fi
 
+  NO_TRIAGE_OPT=""
+  if [[ "$NO_TRIAGE" -eq 1 ]]; then
+    NO_TRIAGE_OPT="--no-triage"
+  fi
+
   # --------------------------------------------------------------------------- #
   # Step 1: generate_minutes_local.py で高品質議事録を生成
   # --------------------------------------------------------------------------- #
   echo "[INFO] generate_minutes_local.py で議事録を生成中: $MEETING_NAME ($DATE_TO_USE)"
   TMPLOG=$(mktemp)
+  URL_OPT=""
+  TOKEN_OPT=""
+  [[ -n "${OPENAI_API_BASE:-}" ]] && URL_OPT="--url $OPENAI_API_BASE"
+  [[ -n "${OPENAI_API_KEY:-}" ]] && TOKEN_OPT="--token $OPENAI_API_KEY"
   "$PYTHON3" "$GENERATE_MINUTES_LOCAL" "$BASENAME.md" \
+    $URL_OPT \
+    $TOKEN_OPT \
     --output     "$(dirname "$BASENAME")" \
     --max-tokens 16384 \
     --multi-stage --chunk-minutes 10 \
     $VTT_OPT \
     $SLIDE_OPT \
     $CONSENSUS_OPT \
+    $NO_TRIAGE_OPT \
     2>&1 | tee "$TMPLOG"
   GEN_EXIT=${PIPESTATUS[0]}
 

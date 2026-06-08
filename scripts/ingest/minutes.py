@@ -129,6 +129,7 @@ def process_minutes_db(
     force: bool,
     dry_run: bool,
     no_encrypt: bool,
+    meeting_id_filter: str | None = None,
     log=print,
 ) -> tuple[int, int]:
     """Returns: (ok_count, skipped_count)"""
@@ -142,9 +143,15 @@ def process_minutes_db(
 
     query = "SELECT meeting_id, held_at, file_path FROM instances"
     params: list = []
+    wheres: list = []
     if since:
-        query += " WHERE held_at >= ?"
+        wheres.append("held_at >= ?")
         params.append(since)
+    if meeting_id_filter:
+        wheres.append("meeting_id = ?")
+        params.append(meeting_id_filter)
+    if wheres:
+        query += " WHERE " + " AND ".join(wheres)
     query += " ORDER BY held_at"
 
     instances = minutes_conn.execute(query, params).fetchall()
@@ -281,6 +288,11 @@ class MinutesIngestPlugin:
             metavar="MEETING_ID",
             help="指定した meeting_id を pm.db から削除して終了（minutes ソース用）",
         )
+        parser.add_argument(
+            "--minutes-meeting-id", default=None,
+            metavar="MEETING_ID",
+            help="特定の meeting_id のみ転記（minutes ソース用）",
+        )
 
     def run(self, args: argparse.Namespace, ctx: IngestContext) -> None:
         minutes_dir = (
@@ -320,8 +332,11 @@ class MinutesIngestPlugin:
         if ctx.dry_run:
             ctx.log("[INFO] --dry-run モード（DB保存なし）")
         force = getattr(args, "minutes_force", False)
+        meeting_id_filter = getattr(args, "minutes_meeting_id", None)
         if force:
             ctx.log("[INFO] --force モード（既存レコードを上書き）")
+        if meeting_id_filter:
+            ctx.log(f"[INFO] meeting_id: {meeting_id_filter} のみ処理")
 
         total_ok = total_skipped = 0
         for db_file in db_files:
@@ -332,6 +347,7 @@ class MinutesIngestPlugin:
                 db_file, ctx.pm_conn,
                 since=ctx.since, force=force, dry_run=ctx.dry_run,
                 no_encrypt=ctx.no_encrypt, log=ctx.log,
+                meeting_id_filter=meeting_id_filter,
             )
             total_ok      += ok
             total_skipped += skipped

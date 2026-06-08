@@ -21,9 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from db_utils import open_db, normalize_assignee
 from cli_utils import (
     load_claude_md,
-    call_claude,
     call_argus_llm,
-    detect_vllm_model,
     retrieve_knowledge_for_extraction,
 )
 from ingest.ingest_plugin import IngestContext
@@ -317,6 +315,82 @@ EXTRACT_PROMPT = """
 """
 
 
+# --------------------------------------------------------------------------- #
+# トリアージプロンプト（Extractor → Triage の2段階分離）
+# --------------------------------------------------------------------------- #
+TRIAGE_PROMPT = """
+あなたは富岳NEXTプロジェクトのシニアプロジェクトマネージャーです。
+以下の抽出候補リストを審査し、**マイルストーン達成に実質的に必要な項目だけ**を残してください。
+
+## 審査の3ゲート
+
+各候補について、以下の3つのゲートを **順番に** 評価してください。
+いずれかのゲートで DROP と判定された候補は結果から除外します。
+
+### ゲート1: マイルストーン関連性
+- この項目が完了しない場合、いずれかのマイルストーン（M1〜Mn）の達成に実質的な支障が出るか？
+- milestone_id が指定されていない場合、どのマイルストーンにも関連づけられないか？
+- 関連づけられない → **DROP**（理由: "マイルストーン非関連"）
+
+### ゲート2: 代替可能性
+- この項目は、他の既存アクションアイテムや決定事項の付随作業に過ぎないか？
+- 「〜を更新する」「〜を確認する」「〜を共有する」「〜を準備する」などの
+  他項目の実行に伴う副次的作業 → **DROP**（理由: "代替可能な付随作業"）
+
+### ゲート3: 影響範囲
+- この項目が完了しない場合、後続の意思決定・他のタスク・スケジュールに影響が出るか？
+- 影響が出ない → **DROP**（理由: "影響範囲が局所的"）
+
+## 審査基準
+
+- **保守的に判定**: 判定に迷う場合は KEEP ではなく DROP を選ぶ
+- ただし、プロジェクトの戦略的転換点・リスク顕在化のシグナルとなる項目は迷った場合でも KEEP
+- **同一項目の重複**: 既に他の候補と実質的に同じ内容がある場合、より詳細な方のみ KEEP
+
+## 入力
+
+### マイルストーン一覧
+{milestones}
+
+### 抽出候補（アクションアイテム）
+{action_items_json}
+
+### 抽出候補（決定事項）
+{decisions_json}
+
+## 出力JSON形式
+
+```json
+{{
+  "action_items": [
+    {{
+      "content": "元のcontentをそのまま",
+      "assignee": "元のassigneeをそのまま",
+      "due_date": "元のdue_dateをそのまま",
+      "milestone_id": "元のmilestone_idをそのまま",
+      "verdict": "KEEP" または "DROP",
+      "reason": "DROPの場合は理由。KEEPの場合は空文字"
+    }}
+  ],
+  "decisions": [
+    {{
+      "content": "元のcontentをそのまま",
+      "decided_at": "元のdecided_atをそのまま",
+      "verdict": "KEEP" または "DROP",
+      "reason": "DROPの場合は理由。KEEPの場合は空文字"
+    }}
+  ]
+}}
+```
+
+**重要**:
+- 元の候補リストの全項目について必ず判定すること（漏れがないように）
+- content, assignee, due_date, milestone_id, decided_at は元の値をそのままコピーすること（変更しない）
+- KEEP と判定された項目のみが後段で pm.db に書き込まれる
+- **すべての候補が DROP になることもあり得る** — その場合は全項目空配列を返す
+"""
+
+
 def extract_json(text: str) -> dict:
     m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
     if m:
@@ -327,32 +401,101 @@ def extract_json(text: str) -> dict:
     raise ValueError(f"JSON not found:\n{text[:300]}")
 
 
+# --------------------------------------------------------------------------- #
+# トリアージ（抽出候補の2次審査）
+# --------------------------------------------------------------------------- #
+def triage_items(
+    extracted: dict,
+    milestones: list[dict],
+) -> dict:
+    """Extractor が抽出した候補を 3 ゲートで審査し、マイルストーン達成に
+    実質的に必要な項目だけを残す。
+
+    ゲート1: マイルストーン関連性
+    ゲート2: 代替可能性（他項目の付随作業でないか）
+    ゲート3: 影響範囲（完了しなくても後続に影響しないなら DROP）
+    """
+    a_items = extracted.get("action_items", []) or []
+    d_items = extracted.get("decisions", []) or []
+    if not a_items and not d_items:
+        return extracted
+
+    prompt = TRIAGE_PROMPT.format(
+        milestones=format_milestones_for_prompt(milestones),
+        action_items_json=json.dumps(a_items, ensure_ascii=False, indent=2),
+        decisions_json=json.dumps(d_items, ensure_ascii=False, indent=2),
+    )
+
+    max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
+    raw = call_argus_llm(prompt, timeout=600, think=True, max_tokens=max_tokens)
+
+    try:
+        triaged = extract_json(raw)
+    except Exception as e:
+        print(f"[WARN] Slack triage JSON パース失敗、トリアージをスキップ: {e}", file=sys.stderr)
+        return extracted
+
+    # --- action_items: KEEP のみ残す ---
+    kept_a = []
+    triaged_a = {item.get("content"): item for item in triaged.get("action_items", []) or []}
+    for item in a_items:
+        t = triaged_a.get(item.get("content"))
+        if t and t.get("verdict") == "DROP":
+            print(f"[TRIAGE] DROP action_item: {(item.get('content') or '')[:80]}… — 理由: {t.get('reason', '不明')}", file=sys.stderr)
+        elif t and t.get("verdict") == "KEEP":
+            kept_a.append(item)
+        elif t is None:
+            # レスポンスに欠落 → DROP 扱い（保守的）
+            print(f"[TRIAGE] DROP action_item: {(item.get('content') or '')[:80]}… — 理由: 候補がレスポンスに欠落", file=sys.stderr)
+        else:
+            # verdict が不明 → KEEP（保守的フェイルセーフ）
+            kept_a.append(item)
+
+    # --- decisions: KEEP のみ残す ---
+    kept_d = []
+    triaged_d = {item.get("content"): item for item in triaged.get("decisions", []) or []}
+    for item in d_items:
+        t = triaged_d.get(item.get("content"))
+        if t and t.get("verdict") == "DROP":
+            print(f"[TRIAGE] DROP decision: {(item.get('content') or '')[:80]}… — 理由: {t.get('reason', '不明')}", file=sys.stderr)
+        elif t and t.get("verdict") == "KEEP":
+            kept_d.append(item)
+        elif t is None:
+            print(f"[TRIAGE] DROP decision: {(item.get('content') or '')[:80]}… — 理由: 候補がレスポンスに欠落", file=sys.stderr)
+        else:
+            kept_d.append(item)
+
+    print(
+        f"[INFO] Slack triage: action_items {len(a_items)}→{len(kept_a)}, "
+        f"decisions {len(d_items)}→{len(kept_d)}",
+        file=sys.stderr,
+    )
+
+    return {"decisions": kept_d, "action_items": kept_a}
+
+
 def _sample_extractions(prompt: str, n: int) -> list[dict]:
     """同一プロンプトを N 回サンプリングし、JSON 抽出に成功したドラフトのリストを返す。
 
-    OPENAI_API_BASE が設定されていれば call_local_llm で temperature を僅かに振って
-    多様性を確保する。RiVault フォールバック時は temperature 制御不可のため
-    1 回だけ call_claude を呼ぶ（その場合 N=1 相当）。
+    call_argus_llm で temperature を僅かに振って多様性を確保する。
+    N=1 の場合は temperature=None（モデルデフォルト）で 1 回のみ呼ぶ。
     """
     if n <= 1:
-        raw = call_claude(prompt)
         try:
-            return [extract_json(raw)]
+            return [extract_json(call_argus_llm(prompt, timeout=600, think=True,
+                                                max_tokens=int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))))]
         except Exception:
             return []
 
     max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
 
-    # n=3 → -0.1, 0, +0.1。Self-Consistency でクラスタ化に必要な多様性を確保する。
+    # n=3 → -0.1, 0, +0.1
     if n == 2:
         deltas = [-0.05, 0.05]
     else:
         step = 0.2 / (n - 1)
         deltas = [-0.1 + step * i for i in range(n)]
-    # ベース温度: V4-Flash / GLM-4.7-Flash 等の Non-think モデルは 0.6 だと発散しがちなので
-    # 0.4 に抑える。gemma4 (think) フォールバック時は cli_utils.py が think=True を内部で
-    # 0.6 デフォルトに合わせるため、ここで指定した temperature がそのまま使われる。
-    base_t = 0.4
+    base_t = 0.4  # V4-Flash オーバーフィット防止
 
     drafts: list[dict] = []
     for i, d in enumerate(deltas, 1):
@@ -483,6 +626,7 @@ def extract_from_thread(
     consensus_n: int = 1,
     consensus_threshold: float = 0.78,
     consensus_min_vote: int | None = None,
+    enable_triage: bool = True,
 ) -> dict:
     # ナレッジ検索（Phase 2追加）— 統合 qa_index.db の pm-all で全件横断
     knowledge_context = retrieve_knowledge_for_extraction(
@@ -502,8 +646,12 @@ def extract_from_thread(
     )
 
     if consensus_n <= 1:
-        raw = call_claude(prompt)
-        return extract_json(raw)
+        max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
+        raw = call_argus_llm(prompt, timeout=600, think=True, max_tokens=max_tokens)
+        result = extract_json(raw)
+        if enable_triage:
+            result = triage_items(result, milestones)
+        return result
 
     drafts = _sample_extractions(prompt, consensus_n)
     if not drafts:
@@ -511,7 +659,10 @@ def extract_from_thread(
     if len(drafts) == 1:
         # サンプルが 1 件しか得られなかった場合は集約しない（投票不可）
         print(f"[WARN] Slack consensus: ドラフトが {len(drafts)}/{consensus_n} 件のみ。集約せず採用", file=sys.stderr)
-        return drafts[0]
+        result = drafts[0]
+        if enable_triage:
+            result = triage_items(result, milestones)
+        return result
 
     min_vote = consensus_min_vote if consensus_min_vote is not None else math.ceil(len(drafts) / 2)
     decisions = _consensus_decisions(drafts, min_vote, consensus_threshold)
@@ -521,7 +672,10 @@ def extract_from_thread(
         f"decisions={len(decisions)}, action_items={len(action_items)}",
         file=sys.stderr,
     )
-    return {"decisions": decisions, "action_items": action_items}
+    result = {"decisions": decisions, "action_items": action_items}
+    if enable_triage:
+        result = triage_items(result, milestones)
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -649,6 +803,10 @@ class SlackIngestPlugin:
             "--slack-consensus-min-vote", type=int, default=None, metavar="INT",
             help="Self-Consistency クラスタ採用に必要な独立票数（デフォルト: ⌈N/2⌉）",
         )
+        parser.add_argument(
+            "--slack-no-triage", action="store_true",
+            help="トリアージ（抽出候補の2次審査）を無効化（デフォルト: 有効）",
+        )
 
     def run(self, args: argparse.Namespace, ctx: IngestContext) -> None:
         channel_id = args.slack_channel
@@ -682,6 +840,11 @@ class SlackIngestPlugin:
         consensus_n = getattr(args, "slack_consensus", 3)
         consensus_threshold = getattr(args, "slack_consensus_threshold", 0.78)
         consensus_min_vote = getattr(args, "slack_consensus_min_vote", None)
+        no_triage = getattr(args, "slack_no_triage", False)
+        if not no_triage:
+            ctx.log("[INFO] トリアージ有効: 抽出候補を2次審査します")
+        else:
+            ctx.log("[INFO] トリアージ無効: --slack-no-triage")
         if consensus_n >= 2:
             ctx.log(
                 f"[INFO] Self-Consistency 有効: N={consensus_n}, "
@@ -707,6 +870,7 @@ class SlackIngestPlugin:
                     consensus_n=consensus_n,
                     consensus_threshold=consensus_threshold,
                     consensus_min_vote=consensus_min_vote,
+                    enable_triage=not no_triage,
                 )
             except Exception as e:
                 ctx.log(f"  [WARN] 抽出失敗: {e}")

@@ -1211,10 +1211,6 @@ def build_app():
                     response_type="ephemeral",
                 )
                 return
-        respond(
-            text=f":hourglass_flowing_sand: `{filename}` の文字起こし・議事録生成を開始します...",
-            response_type="ephemeral",
-        )
         executor.submit(_run_transcribe, respond, command)
 
     @app.command("/argus-transcribe")
@@ -1466,21 +1462,50 @@ def build_app():
         thread_ts = target.get("thread_ts") or message_ts
         deleted, errors = _delete_thread_files(client, channel_id, thread_ts)
 
-        # Bot メッセージ自体も削除する（mp3 は files_delete で消えるが、
-        # ファイルなしの bot 通知メッセージが残ることがあるため）
+        # メッセージ本体を削除する。
+        # リアクション対象が親メッセージ（thread_ts == message_ts）の場合は
+        # スレッド内の全 reply も合わせて削除する。
+        is_parent = (thread_ts == message_ts)
+        reply_tss: list[str] = []
+        if is_parent:
+            try:
+                cursor = None
+                while True:
+                    kwargs = dict(channel=channel_id, ts=thread_ts, limit=200)
+                    if cursor:
+                        kwargs["cursor"] = cursor
+                    rep = client.conversations_replies(**kwargs)
+                    for m in rep.get("messages") or []:
+                        ts = m.get("ts")
+                        if ts and ts != message_ts:
+                            reply_tss.append(ts)
+                    meta = rep.get("response_metadata") or {}
+                    cursor = meta.get("next_cursor")
+                    if not cursor:
+                        break
+            except Exception as e:
+                logger.warning(f"[reaction-delete] replies 取得失敗（子削除スキップ）: {e}")
+
+        for ts in reply_tss:
+            try:
+                client.chat_delete(channel=channel_id, ts=ts)
+            except Exception as e:
+                logger.debug(f"[reaction-delete] reply chat_delete skipped ts={ts}: {e}")
+
         try:
             client.chat_delete(channel=channel_id, ts=message_ts)
         except Exception as e:
             logger.debug(f"[reaction-delete] chat_delete skipped ts={message_ts}: {e}")
 
-        user_id = event.get("user") or ""
-        try:
-            ephemeral_text = f":white_check_mark: {deleted} 件のファイルを削除しました。"
-            if errors:
-                ephemeral_text += "\n失敗:\n" + "\n".join(f"• {e}" for e in errors[:5])
-            client.chat_postEphemeral(channel=channel_id, user=user_id, text=ephemeral_text)
-        except Exception:
-            pass
+        if errors:
+            user_id = event.get("user") or ""
+            try:
+                client.chat_postEphemeral(
+                    channel=channel_id, user=user_id,
+                    text=":warning: 削除失敗:\n" + "\n".join(f"• {e}" for e in errors[:5]),
+                )
+            except Exception:
+                pass
 
     # --- app_mention ハンドラ（常駐AIとしての @mention 応答） ---
     # 許可チャンネルは argus_config.yaml の mention_allowed_channels から取得。

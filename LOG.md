@@ -7,6 +7,59 @@
 
 ---
 
+## 2026-06-08 スライド OCR の RiVault 向け 400 エラー修正
+
+**背景**: `ARGUS_PREFER_RIVAULT=1` 時、`slide_ocr.py` が `RIVAULT_URL` を base_url に選び、
+`_ocr_image()` が `RIVAULT_MODEL`（= `deepseek-ai/DeepSeek-V4-Flash`、テキスト専用）でリクエストして
+400 Bad Request になっていた。`scripts/eval/slide_ocr_compare.py` の結果（`/tmp/slide_compare/report.md`）では
+`gemma3:12b` が 0/7、`Qwen3.6-35B-A3B-FP8` が 7/7 であり、vision 対応モデルの明示指定が必要と確認済み。
+
+**決定**: OCR 用に `RIVAULT_OCR_MODEL` 環境変数を新設。`slide_ocr.py` / `pm_box_crawl._ocr_image()` は
+この変数が設定されている場合のみ RiVault を使い、未設定時は `ARGUS_PREFER_RIVAULT=1` でもローカル vLLM
+（gemma-4）にフォールバック。RiVault で OCR したい場合は `rivault_tokens.sh` に
+`export RIVAULT_OCR_MODEL=Qwen/Qwen3.6-35B-A3B-FP8` を追加する。
+
+---
+
+## 2026-06-08 別環境スクリプト持ち込みによる RiVault リグレッション修正
+
+**背景**: Triage Agent 追加（同日）のスクリプトを別環境から持ち込んだ際、`3ccbfd7`（ARGUS_PREFER_RIVAULT=1 統一）
+と `0b3752b`（Pass1 Slack 抽出を call_argus_llm 経由に変更）の修正内容が上書きされた。
+
+**決定**: `scripts/ingest/slack.py`・`scripts/pm_from_recording.sh`・`scripts/recording/generate_minutes_local.py`
+の 3 ファイルを再修正。slack.py は `call_argus_llm` インポートに戻し、`triage_items()` / `_sample_extractions()` /
+consensus_n≤1 の全 LLM 呼び出しを置き換え。`base_t` を 0.6 → 0.4 に戻した。pm_from_recording.sh は
+`ARGUS_PREFER_RIVAULT=1` 条件分岐と RiVault トークンコメントを復元し、`--url`/`--token` を空変数で
+上書きしない条件付き渡しに修正。generate_minutes_local.py は `load_local_llm_endpoint()` の RiVault 分岐と
+`main()` の `using_rivault` 検出ブロックを復元。
+
+**再発防止**: 別環境から持ち込むスクリプトは `git diff` で RiVault 関連パターン（`call_argus_llm` /
+`ARGUS_PREFER_RIVAULT` / `load_local_llm_endpoint`）の欠落を事前確認すること。
+
+---
+
+## 2026-06-08 抽出・転記パイプラインに Triage Agent を追加
+
+**背景**: EXTRACT_PROMPT は5基準+do-not-extract リスト+few-shot で「大半のスレッドは空配列が正しい」と
+指示しているにもかかわらず、些末な項目が pm.db に大量に漏れ出ていた。これは単一LLM呼び出しで
+「抽出」と「意義判定」を同時に行うことの構造的限界（DevNous 論文の "engineered bias towards action"：
+NO_ACTION F1=0.308）が原因。
+
+**決定**: Extractor → Triage の2段階分離を実装。Extractor（既存 EXTRACT_PROMPT）は高リコールで
+候補を拾い、新設の Triage Agent（TRIAGE_PROMPT）が3ゲート（マイルストーン関連性・代替可能性・
+影響範囲）で審査し KEEP/DROP を判定。Triage はデフォルト有効、`--slack-no-triage` / `--no-triage`
+で無効化可能。DROP理由は stderr にログ出力され、人間が監査可能。JSON パース失敗時はフェイルセーフ
+（元の候補をそのまま返す）。議事録経路では `minutes.py`（転記時）ではなく生成パイプライン側
+（`pm_minutes_import.py` / `generate_minutes_local.py`）でトリアージを挟む。転記時は既に上流で
+フィルタ済みのため効果が薄いという判断。
+
+**影響**: `scripts/ingest/slack.py` に TRIAGE_PROMPT・triage_items()・enable_triage パラメータを追加。
+`scripts/pm_minutes_import.py` の `process_file()` にトリアージ導線を追加。
+`scripts/recording/generate_minutes_local.py` にトリアージ導線と `_reconstruct_decisions_md()` を追加。
+`pm_from_recording.sh` に `--no-triage` オプションを追加。
+
+---
+
 ## 2026-06-05 RiVault 移行: 環境変数一本制御 + V4-Flash のアクションアイテム過剰抽出対策
 
 **背景**: `ARGUS_PREFER_RIVAULT=1` で全 LLM 呼び出しを RiVault に切り替える実装を進めた際、

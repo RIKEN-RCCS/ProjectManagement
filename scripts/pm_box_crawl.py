@@ -642,15 +642,16 @@ def _ocr_image(img_path: Path, base_url: str, prompt: str | None = None) -> str 
     with open(img_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
 
-    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and os.environ.get("RIVAULT_TOKEN"):
+    # OCR は vision 対応モデルが必要。RIVAULT_OCR_MODEL が明示指定されている場合のみ
+    # RiVault トークンを使う。RIVAULT_MODEL (テキスト専用) は OCR に使わない。
+    rivault_ocr_model = os.environ.get("RIVAULT_OCR_MODEL", "").strip()
+    if rivault_ocr_model and os.environ.get("RIVAULT_TOKEN"):
         api_key = os.environ["RIVAULT_TOKEN"]
     else:
         api_key = os.environ.get("OPENAI_API_KEY", "dummy")
     from cli_utils import detect_vllm_model
     try:
-        model = (os.environ.get("OPENAI_MODEL")
-                 or (os.environ.get("RIVAULT_MODEL") if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" else None)
-                 or detect_vllm_model(base_url))
+        model = os.environ.get("OPENAI_MODEL") or rivault_ocr_model or detect_vllm_model(base_url)
     except Exception:
         return None
 

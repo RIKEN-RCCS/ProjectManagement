@@ -195,14 +195,16 @@ def ocr_slides(
     if not frames:
         return []
     if base_url is None:
-        if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
-            base_url = os.environ.get("RIVAULT_URL", "").rstrip("/") or None
-            if base_url:
-                # RIVAULT_TOKEN を OPENAI_API_KEY に強制設定（既存の "dummy" を上書き）
-                token = os.environ.get("RIVAULT_TOKEN", "")
-                if token:
-                    os.environ["OPENAI_API_KEY"] = token
-        base_url = base_url or os.environ.get("OPENAI_API_BASE")
+        # OCR は vision 対応モデルが必要。RIVAULT_OCR_MODEL が明示指定されている場合のみ
+        # RiVault を使う。それ以外は ARGUS_PREFER_RIVAULT=1 でもローカル vLLM を使う
+        # (DeepSeek-V4-Flash 等テキスト専用モデルへの 400 エラーを防ぐため)。
+        if os.environ.get("RIVAULT_OCR_MODEL", "").strip() and os.environ.get("RIVAULT_URL"):
+            base_url = os.environ["RIVAULT_URL"].rstrip("/")
+            token = os.environ.get("RIVAULT_TOKEN", "")
+            if token:
+                os.environ["OPENAI_API_KEY"] = token
+        else:
+            base_url = os.environ.get("OPENAI_API_BASE")
     if not base_url:
         logger.warning("OPENAI_API_BASE 未設定のため OCR をスキップします")
         return [""] * len(frames)

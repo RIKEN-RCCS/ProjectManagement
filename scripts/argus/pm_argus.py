@@ -1825,11 +1825,6 @@ def _run_transcribe(respond, command):
         logger.info(f"[argus-transcribe] 開始: filename={filename} channel={channel_id}")
         _run_transcribe_pipeline(bot_client, channel_id, filename, thread_ts, consensus_n=consensus_n)
         logger.info(f"[argus-transcribe] 完了: filename={filename}")
-        respond(
-            text=f":white_check_mark: `{filename}` の議事録生成が完了しました。スレッドをご確認ください。",
-            response_type="ephemeral",
-            replace_original=True,
-        )
     except Exception as e:
         logger.exception("[argus-transcribe] エラー")
         respond(

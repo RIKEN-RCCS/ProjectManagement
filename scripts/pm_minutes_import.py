@@ -776,6 +776,34 @@ def process_file(
 
     parsed = parse_minutes_output(minutes_text)
 
+    # トリアージ（抽出候補の2次審査）
+    if not no_llm:
+        from ingest.slack import triage_items, fetch_milestones
+        from db_utils import open_db as _open_db
+        pm_db_path = Path(__file__).resolve().parent.parent / "data" / "pm.db"
+        milestones = []
+        if pm_db_path.exists():
+            try:
+                _pm_conn = _open_db(pm_db_path, encrypt=True)
+                milestones = fetch_milestones(_pm_conn)
+                _pm_conn.close()
+            except Exception:
+                pass
+        if milestones:
+            extracted = {
+                "decisions": [{"content": d["content"]} for d in parsed["decisions"]],
+                "action_items": [
+                    {"content": a["content"], "assignee": a.get("assignee"),
+                     "due_date": a.get("due_date"), "milestone_id": None}
+                    for a in parsed["action_items"]
+                ],
+            }
+            triaged = triage_items(extracted, milestones)
+            kept_d = {d["content"] for d in triaged.get("decisions", [])}
+            kept_a = {a["content"] for a in triaged.get("action_items", [])}
+            parsed["decisions"] = [d for d in parsed["decisions"] if d["content"] in kept_d]
+            parsed["action_items"] = [a for a in parsed["action_items"] if a["content"] in kept_a]
+
     # 結果表示
     log("\n" + "=" * 60)
     log(minutes_text)
