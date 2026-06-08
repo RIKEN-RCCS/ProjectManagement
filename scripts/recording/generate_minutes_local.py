@@ -126,7 +126,6 @@ CRITICAL: "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in ou
 - If no significant decisions found: write a single line "（なし）"
 
 ## アクションアイテム rules:
-- **Typical meeting: 3-4 action items. Maximum 5.** If you find more than 5, you are likely including routine or low-importance tasks — re-evaluate and keep only the most impactful ones.
 - An action item is a task that is **essential to project progress** and produces a **concrete deliverable** (report, design doc, code, estimate, proposal, etc.).
 - List only specific tasks explicitly assigned or delegated to an identifiable person.
 - Do NOT infer tasks that were not explicitly assigned in the summaries.
@@ -191,8 +190,7 @@ def load_local_llm_endpoint() -> tuple[str, str]:
         token = os.environ.get("RIVAULT_TOKEN", "")
         if url and token:
             return url, token
-        print("[WARN] ARGUS_PREFER_RIVAULT=1 だが RIVAULT_URL/TOKEN 未設定。ローカルにフォールバック",
-              file=sys.stderr)
+        print("[WARN] ARGUS_PREFER_RIVAULT=1 だが RIVAULT_URL/TOKEN 未設定。ローカルにフォールバック", file=sys.stderr)
     url = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
     token = os.environ.get("OPENAI_API_KEY", "dummy")
     return url, token
@@ -351,14 +349,15 @@ Treat each draft as an independent witness. Your job:
 - Keep numeric figures, dates, and proper nouns EXACTLY as they appear (do not round, do not infer).
 - Output Japanese prose only. No bullet lists, no speaker attribution, no SPEAKER_XX tokens.
 - Preserve the topic title `{title}` (do not rename it).
-- Do NOT reproduce the source drafts or any section other than `### {title}` in your output.
 
-Output format (output this section ONLY, begin immediately, no preamble):
+Output format (begin immediately, no preamble):
 ### {title}
 
 (2〜4 段落、各段落 2〜3 文)
 
-## Source Drafts (input only — do NOT output this section)
+The section below (`## Drafts`) is input data only. Do NOT reproduce it in your output.
+
+## Drafts
 {drafts_block}
 """
 
@@ -376,15 +375,15 @@ Rules:
   〜する方針となった / 〜をキャンセルした). Do not end every line with 〜が決定された.
 - If no decision survives the vote: write a single line `（なし）`.
 - Output Japanese only. Begin immediately with `## 決定事項` — no preamble, no thinking.
-- Do NOT reproduce the source clusters or any section other than `## 決定事項` in your output.
+- Do NOT reproduce the `## Drafts` section in your output.
 
-Output format (output this section ONLY):
+Output format:
 ## 決定事項
 
 - （決定事項1）
 - （決定事項2）
 
-## Source Clusters (input only — do NOT output this section)
+## Drafts (input data only — do not output)
 {drafts_block}
 """
 
@@ -393,7 +392,6 @@ CONSENSUS_ACTIONS_TEMPLATE = """\
 You are merging {n_drafts} independent action item tables from the same meeting into a canonical table.
 
 Rules:
-- **Typical meeting: 3-4 action items. Maximum 5.** If more survive the vote, keep only the most impactful ones.
 - Keep ONLY action items supported by {min_vote} or more independent drafts.
 - Two rows refer to the same item if the assignee matches AND the task content is
   semantically equivalent (even if the wording differs). Merge phrasing variants.
@@ -404,20 +402,19 @@ Rules:
 - 担当者: normalize using the Participant List below; if unclear write `（未定）`.
 - If no action item survives the vote: write a single line `（なし）`.
 - Output Japanese only. Begin immediately with `## アクションアイテム` — no preamble.
-- Do NOT reproduce the source clusters, participant list, or any section other than
-  `## アクションアイテム` in your output.
+- Do NOT reproduce the `## Participant List` or `## Drafts` sections in your output.
 
-Output format (output this section ONLY, EXACTLY 3 columns):
+Output format (EXACTLY 3 columns):
 ## アクションアイテム
 
 | 担当者 | タスク内容 | 期限 |
 |---|---|---|
 | ... | ... | ... |
 
-## Participant List (input only — do NOT output this section)
+## Participant List (input data only — do not output)
 {claude_md_context}
 
-## Source Clusters (input only — do NOT output this section)
+## Drafts (input data only — do not output)
 {drafts_block}
 """
 
@@ -561,6 +558,25 @@ def _split_action_rows(text: str) -> list[tuple[str, str, str]]:
             continue
         rows.append((assignee, task, deadline))
     return rows
+
+
+def _reconstruct_decisions_md(decisions: list[str], action_rows: list[tuple[str, str, str]]) -> str:
+    """トリアージ後の決定事項・アクションアイテムから Markdown を再構築する。"""
+    parts = []
+    if decisions:
+        parts.append("## 決定事項\n\n" + "\n".join(f"- {d}" for d in decisions))
+    else:
+        parts.append("## 決定事項\n\n（なし）")
+
+    if action_rows:
+        rows = ["| 担当者 | タスク内容 | 期限 |", "|---|---|---|"]
+        for a, t, dl in action_rows:
+            rows.append(f"| {a} | {t} | {dl} |")
+        parts.append("## アクションアイテム\n\n" + "\n".join(rows))
+    else:
+        parts.append("## アクションアイテム\n\n（なし）")
+
+    return "\n\n".join(parts)
 
 
 def _extract_section(text: str, header: str) -> str:
@@ -858,20 +874,10 @@ def _consensus_stage3(
     # 決定事項と AI を結合（既存の単発出力と同じ並び）
     decisions_md = decisions_md.strip() if decisions_md else "## 決定事項\n\n（なし）"
     actions_md = actions_md.strip() if actions_md else "## アクションアイテム\n\n（なし）"
-    # decisions_md に AI セクションが混入している場合は削る
+    # decisions_md に既に AI セクションが混入している場合は削る
     m = re.search(r"^##\s*アクションアイテム", decisions_md, flags=re.MULTILINE)
     if m:
         decisions_md = decisions_md[: m.start()].strip()
-    # LLM がプロンプト内の ## Drafts / ### Cluster セクションを出力に混入させた場合に除去
-    m = re.search(r"^##\s*Drafts?", decisions_md, flags=re.MULTILINE | re.IGNORECASE)
-    if m:
-        print("[WARN] decisions_md に ## Drafts セクションが混入、除去します", file=sys.stderr)
-        decisions_md = decisions_md[: m.start()].strip()
-    # actions_md 側も同様にチェック
-    m = re.search(r"^##\s*Drafts?", actions_md, flags=re.MULTILINE | re.IGNORECASE)
-    if m:
-        print("[WARN] actions_md に ## Drafts セクションが混入、除去します", file=sys.stderr)
-        actions_md = actions_md[: m.start()].strip()
     return decisions_md + "\n\n" + actions_md
 
 
@@ -898,6 +904,7 @@ def generate_minutes(
     consensus_n: int = 3,
     consensus_threshold: float = 0.78,
     consensus_min_vote: Optional[int] = None,
+    enable_triage: bool = True,
 ) -> str:
     """文字起こしファイルから議事録を生成してファイルに保存する。
 
@@ -1181,6 +1188,40 @@ def generate_minutes(
                 decisions_text = decisions_text[idx:]
             break
 
+    # トリアージ（抽出候補の2次審査）
+    if enable_triage:
+        try:
+            from ingest.slack import triage_items, fetch_milestones
+            from db_utils import open_db as _open_db
+            pm_db_path = Path(__file__).resolve().parent.parent / "data" / "pm.db"
+            milestones = []
+            if pm_db_path.exists():
+                try:
+                    _pm_conn = _open_db(pm_db_path, encrypt=True)
+                    milestones = fetch_milestones(_pm_conn)
+                    _pm_conn.close()
+                except Exception:
+                    pass
+            if milestones:
+                parsed_decisions = _split_decisions_list(decisions_text)
+                parsed_actions = _split_action_rows(decisions_text)
+                if parsed_decisions or parsed_actions:
+                    extracted = {
+                        "decisions": [{"content": d} for d in parsed_decisions],
+                        "action_items": [
+                            {"content": a[1], "assignee": a[0], "due_date": a[2], "milestone_id": None}
+                            for a in parsed_actions
+                        ],
+                    }
+                    triaged = triage_items(extracted, milestones)
+                    kept_d = {d["content"] for d in triaged.get("decisions", [])}
+                    kept_a = {a["content"] for a in triaged.get("action_items", [])}
+                    filtered_decisions = [d for d in parsed_decisions if d in kept_d]
+                    filtered_actions = [a for a in parsed_actions if a[1] in kept_a]
+                    decisions_text = _reconstruct_decisions_md(filtered_decisions, filtered_actions)
+        except Exception as e:
+            print(f"[WARN] トリアージ失敗、元の抽出結果を使用: {e}", file=sys.stderr)
+
     # CoT スクラッチパッドを除去: "## 議事内容\n" 以降のみを保持
     for marker in ("## 議事内容\n\n", "## 議事内容\n"):
         idx = minutes_text.find(marker)
@@ -1299,6 +1340,11 @@ def main() -> int:
         metavar="N",
         help="Self-consistency クラスタ採用に必要な最小独立サンプル数（デフォルト: ceil(N/2)）",
     )
+    parser.add_argument(
+        "--no-triage",
+        action="store_true",
+        help="抽出候補のトリアージ（2次審査）を無効化する",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.transcript):
@@ -1311,7 +1357,6 @@ def main() -> int:
         os.environ["OPENAI_API_KEY"] = args.token
     base_url, api_key = load_local_llm_endpoint()
 
-    # RiVault は think モード・chat_template_kwargs 非対応のため自動で無効化する
     using_rivault = os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and base_url == os.environ.get("RIVAULT_URL", "").rstrip("/")
     if using_rivault:
         if args.think:
@@ -1346,6 +1391,7 @@ def main() -> int:
     if args.consensus and args.consensus >= 2:
         print(f"[INFO] consensus    : N={args.consensus}, threshold={args.consensus_threshold}")
     print(f"[INFO] LLM URL     : {base_url}")
+    print(f"[INFO] トリアージ  : {'無効' if args.no_triage else '有効'}")
 
     try:
         output_path = generate_minutes(
@@ -1363,6 +1409,7 @@ def main() -> int:
             consensus_n=args.consensus,
             consensus_threshold=args.consensus_threshold,
             consensus_min_vote=args.consensus_min_vote,
+            enable_triage=not args.no_triage,
         )
         print(f"[完了] {output_path}")
         return 0
