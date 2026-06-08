@@ -17,6 +17,7 @@ CLI 例:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -37,6 +38,59 @@ RETRY_BACKOFF = (0.5, 1.0, 2.0)
 
 DEFAULT_SPEAKER = 74   # 琴詠ニア ノーマル
 DEFAULT_SPEED = 1.3
+
+# ---------------------------------------------------------------------------
+# fish-speech バックエンド設定
+# TTS_BACKEND=fish で有効化。VOICEVOX がデフォルト。
+# ---------------------------------------------------------------------------
+FISH_HOST = os.environ.get("FISH_TTS_HOST", "http://localhost:8080")
+FISH_TEXT_LIMIT = 400  # fish-speech は長文も安定しているが念のため分割
+FISH_SYNTH_TIMEOUT = 180
+
+
+def _get_tts_backend() -> str:
+    return os.environ.get("TTS_BACKEND", "voicevox").lower()
+
+
+# ---------------------------------------------------------------------------
+# fish-speech 呼び出し
+# ---------------------------------------------------------------------------
+
+def _fish_synth_chunk(text: str, out_path: Path, speed: float = 1.0) -> None:
+    """fish-speech API でテキストを合成して WAV を out_path に書き出す。"""
+    import json as _json
+
+    reference_id = os.environ.get("FISH_REFERENCE_ID") or None
+    payload: dict = {
+        "text": text,
+        "format": "wav",
+        "normalize": True,
+        "streaming": False,
+        "latency": "normal",
+    }
+    if reference_id:
+        payload["reference_id"] = reference_id
+
+    resp = _request_with_retry(
+        "POST",
+        f"{FISH_HOST}/v1/tts",
+        data=_json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+        timeout=FISH_SYNTH_TIMEOUT,
+    )
+    out_path.write_bytes(resp.content)
+
+
+def check_fish_alive() -> str:
+    try:
+        r = requests.get(f"{FISH_HOST}/v1/health", timeout=5)
+        r.raise_for_status()
+        return r.json().get("status", "ok")
+    except Exception as exc:
+        raise RuntimeError(
+            f"fish-speech サーバに接続できません ({FISH_HOST}): {exc}\n"
+            "bash scripts/pm_daemon.sh start fish で起動してください。"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +409,10 @@ def _split_by_comma(sentence: str, limit: int) -> list[str]:
     return out
 
 
+def default_text_limit() -> int:
+    return FISH_TEXT_LIMIT if _get_tts_backend() == "fish" else VOICEVOX_TEXT_LIMIT
+
+
 def split_into_sentences(text: str, limit: int = VOICEVOX_TEXT_LIMIT) -> list[str]:
     chunks: list[str] = []
     for paragraph in text.split("\n\n"):
@@ -391,7 +449,11 @@ def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
 
 
 def synth_chunk(text: str, speaker: int, out_path: Path, speed: float = 1.0) -> None:
-    """1 チャンクを合成して WAV を out_path に書き出す。"""
+    """1 チャンクを合成して WAV を out_path に書き出す。TTS_BACKEND で切り替え。"""
+    if _get_tts_backend() == "fish":
+        _fish_synth_chunk(text, out_path, speed=speed)
+        return
+
     q = _request_with_retry(
         "POST",
         f"{VOICEVOX_HOST}/audio_query",
@@ -410,6 +472,13 @@ def synth_chunk(text: str, speaker: int, out_path: Path, speed: float = 1.0) -> 
         timeout=SYNTH_TIMEOUT,
     )
     out_path.write_bytes(s.content)
+
+
+def check_tts_alive() -> str:
+    """アクティブな TTS バックエンドの疎通確認。"""
+    if _get_tts_backend() == "fish":
+        return check_fish_alive()
+    return check_voicevox_alive()
 
 
 def check_voicevox_alive() -> str:
@@ -559,7 +628,7 @@ def synthesize_markdown(
     if not chunks:
         raise ValueError("読み上げる本文がありません")
 
-    check_voicevox_alive()
+    check_tts_alive()
 
     output_mp3 = output_mp3.resolve()
     output_mp3.parent.mkdir(parents=True, exist_ok=True)
@@ -628,11 +697,12 @@ def main() -> int:
         return 0
 
     try:
-        version = check_voicevox_alive()
+        version = check_tts_alive()
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(f"VOICEVOX engine: {version}, speaker={args.speaker}, speed={args.speed}, chunks={len(chunks)}", file=sys.stderr)
+    backend = _get_tts_backend()
+    print(f"TTS backend={backend}, version={version}, speaker={args.speaker}, speed={args.speed}, chunks={len(chunks)}", file=sys.stderr)
 
     output_mp3 = args.output or args.input.with_suffix(".mp3")
     output_mp3 = output_mp3.resolve()

@@ -438,7 +438,7 @@ def build_slide_video(
     output_mp4 = output_mp4.resolve()
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
 
-    pm_tts.check_voicevox_alive()
+    pm_tts.check_tts_alive()
     _ffmpeg_or_raise()
 
     work_root = Path(tempfile.mkdtemp(prefix="slide_video_"))
