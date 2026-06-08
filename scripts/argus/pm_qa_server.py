@@ -1229,7 +1229,9 @@ def build_app():
             respond(
                 text=(
                     "ファイル名を指定してください。\n"
-                    "例: `/argus-narrate slides.pptx` / `/argus-narrate handout.pdf`"
+                    "例: `/argus-narrate slides.pptx` / `/argus-narrate handout.pdf`\n"
+                    "英語ナレーションにする場合は `--lang en` を付けてください。\n"
+                    "例: `/argus-narrate slides.pptx --lang en`"
                 ),
                 response_type="ephemeral",
             )

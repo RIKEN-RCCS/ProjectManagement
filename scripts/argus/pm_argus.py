@@ -1849,6 +1849,15 @@ def _run_narrate(respond, command):
     """
     text = (command.get("text") or "").strip()
     text = text.strip("*_`~'\"「」​‌‍﻿")
+
+    # --lang ja / --lang en の解析
+    lang = "ja"
+    import re as _re
+    lang_m = _re.search(r"--lang\s+(ja|en)\b", text)
+    if lang_m:
+        lang = lang_m.group(1)
+        text = (_re.sub(r"--lang\s+(ja|en)\b", "", text)).strip()
+
     filename = text
     if filename and not Path(filename).suffix:
         filename += ".pptx"
@@ -1858,7 +1867,9 @@ def _run_narrate(respond, command):
         respond(
             text=(
                 "ファイル名を指定してください。\n"
-                "例: `/argus-narrate slides.pptx` / `/argus-narrate handout.pdf`"
+                "例: `/argus-narrate slides.pptx` / `/argus-narrate handout.pdf`\n"
+                "英語ナレーションにする場合は `--lang en` を付けてください。\n"
+                "例: `/argus-narrate slides.pptx --lang en`"
             ),
             response_type="ephemeral",
             replace_original=True,
@@ -1963,7 +1974,7 @@ def _run_narrate(respond, command):
 
         mp4_path = work_dir / (Path(filename).stem + ".narrate.mp4")
         logger.info(f"[argus-narrate] 開始: {filename}")
-        build_slide_video(src_path, mp4_path, quiet=True)
+        build_slide_video(src_path, mp4_path, lang=lang, quiet=True)
         logger.info(
             f"[argus-narrate] mp4 生成完了 size={mp4_path.stat().st_size} bytes"
         )

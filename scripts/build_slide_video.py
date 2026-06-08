@@ -141,12 +141,17 @@ def collect_slides(src: Path, work_dir: Path) -> list[Slide]:
 # 要約 (LLM)
 # --------------------------------------------------------------------------- #
 
-_NARRATION_SYSTEM = (
+_NARRATION_SYSTEM_JA = (
     "あなたはスライド資料を読み上げ用に要約するアシスタントです。"
     "聴き手が短時間で資料の概要を把握できるよう、自然な日本語で簡潔にまとめてください。"
 )
 
-_NARRATION_PROMPT_TMPL = """\
+_NARRATION_SYSTEM_EN = (
+    "You are an assistant that summarizes slide content for text-to-speech narration. "
+    "Summarize each slide in concise, natural English so listeners can quickly grasp the key points."
+)
+
+_NARRATION_PROMPT_TMPL_JA = """\
 このスライド({index}枚目)の内容を、音声読み上げ用に{max_sentences}文以内・合計{max_chars}文字以内の日本語平文に要約してください。
 
 以下の 2 種類の入力があります。
@@ -169,6 +174,30 @@ _NARRATION_PROMPT_TMPL = """\
 
 要約:"""
 
+_NARRATION_PROMPT_TMPL_EN = """\
+Summarize slide {index} for text-to-speech narration in {max_sentences} sentences or fewer, \
+within {max_chars} characters total.
+
+Two input sources are provided:
+- (A) Text extracted from the slide file: accurate but may be fragmented
+- (B) Text from image OCR: may contain recognition errors
+
+Rules:
+- Prioritize (A); preserve proper nouns, numbers, and dates exactly as they appear in (A)
+- Use (B) as the primary source only if (A) is empty or very short
+- Omit bullet markers, URLs, parenthetical text, and symbol readings
+- Start directly with the content — no preamble like "This slide shows..."
+- Output the narration text only. No markdown or headings.
+- If the slide has no meaningful content, write only "Slide {index}."
+
+# (A) Extracted text
+{extracted}
+
+# (B) OCR text
+{ocr}
+
+Narration:"""
+
 
 def _summarize_slide(
     slide: Slide,
@@ -176,14 +205,26 @@ def _summarize_slide(
     *,
     max_sentences: int,
     max_chars: int,
+    lang: str = "ja",
     timeout: int = 60,
 ) -> str:
     from cli_utils import call_argus_llm, strip_think_blocks
 
-    extracted = slide.text or "(なし)"
-    ocr = (ocr_text or "").strip() or "(なし)"
+    if lang == "en":
+        system = _NARRATION_SYSTEM_EN
+        tmpl = _NARRATION_PROMPT_TMPL_EN
+        empty_marker = "(none)"
+        fallback_label = f"Slide {slide.index}."
+    else:
+        system = _NARRATION_SYSTEM_JA
+        tmpl = _NARRATION_PROMPT_TMPL_JA
+        empty_marker = "(なし)"
+        fallback_label = f"{slide.index}枚目"
 
-    prompt = _NARRATION_PROMPT_TMPL.format(
+    extracted = slide.text or empty_marker
+    ocr = (ocr_text or "").strip() or empty_marker
+
+    prompt = tmpl.format(
         index=slide.index,
         extracted=extracted[:4000],
         ocr=ocr[:4000],
@@ -194,23 +235,22 @@ def _summarize_slide(
     try:
         raw = call_argus_llm(
             prompt,
-            system=_NARRATION_SYSTEM,
+            system=system,
             max_tokens=512,
             timeout=timeout,
         )
         out = strip_think_blocks(raw).strip()
     except Exception as exc:
         logger.warning(f"slide {slide.index}: LLM 要約失敗 ({exc}) — 抽出テキスト先頭を使用")
-        # フォールバック: 抽出テキスト先頭、なければ OCR 先頭
         fallback = (slide.text or ocr_text or "").strip().splitlines()
         head = " ".join(s for s in fallback if s)[:max_chars]
-        return head or f"{slide.index}枚目"
+        return head or fallback_label
 
-    out = re.sub(r"^(要約[::]\s*|出力[::]\s*)", "", out)
+    out = re.sub(r"^(要約[::]\s*|出力[::]\s*|Narration[::]\s*)", "", out)
     if not out:
-        return f"{slide.index}枚目"
+        return fallback_label
     if not out.endswith(("。", "！", "？", ".", "!", "?")):
-        out += "。"
+        out += "." if lang == "en" else "。"
     return out
 
 
@@ -384,6 +424,7 @@ def build_slide_video(
     max_sentences: int = 3,
     max_chars: int = 180,
     max_slides: int | None = None,
+    lang: str = "ja",
     quiet: bool = False,
 ) -> Path:
     """PPTX/PDF → mp4 を生成して output_mp4 のパスを返す。"""
@@ -420,6 +461,7 @@ def build_slide_video(
                 slide, ocr_text,
                 max_sentences=max_sentences,
                 max_chars=max_chars,
+                lang=lang,
             )
             logger.info(f"  slide {slide.index}: narration={narration}")
 
@@ -449,6 +491,8 @@ def main() -> int:
     ap.add_argument("--max-chars", type=int, default=180)
     ap.add_argument("--max-slides", type=int, default=None,
                     help="先頭 N 枚のみ処理 (動作確認用)")
+    ap.add_argument("--lang", choices=["ja", "en"], default="ja",
+                    help="ナレーション言語 (ja=日本語, en=英語, デフォルト: ja)")
     ap.add_argument("--dry-run", action="store_true",
                     help="narration 文だけ標準出力に流して mp4 は作らない")
     ap.add_argument("--verbose", "-v", action="store_true")
@@ -476,6 +520,7 @@ def main() -> int:
                     slide, ocr_text,
                     max_sentences=args.max_sentences,
                     max_chars=args.max_chars,
+                    lang=args.lang,
                 )
                 print(f"--- slide {slide.index} ---")
                 print(narration)
@@ -492,6 +537,7 @@ def main() -> int:
         max_sentences=args.max_sentences,
         max_chars=args.max_chars,
         max_slides=args.max_slides,
+        lang=args.lang,
     )
     size_mb = output_mp4.stat().st_size / (1024 * 1024)
     print(f"wrote {output_mp4} ({size_mb:.2f} MB)", file=sys.stderr)
