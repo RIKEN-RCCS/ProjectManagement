@@ -24,17 +24,18 @@ LOG_DIR="$REPO_ROOT/logs"
 # サービス定義
 # --------------------------------------------------------------------------- #
 #   key=NAME
-#   value=TARGET_SCRIPT|LOG_BASENAME|SOURCE_RIVAULT|SET_DEFAULT_LLM|EXTRA_ARGS
+#   value=TARGET_SCRIPT|LOG_BASENAME|SOURCE_RIVAULT|SET_DEFAULT_LLM|SOURCE_FISH|EXTRA_ARGS
 #     TARGET_SCRIPT    : scripts/ からの相対パス
 #     LOG_BASENAME     : logs/{name}.log / logs/{name}.pid に使う識別子
 #     SOURCE_RIVAULT   : 1 なら ~/.secrets/rivault_tokens.sh を読み込む
 #     SET_DEFAULT_LLM  : 1 なら OPENAI_API_BASE/API_KEY のデフォルト値を設定
+#     SOURCE_FISH      : 1 なら ~/.secrets/fish_tts.sh を読み込む
 #     EXTRA_ARGS       : Python スクリプトに渡す追加引数（空可）
 # --------------------------------------------------------------------------- #
 declare -A SERVICES=(
-    [qa]="argus/pm_qa_server.py|pm_qa_server|1|1|"
-    [web]="pm_api.py|pm_web|0|0|--port ${PM_WEB_PORT:-8501}"
-    [fish]="pm_fish_tts_server.py|pm_fish_tts|0|0|"
+    [qa]="argus/pm_qa_server.py|pm_qa_server|1|1|0|"
+    [web]="pm_api.py|pm_web|0|0|0|--port ${PM_WEB_PORT:-8501}"
+    [fish]="pm_fish_tts_server.py|pm_fish_tts|0|0|1|"
 )
 
 # --------------------------------------------------------------------------- #
@@ -59,7 +60,7 @@ load_service() {
         echo "未知のサービス: $name（利用可能: ${!SERVICES[*]}）" >&2
         exit 1
     fi
-    IFS='|' read -r SVC_TARGET SVC_LOG_BASE SVC_RIVAULT SVC_DEFAULT_LLM SVC_EXTRA <<< "$spec"
+    IFS='|' read -r SVC_TARGET SVC_LOG_BASE SVC_RIVAULT SVC_DEFAULT_LLM SVC_FISH SVC_EXTRA <<< "$spec"
     SVC_LOG_FILE="$LOG_DIR/${SVC_LOG_BASE}.log"
     SVC_PID_FILE="$LOG_DIR/${SVC_LOG_BASE}.pid"
     SVC_TARGET_PATH="$SCRIPT_DIR/$SVC_TARGET"
@@ -92,6 +93,10 @@ cmd_start() {
         export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
         export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
         export QA_INDEX_DB="${QA_INDEX_DB:-$REPO_ROOT/data/qa_index.db}"
+    fi
+    if [[ "${SVC_FISH:-0}" == "1" && -f "$HOME/.secrets/fish_tts.sh" ]]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.secrets/fish_tts.sh"
     fi
 
     # 起動確認
