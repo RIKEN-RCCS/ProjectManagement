@@ -11,7 +11,7 @@ Usage:
     python3 scripts/pm_argus_agent.py --investigate "先週の決定事項の実行状況" --max-steps 5
 
 環境変数:
-    OPENAI_API_BASE / RIVAULT_URL — LLM バックエンド（pm_argus.py と同じ）
+    LOCAL_LLM_URL / RIVAULT_URL — LLM バックエンド（pm_argus.py と同じ）
     SLACK_BOT_TOKEN — Slack 返信用（Slack コマンド時のみ）
 """
 

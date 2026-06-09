@@ -897,7 +897,7 @@ def main():
                         help="議事録DBの保存ディレクトリ（デフォルト: data/minutes/）")
     add_since_arg(parser, "（--bulk / --list 時）")
     parser.add_argument("--model", default=None, metavar="MODEL",
-                        help="使用する LLM モデル名（OPENAI_MODEL より優先）。省略時は vLLM /v1/models から自動取得")
+                        help="使用する LLM モデル名（LOCAL_LLM_MODEL より優先）。省略時は vLLM /v1/models から自動取得")
     parser.add_argument("--no-llm", action="store_true", default=False,
                         help="LLMを呼ばず入力ファイルを構造化Markdownとして直接解析してDBに保存"
                              "（人間が修正した議事録の再インポート用。--force と併用して上書き）")

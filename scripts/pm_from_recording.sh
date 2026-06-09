@@ -44,8 +44,8 @@ fi
 export SINGULARITY_BIND=/lvs0
 
 if [[ "${ARGUS_PREFER_RIVAULT:-0}" != "1" ]]; then
-  export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
-  export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
+  export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
+  export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -354,8 +354,8 @@ EOF
   TMPLOG=$(mktemp)
   URL_OPT=""
   TOKEN_OPT=""
-  [[ -n "${OPENAI_API_BASE:-}" ]] && URL_OPT="--url $OPENAI_API_BASE"
-  [[ -n "${OPENAI_API_KEY:-}" ]] && TOKEN_OPT="--token $OPENAI_API_KEY"
+  [[ -n "${LOCAL_LLM_URL:-}" ]] && URL_OPT="--url $LOCAL_LLM_URL"
+  [[ -n "${LOCAL_LLM_TOKEN:-}" ]] && TOKEN_OPT="--token $LOCAL_LLM_TOKEN"
   "$PYTHON3" "$GENERATE_MINUTES_LOCAL" "$BASENAME.md" \
     $URL_OPT \
     $TOKEN_OPT \

@@ -259,7 +259,7 @@ def _summarize_slide(
 # --------------------------------------------------------------------------- #
 
 def _ocr_slide(image: Path) -> str:
-    base_url = os.environ.get("OPENAI_API_BASE")
+    base_url = os.environ.get("LOCAL_LLM_URL")
     if not base_url:
         return ""
     try:

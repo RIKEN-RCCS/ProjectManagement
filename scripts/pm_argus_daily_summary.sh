@@ -17,7 +17,7 @@ if [[ -f ~/.secrets/rivault_tokens.sh ]]; then
 fi
 
 # デフォルトでローカルLLMを優先
-export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
+export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
 
 PYTHON3="$HOME/.venv_aarch64/bin/python3"
 CANVAS_ID="<CANVAS_ID>"  # リーダー会議Canvas ID (既存と同じ)

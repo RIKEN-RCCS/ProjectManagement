@@ -426,7 +426,7 @@ def triage_items(
         decisions_json=json.dumps(d_items, ensure_ascii=False, indent=2),
     )
 
-    max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
+    max_tokens = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "8192"))
     raw = call_argus_llm(prompt, timeout=600, think=True, max_tokens=max_tokens)
 
     try:
@@ -483,11 +483,11 @@ def _sample_extractions(prompt: str, n: int) -> list[dict]:
     if n <= 1:
         try:
             return [extract_json(call_argus_llm(prompt, timeout=600, think=True,
-                                                max_tokens=int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))))]
+                                                max_tokens=int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "8192"))))]
         except Exception:
             return []
 
-    max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
+    max_tokens = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "8192"))
 
     # n=3 → -0.1, 0, +0.1
     if n == 2:
@@ -646,7 +646,7 @@ def extract_from_thread(
     )
 
     if consensus_n <= 1:
-        max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
+        max_tokens = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "8192"))
         raw = call_argus_llm(prompt, timeout=600, think=True, max_tokens=max_tokens)
         result = extract_json(raw)
         if enable_triage:

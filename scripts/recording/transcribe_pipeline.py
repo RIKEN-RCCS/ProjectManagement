@@ -2,11 +2,11 @@
 transcribe_pipeline.py - Whisper文字起こし → LLM議事録生成パイプライン
 
 Minutes/slack_bot/pipeline.py を ProjectManagement に吸収したもの。
-config.py への依存を除去し、PM側の環境変数体系（OPENAI_API_BASE 等）を使用する。
+config.py への依存を除去し、PM側の環境変数体系（LOCAL_LLM_URL 等）を使用する。
 
 環境変数:
     AUDIO_SAVE_DIR      ダウンロード・中間ファイルの保存先（デフォルト: /tmp/whisper_audio）
-    OPENAI_API_BASE     vLLM エンドポイント（デフォルト: http://localhost:8000/v1）
+    LOCAL_LLM_URL     vLLM エンドポイント（デフォルト: http://localhost:8000/v1）
     （モデル名は vLLM /v1/models から自動取得）
     SLACK_BOT_TOKEN     ファイルダウンロード用 Bot Token
     HUGGING_FACE_TOKEN  PyAnnote モデルダウンロード用（任意）
@@ -54,7 +54,7 @@ def _get_vllm_api_base() -> str:
         token = os.environ.get("RIVAULT_TOKEN", "")
         if url and token:
             return url
-    return os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+    return os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
 
 
 def _get_vllm_model() -> str:

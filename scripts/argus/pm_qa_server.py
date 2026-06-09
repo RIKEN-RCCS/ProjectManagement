@@ -7,14 +7,14 @@ pm_qa_server.py - Slack Slash Command QA サーバー（Socket Mode）
 
 起動方法:
   source ~/.secrets/slack_tokens.sh
-  export OPENAI_API_BASE="http://localhost:8000/v1" OPENAI_API_KEY="dummy"
+  export LOCAL_LLM_URL="http://localhost:8000/v1" LOCAL_LLM_TOKEN="dummy"
   python3 scripts/pm_qa_server.py
 
 環境変数:
   SLACK_BOT_TOKEN   必須: Bot Token (xoxb-)
   SLACK_APP_TOKEN   必須: App-Level Token (xapp-)
-  OPENAI_API_BASE   必須: vLLM エンドポイント
-  OPENAI_API_KEY    デフォルト: "dummy"
+  LOCAL_LLM_URL   必須: vLLM エンドポイント
+  LOCAL_LLM_TOKEN    デフォルト: "dummy"
   （モデル名は vLLM /v1/models から自動取得）
   ARGUS_CONFIG      デフォルト: data/argus_config.yaml（旧 QA_CONFIG / qa_config.yaml にフォールバック）
 """
@@ -100,13 +100,13 @@ MAX_TOKENS = 1024
 LLM_TIMEOUT = 120
 RERANK_TIMEOUT = 60  # 30 → 60秒（議事録生成の re-rank に十分な時間を確保）
 
-_OPENAI_BASE = os.environ.get("OPENAI_API_BASE", "")
-_OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "dummy")
-_OPENAI_MODEL = ""
+_OPENAI_BASE = os.environ.get("LOCAL_LLM_URL", "")
+_OPENAI_KEY = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
+_LOCAL_LLM_MODEL = ""
 if _OPENAI_BASE:
     try:
         from cli_utils import detect_vllm_model
-        _OPENAI_MODEL = detect_vllm_model(_OPENAI_BASE)
+        _LOCAL_LLM_MODEL = detect_vllm_model(_OPENAI_BASE)
     except Exception as _e:
         print(f"[WARN] vLLM モデル自動検出に失敗: {_e}", file=sys.stderr)
 
@@ -897,7 +897,7 @@ def run_structured_query(entities: dict, pm_db_paths: list[Path] | None = None) 
 
 def generate_answer(question: str, chunks: list[dict], *, structured_context: str = "") -> str:
     if not _OPENAI_BASE:
-        return ":warning: OPENAI_API_BASE が設定されていません。`bash scripts/pm_daemon.sh start qa` 経由で起動してください。"
+        return ":warning: LOCAL_LLM_URL が設定されていません。`bash scripts/pm_daemon.sh start qa` 経由で起動してください。"
 
     parts = []
     if structured_context:
@@ -1776,7 +1776,7 @@ def test_hybrid(question: str) -> None:
     _init_common()
 
     if not _OPENAI_BASE:
-        logger.warning("OPENAI_API_BASE が未設定です")
+        logger.warning("LOCAL_LLM_URL が未設定です")
 
     index_name, index_db, _pm_dbs = resolve_index_db("")
     print(f"\n質問: {question}")
@@ -1839,7 +1839,7 @@ def main() -> None:
     _init_common()
 
     if not _OPENAI_BASE:
-        logger.warning("OPENAI_API_BASE が未設定です（QA実行時にエラーになります）")
+        logger.warning("LOCAL_LLM_URL が未設定です（QA実行時にエラーになります）")
     if not os.environ.get("SLACK_BOT_TOKEN"):
         logger.error("SLACK_BOT_TOKEN が未設定です")
     if not os.environ.get("SLACK_APP_TOKEN"):

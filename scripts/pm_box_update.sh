@@ -37,8 +37,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
-export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
+export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
+export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
 
 # --------------------------------------------------------------------------- #
 # ログ出力先

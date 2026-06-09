@@ -14,17 +14,17 @@ Options:
   --model MODEL       使用するモデル名（必須）
   --think             思考モードを有効化（デフォルト: 無効）
   --output DIR        議事録の出力ディレクトリ（デフォルト: minutes）
-  --url URL           ローカルLLMのURL（OPENAI_API_BASE 環境変数でも可）
-  --token TOKEN       APIトークン（OPENAI_API_KEY 環境変数でも可）
+  --url URL           ローカルLLMのURL（LOCAL_LLM_URL 環境変数でも可）
+  --token TOKEN       APIトークン（LOCAL_LLM_TOKEN 環境変数でも可）
   --timeout SEC       LLM呼び出しタイムアウト秒数（デフォルト: 600）
 
 認証情報の読み込み順序:
   1. --url / --token 引数
-  2. OPENAI_API_BASE / OPENAI_API_KEY 環境変数
+  2. LOCAL_LLM_URL / LOCAL_LLM_TOKEN 環境変数
   3. デフォルト: http://localhost:8000/v1 / "dummy"
 
 ローカル LLM (vLLM gemma4) 用と RiVault Embedding (bge-m3) 用は環境変数を分離する:
-  - OPENAI_API_BASE / OPENAI_API_KEY    — vLLM gemma4（議事録生成）
+  - LOCAL_LLM_URL / LOCAL_LLM_TOKEN    — vLLM gemma4（議事録生成）
   - RIVAULT_URL / RIVAULT_TOKEN          — RiVault（embed_utils 経由で embedding 取得）
 """
 
@@ -183,7 +183,7 @@ def load_local_llm_endpoint() -> tuple[str, str]:
     """LLM エンドポイント (URL, token) を返す。
 
     ARGUS_PREFER_RIVAULT=1 の場合は RIVAULT_URL / RIVAULT_TOKEN を優先する。
-    それ以外は OPENAI_API_BASE / OPENAI_API_KEY（ローカル vLLM）を使う。
+    それ以外は LOCAL_LLM_URL / LOCAL_LLM_TOKEN（ローカル vLLM）を使う。
     """
     if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
         url = os.environ.get("RIVAULT_URL", "").rstrip("/")
@@ -191,8 +191,8 @@ def load_local_llm_endpoint() -> tuple[str, str]:
         if url and token:
             return url, token
         print("[WARN] ARGUS_PREFER_RIVAULT=1 だが RIVAULT_URL/TOKEN 未設定。ローカルにフォールバック", file=sys.stderr)
-    url = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
-    token = os.environ.get("OPENAI_API_KEY", "dummy")
+    url = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
+    token = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
     return url, token
 
 
@@ -1288,8 +1288,8 @@ def main() -> int:
         dest="no_chat_template_kwargs",
         help="chat_template_kwargs を送信しない（常時 reasoning モデル向け: Qwen3-Swallow 等）",
     )
-    parser.add_argument("--url", default=None, help="ローカルLLMのURL（OPENAI_API_BASE 環境変数でも可）")
-    parser.add_argument("--token", default=None, help="APIトークン（OPENAI_API_KEY 環境変数でも可）")
+    parser.add_argument("--url", default=None, help="ローカルLLMのURL（LOCAL_LLM_URL 環境変数でも可）")
+    parser.add_argument("--token", default=None, help="APIトークン（LOCAL_LLM_TOKEN 環境変数でも可）")
     parser.add_argument("--timeout", type=int, default=600, help="LLM呼び出しタイムアウト秒数（デフォルト: 600）")
     parser.add_argument("--max-tokens", type=int, default=8192, help="最大出力トークン数（デフォルト: 8192）")
     parser.add_argument("--multi-stage", action="store_true", help="マルチステージ（分割→抽出→統合）モードを有効化")
@@ -1352,9 +1352,9 @@ def main() -> int:
         return 1
 
     if args.url:
-        os.environ["OPENAI_API_BASE"] = args.url
+        os.environ["LOCAL_LLM_URL"] = args.url
     if args.token:
-        os.environ["OPENAI_API_KEY"] = args.token
+        os.environ["LOCAL_LLM_TOKEN"] = args.token
     base_url, api_key = load_local_llm_endpoint()
 
     using_rivault = os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and base_url == os.environ.get("RIVAULT_URL", "").rstrip("/")
