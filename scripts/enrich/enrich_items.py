@@ -274,7 +274,7 @@ def enrich_decision(
     )
 
     try:
-        raw = call_claude(prompt, timeout=60)
+        raw = call_claude(prompt, timeout=300)
         result = _extract_json(raw)
     except Exception as e:
         return {"error": str(e)}
@@ -321,7 +321,7 @@ def enrich_action_item(
     )
 
     try:
-        raw = call_claude(prompt, timeout=60)
+        raw = call_claude(prompt, timeout=300)
         result = _extract_json(raw)
     except Exception as e:
         return {"error": str(e)}

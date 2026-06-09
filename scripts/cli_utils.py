@@ -217,44 +217,23 @@ def make_logger(output_path: str | None):
 # --------------------------------------------------------------------------- #
 
 def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
+    """call_argus_llm() の薄いラッパー。既存コードとの互換性を保つ。
+
+    model 引数は LOCAL_LLM_MODEL 環境変数を一時的に上書きして渡す。
+    ルーティング（prefer_rivault / ARGUS_PREFER_RIVAULT）は call_argus_llm に委譲。
     """
-    LLM を呼び出す。プロジェクトのスクリプトは Claude API を使用してはならない
-    （コスト管理・情報セキュリティの観点から CLAUDE.md で禁止）。
-    本関数はローカル LLM (OPENAI_API_BASE) を優先し、未設定または接続失敗時は
-    RiVault にフォールバックする。
-
-    Parameters
-    ----------
-    prompt : str
-        LLM に渡すプロンプト
-    model : str | None
-        OpenAI 互換モード時のモデル名（None なら OPENAI_MODEL → vLLM 自動取得）。
-        RiVault フォールバック時は無視され、RIVAULT_MODEL が使われる。
-    timeout : int
-        タイムアウト秒数（デフォルト: 120秒）
-
-    Returns
-    -------
-    str
-        LLM の出力（strip済み）
-
-    Raises
-    ------
-    RuntimeError
-        ローカル LLM も RiVault も利用できない場合
-    """
-    # ARGUS_PREFER_RIVAULT=1 が設定されていれば RiVault を優先
-    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and os.environ.get("RIVAULT_URL"):
-        return call_rivault(prompt, timeout=timeout)
-    if os.environ.get("OPENAI_API_BASE"):
-        return _call_openai_compat(prompt, model=model, timeout=timeout)
-    if os.environ.get("RIVAULT_URL"):
-        return call_rivault(prompt, timeout=timeout)
-    raise RuntimeError(
-        "LLM エンドポイントが未設定です。OPENAI_API_BASE（ローカル vLLM）または "
-        "RIVAULT_URL（RiVault）のいずれかを設定してください。"
-        "Claude API はプロジェクトポリシーにより使用禁止です。"
-    )
+    max_tokens = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "4096"))
+    if model:
+        old = os.environ.get("LOCAL_LLM_MODEL")
+        os.environ["LOCAL_LLM_MODEL"] = model
+        try:
+            return call_argus_llm(prompt, timeout=timeout, max_tokens=max_tokens)
+        finally:
+            if old is None:
+                os.environ.pop("LOCAL_LLM_MODEL", None)
+            else:
+                os.environ["LOCAL_LLM_MODEL"] = old
+    return call_argus_llm(prompt, timeout=timeout, max_tokens=max_tokens)
 
 
 def strip_think_blocks(text: str) -> str:
@@ -294,11 +273,56 @@ def call_local_llm(
     system: str = "",
     no_chat_template_kwargs: bool = False,
     temperature: float | None = None,
+    _fallback_to_local: bool = True,
 ) -> str:
     """OpenAI 互換 API を requests で直接呼び出す。generate_minutes_local.py より移植。
 
+    base_url が RiVault の URL（RIVAULT_URL）で呼び出しが失敗した場合、
+    _fallback_to_local=True（既定）なら LOCAL_LLM_URL のローカル vLLM にフォールバックする。
+
     ストリーミングをデフォルトとし、CoT ブロック（<think>タグ・英語前置き）を自動除去する。
     """
+    rivault_url = os.environ.get("RIVAULT_URL", "").rstrip("/")
+    is_rivault = bool(rivault_url) and base_url.rstrip("/") == rivault_url
+
+    try:
+        return _call_local_llm_inner(
+            prompt, model=model, base_url=base_url, api_key=api_key,
+            timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+            system=system, no_chat_template_kwargs=no_chat_template_kwargs,
+            temperature=temperature,
+        )
+    except Exception as exc:
+        if not (_fallback_to_local and is_rivault):
+            raise
+        local_base = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        if local_base.rstrip("/") == rivault_url:
+            raise  # LOCAL_LLM_URL も RiVault を指しているなら逃げ場なし
+        print(f"[WARN] call_local_llm: RiVault 失敗 ({type(exc).__name__}: {exc})。"
+              f"local ({local_base}) にフォールバック", file=sys.stderr)
+        local_model = detect_vllm_model(local_base)
+        return _call_local_llm_inner(
+            prompt, model=local_model, base_url=local_base,
+            api_key=os.environ.get("LOCAL_LLM_TOKEN", "dummy"),
+            timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+            system=system, no_chat_template_kwargs=no_chat_template_kwargs,
+            temperature=temperature,
+        )
+
+
+def _call_local_llm_inner(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+) -> str:
     import requests
     import json as _json
     print(f"[INFO] LLM call: backend=local model={model} url={base_url} think={think}",
@@ -392,12 +416,12 @@ def call_local_llm(
 def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
     """vLLM の /v1/models エンドポイントからモデル名を自動取得する。
 
-    api_key が None の場合は RIVAULT_TOKEN → OPENAI_API_KEY の順で環境変数から取得する。
+    api_key が None の場合は RIVAULT_TOKEN → LOCAL_LLM_TOKEN の順で環境変数から取得する。
     """
     import urllib.request, json  # noqa: E401
     url = base_url.rstrip("/") + "/models"
     if api_key is None:
-        api_key = os.environ.get("RIVAULT_TOKEN") or os.environ.get("OPENAI_API_KEY", "dummy")
+        api_key = os.environ.get("RIVAULT_TOKEN") or os.environ.get("LOCAL_LLM_TOKEN", "dummy")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -408,29 +432,6 @@ def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
         return models[0]
     except Exception as e:
         raise RuntimeError(f"vLLM モデル自動取得に失敗: {url} — {e}") from e
-
-
-def _call_openai_compat(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
-    """
-    call_local_llm() を環境変数経由で呼び出すラッパー。
-    環境変数:
-        OPENAI_API_BASE   — エンドポイント URL（例: http://localhost:8000/v1）
-        OPENAI_API_KEY    — API キー（省略時は "dummy"）
-        OPENAI_MODEL      — モデル名（省略時は vLLM /v1/models から自動取得）
-        OPENAI_MAX_TOKENS — 最大出力トークン数（省略時: 8192）
-    """
-    base_url = os.environ["OPENAI_API_BASE"]
-    api_key = os.environ.get("OPENAI_API_KEY", "dummy")
-    model_name = model or os.environ.get("OPENAI_MODEL") or detect_vllm_model(base_url)
-    max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "8192"))
-    return call_local_llm(
-        prompt,
-        model=model_name,
-        base_url=base_url,
-        api_key=api_key,
-        timeout=timeout,
-        max_tokens=max_tokens,
-    )
 
 
 # RiVault を優先使用するフラグ（リクエストスコープ）。
@@ -482,9 +483,16 @@ def call_argus_llm(
         temperature: 明示指定時のみ送信。RiVault では既定 0.3 (Stage 6 検証)。
         no_chat_template_kwargs: ローカル vLLM 用 (Qwen3-Swallow 等)。RiVault では無視。
     """
-    prefer_rv = _prefer_rivault.get() or os.environ.get("ARGUS_PREFER_RIVAULT") == "1"
-    reason = "ARGUS_PREFER_RIVAULT=1" if os.environ.get("ARGUS_PREFER_RIVAULT") == "1" \
-        else ("prefer_rivault()" if _prefer_rivault.get() else "default-local")
+    prefer_rv = _prefer_rivault.get() or os.environ.get("ARGUS_PREFER_RIVAULT") == "1" \
+        or bool(os.environ.get("RIVAULT_URL"))
+    if _prefer_rivault.get():
+        reason = "prefer_rivault()"
+    elif os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
+        reason = "ARGUS_PREFER_RIVAULT=1"
+    elif os.environ.get("RIVAULT_URL"):
+        reason = "RIVAULT_URL set"
+    else:
+        reason = "default-local"
     print(f"[INFO] call_argus_llm: route={'rivault' if prefer_rv else 'local'} "
           f"reason={reason} think={think} fallback={fallback}", file=sys.stderr)
 
@@ -495,16 +503,16 @@ def call_argus_llm(
         )
 
     def _try_local() -> str:
-        local_base = os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+        local_base = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
         import requests as _req
         try:
             _req.get(local_base.removesuffix("/v1").rstrip("/") + "/health", timeout=3)
         except Exception as exc:
             raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません: {exc}")
-        model = os.environ.get("OPENAI_MODEL") or detect_vllm_model(local_base)
+        model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
         return call_local_llm(
             prompt, model=model, base_url=local_base,
-            api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+            api_key=os.environ.get("LOCAL_LLM_TOKEN", "dummy"),
             timeout=timeout, max_tokens=max_tokens, system=system,
             no_stream=True, think=think,
             no_chat_template_kwargs=no_chat_template_kwargs,
