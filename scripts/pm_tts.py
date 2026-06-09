@@ -45,11 +45,16 @@ DEFAULT_SPEED = 1.3
 # ---------------------------------------------------------------------------
 FISH_HOST = os.environ.get("FISH_TTS_HOST", "http://localhost:8080")
 FISH_TEXT_LIMIT = 400  # fish-speech は長文も安定しているが念のため分割
-FISH_SYNTH_TIMEOUT = 180
+FISH_SYNTH_TIMEOUT = 600
 
 
 def _get_tts_backend() -> str:
-    return os.environ.get("TTS_BACKEND", "voicevox").lower()
+    # FISH_TTS_HOST が設定されていれば fish、未設定なら voicevox
+    # TTS_BACKEND で明示的に上書きも可能
+    explicit = os.environ.get("TTS_BACKEND", "").lower()
+    if explicit:
+        return explicit
+    return "fish" if os.environ.get("FISH_TTS_HOST") else "voicevox"
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +66,15 @@ def _fish_synth_chunk(text: str, out_path: Path, speed: float = 1.0) -> None:
     import json as _json
 
     reference_id = os.environ.get("FISH_REFERENCE_ID") or None
+    # FISH_SEED で話者を固定する。同じ seed → 毎回同じ声が生成される
+    # FISH_SEED=0 でランダム（seed なし）、それ以外の値で話者固定
+    seed_str = os.environ.get("FISH_SEED", "42")
+    seed = int(seed_str) if seed_str.isdigit() and seed_str != "0" else None
+    # FISH_EMOTION: excited / happy / sad / angry / fearful / disgusted / surprised など
+    emotion = os.environ.get("FISH_EMOTION", "").strip()
+    synth_text = f"[{emotion}] {text}" if emotion else text
     payload: dict = {
-        "text": text,
+        "text": synth_text,
         "format": "wav",
         "normalize": True,
         "streaming": False,
@@ -70,14 +82,17 @@ def _fish_synth_chunk(text: str, out_path: Path, speed: float = 1.0) -> None:
     }
     if reference_id:
         payload["reference_id"] = reference_id
+    if seed is not None:
+        payload["seed"] = seed
 
-    resp = _request_with_retry(
-        "POST",
+    # fish-speech は推論に数分かかるためリトライなし・長タイムアウトで1回だけ呼ぶ
+    resp = requests.post(
         f"{FISH_HOST}/v1/tts",
         data=_json.dumps(payload),
         headers={"Content-Type": "application/json"},
         timeout=FISH_SYNTH_TIMEOUT,
     )
+    resp.raise_for_status()
     out_path.write_bytes(resp.content)
 
 
@@ -522,7 +537,9 @@ def resolve_speaker_name(speaker_id: int) -> str:
 
 
 def credit_line(speaker_id: int) -> str:
-    """VOICEVOX 利用規約に基づくクレジット文字列を返す。"""
+    """アクティブな TTS バックエンドのクレジット文字列を返す。"""
+    if _get_tts_backend() == "fish":
+        return ""
     return f"音声合成に『VOICEVOX:{resolve_speaker_name(speaker_id)}』を使用"
 
 

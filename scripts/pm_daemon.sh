@@ -28,12 +28,12 @@ LOG_DIR="$REPO_ROOT/logs"
 #     TARGET_SCRIPT    : scripts/ からの相対パス
 #     LOG_BASENAME     : logs/{name}.log / logs/{name}.pid に使う識別子
 #     SOURCE_RIVAULT   : 1 なら ~/.secrets/rivault_tokens.sh を読み込む
-#     SET_DEFAULT_LLM  : 1 なら OPENAI_API_BASE/API_KEY のデフォルト値を設定
+#     SET_DEFAULT_LLM  : 1 なら LOCAL_LLM_URL/API_KEY のデフォルト値を設定
 #     SOURCE_FISH      : 1 なら ~/.secrets/fish_tts.sh を読み込む
 #     EXTRA_ARGS       : Python スクリプトに渡す追加引数（空可）
 # --------------------------------------------------------------------------- #
 declare -A SERVICES=(
-    [qa]="argus/pm_qa_server.py|pm_qa_server|1|1|0|"
+    [qa]="argus/pm_qa_server.py|pm_qa_server|1|1|1|"
     [web]="pm_api.py|pm_web|0|0|0|--port ${PM_WEB_PORT:-8501}"
     [fish]="pm_fish_tts_server.py|pm_fish_tts|0|0|1|"
 )
@@ -90,8 +90,8 @@ cmd_start() {
             # shellcheck disable=SC1091
             source "$HOME/.secrets/localLLM.sh"
         fi
-        export OPENAI_API_BASE="${OPENAI_API_BASE:-http://localhost:8000/v1}"
-        export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
+        export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
+        export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
         export QA_INDEX_DB="${QA_INDEX_DB:-$REPO_ROOT/data/qa_index.db}"
     fi
     if [[ "${SVC_FISH:-0}" == "1" && -f "$HOME/.secrets/fish_tts.sh" ]]; then

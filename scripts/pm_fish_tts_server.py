@@ -2,15 +2,18 @@
 """fish-speech API サーバの起動ラッパー。
 
 pm_daemon.sh から `bash scripts/pm_daemon.sh start fish` で起動する。
-fish-speech リポジトリのパスを FISH_SPEECH_REPO 環境変数で指定すること。
+
+FISH_SPEECH_REPO が未設定の場合、このスクリプトの親ディレクトリの隣にある
+fish-speech ディレクトリを自動検出する（../fish-speech）。
 
 環境変数:
-    FISH_SPEECH_REPO         fish-speech リポジトリのパス（必須）
+    FISH_SPEECH_REPO         fish-speech リポジトリのパス
+                             （未設定時は ../fish-speech を自動検出）
     FISH_TTS_HOST            listen アドレス（デフォルト: 0.0.0.0:8080）
     FISH_LLAMA_CHECKPOINT    LLaMA チェックポイントのパス
-                             （デフォルト: {FISH_SPEECH_REPO}/checkpoints/openaudio-s1-mini）
+                             （デフォルト: {FISH_SPEECH_REPO}/checkpoints/s2-pro）
     FISH_DECODER_CHECKPOINT  Decoder チェックポイントのパス
-                             （デフォルト: {FISH_LLAMA_CHECKPOINT}/firefly-gan-vq-fsq-8x1024-21hz-generator.pth）
+                             （デフォルト: {FISH_LLAMA_CHECKPOINT}/codec.pth）
     FISH_DECODER_CONFIG      Decoder 設定名（デフォルト: modded_dac_vq）
     FISH_DEVICE              推論デバイス（デフォルト: cuda）
     FISH_HALF                fp16 を使用（デフォルト: 0）
@@ -27,16 +30,23 @@ import os
 import sys
 from pathlib import Path
 
+# このスクリプトの隣 (scripts/) → その親 (repo root) → 隣の fish-speech
+_DEFAULT_FISH_REPO = Path(__file__).resolve().parent.parent.parent / "fish-speech"
+
 
 def main() -> int:
     repo = os.environ.get("FISH_SPEECH_REPO", "")
     if not repo:
-        print(
-            "[ERROR] FISH_SPEECH_REPO 環境変数が設定されていません。\n"
-            "例: export FISH_SPEECH_REPO=/path/to/fish-speech",
-            file=sys.stderr,
-        )
-        return 1
+        if _DEFAULT_FISH_REPO.is_dir():
+            repo = str(_DEFAULT_FISH_REPO)
+            print(f"[INFO] FISH_SPEECH_REPO 未設定: {repo} を使用します", file=sys.stderr)
+        else:
+            print(
+                "[ERROR] FISH_SPEECH_REPO 環境変数が設定されていません。\n"
+                "例: export FISH_SPEECH_REPO=/path/to/fish-speech",
+                file=sys.stderr,
+            )
+            return 1
 
     repo_path = Path(repo).resolve()
     if not repo_path.is_dir():
@@ -51,11 +61,11 @@ def main() -> int:
     listen = os.environ.get("FISH_TTS_HOST", "0.0.0.0:8080").replace("http://", "")
     llama_ckpt = os.environ.get(
         "FISH_LLAMA_CHECKPOINT",
-        str(repo_path / "checkpoints" / "openaudio-s1-mini"),
+        str(repo_path / "checkpoints" / "s2-pro"),
     )
     decoder_ckpt = os.environ.get(
         "FISH_DECODER_CHECKPOINT",
-        str(Path(llama_ckpt) / "firefly-gan-vq-fsq-8x1024-21hz-generator.pth"),
+        str(Path(llama_ckpt) / "codec.pth"),
     )
     decoder_config = os.environ.get("FISH_DECODER_CONFIG", "modded_dac_vq")
     device = os.environ.get("FISH_DEVICE", "cuda")
