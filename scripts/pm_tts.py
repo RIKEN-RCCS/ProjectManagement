@@ -61,11 +61,12 @@ def _get_tts_backend() -> str:
 # fish-speech 呼び出し
 # ---------------------------------------------------------------------------
 
-def _fish_synth_chunk(text: str, out_path: Path, speed: float = 1.0) -> None:
+def _fish_synth_chunk(text: str, out_path: Path, speed: float = 1.0, reference_id: str | None = None) -> None:
     """fish-speech API でテキストを合成して WAV を out_path に書き出す。"""
     import json as _json
 
-    reference_id = os.environ.get("FISH_REFERENCE_ID") or None
+    if reference_id is None:
+        reference_id = os.environ.get("FISH_REFERENCE_ID") or None
     # FISH_SEED で話者を固定する。同じ seed → 毎回同じ声が生成される
     # FISH_SEED=0 でランダム（seed なし）、それ以外の値で話者固定
     seed_str = os.environ.get("FISH_SEED", "42")
@@ -463,10 +464,10 @@ def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
     raise last_exc
 
 
-def synth_chunk(text: str, speaker: int, out_path: Path, speed: float = 1.0) -> None:
+def synth_chunk(text: str, speaker: int, out_path: Path, speed: float = 1.0, reference_id: str | None = None) -> None:
     """1 チャンクを合成して WAV を out_path に書き出す。TTS_BACKEND で切り替え。"""
     if _get_tts_backend() == "fish":
-        _fish_synth_chunk(text, out_path, speed=speed)
+        _fish_synth_chunk(text, out_path, speed=speed, reference_id=reference_id)
         return
 
     q = _request_with_retry(

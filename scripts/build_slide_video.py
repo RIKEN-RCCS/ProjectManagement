@@ -328,6 +328,7 @@ def _synth_narration_to_wav(
     speaker: int,
     speed: float,
     chunk_limit: int = pm_tts.VOICEVOX_TEXT_LIMIT,
+    reference_id: str | None = None,
 ) -> None:
     """1 スライド分の narration を WAV にする (チャンク合成 → concat → 無音トリム)。"""
     chunks = pm_tts.split_into_sentences(text, limit=chunk_limit)
@@ -338,7 +339,7 @@ def _synth_narration_to_wav(
         wavs: list[Path] = []
         for i, c in enumerate(chunks, 1):
             wp = tmp / f"chunk_{i:04d}.wav"
-            pm_tts.synth_chunk(c, speaker, wp, speed=speed)
+            pm_tts.synth_chunk(c, speaker, wp, speed=speed, reference_id=reference_id)
             wavs.append(wp)
         merged = tmp / "merged.wav"
         pm_tts.concat_wavs(wavs, merged)
@@ -466,7 +467,8 @@ def build_slide_video(
             logger.info(f"  slide {slide.index}: narration={narration}")
 
             wav_path = seg_dir / f"slide_{slide.index:04d}.wav"
-            _synth_narration_to_wav(narration, wav_path, speaker=speaker, speed=speed)
+            ref_id = os.environ.get("FISH_REFERENCE_ID_EN") if lang == "en" else None
+            _synth_narration_to_wav(narration, wav_path, speaker=speaker, speed=speed, reference_id=ref_id)
             pairs.append((slide.image_png, wav_path))
 
         _mux_video(pairs, output_mp4, work_root)

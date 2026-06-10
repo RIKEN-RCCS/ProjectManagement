@@ -39,3 +39,10 @@ slurm-*.out
 .work_*/
 *.pptx
 *.csv
+
+# fish-speech
+fish.tar
+references/
+scripts/fish_seed_sweep.sh
+scripts/eval/
+scripts/ingest/*.bak
