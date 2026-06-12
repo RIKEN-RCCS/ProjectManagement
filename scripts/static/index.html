@@ -3,142 +3,179 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PM DB Editor</title>
+  <title>Argus Console</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32/styles/ag-theme-quartz.css">
   <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32/dist/ag-grid-community.min.js"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body class="h-screen flex flex-col bg-gray-50 overflow-hidden">
+<body class="h-screen flex flex-col bg-gray-900 overflow-hidden">
 
   <!-- Header -->
-  <header class="bg-blue-800 text-white px-4 py-2 flex-none flex items-center gap-4">
-    <h1 class="text-xl font-bold">PM DB Editor</h1>
-    <select id="sel-db" class="bg-blue-700 text-white text-sm rounded px-2 py-1 border border-blue-600"></select>
+  <header class="bg-gray-800 text-white px-4 py-2 flex-none flex items-center gap-4 border-b border-gray-700">
+    <h1 class="text-xl font-bold tracking-wide">
+      <span class="text-blue-400">Argus</span> Console
+    </h1>
+    <select id="sel-db" class="bg-gray-700 text-white text-sm rounded px-2 py-1 border border-gray-600"></select>
   </header>
 
-  <!-- Tabs -->
-  <nav class="flex border-b border-gray-300 bg-white flex-none">
-    <button class="tab-btn active px-6 py-2 font-medium text-sm" data-tab="ai">アクションアイテム</button>
-    <button class="tab-btn px-6 py-2 font-medium text-sm text-gray-500" data-tab="dec">決定事項</button>
-    <button class="tab-btn px-6 py-2 font-medium text-sm text-gray-500" data-tab="files">ファイル一覧</button>
+  <!-- Admin Navigation -->
+  <nav class="flex border-b border-gray-700 bg-gray-800 flex-none" id="admin-nav">
+    <button class="admin-nav-btn active px-4 py-2 font-medium text-sm" data-page="dashboard">
+      <span class="text-lg mr-1">📊</span> Dashboard
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="recording">
+      <span class="text-lg mr-1">🎙️</span> Recording
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="ingest">
+      <span class="text-lg mr-1">📥</span> Ingest
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="knowledge">
+      <span class="text-lg mr-1">🧠</span> Knowledge
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="reports">
+      <span class="text-lg mr-1">📈</span> Reports
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="quality">
+      <span class="text-lg mr-1">🔍</span> Quality
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="ai">
+      <span class="text-lg mr-1">📋</span> Actions
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="dec">
+      <span class="text-lg mr-1">📝</span> Decisions
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="minutes">
+      <span class="text-lg mr-1">📄</span> Minutes
+    </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="services">
+      <span class="text-lg mr-1">⚙️</span> Services
+    </button>
   </nav>
 
+  <!-- DB Editor Navigation — タブは削除（ナビゲーションボタンで各画面に直接遷移） -->
+  <nav class="flex border-b border-gray-700 bg-gray-850 flex-none hidden" id="editor-nav"></nav>
+
   <!-- ================================================================ -->
-  <!-- Action Items Panel                                               -->
+  <!-- Admin Pages (hidden by default)                                  -->
   <!-- ================================================================ -->
-  <div id="panel-ai" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto">
-    <!-- Filters -->
+
+  <div id="page-dashboard" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+  <div id="page-recording" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+  <div id="page-ingest" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+  <div id="page-knowledge" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+  <div id="page-reports" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+  <div id="page-quality" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+  <div id="page-minutes" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+  <div id="page-services" class="admin-page flex-1 min-h-0 overflow-y-auto p-4 hidden"></div>
+
+  <!-- ================================================================ -->
+  <!-- DB Editor Panels (same as before, hidden on admin pages)         -->
+  <!-- ================================================================ -->
+
+  <!-- Action Items Panel -->
+  <div id="panel-ai" class="tab-panel flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
     <div class="flex items-end gap-3 flex-none">
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         ステータス
-        <select id="f-ai-status" class="border rounded px-2 py-1 text-sm w-28">
+        <select id="f-ai-status" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-28 text-gray-200">
           <option value="open" selected>open</option>
           <option value="closed">closed</option>
           <option value="すべて">すべて</option>
         </select>
       </label>
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         マイルストーン
-        <select id="f-ai-ms" class="border rounded px-2 py-1 text-sm w-40">
+        <select id="f-ai-ms" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-40 text-gray-200">
           <option value="すべて" selected>すべて</option>
         </select>
       </label>
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         削除
-        <select id="f-ai-del" class="border rounded px-2 py-1 text-sm w-24">
+        <select id="f-ai-del" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-24 text-gray-200">
           <option value="非削除" selected>非削除</option>
           <option value="削除のみ">削除のみ</option>
           <option value="すべて">すべて</option>
         </select>
       </label>
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         発生日（以降）
-        <input id="f-ai-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
+        <input id="f-ai-since" type="text" placeholder="YYYY-MM-DD" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-36 text-gray-200">
       </label>
-      <div class="flex flex-col text-xs text-gray-600">
+      <div class="flex flex-col text-xs text-gray-400">
         <span>ソース絞り込み</span>
-        <button type="button" onclick="openSourceFilter('ai')" id="btn-ai-source" class="border rounded px-2 py-1 text-sm bg-white hover:bg-gray-50 text-left min-w-[200px]">
+        <button type="button" onclick="openSourceFilter('ai')" id="btn-ai-source" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 hover:bg-gray-700 text-left min-w-[200px]">
           すべて
         </button>
       </div>
-      <button onclick="loadActionItems()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
+      <button onclick="loadActionItems()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">検索</button>
     </div>
 
-    <!-- Buttons -->
     <div class="flex items-center gap-2 flex-none">
       <button onclick="saveActionItems()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
-      <button id="btn-ai-del" onclick="bulkToggle('ai','deleted')" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">全件削除</button>
-      <button id="btn-ai-done" onclick="bulkToggle('ai','done')" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">全件完了</button>
-      <button onclick="loadActionItems()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">再読み込み</button>
-      <button onclick="openDialog('dialog-ai-new')" class="border border-blue-600 text-blue-600 hover:bg-blue-50 rounded px-3 py-1 text-sm">+ 新規追加</button>
+      <button id="btn-ai-del" onclick="bulkToggle('ai','deleted')" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">全件削除</button>
+      <button id="btn-ai-done" onclick="bulkToggle('ai','done')" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">全件完了</button>
+      <button onclick="loadActionItems()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">再読み込み</button>
+      <button onclick="openDialog('dialog-ai-new')" class="border border-blue-500 text-blue-400 hover:bg-blue-900/30 rounded px-3 py-1 text-sm">+ 新規追加</button>
     </div>
 
-    <!-- Grid -->
-    <div id="grid-ai" class="ag-theme-quartz flex-1 min-h-0"></div>
+    <div id="grid-ai" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
   </div>
 
-  <!-- ================================================================ -->
-  <!-- Decisions Panel                                                  -->
-  <!-- ================================================================ -->
-  <div id="panel-dec" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
-    <!-- Filters -->
+  <!-- Decisions Panel -->
+  <div id="panel-dec" class="tab-panel flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
     <div class="flex items-end gap-3 flex-none">
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         削除
-        <select id="f-dec-del" class="border rounded px-2 py-1 text-sm w-24">
+        <select id="f-dec-del" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-24 text-gray-200">
           <option value="非削除" selected>非削除</option>
           <option value="削除のみ">削除のみ</option>
           <option value="すべて">すべて</option>
         </select>
       </label>
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         発生日（以降）
-        <input id="f-dec-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
+        <input id="f-dec-since" type="text" placeholder="YYYY-MM-DD" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-36 text-gray-200">
       </label>
-      <div class="flex flex-col text-xs text-gray-600">
+      <div class="flex flex-col text-xs text-gray-400">
         <span>ソース絞り込み</span>
-        <button type="button" onclick="openSourceFilter('dec')" id="btn-dec-source" class="border rounded px-2 py-1 text-sm bg-white hover:bg-gray-50 text-left min-w-[200px]">
+        <button type="button" onclick="openSourceFilter('dec')" id="btn-dec-source" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 hover:bg-gray-700 text-left min-w-[200px]">
           すべて
         </button>
       </div>
-      <button onclick="loadDecisions()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
+      <button onclick="loadDecisions()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">検索</button>
     </div>
 
-    <!-- Buttons -->
     <div class="flex items-center gap-2 flex-none">
       <button onclick="saveDecisions()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
-      <button onclick="ackAll()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">未確認を一括確認</button>
-      <button onclick="loadDecisions()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">再読み込み</button>
-      <button onclick="openDialog('dialog-dec-new')" class="border border-blue-600 text-blue-600 hover:bg-blue-50 rounded px-3 py-1 text-sm">+ 新規追加</button>
+      <button onclick="ackAll()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">未確認を一括確認</button>
+      <button onclick="loadDecisions()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">再読み込み</button>
+      <button onclick="openDialog('dialog-dec-new')" class="border border-blue-500 text-blue-400 hover:bg-blue-900/30 rounded px-3 py-1 text-sm">+ 新規追加</button>
     </div>
 
-    <!-- Grid -->
-    <div id="grid-dec" class="ag-theme-quartz flex-1 min-h-0"></div>
+    <div id="grid-dec" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
   </div>
 
-  <!-- ================================================================ -->
-  <!-- Files Panel                                                      -->
-  <!-- ================================================================ -->
-  <div id="panel-files" class="tab-panel flex flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
-    <!-- Filters -->
+  <!-- Files Panel -->
+  <div id="panel-files" class="tab-panel flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
     <div class="flex items-end gap-3 flex-none flex-wrap">
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         チャンネル
-        <select id="f-files-ch" class="border rounded px-2 py-1 text-sm w-52">
+        <select id="f-files-ch" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-52 text-gray-200">
           <option value="">すべて</option>
         </select>
       </label>
-      <label class="flex flex-col text-xs text-gray-600">
+      <label class="flex flex-col text-xs text-gray-400">
         日付（以降）
-        <input id="f-files-since" type="text" placeholder="YYYY-MM-DD" class="border rounded px-2 py-1 text-sm w-36">
+        <input id="f-files-since" type="text" placeholder="YYYY-MM-DD" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-36 text-gray-200">
       </label>
-      <button onclick="loadFiles()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">検索</button>
-      <button onclick="loadFiles()" class="bg-gray-200 hover:bg-gray-300 rounded px-3 py-1 text-sm">再読み込み</button>
+      <button onclick="loadFiles()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">検索</button>
+      <button onclick="loadFiles()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">再読み込み</button>
       <span id="files-count" class="text-xs text-gray-500 self-end pb-1"></span>
     </div>
 
-    <!-- AG Grid -->
-    <div id="grid-files" class="ag-theme-quartz flex-1 min-h-0"></div>
+    <div id="grid-files" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
   </div>
 
   <!-- ================================================================ -->
@@ -146,101 +183,108 @@
   <!-- ================================================================ -->
 
   <!-- New Action Item -->
-  <dialog id="dialog-ai-new" class="rounded-lg shadow-xl p-6 w-[560px] backdrop:bg-black/30">
-    <h2 class="text-lg font-bold mb-3">新規アクションアイテム</h2>
+  <dialog id="dialog-ai-new" class="rounded-lg shadow-xl p-6 w-[560px] backdrop:bg-black/50 bg-gray-800 text-gray-200">
+    <h2 class="text-lg font-bold mb-3 text-white">新規アクションアイテム</h2>
     <form id="form-ai-new" method="dialog" class="flex flex-col gap-2">
-      <textarea name="content" rows="3" required placeholder="内容 *" class="border rounded p-2 text-sm w-full"></textarea>
+      <textarea name="content" rows="3" required placeholder="内容 *" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200"></textarea>
       <div class="flex gap-2">
-        <input name="assignee" placeholder="担当者" class="border rounded p-2 text-sm flex-1">
-        <input name="due_date" placeholder="期限 YYYY-MM-DD" class="border rounded p-2 text-sm flex-1">
+        <input name="assignee" placeholder="担当者" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
+        <input name="due_date" placeholder="期限 YYYY-MM-DD" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
       </div>
       <div class="flex gap-2">
-        <select name="milestone_id" class="border rounded p-2 text-sm flex-1">
+        <select name="milestone_id" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
           <option value="">マイルストーン</option>
         </select>
-        <select name="status" class="border rounded p-2 text-sm flex-1">
+        <select name="status" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
           <option value="open">open</option>
           <option value="closed">closed</option>
         </select>
       </div>
-      <input name="note" placeholder="対応状況" class="border rounded p-2 text-sm w-full">
-      <input name="source" placeholder="出典（任意）" class="border rounded p-2 text-sm w-full">
+      <input name="note" placeholder="対応状況" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200">
+      <input name="source" placeholder="出典（任意）" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200">
       <div class="flex justify-end gap-2 mt-2">
-        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">キャンセル</button>
+        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-400 hover:text-white">キャンセル</button>
         <button type="submit" class="bg-blue-600 text-white rounded px-4 py-1 text-sm">追加</button>
       </div>
     </form>
   </dialog>
 
   <!-- New Decision -->
-  <dialog id="dialog-dec-new" class="rounded-lg shadow-xl p-6 w-[560px] backdrop:bg-black/30">
-    <h2 class="text-lg font-bold mb-3">新規決定事項</h2>
+  <dialog id="dialog-dec-new" class="rounded-lg shadow-xl p-6 w-[560px] backdrop:bg-black/50 bg-gray-800 text-gray-200">
+    <h2 class="text-lg font-bold mb-3 text-white">新規決定事項</h2>
     <form id="form-dec-new" method="dialog" class="flex flex-col gap-2">
-      <textarea name="content" rows="3" required placeholder="内容 *" class="border rounded p-2 text-sm w-full"></textarea>
+      <textarea name="content" rows="3" required placeholder="内容 *" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200"></textarea>
       <div class="flex gap-2">
-        <input name="decided_at" placeholder="決定日 YYYY-MM-DD" class="border rounded p-2 text-sm flex-1">
-        <input name="source" placeholder="出典（任意）" class="border rounded p-2 text-sm flex-1">
+        <input name="decided_at" placeholder="決定日 YYYY-MM-DD" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
+        <input name="source" placeholder="出典（任意）" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
       </div>
       <div class="flex justify-end gap-2 mt-2">
-        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">キャンセル</button>
+        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-400 hover:text-white">キャンセル</button>
         <button type="submit" class="bg-blue-600 text-white rounded px-4 py-1 text-sm">追加</button>
       </div>
     </form>
   </dialog>
 
-  <!-- Source Filter Dialog (channel / meeting_kind multi-select) -->
-  <dialog id="dialog-source-filter" class="rounded-lg shadow-xl p-6 w-[720px] max-h-[80vh] backdrop:bg-black/30 overflow-y-auto">
+  <!-- Source Filter Dialog -->
+  <dialog id="dialog-source-filter" class="rounded-lg shadow-xl p-6 w-[720px] max-h-[80vh] backdrop:bg-black/50 bg-gray-800 text-gray-200 overflow-y-auto">
     <div class="flex items-start justify-between mb-3">
-      <h2 class="text-lg font-bold">ソース絞り込み <span id="source-filter-target" class="text-sm font-normal text-gray-500"></span></h2>
-      <button type="button" onclick="this.closest('dialog').close()" class="text-gray-500 hover:text-gray-800 text-xl leading-none">✕</button>
+      <h2 class="text-lg font-bold text-white">ソース絞り込み <span id="source-filter-target" class="text-sm font-normal text-gray-400"></span></h2>
+      <button type="button" onclick="this.closest('dialog').close()" class="text-gray-400 hover:text-white text-xl leading-none">✕</button>
     </div>
 
-    <p class="text-xs text-gray-500 mb-3">
-      Slack チャンネル と 会議名 で絞り込みます。両方を指定した場合は OR 結合（どちらかに合致するレコードを表示）。
-      何も選択しなければ全件が対象です。
+    <p class="text-xs text-gray-400 mb-3">
+      Slack チャンネル と 会議名 で絞り込みます。両方を指定した場合は OR 結合。
     </p>
 
-    <!-- Preset buttons -->
     <div class="mb-3">
-      <div class="text-xs font-bold text-gray-700 mb-1">プリセット</div>
+      <div class="text-xs font-bold text-gray-300 mb-1">プリセット</div>
       <div id="source-presets" class="flex flex-wrap gap-1"></div>
     </div>
 
-    <!-- Selected chips -->
     <div class="mb-3">
-      <div class="text-xs font-bold text-gray-700 mb-1">選択中 <span id="source-selected-count" class="text-gray-500 font-normal"></span></div>
-      <div id="source-chips" class="flex flex-wrap gap-1 min-h-[28px] p-2 border rounded bg-gray-50"></div>
+      <div class="text-xs font-bold text-gray-300 mb-1">選択中 <span id="source-selected-count" class="text-gray-400 font-normal"></span></div>
+      <div id="source-chips" class="flex flex-wrap gap-1 min-h-[28px] p-2 border border-gray-600 rounded bg-gray-700"></div>
     </div>
 
     <div class="grid grid-cols-2 gap-3">
       <div>
-        <div class="text-xs font-bold text-gray-700 mb-1">Slack チャンネル</div>
-        <div id="source-channels" class="border rounded p-2 max-h-[280px] overflow-y-auto text-sm"></div>
+        <div class="text-xs font-bold text-gray-300 mb-1">Slack チャンネル</div>
+        <div id="source-channels" class="border border-gray-600 rounded p-2 max-h-[280px] overflow-y-auto text-sm text-gray-300"></div>
       </div>
       <div>
-        <div class="text-xs font-bold text-gray-700 mb-1">会議名 (meeting_kind)</div>
-        <div id="source-meetings" class="border rounded p-2 max-h-[280px] overflow-y-auto text-sm"></div>
+        <div class="text-xs font-bold text-gray-300 mb-1">会議名 (meeting_kind)</div>
+        <div id="source-meetings" class="border border-gray-600 rounded p-2 max-h-[280px] overflow-y-auto text-sm text-gray-300"></div>
       </div>
     </div>
 
     <div class="flex justify-between items-center mt-4">
-      <button type="button" onclick="clearSourceFilter()" class="text-sm text-red-600 hover:underline">全クリア</button>
+      <button type="button" onclick="clearSourceFilter()" class="text-sm text-red-400 hover:underline">全クリア</button>
       <div class="flex gap-2">
-        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">キャンセル</button>
+        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-400 hover:text-white">キャンセル</button>
         <button type="button" onclick="applySourceFilter()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm">適用して検索</button>
       </div>
     </div>
   </dialog>
 
   <!-- Enrichment Detail Dialog -->
-  <dialog id="dialog-enrich" class="rounded-lg shadow-xl p-6 w-[720px] max-h-[80vh] backdrop:bg-black/30 overflow-y-auto">
+  <dialog id="dialog-enrich" class="rounded-lg shadow-xl p-6 w-[720px] max-h-[80vh] backdrop:bg-black/50 bg-gray-800 text-gray-200 overflow-y-auto">
     <div class="flex items-start justify-between mb-3">
-      <h2 class="text-lg font-bold">エンリッチメント詳細 <span id="enrich-title" class="text-sm font-normal text-gray-500"></span></h2>
-      <button type="button" onclick="this.closest('dialog').close()" class="text-gray-500 hover:text-gray-800 text-xl leading-none">✕</button>
+      <h2 class="text-lg font-bold text-white">エンリッチメント詳細 <span id="enrich-title" class="text-sm font-normal text-gray-400"></span></h2>
+      <button type="button" onclick="this.closest('dialog').close()" class="text-gray-400 hover:text-white text-xl leading-none">✕</button>
     </div>
     <div id="enrich-body" class="flex flex-col gap-3 text-sm"></div>
     <div class="flex justify-end mt-4">
-      <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-600">閉じる</button>
+      <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-400 hover:text-white">閉じる</button>
+    </div>
+  </dialog>
+
+  <!-- Confirmation Dialog -->
+  <dialog id="dialog-confirm" class="rounded-lg shadow-xl p-6 w-[480px] backdrop:bg-black/50 bg-gray-800 text-gray-200">
+    <h2 id="confirm-title" class="text-lg font-bold mb-3 text-white">確認</h2>
+    <p id="confirm-message" class="text-sm mb-4"></p>
+    <div class="flex justify-end gap-2">
+      <button type="button" onclick="document.getElementById('dialog-confirm').close()" class="px-4 py-1 text-sm text-gray-400 hover:text-white">キャンセル</button>
+      <button id="confirm-ok" type="button" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm">実行</button>
     </div>
   </dialog>
 
@@ -248,5 +292,14 @@
   <div id="toast-container" class="fixed bottom-4 right-4 flex flex-col gap-2 z-50"></div>
 
   <script src="/app.js"></script>
+  <script src="/admin.js"></script>
+  <script src="/pages/dashboard.js"></script>
+  <script src="/pages/recording.js"></script>
+  <script src="/pages/ingest.js"></script>
+  <script src="/pages/knowledge.js"></script>
+  <script src="/pages/reports.js"></script>
+  <script src="/pages/quality.js"></script>
+  <script src="/pages/services.js"></script>
+  <script src="/pages/minutes.js"></script>
 </body>
 </html>

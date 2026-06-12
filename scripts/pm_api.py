@@ -11,14 +11,18 @@ Usage:
 """
 
 import argparse
+import asyncio
+import csv
+import io
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -29,6 +33,15 @@ from web_utils import (
     load_filter_presets,
 )
 from db_utils import open_db
+from web_admin import (
+    AdminJobQueue, get_all_services, get_service_status, get_dashboard_stats,
+    get_recent_minutes, list_minutes, get_minutes_content,
+    get_minutes_decisions, get_minutes_action_items,
+    update_minutes_decisions, update_minutes_action_items,
+    delete_minutes_instance, delete_minutes_from_pm,
+    update_minutes_content, get_minutes_held_at,
+    service_action, tail_log, scan_recent_errors,
+)
 
 # --------------------------------------------------------------------------- #
 # 設定
@@ -36,6 +49,9 @@ from db_utils import open_db
 _REPO = Path(__file__).resolve().parent.parent
 _DEFAULT_DB = _REPO / "data" / "pm.db"
 _DEFAULT_PORT = 8501
+
+# AdminJobQueue はモジュールロード時に初期化（pm_daemon.sh 経由の起動でも __main__ 経由でも動作）
+_job_queue = AdminJobQueue(repo_root=_REPO)
 
 # --------------------------------------------------------------------------- #
 # アプリ状態（シングルプロセス前提）
@@ -45,6 +61,8 @@ _state: dict[str, Any] = {
     "no_encrypt": False,
     "ai_df": None,   # optimistic locking 用スナップショット
     "dec_df": None,
+    "job_queue": _job_queue,
+    "processing_dir": None,
 }
 
 def _get_conn(db_path=None):
@@ -382,6 +400,519 @@ def get_files(channel: str = Query(""), since: str = Query("")):
 
 
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Admin endpoints (dashboard, jobs, services, operations)
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/admin/stats")
+def admin_stats():
+    """ダッシュボード統計を返す。"""
+    try:
+        conn = _get_conn()
+    except Exception:
+        return {"error": "Database not available", "open_action_items": 0,
+                "unacknowledged_decisions": 0, "active_milestones": 0,
+                "overdue_items": 0, "total_action_items": 0, "total_decisions": 0}
+    try:
+        stats = get_dashboard_stats(conn)
+    except Exception:
+        stats = {"error": "Failed to load stats", "open_action_items": 0,
+                 "unacknowledged_decisions": 0, "active_milestones": 0,
+                 "overdue_items": 0, "total_action_items": 0, "total_decisions": 0}
+    return stats
+
+
+@app.get("/api/admin/services")
+async def admin_services():
+    """全サービスの状態を返す。"""
+    services = await get_all_services()
+    return {"services": services}
+
+
+@app.get("/api/admin/services/{name}/status")
+async def admin_service_status(name: str):
+    """特定サービスの状態を返す。"""
+    result = await get_service_status(name)
+    return result
+
+
+@app.post("/api/admin/services/{name}/start")
+async def admin_service_start(name: str):
+    """サービスを起動。"""
+    result = await service_action(name, "start")
+    return result
+
+
+@app.post("/api/admin/services/{name}/stop")
+async def admin_service_stop(name: str):
+    """サービスを停止。"""
+    result = await service_action(name, "stop")
+    return result
+
+
+@app.get("/api/admin/services/{name}/logs")
+def admin_service_logs(name: str, lines: int = Query(100, ge=10, le=500)):
+    """サービスのログファイル末尾を返す。"""
+    log_files = {
+        "qa": _REPO / "logs" / "pm_qa_server.log",
+        "web": _REPO / "logs" / "pm_web.log",
+        "fish": _REPO / "logs" / "pm_fish_tts.log",
+    }
+    log_path = log_files.get(name)
+    if not log_path:
+        return {"lines": [], "total_lines": 0, "error": f"Unknown service: {name}"}
+    return tail_log(log_path, lines)
+
+
+@app.get("/api/admin/logs/recent-errors")
+def admin_recent_errors():
+    """直近のログファイルから ERROR/WARNING 行をスキャンする。"""
+    errors = scan_recent_errors()
+    return {"errors": errors}
+
+
+# --- Job queue endpoints --- #
+
+@app.get("/api/admin/jobs")
+def admin_list_jobs(kind: str = Query(""), limit: int = Query(50, le=200)):
+    """ジョブ一覧を取得。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return {"jobs": []}
+    jobs = queue.list_jobs(kind=kind or None, limit=limit)
+    return {"jobs": jobs}
+
+
+@app.get("/api/admin/jobs/{job_id}")
+def admin_get_job(job_id: str):
+    """単一ジョブの状態を取得。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    job = queue.get_job(job_id)
+    if job is None:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return job
+
+
+@app.get("/api/admin/jobs/{job_id}/log")
+def admin_get_job_log(job_id: str, lines: int = 200):
+    """ジョブのログファイル内容を取得する。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    job = queue.get_job(job_id)
+    if job is None:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    log_path = job.get("log_file") if isinstance(job, dict) else job.get("log_file")
+    if not log_path:
+        return JSONResponse({"error": "No log file for this job"}, status_code=404)
+    p = Path(log_path)
+    if not p.exists():
+        return JSONResponse({"error": "Log file not found"}, status_code=404)
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {"file": str(p), "total_lines": len(all_lines), "lines": tail}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# --- Ingest endpoints --- #
+
+class IngestRunRequest(BaseModel):
+    source: str  # "slack", "minutes", "goals"
+    slack_channel: str | None = None
+    since: str | None = None
+    dry_run: bool = False
+    no_auto_enrich: bool = False
+
+
+@app.post("/api/admin/ingest/run")
+def admin_ingest_run(req: IngestRunRequest):
+    """Ingest ジョブを開始。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    params = req.model_dump()
+    job_id = queue.enqueue("ingest", params)
+    queue.start(job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/admin/ingest/sources")
+def admin_ingest_sources():
+    """利用可能な Ingest ソース一覧（チャンネル情報を含む）。"""
+    try:
+        presets = load_filter_presets()
+        return {
+            "sources": ["slack", "minutes", "goals"],
+            "channels": presets.get("channels", []),
+            "channel_names": presets.get("channel_names", {}),
+            "meeting_kinds": presets.get("meeting_kinds", []),
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# --- Knowledge endpoints --- #
+
+class DistillRequest(BaseModel):
+    source: str | None = None
+    since: str | None = None
+    force: bool = False
+    dry_run: bool = False
+
+
+class EmbedRequest(BaseModel):
+    index_name: str | None = None
+    full_rebuild: bool = False
+    dry_run: bool = False
+
+
+@app.post("/api/admin/knowledge/distill")
+def admin_knowledge_distill(req: DistillRequest):
+    """Distill (ナレッジ蒸留) ジョブを開始。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    params = req.model_dump()
+    job_id = queue.enqueue("distill", params)
+    queue.start(job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/api/admin/knowledge/embed")
+def admin_knowledge_embed(req: EmbedRequest):
+    """Embed (FTS5 インデックス構築) ジョブを開始。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    params = req.model_dump()
+    job_id = queue.enqueue("embed", params)
+    queue.start(job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+# --- Report endpoints --- #
+
+class ReportGenerateRequest(BaseModel):
+    report_type: str  # "report", "insight", "xlsx_report"
+    since: str | None = None
+    skip_canvas: bool = False
+    dry_run: bool = False
+
+
+@app.post("/api/admin/reports/generate")
+def admin_report_generate(req: ReportGenerateRequest):
+    """レポート生成ジョブを開始。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    params = req.model_dump()
+    job_id = queue.enqueue("report", params)
+    queue.start(job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+# --- Quality endpoints --- #
+
+class ScreenRequest(BaseModel):
+    include_decisions: bool = False
+    export: bool = False
+
+
+class RelinkImportRequest(BaseModel):
+    csv_content: str  # Base64-encoded or raw CSV content
+    dry_run: bool = False
+
+
+@app.post("/api/admin/quality/screen")
+def admin_quality_screen(req: ScreenRequest):
+    """Screen (重複検出) ジョブを開始。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    params = req.model_dump()
+    job_id = queue.enqueue("screen", params)
+    queue.start(job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/admin/quality/relink-export")
+def admin_quality_relink_export():
+    """Relink CSV をダウンロード。"""
+    try:
+        py = _state.get("_python", "python3")
+        scripts_dir = Path(__file__).parent
+        result = subprocess.run(
+            [py, str(scripts_dir / "pm_relink.py"), "--export"],
+            capture_output=True, text=True, cwd=str(_REPO), timeout=30,
+        )
+        if result.returncode != 0:
+            return JSONResponse({"error": result.stderr}, status_code=500)
+        # pm_relink.py outputs CSV to stdout; parse and return as download
+        csv_content = result.stdout
+        if not csv_content.strip():
+            return JSONResponse({"error": "No data exported"}, status_code=400)
+        return StreamingResponse(
+            io.StringIO(csv_content),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=pm_relink_export.csv"},
+        )
+    except subprocess.TimeoutExpired:
+        return JSONResponse({"error": "Export timed out"}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/quality/relink-import")
+def admin_quality_relink_import(req: RelinkImportRequest):
+    """Relink CSV をインポート（ジョブ経由）。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    # CSV content を一時ファイルに保存
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, dir=str(_REPO / "data"))
+    tmp.write(req.csv_content)
+    tmp_path = tmp.name
+    tmp.close()
+    params = {"csv_path": tmp_path, "dry_run": req.dry_run}
+    job_id = queue.enqueue("relink-import", params)
+    queue.start(job_id)
+    return {"job_id": job_id, "status": "queued", "csv_file": tmp_path}
+
+
+# --- Recording endpoints --- #
+
+@app.post("/api/admin/recording/upload")
+async def admin_recording_upload(files: list[UploadFile] = File(...),
+                                  meeting_name: str = Form(""),
+                                  held_at: str = Form(""),
+                                  skip_seconds: int = Form(0)):
+    """録音ファイル + VTT をアップロードし、パイプラインジョブを開始。"""
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+
+    if not files or len(files) == 0:
+        return JSONResponse({"error": "ファイルが選択されていません"}, status_code=400)
+
+    # Validate and save files
+    proc_dir = _state.get("processing_dir")
+    if not proc_dir:
+        proc_dir = _REPO / "data" / "processing"
+        proc_dir.mkdir(parents=True, exist_ok=True)
+        _state["processing_dir"] = proc_dir
+
+    audio_exts = {".mp4", ".m4a", ".wav", ".mp3"}
+    audio_path = None
+    vtt_path = None
+
+    for f in files:
+        if not f.filename:
+            continue
+        ext = Path(f.filename).suffix.lower()
+        if ext not in {".mp4", ".m4a", ".wav", ".mp3", ".vtt"}:
+            return JSONResponse({"error": f"非対応のファイル形式: {f.filename}"}, status_code=400)
+
+        file_path = proc_dir / f.filename
+        content = await f.read()
+        with open(file_path, "wb") as out:
+            out.write(content)
+
+        if ext == ".vtt":
+            vtt_path = str(file_path)
+        elif audio_path is None:
+            audio_path = str(file_path)
+
+    if not audio_path:
+        return JSONResponse({"error": "音声ファイル (MP4/M4A/WAV/MP3) が見つかりません"}, status_code=400)
+
+    params = {
+        "file_path": audio_path,
+        "meeting_name": meeting_name,
+        "held_at": held_at,
+        "skip_seconds": skip_seconds,
+    }
+    if vtt_path:
+        params["vtt_path"] = vtt_path
+
+    job_id = queue.enqueue("recording", params)
+    queue.start(job_id)
+
+    extra = f" + VTT" if vtt_path else ""
+    return {"job_id": job_id, "status": "queued", "file": audio_path + extra}
+
+
+# --- Minutes management --- #
+
+@app.get("/api/admin/minutes/recent")
+def admin_recent_minutes():
+    """直近の会議一覧を返す。"""
+    minutes = get_recent_minutes(_REPO, no_encrypt=_state["no_encrypt"])
+    return {"minutes": minutes}
+
+
+@app.get("/api/admin/minutes/list")
+def admin_minutes_list(kind: str = Query("")):
+    """全 minutes DB の会議インスタンス一覧。"""
+    all_minutes = list_minutes(_REPO, no_encrypt=_state["no_encrypt"])
+    if kind:
+        all_minutes = [m for m in all_minutes if m.get("kind") == kind]
+    return {"minutes": all_minutes, "total": len(all_minutes)}
+
+
+@app.get("/api/admin/minutes/meetings")
+def admin_minutes_meetings():
+    """利用可能な会議種別（kind）一覧を返す。"""
+    minutes_dir = _REPO / "data" / "minutes"
+    kinds = []
+    if minutes_dir.exists():
+        kinds = sorted([f.stem for f in minutes_dir.glob("*.db")])
+    return {"meetings": kinds}
+
+
+@app.get("/api/admin/minutes/content")
+def admin_minutes_content(id: str = Query(""), kind: str = Query("")):
+    """議事内容を取得する。"""
+    content = get_minutes_content(id, kind, no_encrypt=_state["no_encrypt"], repo_root=_REPO)
+    if content is None:
+        return JSONResponse({"error": "Content not found"}, status_code=404)
+    return {"meeting_id": id, "kind": kind, "content": content}
+
+
+class UpdateMinutesContentRequest(BaseModel):
+    meeting_id: str
+    kind: str
+    content: str
+
+
+@app.post("/api/admin/minutes/content/save")
+def admin_minutes_content_save(req: UpdateMinutesContentRequest):
+    """議事内容を更新し、pm.db / Box XLSX への発行ジョブをキューイングする。"""
+    result = update_minutes_content(
+        req.meeting_id, req.kind, req.content,
+        no_encrypt=_state["no_encrypt"], repo_root=_REPO,
+    )
+    if result.get("error"):
+        return JSONResponse(result, status_code=500)
+
+    # Enqueue async publish job (only on content save to avoid duplication)
+    publish_job_id = None
+    try:
+        held_at = get_minutes_held_at(
+            req.meeting_id, req.kind,
+            no_encrypt=_state["no_encrypt"], repo_root=_REPO,
+        )
+        if held_at:
+            params = {
+                "meeting_id": req.meeting_id,
+                "kind": req.kind,
+                "held_at": held_at,
+                "no_encrypt": _state.get("no_encrypt", False),
+            }
+            publish_job_id = _job_queue.enqueue("minutes-publish", params)
+            _job_queue.start(publish_job_id)
+    except Exception:
+        pass  # publish failure should not block the save response
+
+    result["publish_job_id"] = publish_job_id
+    return result
+
+
+class UpdateMinutesDecisionsRequest(BaseModel):
+    meeting_id: str
+    kind: str
+    items: list[dict]
+
+
+@app.get("/api/admin/minutes/decisions")
+def admin_minutes_decisions(id: str = Query(""), kind: str = Query("")):
+    """minutes DB から決定事項一覧を取得。"""
+    items = get_minutes_decisions(id, kind, no_encrypt=_state["no_encrypt"], repo_root=_REPO)
+    return {"items": items}
+
+
+@app.post("/api/admin/minutes/decisions/save")
+def admin_minutes_decisions_save(req: UpdateMinutesDecisionsRequest):
+    """minutes DB の決定事項を全置換。"""
+    result = update_minutes_decisions(
+        req.meeting_id, req.kind, req.items,
+        no_encrypt=_state["no_encrypt"], repo_root=_REPO,
+    )
+    if result.get("error"):
+        return JSONResponse(result, status_code=500)
+    return result
+
+
+@app.get("/api/admin/minutes/action-items")
+def admin_minutes_action_items(id: str = Query(""), kind: str = Query("")):
+    """minutes DB からアクションアイテム一覧を取得。"""
+    items = get_minutes_action_items(id, kind, no_encrypt=_state["no_encrypt"], repo_root=_REPO)
+    return {"items": items}
+
+
+@app.post("/api/admin/minutes/action-items/save")
+def admin_minutes_action_items_save(req: UpdateMinutesDecisionsRequest):
+    """minutes DB のアクションアイテムを全置換。"""
+    result = update_minutes_action_items(
+        req.meeting_id, req.kind, req.items,
+        no_encrypt=_state["no_encrypt"], repo_root=_REPO,
+    )
+    if result.get("error"):
+        return JSONResponse(result, status_code=500)
+    return result
+
+
+class DeleteMinutesRequest(BaseModel):
+    meeting_id: str
+    kind: str
+    cascade_pm: bool = True          # pm.db からも削除
+    cascade_canvas: bool = False     # Canvas 目録を再生成
+    cascade_box: bool = False        # Box ファイルは削除しない（バージョン管理のため）
+
+
+@app.post("/api/admin/minutes/delete")
+def admin_minutes_delete(req: DeleteMinutesRequest):
+    """会議インスタンスを削除（カスケード削除対応）。"""
+    # 1. minutes DB から削除
+    result = delete_minutes_instance(
+        req.meeting_id, req.kind, no_encrypt=_state["no_encrypt"], repo_root=_REPO,
+    )
+    if result.get("error"):
+        return JSONResponse(result, status_code=500)
+
+    # 2. pm.db から削除（カスケード）
+    cascade_result = {}
+    if req.cascade_pm:
+        try:
+            conn = _get_conn()
+            pm_result = delete_minutes_from_pm(
+                req.meeting_id, repo_root=_REPO, pm_conn=conn,
+                no_encrypt=_state["no_encrypt"],
+            )
+            cascade_result["pm_db"] = pm_result
+        except Exception as e:
+            cascade_result["pm_db"] = {"error": str(e)}
+
+    # 3. Canvas 目録再生成（カスケード）
+    if req.cascade_canvas:
+        cascade_result["canvas"] = {"scheduled": True}
+        # Canvas 再生成はジョブとして非同期実行
+        queue = _state.get("job_queue")
+        if queue:
+            job_id = queue.enqueue("catalog", {"kind": req.kind})
+            queue.start(job_id)
+            cascade_result["canvas"]["job_id"] = job_id
+
+    return {
+        "minutes_db": result,
+        "cascade": cascade_result,
+    }
+
+
 # 静的ファイル配信（API ルートより後に配置）
 # --------------------------------------------------------------------------- #
 _static_dir = Path(__file__).resolve().parent / "static"

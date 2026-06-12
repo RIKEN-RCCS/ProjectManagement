@@ -38,23 +38,12 @@ function toast(msg, type, duration) {
 }
 
 // ----------------------------------------------------------------
-// Tabs
+// Tabs (for DB Editor — linked to URL hash navigation)
 // ----------------------------------------------------------------
-document.querySelectorAll('.tab-btn').forEach(btn => {
+// Editor tab clicks change the hash, handled by admin.js
+document.querySelectorAll('.editor-nav-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
-    document.getElementById('panel-' + btn.dataset.tab).classList.remove('hidden');
-    // ファイルタブを開いた時: グリッドサイズ再計算
-    if (btn.dataset.tab === 'files') {
-      if (!_filesLoaded) {
-        _filesLoaded = true;
-        loadFiles();
-      } else if (filesGrid) {
-        setTimeout(() => filesGrid.sizeColumnsToFit(), 0);
-      }
-    }
+    location.hash = btn.dataset.tab;
   });
 });
 
@@ -137,10 +126,10 @@ function sourceRenderer(params) {
   return src;
 }
 
-// Source for decisions (no meeting_id column; derive from source_ref)
 function sourceRendererDec(params) {
   const src = params.value || '';
   const ref = (params.data || {}).source_ref || '';
+  const mid = (params.data || {}).meeting_id || '';
   const s = 'cursor:pointer;color:#1565c0;text-decoration:underline';
   if (src === 'slack' && ref) return `<span style="${s}">Slack</span>`;
   if (src === 'meeting') return `<span style="${s}">minutes</span>`;
@@ -418,11 +407,8 @@ function initDecGrid() {
       const data = event.data || {};
       if (data.source === 'slack' && data.source_ref) {
         window.open(data.source_ref, '_blank');
-      } else if (data.source === 'meeting' && data.source_ref) {
-        // Derive meeting_id from source_ref path
-        const filename = data.source_ref.split('/').pop().replace(/\.md$/, '');
-        const kind = filename.length > 11 ? filename.substring(11) : '';
-        openMinutes(filename, kind);
+      } else if (data.source === 'meeting' && data.meeting_id) {
+        openMinutes(data.meeting_id, data.meeting_kind || '');
       }
     },
   });
@@ -770,9 +756,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   initFilesChannelFilter();
   _updateSourceFilterButtonLabel('ai');
   _updateSourceFilterButtonLabel('dec');
-  await loadActionItems();
-  await loadDecisions();
-  // ファイルグリッドも初期データ取得（domLayout:autoHeight はデータがないと高さ0になるため）
-  _filesLoaded = true;
-  loadFiles();
+  // 初期化後に admin.js のルーターが起動。editor ページの場合はここでデータ読み込み
+  const initHash = location.hash.replace('#', '') || 'dashboard';
+  if (initHash === 'ai' || initHash === 'dec' || initHash === 'files') {
+    await loadActionItems();
+    await loadDecisions();
+    _filesLoaded = true;
+    loadFiles();
+  }
+  // admin.js のルーター初期化を再トリガー（app.js の DOMContentLoaded が admin.js より後に完了する場合への対処）
+  if (typeof handleHashChange === 'function') {
+    handleHashChange();
+  }
 });
