@@ -30,7 +30,14 @@
 
 set -euo pipefail
 
-. /home/users/hikaru.inoue/.venv_aarch64/bin/activate
+_arch="$(uname -m)"
+if [[ "$_arch" == "aarch64" ]]; then
+    . "$HOME/.venv_aarch64/bin/activate"
+elif [[ "$_arch" == "x86_64" ]]; then
+    . "$HOME/.venv_x86_64/bin/activate"
+else
+    echo "Unknown architecture: $_arch"; exit 1
+fi
 
 . ~/.secrets/slack_tokens.sh
 

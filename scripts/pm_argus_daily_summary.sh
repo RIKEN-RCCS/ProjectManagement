@@ -19,8 +19,15 @@ fi
 # デフォルトでローカルLLMを優先
 export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
 
-PYTHON3="$HOME/.venv_aarch64/bin/python3"
-CANVAS_ID="<CANVAS_ID>"  # リーダー会議Canvas ID (既存と同じ)
+_arch="$(uname -m)"
+if [[ "$_arch" == "aarch64" ]]; then
+    PYTHON3="$HOME/.venv_aarch64/bin/python3"
+elif [[ "$_arch" == "x86_64" ]]; then
+    PYTHON3="$HOME/.venv_x86_64/bin/python3"
+else
+    echo "Unknown architecture: $_arch"; exit 1
+fi
+CANVAS_ID="F0ATCN7E2D9"  # リーダー会議Canvas ID
 
 echo "[$(date +'%Y-%m-%d %H:%M:%S')] 日次サマリー生成開始"
 "$PYTHON3" "$SCRIPT_DIR/argus/pm_argus.py" \

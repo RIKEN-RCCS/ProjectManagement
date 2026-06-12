@@ -83,6 +83,10 @@ def main() -> None:
         "--no-auto-enrich", action="store_true",
         help="Pass 1 投入後の自動エンリッチメント（Pass 2）をスキップ",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="既存レコードの上書きを許可",
+    )
     add_dry_run_arg(parser)
     add_no_encrypt_arg(parser)
     add_since_arg(parser)
@@ -116,6 +120,7 @@ def main() -> None:
         dry_run=args.dry_run,
         no_encrypt=args.no_encrypt,
         since=args.since,
+        force=getattr(args, "force", False),
         log=log,
         repo_root=REPO_ROOT,
     )

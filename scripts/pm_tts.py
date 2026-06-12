@@ -97,6 +97,24 @@ def _fish_synth_chunk(text: str, out_path: Path, speed: float = 1.0, reference_i
     out_path.write_bytes(resp.content)
 
 
+def _is_fish_available() -> bool:
+    """fish-speech サーバが疎通可能かを返す。"""
+    try:
+        r = requests.get(f"{FISH_HOST}/v1/health", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _is_voicevox_available() -> bool:
+    """VOICEVOX エンジンが疎通可能かを返す。"""
+    try:
+        r = requests.get(f"{VOICEVOX_HOST}/version", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def check_fish_alive() -> str:
     try:
         r = requests.get(f"{FISH_HOST}/v1/health", timeout=5)
@@ -426,7 +444,13 @@ def _split_by_comma(sentence: str, limit: int) -> list[str]:
 
 
 def default_text_limit() -> int:
-    return FISH_TEXT_LIMIT if _get_tts_backend() == "fish" else VOICEVOX_TEXT_LIMIT
+    backend = _get_tts_backend()
+    if backend == "fish":
+        # fish 優先でも利用不可なら VOICEVOX にフォールバックする可能性があるため、
+        # 常に VOICEVOX の制限 (200) を使うのが安全
+        if _is_fish_available():
+            return FISH_TEXT_LIMIT
+    return VOICEVOX_TEXT_LIMIT
 
 
 def split_into_sentences(text: str, limit: int = VOICEVOX_TEXT_LIMIT) -> list[str]:
@@ -465,35 +489,63 @@ def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
 
 
 def synth_chunk(text: str, speaker: int, out_path: Path, speed: float = 1.0, reference_id: str | None = None) -> None:
-    """1 チャンクを合成して WAV を out_path に書き出す。TTS_BACKEND で切り替え。"""
-    if _get_tts_backend() == "fish":
-        _fish_synth_chunk(text, out_path, speed=speed, reference_id=reference_id)
+    """1 チャンクを合成して WAV を out_path に書き出す。
+
+    TTS_BACKEND で優先バックエンドを決定し、fish 優先時に fish が利用不可なら
+    VOICEVOX にフォールバックする。voicevox 優先時のフォールバックは行わない。
+    """
+    backend = _get_tts_backend()
+    use_voicevox = backend == "voicevox"
+    if backend == "fish":
+        try:
+            _fish_synth_chunk(text, out_path, speed=speed, reference_id=reference_id)
+            return
+        except Exception as exc:
+            if _is_voicevox_available():
+                print(f"[WARN] fish-speech 合成失敗 ({exc})。VOICEVOX にフォールバック",
+                      file=sys.stderr)
+                use_voicevox = True
+            else:
+                raise
+
+    if use_voicevox:
+        q = _request_with_retry(
+            "POST",
+            f"{VOICEVOX_HOST}/audio_query",
+            params={"speaker": speaker, "text": text},
+            timeout=QUERY_TIMEOUT,
+        )
+        audio_query = q.json()
+        audio_query["speedScale"] = speed
+
+        s = _request_with_retry(
+            "POST",
+            f"{VOICEVOX_HOST}/synthesis",
+            params={"speaker": speaker},
+            json=audio_query,
+            headers={"Content-Type": "application/json"},
+            timeout=SYNTH_TIMEOUT,
+        )
+        out_path.write_bytes(s.content)
         return
-
-    q = _request_with_retry(
-        "POST",
-        f"{VOICEVOX_HOST}/audio_query",
-        params={"speaker": speaker, "text": text},
-        timeout=QUERY_TIMEOUT,
-    )
-    audio_query = q.json()
-    audio_query["speedScale"] = speed
-
-    s = _request_with_retry(
-        "POST",
-        f"{VOICEVOX_HOST}/synthesis",
-        params={"speaker": speaker},
-        json=audio_query,
-        headers={"Content-Type": "application/json"},
-        timeout=SYNTH_TIMEOUT,
-    )
-    out_path.write_bytes(s.content)
 
 
 def check_tts_alive() -> str:
-    """アクティブな TTS バックエンドの疎通確認。"""
+    """アクティブな TTS バックエンドの疎通確認。
+
+    fish 優先時に fish が利用不可なら VOICEVOX の疎通を試み、
+    利用可能ならフォールバック先として確認する。
+    両方不可なら例外を投げる。
+    """
     if _get_tts_backend() == "fish":
-        return check_fish_alive()
+        try:
+            return check_fish_alive()
+        except RuntimeError:
+            if _is_voicevox_available():
+                print("[WARN] fish-speech が利用不可。VOICEVOX にフォールバックします",
+                      file=sys.stderr)
+                return check_voicevox_alive()
+            raise
     return check_voicevox_alive()
 
 
@@ -538,9 +590,14 @@ def resolve_speaker_name(speaker_id: int) -> str:
 
 
 def credit_line(speaker_id: int) -> str:
-    """アクティブな TTS バックエンドのクレジット文字列を返す。"""
-    if _get_tts_backend() == "fish":
+    """アクティブな TTS バックエンドのクレジット文字列を返す。
+
+    fish 優先時は fish が利用不可なら VOICEVOX のクレジットを返す。
+    """
+    backend = _get_tts_backend()
+    if backend == "fish" and _is_fish_available():
         return ""
+    # fish が利用不可 (フォールバック含む) または voicevox 優先
     return f"音声合成に『VOICEVOX:{resolve_speaker_name(speaker_id)}』を使用"
 
 

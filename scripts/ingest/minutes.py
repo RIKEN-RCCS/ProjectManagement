@@ -331,7 +331,7 @@ class MinutesIngestPlugin:
             ctx.log(f"[INFO] since      : {ctx.since}")
         if ctx.dry_run:
             ctx.log("[INFO] --dry-run モード（DB保存なし）")
-        force = getattr(args, "minutes_force", False)
+        force = ctx.force or getattr(args, "minutes_force", False)
         meeting_id_filter = getattr(args, "minutes_meeting_id", None)
         if force:
             ctx.log("[INFO] --force モード（既存レコードを上書き）")

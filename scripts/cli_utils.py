@@ -325,6 +325,7 @@ def _call_local_llm_inner(
 ) -> str:
     import requests
     import json as _json
+    import re
     print(f"[INFO] LLM call: backend=local model={model} url={base_url} think={think}",
           file=sys.stderr)
     messages = []
@@ -362,8 +363,39 @@ def _call_local_llm_inner(
     if no_stream:
         # 非ストリーミング（LiteLLM プロキシ経由で streaming が動作しない場合等）
         payload["stream"] = False
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        resp.raise_for_status()
+        # コンテキスト長超過の 400 に対し、段階的に max_tokens を縮小して再試行する。
+        # vLLM の "at least N input tokens" は実際より少なめに報告されることがあり、
+        # 1回の再試行で収まらない場合があるため、複数段階で縮小する。
+        _retry_max_tokens_steps = [max_tokens // 2, max_tokens // 4, 512]
+        for _attempt in range(len(_retry_max_tokens_steps) + 1):
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code != 400:
+                break
+            err_body = resp.text[:1000]
+            is_ctx_overflow = bool(re.search(r"maximum context length.*input tokens", err_body))
+            if not is_ctx_overflow:
+                # コンテキスト長以外の 400 はそのままエラーにする
+                print(f"[ERROR] vLLM 400: {err_body}", file=sys.stderr)
+                resp.raise_for_status()
+            if _attempt < len(_retry_max_tokens_steps):
+                reduced = _retry_max_tokens_steps[_attempt]
+                print(f"[WARN] コンテキスト長超過。max_tokens {payload['max_tokens']} → {reduced} に縮小再試行",
+                      file=sys.stderr)
+                payload["max_tokens"] = reduced
+            else:
+                # 全再試行失敗 — プロンプト自体が長すぎる
+                m = re.search(r"at least (\d+) input tokens", err_body)
+                m2 = re.search(r"maximum context length is (\d+) tokens", err_body)
+                input_tok = m.group(1) if m else "?"
+                max_ctx = m2.group(1) if m2 else "?"
+                print(f"[ERROR] vLLM 400: {err_body[:500]}", file=sys.stderr)
+                raise RuntimeError(
+                    f"プロンプトが長すぎます (入力 {input_tok} トークン / 上限 {max_ctx})。"
+                    f"日数範囲を狭めるか、RiVault の回復を待ってください。"
+                )
+        if resp.status_code >= 400:
+            print(f"[ERROR] vLLM {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
+            resp.raise_for_status()
         data = resp.json()
         msg = data["choices"][0]["message"]
         # reasoning_content は reasoning parser が有効な場合に thinking が分離される領域。
@@ -376,8 +408,32 @@ def _call_local_llm_inner(
 
     # ストリーミング（デフォルト）
     payload["stream"] = True
-    resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
-    resp.raise_for_status()
+    _retry_max_tokens_steps_stream = [max_tokens // 2, max_tokens // 4, 512]
+    for _attempt in range(len(_retry_max_tokens_steps_stream) + 1):
+        resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+        if resp.status_code < 400:
+            break
+        if resp.status_code == 400:
+            err_body = resp.text[:1000]
+            is_ctx_overflow = bool(re.search(r"maximum context length.*input tokens", err_body))
+            if is_ctx_overflow and _attempt < len(_retry_max_tokens_steps_stream):
+                reduced = _retry_max_tokens_steps_stream[_attempt]
+                print(f"[WARN] コンテキスト長超過。max_tokens {payload['max_tokens']} → {reduced} に縮小再試行",
+                      file=sys.stderr)
+                payload["max_tokens"] = reduced
+                continue
+            print(f"[ERROR] vLLM {resp.status_code}: {err_body}", file=sys.stderr)
+            if is_ctx_overflow:
+                m = re.search(r"at least (\d+) input tokens", err_body)
+                m2 = re.search(r"maximum context length is (\d+) tokens", err_body)
+                input_tok = m.group(1) if m else "?"
+                max_ctx = m2.group(1) if m2 else "?"
+                raise RuntimeError(
+                    f"プロンプトが長すぎます (入力 {input_tok} トークン / 上限 {max_ctx})。"
+                    f"日数範囲を狭めるか、RiVault の回復を待ってください。"
+                )
+        print(f"[ERROR] vLLM {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
+        resp.raise_for_status()
 
     content_parts: list[str] = []
     print("[INFO] 生成中 ", end="", flush=True, file=sys.stderr)
@@ -596,7 +652,10 @@ def call_rivault(
     }
     url = base_url.rstrip("/") + "/chat/completions"
     resp = _requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        err_text = resp.text[:500] if resp.text else f"HTTP {resp.status_code}"
+        print(f"[ERROR] RiVault {resp.status_code}: {err_text}", file=sys.stderr)
+        resp.raise_for_status()
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     print("[INFO] Argus 生成中 ", end="", flush=True, file=sys.stderr)

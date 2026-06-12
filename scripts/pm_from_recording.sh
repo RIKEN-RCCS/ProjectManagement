@@ -33,10 +33,10 @@ set -euo pipefail
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
   SIFFILE1=/lvs0/rccs-sdt/hikaru.inoue/cpu_aarch64/singularity/whisper.sif
-  PYTHON3=/home/users/hikaru.inoue/.venv_aarch64/bin/python3
+  PYTHON3="$HOME/.venv_aarch64/bin/python3"
 elif [[ "$ARCH" == "x86_64" ]]; then
   SIFFILE1=/lvs0/rccs-sdt/hikaru.inoue/cpu_amd64/singularity/whisper.sif
-  PYTHON3=/home/users/hikaru.inoue/.venv_x86_64/bin/python3
+  PYTHON3="$HOME/.venv_x86_64/bin/python3"
 else
   echo "Unknown architecture: $ARCH"; exit 1
 fi

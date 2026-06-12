@@ -836,7 +836,7 @@ class SlackIngestPlugin:
         ctx.log(f"[INFO] 対象スレッド: {len(threads)} 件")
 
         total_d = total_a = skipped = 0
-        force_reextract = getattr(args, "slack_force_reextract", False)
+        force_reextract = ctx.force or getattr(args, "slack_force_reextract", False)
         consensus_n = getattr(args, "slack_consensus", 3)
         consensus_threshold = getattr(args, "slack_consensus_threshold", 0.78)
         consensus_min_vote = getattr(args, "slack_consensus_min_vote", None)

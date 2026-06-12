@@ -28,6 +28,7 @@ class IngestContext:
     since: str | None          # YYYY-MM-DD または None
     log: Callable[[str], None]
     repo_root: Path
+    force: bool = False        # 既存レコードの上書きを許可
 
 
 @runtime_checkable
