@@ -73,6 +73,17 @@ CREATE TABLE IF NOT EXISTS index_state (
 # tokens カラムの追加（既存DBへの移行用）
 SCHEMA_ADD_TOKENS_COLUMN = "ALTER TABLE chunks ADD COLUMN tokens TEXT"
 
+SCHEMA_CHUNK_EMBEDDINGS = """
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    chunk_id    INTEGER PRIMARY KEY,
+    model       TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    embedded_at TEXT NOT NULL,
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+"""
+
 # SudachiPy形態素解析トークンによるFTS5インデックス
 SCHEMA_FTS_TOKENS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_tokens USING fts5(
@@ -155,7 +166,7 @@ def open_index_db(index_db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    for ddl in (SCHEMA_CHUNKS, SCHEMA_CHUNK_INDEXES, SCHEMA_FTS, SCHEMA_INDEX_STATE):
+    for ddl in (SCHEMA_CHUNKS, SCHEMA_CHUNK_INDEXES, SCHEMA_FTS, SCHEMA_INDEX_STATE, SCHEMA_CHUNK_EMBEDDINGS):
         for stmt in ddl.split(";"):
             stmt = stmt.strip()
             if stmt:
@@ -719,6 +730,10 @@ def main() -> None:
     parser.add_argument("--config", default=None, help="設定ファイルのパス（デフォルト: data/argus_config.yaml）")
     parser.add_argument("--data-dir", default="data", help="data/ ディレクトリのパス")
     parser.add_argument("--dry-run", action="store_true", help="書き込みなしで件数のみ表示")
+    parser.add_argument("--skip-embed", action="store_true",
+                        help="embedding ベクトル計算をスキップ（FTS5 のみ更新）")
+    parser.add_argument("--embed-backfill", action="store_true",
+                        help="既存チャンクに embedding を後追い計算する")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

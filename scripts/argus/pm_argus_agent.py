@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import re
@@ -1217,22 +1218,23 @@ def run_agent(
         messages.append({"role": "assistant", "content": response})
 
         result_parts = []
+        # 重複・過剰呼び出しチェックを事前フィルタリング（並列実行前に実施）
+        valid_calls = []
+        pre_errors = []
         for tc in tool_calls:
             if "error" in tc:
-                result_parts.append(f"[Tool Error]\n{tc['error']}")
+                pre_errors.append(f"[Tool Error]\n{tc['error']}")
                 continue
-
             call_key = json.dumps(tc, sort_keys=True, ensure_ascii=False)
             if call_key in call_history:
-                result_parts.append(
+                pre_errors.append(
                     f"[Tool Result: {tc['name']}]\n"
                     f"（同一引数での再呼び出し。前回と同じ結果です。別の引数を試すか <final_answer> で回答してください）"
                 )
                 continue
-            # 同一ツール名を3回以上呼んでいれば打ち切り（引数違いでも）
             same_name_count = sum(1 for k in call_history if f'"name": "{tc["name"]}"' in k)
             if same_name_count >= 2:
-                result_parts.append(
+                pre_errors.append(
                     f"[Tool Result: {tc['name']}]\n"
                     f"（同一ツール {tc['name']} が既に{same_name_count}回呼ばれています。"
                     f"**別のツール**を試すか、これまでの結果で <final_answer> を出力してください。"
@@ -1241,20 +1243,42 @@ def run_agent(
                 call_history.append(call_key)
                 continue
             call_history.append(call_key)
+            valid_calls.append(tc)
+        result_parts = list(pre_errors)
 
-            tool_name = tc["name"]
-            tool_args = tc["args"]
-            args_desc = ", ".join(f"{k}={v}" for k, v in tool_args.items()) if tool_args else ""
-            progress(f"Step {step}/{max_steps}: {tool_name}({args_desc})")
-
-            tool_t0 = time.time()
-            result = execute_tool(tool_name, tool_args, ctx)
-            tool_elapsed = time.time() - tool_t0
-            logger.info(
-                f"[investigate] Step {step}/{max_steps} tool={tool_name}"
-                f" args={tool_args} result_len={len(str(result))} chars, {tool_elapsed:.1f}s"
-            )
-            result_parts.append(f"[Tool Result: {tool_name}]\n{result}")
+        # 有効なツール呼び出しを並列実行
+        if valid_calls:
+            remaining = max(10.0, timeout - (time.monotonic() - start_time))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                fut_map = {
+                    pool.submit(execute_tool, tc["name"], tc["args"], ctx): tc
+                    for tc in valid_calls
+                }
+                try:
+                    for future in concurrent.futures.as_completed(fut_map, timeout=remaining):
+                        tc = fut_map[future]
+                        try:
+                            tool_name = tc["name"]
+                            tool_args = tc["args"]
+                            args_desc = ", ".join(f"{k}={v}" for k, v in tool_args.items()) if tool_args else ""
+                            progress(f"Step {step}/{max_steps}: {tool_name}({args_desc})")
+                            tool_t0 = time.time()
+                            result = future.result()
+                            tool_elapsed = time.time() - tool_t0
+                            logger.info(
+                                f"[investigate] Step {step}/{max_steps} tool={tool_name}"
+                                f" args={tool_args} result_len={len(str(result))} chars, {tool_elapsed:.1f}s"
+                            )
+                            result_parts.append(f"[Tool Result: {tool_name}]\n{result}")
+                        except Exception as e:
+                            result_parts.append(f"[Tool Error: {tc['name']}]\n{type(e).__name__}: {e}")
+                except concurrent.futures.TimeoutError:
+                    for fut in fut_map:
+                        fut.cancel()
+                    for tc in valid_calls:
+                        result_parts.append(
+                            f"[Tool Result: {tc['name']}]\n（タイムアウトにより結果取得できず）"
+                        )
 
         messages.append({"role": "user", "content": "\n\n".join(result_parts)})
 

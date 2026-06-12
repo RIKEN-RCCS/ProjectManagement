@@ -526,8 +526,8 @@ def retrieve_chunks_hyde(
     seen: set = set()
     merged: list[dict] = []
     for q in queries:
-        for c in retrieve_chunks(q, index_db, k=k, since_date=since_date,
-                                 index_name=index_name):
+        for c in retrieve_chunks_hybrid(q, index_db, k=k, since_date=since_date,
+                                        index_name=index_name):
             key = (c.get("source_db"), c.get("record_id"), c.get("content", "")[:80])
             if key in seen:
                 continue
@@ -539,6 +539,117 @@ def retrieve_chunks_hyde(
     today = _date.today()
     merged.sort(key=lambda c: _combined_score(c, today), reverse=True)
     return merged[:max_merged]
+
+
+# --- ベクトル検索（embedding） ---
+
+_VECTOR_SEARCH_WEIGHT = 0.4  # RRF での vector スコアの重み
+_VECTOR_K = 50  # vector 検索の取得件数
+
+
+def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTOR_K,
+                           index_name: str | None = None) -> list[dict]:
+    """chunk_embeddings を使って cosine similarity 検索を行う。"""
+    try:
+        from embed_utils import embed_one, blob_to_vector, cosine_similarity_matrix
+    except ImportError:
+        logger.warning("embed_utils が利用できません — vector 検索をスキップ")
+        return []
+
+    # クエリを embedding
+    try:
+        qvec = embed_one(query)
+    except Exception as e:
+        logger.warning(f"embedding 取得エラー: {e}")
+        return []
+
+    # 対象 index のチャンク embedding を全件ロード
+    sql = """
+        SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,
+               c.content, c.source_ref, e.vector, e.dim
+        FROM chunks c
+        JOIN chunk_embeddings e ON e.chunk_id = c.id
+        JOIN chunk_indexes ci ON ci.chunk_id = c.id
+        WHERE ci.index_name = ?
+    """
+    rows = conn.execute(sql, (index_name,)).fetchall() if index_name else conn.execute(
+        "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
+        " c.content, c.source_ref, e.vector, e.dim"
+        " FROM chunks c"
+        " JOIN chunk_embeddings e ON e.chunk_id = c.id"
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    import numpy as np
+    chunks = [dict(r) for r in rows]
+    vecs = []
+    for c in chunks:
+        dim = c.pop("dim")
+        vec = blob_to_vector(c.pop("vector"), dim) if dim else None
+        vecs.append(vec)
+    vectors = np.stack(vecs)
+    sims = cosine_similarity_matrix(qvec, vectors)
+    top_k = np.argsort(-sims)[:k]
+    results = []
+    for i in top_k:
+        c = chunks[i]
+        c["vector_score"] = float(sims[i])
+        results.append(c)
+    return results
+
+
+def _rrf_merge(fts_chunks: list[dict], vec_chunks: list[dict], k: int,
+               rrf_k: int = 60) -> list[dict]:
+    """Reciprocal Rank Fusion で FTS5 と vector の結果を統合する。"""
+    rank_map: dict[int, float] = {}
+
+    for rank, c in enumerate(fts_chunks):
+        cid = c["id"]
+        rank_map[cid] = rank_map.get(cid, 0.0) + 1.0 / (rrf_k + rank)
+
+    for rank, c in enumerate(vec_chunks):
+        cid = c["id"]
+        rank_map[cid] = rank_map.get(cid, 0.0) + _VECTOR_SEARCH_WEIGHT / (rrf_k + rank)
+
+    sorted_ids = sorted(rank_map.keys(), key=lambda cid: -rank_map[cid])
+
+    # ID → chunk の辞書を作成（vec_chunks を優先、なければ fts）
+    chunk_dict = {c["id"]: c for c in vec_chunks}
+    for c in fts_chunks:
+        if c["id"] not in chunk_dict:
+            chunk_dict[c["id"]] = c
+
+    merged = []
+    for cid in sorted_ids[:k]:
+        c = dict(chunk_dict[cid])
+        c["rrf_score"] = rank_map[cid]
+        merged.append(c)
+    return merged
+
+
+def retrieve_chunks_hybrid(
+    question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
+    since_date: str | None = None, index_name: str | None = None,
+) -> list[dict]:
+    """FTS5 + vector のハイブリッド検索。RRF で統合する。"""
+    # FTS5 検索
+    fts_results = retrieve_chunks(question, index_db, k=k+20,
+                                  since_date=since_date, index_name=index_name)
+    # Vector 検索
+    conn = sqlite3.connect(str(index_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        vec_results = retrieve_chunks_vector(question, conn, k=_VECTOR_K,
+                                             index_name=index_name)
+    finally:
+        conn.close()
+
+    if not vec_results:
+        return fts_results[:k]
+
+    return _rrf_merge(fts_results, vec_results, k)
 
 
 # --- Re-ranking ---

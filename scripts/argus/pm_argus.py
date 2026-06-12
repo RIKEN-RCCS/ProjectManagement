@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import logging
 import os
 import re
@@ -785,6 +786,186 @@ _RISK_PROMPT = """\
 """
 
 
+# =========================================================================== #
+#  リスク分析: マルチWorker + Orchestrator
+# =========================================================================== #
+
+_RISK_WORKER_PM_PROMPT = """\
+あなたは富岳NEXTプロジェクトのPMデータ分析エージェントです。
+以下の pm.db の定量データを分析し、プロジェクトの**スケジュール・リソース・プロセス**観点の
+リスクを3〜5件、優先度順に列挙してください。
+
+各項目の形式:
+- **[高/中/低]** リスクタイトル
+  - 状況: （現状の説明）
+  - 根拠: （マイルストーン名・アイテムID・件数・担当者名を必ず含める）
+
+{stats_section}
+"""
+
+_RISK_WORKER_CONVERSATION_PROMPT = """\
+あなたは富岳NEXTプロジェクトのSlack会話分析エージェントです。
+以下の Slack メッセージを分析し、**未解決の議論・対立・認識齟齬・停滞**を
+リスクとして3〜5件、優先度順に列挙してください。
+
+各項目の形式:
+- **[高/中/低]** リスクタイトル
+  - 状況: （現状の説明）
+  - 根拠: （メッセージ内容・チャンネル・発言者を引用）
+
+{conversation_section}
+"""
+
+_RISK_WORKER_MINUTES_PROMPT = """\
+あなたは富岳NEXTプロジェクトの議事録分析エージェントです。
+以下の議事録を分析し、**決定の反転・未対応事項・認識のズレ**を
+リスクとして3〜5件、優先度順に列挙してください。
+
+各項目の形式:
+- **[高/中/低]** リスクタイトル
+  - 状況: （現状の説明）
+  - 根拠: （会議名・発言内容を引用）
+
+{minutes_section}
+"""
+
+_RISK_WORKER_KNOWLEDGE_PROMPT = """\
+あなたは富岳NEXTプロジェクトのナレッジ一貫性チェックエージェントです。
+以下の確定ナレッジを分析し、**ナレッジ間の矛盾・陳腐化した前提・欠落している情報**を
+リスクとして3〜5件、優先度順に列挙してください。
+
+各項目の形式:
+- **[高/中/低]** リスクタイトル
+  - 状況: （現状の説明）
+  - 根拠: （KN-XXXX 形式で引用）
+
+{knowledge_section}
+"""
+
+_RISK_ORCHESTRATOR_PROMPT = """\
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
+以下の 4 つの視点から提出されたリスク分析結果を統合し、重複を除去し、
+優先順位を付けて最終的なリスク報告を生成してください。
+
+各リスクの形式:
+- **[高/中/低]** リスクタイトル
+  - 状況: （現状の説明）
+  - 根拠: （具体的なデータの引用）
+  - 推奨対応: （今すぐやるべき対応）
+
+## プロジェクト文脈
+
+{context}
+
+## フォーカス指定
+
+{focus_section}
+
+## Worker A — PMデータからのリスク分析
+
+{worker_pm}
+
+## Worker B — Slack会話からのリスク分析
+
+{worker_conversation}
+
+## Worker C — 議事録からのリスク分析
+
+{worker_minutes}
+
+## Worker D — ナレッジ一貫性チェック
+
+{worker_knowledge}
+
+---
+
+上記4視点の分析結果を統合し、重複しているリスクは1つにまとめ、
+優先順位を付けて最終的なリスク報告を出力してください。
+各リスクには根拠と推奨対応を必ず含めてください。
+"""
+
+
+# =========================================================================== #
+#  ブリーフィング: マルチWorker + Orchestrator
+# =========================================================================== #
+
+_BRIEF_WORKER_PM_PROMPT = """\
+あなたは富岳NEXTプロジェクトのPMデータ分析エージェントです。
+以下の pm.db の定量データを分析し、**プロジェクトとして今日対応すべきアクション候補**を
+3〜5件、優先度順に列挙してください。
+
+各項目には具体的な根拠（マイルストーン名・アイテムID・担当者名・期限）を必ず含めてください。
+
+{stats_section}
+"""
+
+_BRIEF_WORKER_CONVERSATION_PROMPT = """\
+あなたは富岳NEXTプロジェクトのSlack会話分析エージェントです。
+以下の Slack メッセージを分析し、**プロジェクトとして今日対応すべきアクション候補**を
+3〜5件、優先度順に列挙してください。
+
+各項目には具体的な根拠（チャンネル名・発言者・メッセージ内容の引用）を必ず含めてください。
+
+{conversation_section}
+"""
+
+_BRIEF_WORKER_MINUTES_PROMPT = """\
+あなたは富岳NEXTプロジェクトの議事録分析エージェントです。
+以下の議事録を分析し、**プロジェクトとして今日対応すべきアクション候補**を
+3〜5件、優先度順に列挙してください。
+
+各項目には具体的な根拠（会議名・決定事項・アクションアイテムの引用）を必ず含めてください。
+
+{minutes_section}
+"""
+
+_BRIEF_ORCHESTRATOR_PROMPT = """\
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
+以下の 3 つの視点から提出されたアクション候補を統合し、重複を除去し、
+優先順位を付けて**最大5件**のブリーフィングを生成してください。
+
+各項目の形式:
+- **[優先度: 高/中/低]** タイトル
+  - 状況: （プロジェクト全体での現状の簡潔な説明）
+  - 次の一手: （誰が何を確認/決定/依頼すべきかを含む具体的なアクション）
+  - 根拠: （データ上の根拠: マイルストーン名・アイテムID・担当者名・期限など）
+
+## プロジェクト文脈
+
+{context}
+
+## 確定済みナレッジ（蒸留 / 上書き未済）
+
+推奨アクションが既存の意思決定 / 制約と整合しているかを必ず照合し、
+参照したレコードは `KN-XXXX` 形式で引用してください。
+空の場合は無視して構いません。
+
+{knowledge_summary}
+
+## フォーカス指定
+
+{focus_section}
+
+## Worker A — PMデータからのアクション候補
+
+{worker_pm}
+
+## Worker B — Slack会話からのアクション候補
+
+{worker_conversation}
+
+## Worker C — 議事録からのアクション候補
+
+{worker_minutes}
+
+---
+
+上記3視点の分析結果を統合し、重複しているアクションは1つにまとめ、
+優先順位を付けて**最大5件**のブリーフィングを出力してください。
+各アクションには状況・次の一手・根拠を必ず含めてください。
+"""
+
+
 def _fmt_closed_items(conns, since_date: str, limit: int = 20) -> str:
     if not isinstance(conns, list):
         conns = [conns]
@@ -1012,6 +1193,17 @@ def build_risk_prompt(
 # Slack コマンドのバックグラウンド処理
 # --------------------------------------------------------------------------- #
 
+def _fetch_single_pm_stats(p: Path, today: str, since_date: str, no_encrypt: bool) -> dict:
+    """単一 pm.db から stats を取得（ThreadPoolExecutor 用）。
+    コネクションはスレッド内で閉じて結果だけ返す。"""
+    conn = open_pm_db(p, no_encrypt=no_encrypt)
+    try:
+        stats = fetch_pm_stats(conn, today, since=since_date)
+    finally:
+        conn.close()
+    return stats
+
+
 def _collect_all_data(
     today: str,
     since_date: str,
@@ -1041,38 +1233,73 @@ def _collect_all_data(
     channel_ids = _load_channel_ids(index_name)
     minutes_names = _load_minutes_names(index_name)
     channel_names = _build_channel_name_map()
+
+    # 並列データ収集
     message_parts = []
-    for ch_id in channel_ids:
-        raw = fetch_raw_messages(ch_id, since_date, data_dir=data_dir, no_encrypt=no_encrypt)
-        if raw:
-            label = f"{ch_id} (#{channel_names[ch_id]})" if ch_id in channel_names else ch_id
-            message_parts.append(f"## チャンネル: {label}\n\n{raw}")
-    messages = "\n\n---\n\n".join(message_parts)
+    minutes = ""
+    stats = {}
+    knowledge_summary = ""
 
-    minutes = fetch_recent_minutes(
-        since_date, minutes_dir=minutes_dir, no_encrypt=no_encrypt,
-        minutes_names=minutes_names or None,
-    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        # Slack messages: チャンネルごと並列 fetch
+        msg_futs = {}
+        for ch_id in channel_ids:
+            f = pool.submit(fetch_raw_messages, ch_id, since_date,
+                            data_dir=data_dir, no_encrypt=no_encrypt)
+            msg_futs[f] = ch_id
 
-    conns = []
-    stats_list = []
-    for p in pm_db_paths:
+        # Minutes: 全 kind を並列 fetch
+        min_fut = pool.submit(fetch_recent_minutes, since_date,
+                              minutes_dir=minutes_dir, no_encrypt=no_encrypt,
+                              minutes_names=minutes_names or None)
+
+        # pm.db stats: 全 pm.db を並列 fetch
+        pm_futs = []
+        for p in pm_db_paths:
+            f = pool.submit(_fetch_single_pm_stats, p, today, since_date, no_encrypt)
+            pm_futs.append(f)
+
+        # knowledge: 独立 fetch
+        kn_fut = pool.submit(fetch_knowledge_summary, no_encrypt=no_encrypt, data_dir=data_dir)
+
+        # Slack 結果を集約
+        for f in concurrent.futures.as_completed(msg_futs):
+            ch_id = msg_futs[f]
+            try:
+                raw = f.result()
+                if raw:
+                    label = f"{ch_id} (#{channel_names[ch_id]})" if ch_id in channel_names else ch_id
+                    message_parts.append(f"## チャンネル: {label}\n\n{raw}")
+            except Exception:
+                pass
+        messages = "\n\n---\n\n".join(message_parts)
+
+        # Minutes 結果
         try:
-            conn = open_pm_db(p, no_encrypt=no_encrypt)
-            conns.append(conn)
-            stats_list.append(fetch_pm_stats(conn, today, since=since_date))
-        except Exception as e:
-            print(f"[WARN] pm.db 接続スキップ ({p}): {e}", file=sys.stderr)
+            minutes = min_fut.result()
+        except Exception:
+            minutes = ""
 
-    stats = merge_pm_stats(stats_list)
-    knowledge_summary = fetch_knowledge_summary(
-        no_encrypt=no_encrypt, data_dir=data_dir,
-    )
-    return messages, minutes, stats, conns, knowledge_summary
+        # pm.db stats 結果
+        stats_list = []
+        for f in pm_futs:
+            try:
+                stats_list.append(f.result())
+            except Exception:
+                pass
+        stats = merge_pm_stats(stats_list)
+
+        # knowledge 結果
+        try:
+            knowledge_summary = kn_fut.result()
+        except Exception:
+            knowledge_summary = ""
+
+    return messages, minutes, stats, knowledge_summary
 
 
 def _run_brief(respond, command, *, no_encrypt: bool = False):
-    """Slack /argus-brief のバックグラウンド処理"""
+    """Slack /argus-brief のバックグラウンド処理 — マルチWorker + Orchestrator 版"""
     import logging
     logger = logging.getLogger("pm_argus")
     try:
@@ -1093,20 +1320,53 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         ])
         logger.info(f"[argus-brief] since={since_date}{focus_desc}")
 
+        # Phase 1: 並列データ収集
         context = load_claude_md_context()
-        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
-        for c in conns:
-            c.close()
 
-        prompt = build_brief_prompt(
-            messages, minutes, stats, context, today, days,
-            assignee=assignee, topic=topic, requester=requester,
-            knowledge_summary=knowledge_summary,
+        # Phase 2: 多視点 Worker の並列 LLM 呼び出し
+        logger.info("[argus-brief] Worker LLM 呼び出し（並列）")
+        s = stats.get("stats", {})
+        stats_section = _build_stats_section(stats, s, today)
+        conversation_section = messages or "（データなし）"
+        minutes_section = minutes or "（データなし）"
+
+        focus_lines = []
+        if assignee:
+            focus_lines.append(f"担当者フォーカス: {assignee}")
+        if topic:
+            focus_lines.append(f"話題フォーカス: {topic}")
+        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
+
+        worker_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            wfuts = {
+                pool.submit(_run_brief_worker, "pm", stats_section): "pm",
+                pool.submit(_run_brief_worker, "conversation", conversation_section): "conversation",
+                pool.submit(_run_brief_worker, "minutes", minutes_section): "minutes",
+            }
+            for f in concurrent.futures.as_completed(wfuts):
+                name = wfuts[f]
+                try:
+                    worker_results[name] = f.result()
+                except Exception as e:
+                    worker_results[name] = f"（{name} Worker エラー: {e}）"
+                    logger.warning(f"[argus-brief] Worker {name} 失敗: {e}")
+
+        # Phase 3: Orchestrator 統合
+        logger.info("[argus-brief] Orchestrator 統合")
+        orch_prompt = _BRIEF_ORCHESTRATOR_PROMPT.format(
+            context=context,
+            knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
+            focus_section=focus_section_str,
+            worker_pm=worker_results.get("pm", "（エラー）"),
+            worker_conversation=worker_results.get("conversation", "（エラー）"),
+            worker_minutes=worker_results.get("minutes", "（エラー）"),
         )
-        logger.info("[argus-brief] LLM 呼び出し中...")
-        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+
         header = f"*Argus ブリーフィング ({today})*"
         if assignee:
             header += f"  担当者フォーカス: {assignee}"
@@ -1117,7 +1377,6 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-brief] respond text={len(full_text)} chars, blocks={len(blocks)}")
         respond(blocks=blocks)
 
-        # 音声版 (mp3) を生成して実行者の DM にアップロード
         _post_argus_voice(
             command,
             kind="brief",
@@ -1142,6 +1401,44 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
                 }
             ],
         )
+
+
+def _build_stats_section(stats: dict, s: dict, today: str) -> str:
+    """pm.db stats を Markdown セクションに整形する（risk/brief 共通）。"""
+    return (
+        f"## pm.db 統計サマリー\n\n"
+        f"- オープンAI: {s.get('total_open', 0)}件 / 完了AI: {s.get('total_closed', 0)}件\n"
+        f"- 期限超過（open）: {s.get('overdue_count', 0)}件\n"
+        f"- 未確認決定事項: {s.get('unacknowledged_decisions', 0)}件\n\n"
+        f"## マイルストーン進捗\n\n"
+        f"{format_milestone_table(stats.get('milestones', []), today)}\n\n"
+        f"## 期限超過アクションアイテム\n\n"
+        f"{format_overdue_list(stats.get('overdue_items', []))}\n\n"
+        f"## 担当者別負荷\n\n"
+        f"{format_assignee_table(stats.get('assignee_workload', []))}\n\n"
+        f"## 週次トレンド（直近4週）\n\n"
+        f"{format_trends_table(stats.get('weekly_trends', []))}\n\n"
+        f"## 未確認決定事項\n\n"
+        f"{format_decisions_list(stats.get('unacknowledged_decisions', []))}"
+    )
+
+
+def _run_brief_worker(worker_type: str, data: str) -> str:
+    """ブリーフィング Worker を実行する（ThreadPoolExecutor 用）。"""
+    prompt_map = {
+        "pm": _BRIEF_WORKER_PM_PROMPT,
+        "conversation": _BRIEF_WORKER_CONVERSATION_PROMPT,
+        "minutes": _BRIEF_WORKER_MINUTES_PROMPT,
+    }
+    tmpl = prompt_map.get(worker_type)
+    if not tmpl:
+        return f"（不明な Worker: {worker_type}）"
+    prompt = tmpl.format(
+        stats_section=data,
+        conversation_section=data,
+        minutes_section=data,
+    )
+    return call_argus_llm(prompt, system="あなたはAIエージェントです。与えられたデータからアクション候補を抽出してください。", max_tokens=4096)
 
 
 def _run_draft(respond, command, *, no_encrypt: bool = False):
@@ -1172,15 +1469,12 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-draft] purpose={purpose} subject={subject} index={index_name}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
         prompt = build_draft_prompt(purpose, subject, messages, stats, context, conns=conns, today=today)
-        for c in conns:
-            c.close()
-
-        logger.info("[argus-draft] RiVault 呼び出し中...")
+        logger.info("[argus-draft] LLM 呼び出し中...")
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         full_text = _to_slack_mrkdwn(f"*Argus 草案 ({purpose}: {subject})*\n\n{result}")
         blocks = _split_mrkdwn_to_blocks(full_text)
@@ -1203,7 +1497,7 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
 
 
 def _run_risk(respond, command, *, no_encrypt: bool = False):
-    """Slack /argus-risk のバックグラウンド処理"""
+    """Slack /argus-risk のバックグラウンド処理 — マルチWorker + Orchestrator 版"""
     import logging
     logger = logging.getLogger("pm_argus")
     try:
@@ -1222,20 +1516,60 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         ])
         logger.info(f"[argus-risk] since={since_date}{focus_desc}")
 
+        # Phase 1: 並列データ収集
+        logger.info("[argus-risk] データ収集（並列）")
         context = load_claude_md_context()
-        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
-        for c in conns:
-            c.close()
 
-        prompt = build_risk_prompt(
-            messages, minutes, stats, context, today, days,
-            assignee=assignee, topic=topic,
-            knowledge_summary=knowledge_summary,
+        # Phase 2: 多視点 Worker の並列 LLM 呼び出し
+        logger.info("[argus-risk] Worker LLM 呼び出し（並列）")
+
+        # 各 Worker の入力データを構築
+        s = stats.get("stats", {})
+        stats_section = _build_stats_section(stats, s, today)
+        conversation_section = messages or "（データなし）"
+        minutes_section = minutes or "（データなし）"
+        knowledge_section = knowledge_summary or "（蒸留ナレッジなし）"
+
+        # フォーカス指定
+        focus_lines = []
+        if assignee:
+            focus_lines.append(f"担当者フォーカス: {assignee}")
+        if topic:
+            focus_lines.append(f"話題フォーカス: {topic}")
+        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
+
+        # Worker を並列実行
+        worker_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            wfuts = {
+                pool.submit(_run_risk_worker, "pm", stats_section): "pm",
+                pool.submit(_run_risk_worker, "conversation", conversation_section): "conversation",
+                pool.submit(_run_risk_worker, "minutes", minutes_section): "minutes",
+                pool.submit(_run_risk_worker, "knowledge", knowledge_section): "knowledge",
+            }
+            for f in concurrent.futures.as_completed(wfuts):
+                name = wfuts[f]
+                try:
+                    worker_results[name] = f.result()
+                except Exception as e:
+                    worker_results[name] = f"（{name} Worker エラー: {e}）"
+                    logger.warning(f"[argus-risk] Worker {name} 失敗: {e}")
+
+        # Phase 3: Orchestrator 統合
+        logger.info("[argus-risk] Orchestrator 統合")
+        orch_prompt = _RISK_ORCHESTRATOR_PROMPT.format(
+            context=context,
+            focus_section=focus_section_str,
+            worker_pm=worker_results.get("pm", "（エラー）"),
+            worker_conversation=worker_results.get("conversation", "（エラー）"),
+            worker_minutes=worker_results.get("minutes", "（エラー）"),
+            worker_knowledge=worker_results.get("knowledge", "（エラー）"),
         )
-        logger.info("[argus-risk] LLM 呼び出し中...")
-        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+
         header = f"*Argus リスク分析 ({today})*"
         if assignee:
             header += f"  担当者フォーカス: {assignee}"
@@ -1246,7 +1580,6 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-risk] respond text={len(full_text)} chars, blocks={len(blocks)}")
         respond(blocks=blocks)
 
-        # 音声版 (mp3) を生成して実行者の DM にアップロード
         _post_argus_voice(
             command,
             kind="risk",
@@ -1256,7 +1589,6 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
             title=f"Argus リスク分析 (音声版) {today}",
             enable_env="ARGUS_RISK_VOICE",
         )
-
         logger.info("[argus-risk] 完了")
     except Exception as e:
         logger.exception("[argus-risk] エラー")
@@ -1271,6 +1603,28 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
                 }
             ],
         )
+
+
+def _run_risk_worker(worker_type: str, data: str) -> str:
+    """リスク Worker を実行する（ThreadPoolExecutor 用）。
+    worker_type: 'pm' / 'conversation' / 'minutes' / 'knowledge'
+    """
+    prompt_map = {
+        "pm": _RISK_WORKER_PM_PROMPT,
+        "conversation": _RISK_WORKER_CONVERSATION_PROMPT,
+        "minutes": _RISK_WORKER_MINUTES_PROMPT,
+        "knowledge": _RISK_WORKER_KNOWLEDGE_PROMPT,
+    }
+    tmpl = prompt_map.get(worker_type)
+    if not tmpl:
+        return f"（不明な Worker: {worker_type}）"
+    prompt = tmpl.format(
+        stats_section=data,
+        conversation_section=data,
+        minutes_section=data,
+        knowledge_section=data,
+    )
+    return call_argus_llm(prompt, system="あなたはAIエージェントです。与えられたデータからリスクを分析してください。", max_tokens=4096)
 
 
 def _build_channel_name_map() -> dict[str, str]:
@@ -1654,13 +2008,10 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-today] requester={requester} user_id={user_id} index={index_name}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
-        for c in conns:
-            c.close()
-
-        # 3. ユーザーIDマップを構築（テキスト内のID展開用）
+                # 3. ユーザーIDマップを構築（テキスト内のID展開用）
         # 優先順位: argus_config.yaml の user_names: > slack.db の messages.user_name
         import re
         from cli_utils import resolve_user_names
@@ -2077,19 +2428,14 @@ def main() -> None:
     print(f"[INFO] since: {since_date} / today: {today} / "
           f"index: {args.index_name or '(default)'}", file=sys.stderr)
 
-    messages, minutes, stats, conns, knowledge_summary = _collect_all_data(
+    messages, minutes, stats, knowledge_summary = _collect_all_data(
         today, since_date,
         no_encrypt=args.no_encrypt,
         pm_db_paths=pm_db_paths_cli,
         index_name=args.index_name,
     )
 
-    def _close_conns():
-        for c in conns:
-            c.close()
-
     if args.brief_to_canvas:
-        _close_conns()
         prompt = build_brief_prompt(
             messages, minutes, stats, context, today, days,
             assignee=args.assignee, topic=args.topic, requester=requester,
