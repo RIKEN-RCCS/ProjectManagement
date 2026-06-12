@@ -7,7 +7,20 @@
 
 ---
 
-## 2026-06-08 スライド OCR の RiVault 向け 400 エラー修正
+## 2026-06-11 Admin Web Dashboard 実装
+
+**背景**: 管理者が SSH + コマンド実行で行っていた全操作（録音処理→議事録生成、データ取り込み、ナレッジ蒸留、レポート生成、サービス管理）をブラウザから実行できるようにする必要があった。
+
+**決定**: 既存の `pm_api.py` (FastAPI) + `scripts/static/` Web UI を拡張し、19 の `/api/admin/*` エンドポイント + 7 ページの SPA 管理ダッシュボードを追加。新規 npm/Node/Python 依存ゼロ。ジョブキューは SQLite 永続化 + スレッド実行（FastAPI 同期エンドポイント対応）。
+
+**影響**: 
+- PM_DB Editor の既存機能（AG Grid）は完全維持
+- `data/admin_jobs.db` が新規作成される（ジョブ履歴の永続化）
+- `scripts/web_admin.py` 新設、`web_admin.AdminJobQueue` で全管理操作を非同期実行
+
+**副次修正**:
+- `pm_ingest.py` に `--force` 共通オプション追加、`IngestContext.force` で全プラグイン統一
+- 全 11 シェルスクリプトの Python venv パスを `uname -m` 自動判定に統一（aarch64/x86_64 両対応）
 
 **背景**: `ARGUS_PREFER_RIVAULT=1` 時、`slide_ocr.py` が `RIVAULT_URL` を base_url に選び、
 `_ocr_image()` が `RIVAULT_MODEL`（= `deepseek-ai/DeepSeek-V4-Flash`、テキスト専用）でリクエストして
