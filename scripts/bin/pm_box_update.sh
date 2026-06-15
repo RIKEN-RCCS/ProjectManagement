@@ -23,6 +23,9 @@
 
 set -euo pipefail
 
+# box CLI の PATH を通す（cron 環境では .bashrc がロードされないため）
+export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
+
 . ~/.secrets/slack_tokens.sh
 
 ARCH=$(uname -m)
