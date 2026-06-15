@@ -630,6 +630,8 @@ def call_rivault(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    # LiteLLM が context_management パラメータを自動付与して vLLM がエラーになるのを防止
+    payload["context_management"] = False
     # モデル別の thinking 制御
     # - GLM-4.7-Flash: thinking.type=disabled / enable_thinking=False で無効化可能
     # - DeepSeek-V4-Flash: 同じく enable_thinking=False で Non-think モード。

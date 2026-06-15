@@ -55,6 +55,8 @@ WHISPER_VAD="$SCRIPT_DIR/recording/whisper_vad.py"
 PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
 PM_INGEST="$SCRIPT_DIR/ingest/pm_ingest.py"
 GENERATE_MINUTES_LOCAL="$SCRIPT_DIR/recording/generate_minutes_local.py"
+PM_MINUTES_CATALOG="$SCRIPT_DIR/pm_minutes_catalog.py"
+PM_MINUTES_PUBLISH="$SCRIPT_DIR/pm_minutes_publish.py"
 
 # --------------------------------------------------------------------------- #
 # 引数パース
@@ -403,6 +405,44 @@ EOF
   if [[ $? -eq 0 ]]; then
     rm -f "$BASENAME.md" "$MINUTES_MD"
     echo "[INFO] 文字起こし・議事録ファイルを議事録DB・pm.db に保存し削除しました"
+
+    # -------------------------------------------------------------------- #
+    # Step 4: Box 議事録アップロード + Canvas 目録更新（設定ありの場合のみ）
+    # -------------------------------------------------------------------- #
+    MEETING_CFG=$(python3 -c "
+import sys, yaml
+from pathlib import Path
+root = Path('$REPO_ROOT')
+cfg_path = root / 'data' / 'argus_config.yaml'
+if not cfg_path.exists():
+    print('0 0')
+    sys.exit(0)
+cfg = yaml.safe_load(cfg_path.read_text())
+m = (cfg.get('meetings') or {}).get('$MEETING_NAME', {})
+print(f\"{1 if m.get('box_folder_id') else 0} {1 if m.get('catalog_canvas_id') else 0}\")
+" 2>/dev/null || echo "0 0")
+    HAS_BOX=$(echo "$MEETING_CFG" | cut -d' ' -f1)
+    HAS_CANVAS=$(echo "$MEETING_CFG" | cut -d' ' -f2)
+    CATALOG_OPTS=""
+    if [[ "$HAS_BOX" == "1" ]]; then
+      CATALOG_OPTS="--upload"
+      echo "[INFO] Box 議事録アップロード: $MEETING_NAME"
+    else
+      echo "[SKIP] Box 議事録アップロード: $MEETING_NAME に box_folder_id 未設定"
+    fi
+    if [[ "$HAS_CANVAS" == "1" ]]; then
+      CATALOG_OPTS="$CATALOG_OPTS --catalog"
+      echo "[INFO] Canvas 目録更新: $MEETING_NAME"
+    else
+      echo "[SKIP] Canvas 目録更新: $MEETING_NAME に catalog_canvas_id 未設定"
+    fi
+    if [[ -n "$CATALOG_OPTS" ]]; then
+      echo "[INFO] pm_minutes_catalog.py 実行中..."
+      "$PYTHON3" "$PM_MINUTES_CATALOG" $CATALOG_OPTS --meeting-name "$MEETING_NAME" 2>&1 | tail -3
+    fi
+    # Step 5: Box XLSX 更新
+    echo "[INFO] Box XLSX 更新中..."
+    "$PYTHON3" "$PM_MINUTES_PUBLISH" --xlsx-only 2>&1 | tail -3 || echo "[WARN] Box XLSX 更新失敗"
   else
     echo "[WARN] pm.db への転記に失敗しました。ファイルは保持されています"
   fi

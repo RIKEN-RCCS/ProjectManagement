@@ -116,10 +116,11 @@ RULES:
 CRITICAL: "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in output.
 {vtt_speaker_instructions}
 ## 決定事項 rules:
-- **Decisions = judgments by decision-makers ONLY (3-7 items max)**. A decision is a choice among alternatives that changes the project's direction, resources, or commitments.
+- **Decisions = judgments by decision-makers ONLY (2-5 items max, preferably 3-4)**. A decision is a choice among alternatives that changes the project's direction, resources, or commitments.
 - Include ONLY: policy/strategy decisions, resource allocation decisions, schedule/scope changes, agreements with external parties.
 - Ask yourself: "Would this item appear in a formal board-level summary?" If not, omit it.
-- Definitely omit: routine procedural confirmations ("資料を配布する", "Slackで共有する", "アジェンダを反映する", "議事録を作成する"), minor operational steps, restatements of deadlines that are already obvious from context, information sharing ("〜が判明した"), and meeting scheduling ("次回は〇月〇日に開催").
+- **CRITICAL — Never include: status updates, information sharing, announcements, mere acknowledgements, progress reports, or findings from investigations.** These are NOT decisions. Even if someone says "〇〇が判明しました" or "〇〇について報告します", the discovery itself is not a decision.
+- Definitely omit: routine procedural confirmations ("資料を配布する", "Slackで共有する", "アジェンダを反映する", "議事録を作成する"), minor operational steps, restatements of deadlines, information sharing ("〜が判明した"), and meeting scheduling ("次回は〇月〇日に開催").
 - Do NOT restate action items as decisions. If someone is assigned a task, that is an action item, not a decision.
 - Markers for explicit agreement: 〜で進める / 〜に決定 / 〜することが合意 / 〜することになった / 〜が決定した
 - Vary the ending naturally in Japanese (e.g. 〜することになった / 〜と合意した / 〜する方針となった / 〜をキャンセルした). Do NOT end every item with 〜が決定された.
@@ -366,6 +367,7 @@ CONSENSUS_DECISIONS_TEMPLATE = """\
 You are merging {n_drafts} independent decision lists from the same meeting into a canonical list.
 
 Rules:
+- **DESIGN PRINCIPLE**: Decisions = choices that change project direction/resources/commitments. Information sharing, status updates, and findings ("〜が判明した") are NOT decisions.
 - Keep ONLY decisions supported by {min_vote} or more independent drafts.
 - A decision is the same across drafts if it refers to the same subject and outcome,
   even if the wording differs. Merge phrasing variants into one entry.
