@@ -135,45 +135,55 @@ def main():
     parser = argparse.ArgumentParser(
         description="Publish minutes edits to pm.db and Box XLSX",
     )
-    parser.add_argument("--meeting-id", required=True)
-    parser.add_argument("--kind", required=True)
-    parser.add_argument("--held-at", required=True)
+    parser.add_argument("--meeting-id", default=None)
+    parser.add_argument("--kind", default=None)
+    parser.add_argument("--held-at", default=None)
     parser.add_argument("--file-path", default=None)
     parser.add_argument("--db", default=None)
     parser.add_argument("--config", default=None)
     parser.add_argument("--no-encrypt", action="store_true")
+    parser.add_argument("--xlsx-only", action="store_true",
+                        help="XLSX 更新のみ（minutes.db 同期スキップ）")
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else DEFAULT_PM_DB
     minutes_dir = db_path.parent / "minutes"
-    minutes_db_file = minutes_dir / f"{args.kind}.db"
     config_path = Path(args.config) if args.config else DEFAULT_CONFIG
 
     def log(msg: str) -> None:
         print(msg)
 
-    # ---- Stage 1: Sync minutes.db -> pm.db ---- #
-    log(f"[1/4] Syncing minutes.db -> pm.db: {args.meeting_id}")
+    if args.xlsx_only:
+        log("[xlsx-only] XLSX 更新のみ実行")
+        pm_conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
+    else:
+        if not args.meeting_id or not args.kind or not args.held_at:
+            log("  ERROR: --xlsx-only 未指定時は --meeting-id, --kind, --held-at が必須です")
+            sys.exit(1)
 
-    if not minutes_db_file.exists():
-        log(f"  ERROR: minutes DB not found: {minutes_db_file}")
-        sys.exit(1)
+        minutes_db_file = minutes_dir / f"{args.kind}.db"
+        if not minutes_db_file.exists():
+            log(f"  ERROR: minutes DB not found: {minutes_db_file}")
+            sys.exit(1)
 
-    pm_conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
-    minutes_conn = init_minutes_db(minutes_db_file, no_encrypt=args.no_encrypt)
+        # ---- Stage 1: Sync minutes.db -> pm.db ---- #
+        log(f"[1/4] Syncing minutes.db -> pm.db: {args.meeting_id}")
 
-    result = transfer_meeting(
-        pm_conn, minutes_conn,
-        args.meeting_id, args.held_at, args.kind, args.file_path,
-        force=True, dry_run=False, log=log,
-    )
-    log(f"  Sync result: {result}")
+        pm_conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
+        minutes_conn = init_minutes_db(minutes_db_file, no_encrypt=args.no_encrypt)
 
-    # ---- Stage 2: Update minutes Markdown on Box ---- #
-    log("[2/4] Updating minutes Markdown on Box")
-    _update_minutes_md_on_box(minutes_conn, args.meeting_id, args.held_at, args.kind, log)
+        result = transfer_meeting(
+            pm_conn, minutes_conn,
+            args.meeting_id, args.held_at, args.kind, args.file_path,
+            force=True, dry_run=False, log=log,
+        )
+        log(f"  Sync result: {result}")
 
-    minutes_conn.close()
+        # ---- Stage 2: Update minutes Markdown on Box ---- #
+        log("[2/4] Updating minutes Markdown on Box")
+        _update_minutes_md_on_box(minutes_conn, args.meeting_id, args.held_at, args.kind, log)
+
+        minutes_conn.close()
 
     # ---- Stage 3: Rebuild XLSX from pm.db ---- #
     log("[3/4] Rebuilding XLSX from pm.db")

@@ -282,6 +282,12 @@ class AdminJobQueue:
                 cmd += ["--no-encrypt"]
             return cmd
 
+        if kind == "xlsx-publish":
+            cmd = [py, str(self.scripts_dir / "pm_minutes_publish.py"), "--xlsx-only"]
+            if params.get("no_encrypt"):
+                cmd += ["--no-encrypt"]
+            return cmd
+
         raise ValueError(f"Unknown job kind: {kind}")
 
     # ---- Job execution ---- #

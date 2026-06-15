@@ -168,8 +168,10 @@ def save_action_items(req: SaveRowsRequest):
     if _state["ai_df"] is None:
         return JSONResponse({"error": "データ未読込。先に一覧を取得してください"}, status_code=400)
     n, conflicts = do_save_action_items(_get_conn(), _state["ai_df"], req.rows)
-    # スナップショットを更新
     _state["ai_df"] = None
+    # 非同期で Box XLSX を更新
+    if n > 0:
+        _enqueue_xlsx_publish()
     return {"updated": n, "conflicts": conflicts}
 
 
@@ -213,6 +215,9 @@ def save_decisions(req: SaveRowsRequest):
         return JSONResponse({"error": "データ未読込。先に一覧を取得してください"}, status_code=400)
     n, conflicts = do_save_decisions(_get_conn(), _state["dec_df"], req.rows)
     _state["dec_df"] = None
+    # 非同期で Box XLSX を更新
+    if n > 0:
+        _enqueue_xlsx_publish()
     return {"updated": n, "conflicts": conflicts}
 
 
@@ -820,6 +825,17 @@ def admin_minutes_content_save(req: UpdateMinutesContentRequest):
 
     result["publish_job_id"] = publish_job_id
     return result
+
+
+def _enqueue_xlsx_publish() -> str | None:
+    """Box XLSX 更新ジョブを非同期でエンキューする。"""
+    try:
+        params = {"no_encrypt": _state.get("no_encrypt", False)}
+        job_id = _job_queue.enqueue("xlsx-publish", params)
+        _job_queue.start(job_id)
+        return job_id
+    except Exception:
+        return None
 
 
 class UpdateMinutesDecisionsRequest(BaseModel):

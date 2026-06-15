@@ -68,6 +68,7 @@ _QA_CONFIG_FILE_LEGACY = _DATA_DIR / "qa_config.yaml"
 
 _DEFAULT_SINCE_DAYS = 30
 _DRAFT_REPORT_SINCE_DAYS = 14
+_WORKER_MAX_CHARS = 8000  # Worker に渡す各セクションの最大文字数
 
 # --------------------------------------------------------------------------- #
 # /argus-transcribe ジョブ排他制御
@@ -1330,8 +1331,8 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         logger.info("[argus-brief] Worker LLM 呼び出し（並列）")
         s = stats.get("stats", {})
         stats_section = _build_stats_section(stats, s, today)
-        conversation_section = messages or "（データなし）"
-        minutes_section = minutes or "（データなし）"
+        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
+        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
 
         focus_lines = []
         if assignee:
@@ -1529,8 +1530,8 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         # 各 Worker の入力データを構築
         s = stats.get("stats", {})
         stats_section = _build_stats_section(stats, s, today)
-        conversation_section = messages or "（データなし）"
-        minutes_section = minutes or "（データなし）"
+        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
+        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
         knowledge_section = knowledge_summary or "（蒸留ナレッジなし）"
 
         # フォーカス指定
@@ -2436,19 +2437,47 @@ def main() -> None:
     )
 
     if args.brief_to_canvas:
-        prompt = build_brief_prompt(
-            messages, minutes, stats, context, today, days,
-            assignee=args.assignee, topic=args.topic, requester=requester,
-            knowledge_summary=knowledge_summary,
-        )
-        print("[INFO] LLM に問い合わせ中（ブリーフィング）...", file=sys.stderr)
-        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+        # マルチWorker + Orchestrator で生成
+        print("[INFO] 多視点 Worker でブリーフィング生成中...", file=sys.stderr)
+        s = stats.get("stats", {})
+        stats_section = _build_stats_section(stats, s, today)
+        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
+        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
+        focus_lines = []
+        if args.assignee:
+            focus_lines.append(f"担当者フォーカス: {args.assignee}")
+        if args.topic:
+            focus_lines.append(f"話題フォーカス: {args.topic}")
+        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
 
-        # タイトルを days == 0 の場合に変更
-        if days == 0:
-            canvas_content = f"# Argus 日次活動サマリー ({today})\n\n{result}\n\n_生成: {today} JST_"
-        else:
-            canvas_content = f"# Argus ブリーフィング ({today})\n\n{result}\n\n_生成: {today} JST_"
+        worker_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            wfuts = {
+                pool.submit(_run_brief_worker, "pm", stats_section): "pm",
+                pool.submit(_run_brief_worker, "conversation", conversation_section): "conversation",
+                pool.submit(_run_brief_worker, "minutes", minutes_section): "minutes",
+            }
+            for f in concurrent.futures.as_completed(wfuts):
+                name = wfuts[f]
+                try:
+                    worker_results[name] = f.result()
+                except Exception as e:
+                    worker_results[name] = f"（{name} Worker エラー: {e}）"
+                    print(f"[WARN] Worker {name} 失敗: {e}", file=sys.stderr)
+
+        orch_prompt = _BRIEF_ORCHESTRATOR_PROMPT.format(
+            context=context,
+            knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
+            focus_section=focus_section_str,
+            worker_pm=worker_results.get("pm", "（エラー）"),
+            worker_conversation=worker_results.get("conversation", "（エラー）"),
+            worker_minutes=worker_results.get("minutes", "（エラー）"),
+        )
+        print("[INFO] Orchestrator 統合中...", file=sys.stderr)
+        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+
+        title = "Argus 日次活動サマリー" if days == 0 else "Argus ブリーフィング"
+        canvas_content = f"# {title} ({today})\n\n{result}\n\n_生成: {today} JST_"
 
         print("\n" + "=" * 60)
         print(canvas_content)
@@ -2469,14 +2498,46 @@ def main() -> None:
         print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
 
     elif args.risk:
-        _close_conns()
-        prompt = build_risk_prompt(
-            messages, minutes, stats, context, today, days,
-            assignee=args.assignee, topic=args.topic,
-            knowledge_summary=knowledge_summary,
+        # マルチWorker + Orchestrator で生成
+        print("[INFO] 多視点 Worker でリスク分析生成中...", file=sys.stderr)
+        s = stats.get("stats", {})
+        stats_section = _build_stats_section(stats, s, today)
+        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
+        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
+        knowledge_section = knowledge_summary or "（蒸留ナレッジなし）"
+        focus_lines = []
+        if args.assignee:
+            focus_lines.append(f"担当者フォーカス: {args.assignee}")
+        if args.topic:
+            focus_lines.append(f"話題フォーカス: {args.topic}")
+        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
+
+        worker_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            wfuts = {
+                pool.submit(_run_risk_worker, "pm", stats_section): "pm",
+                pool.submit(_run_risk_worker, "conversation", conversation_section): "conversation",
+                pool.submit(_run_risk_worker, "minutes", minutes_section): "minutes",
+                pool.submit(_run_risk_worker, "knowledge", knowledge_section): "knowledge",
+            }
+            for f in concurrent.futures.as_completed(wfuts):
+                name = wfuts[f]
+                try:
+                    worker_results[name] = f.result()
+                except Exception as e:
+                    worker_results[name] = f"（{name} Worker エラー: {e}）"
+                    print(f"[WARN] Worker {name} 失敗: {e}", file=sys.stderr)
+
+        orch_prompt = _RISK_ORCHESTRATOR_PROMPT.format(
+            context=context,
+            focus_section=focus_section_str,
+            worker_pm=worker_results.get("pm", "（エラー）"),
+            worker_conversation=worker_results.get("conversation", "（エラー）"),
+            worker_minutes=worker_results.get("minutes", "（エラー）"),
+            worker_knowledge=worker_results.get("knowledge", "（エラー）"),
         )
-        print("[INFO] LLM に問い合わせ中（リスク分析）...", file=sys.stderr)
-        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+        print("[INFO] Orchestrator 統合中...", file=sys.stderr)
+        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         canvas_content = f"# Argus リスク分析 ({today})\n\n{result}\n\n_生成: {today} JST_"
         print("\n" + "=" * 60)
         print(canvas_content)
@@ -2497,7 +2558,6 @@ def main() -> None:
         print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
 
     else:
-        _close_conns()
         parser.print_help()
 
 
