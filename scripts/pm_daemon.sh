@@ -35,7 +35,7 @@ LOG_DIR="$REPO_ROOT/logs"
 declare -A SERVICES=(
     [qa]="argus/pm_qa_server.py|pm_qa_server|1|1|1|"
     [web]="pm_api.py|pm_web|0|0|0|--port ${PM_WEB_PORT:-8501}"
-    [fish]="pm_fish_tts_server.py|pm_fish_tts|0|0|1|"
+    # fish は別サーバー運用に移行したため削除（2026-06-11）
 )
 
 # --------------------------------------------------------------------------- #
