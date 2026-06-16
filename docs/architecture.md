@@ -33,8 +33,7 @@
 │  enrich_items.py: pm.db に判断者・根拠・関連IDを補完                      │
 │  pm_embed.py:                                                           │
 │     FTS5 (trigram + 形態素) → qa_index.db の chunks + fts              │
-│     embedding (bge-m3)  → qa_index.db の chunk_embeddings  ← 新規      │
-│  pm_box_distill.py: knowledge.db へのナレッジ蒸留 (Stage 1+2)            │
+│     embedding (bge-m3)  → qa_index.db の chunk_embeddings              │
 └──────────────────────┬──────────────────────────────────────────────────┘
                        │
                        ▼
@@ -45,22 +44,24 @@
 │                                                                         │
 │  /argus-brief                                                           │
 │    ├─ [並列Worker] PMデータ / Slack会話 / 議事録                          │
+│    │  + 背景知識: pm.db.decisions の rationale 付き上位 30 件             │
 │    └─ [Orchestrator] 3視点を統合 → 5件のアクション                        │
 │                                                                         │
 │  /argus-risk                                                            │
-│    ├─ [並列Worker] PMデータ / Slack会話 / 議事録 / ナレッジ               │
-│    └─ [Orchestrator] 4視点を統合 → リスク一覧                            │
+│    ├─ [並列Worker] PMデータ / Slack会話 / 議事録                          │
+│    │  + 背景知識: pm.db.decisions の rationale 付き上位 30 件             │
+│    └─ [Orchestrator] 3視点を統合 → リスク一覧                            │
 │                                                                         │
 │  /argus-investigate                                                     │
 │    ├─ マルチステップ agent ループ                                        │
 │    ├─ 各ステップ内の tool_call を並列実行 (ThreadPool)                     │
-│    ├─ ツール: search_text / search_knowledge / search_decisions /       │
-│    │          get_slack_messages / get_milestone_progress / ...          │
+│    ├─ ツール: search_text / search_decisions / get_slack_messages /     │
+│    │          get_milestone_progress / get_unacknowledged_decisions ... │
 │    └─ ハイブリッド検索 (FTS5 RRF + embedding cosine similarity)          │
 │                                                                         │
-│  /argus-today / /argus-draft / /argus-transcribe / /argus-knowledge     │
+│  /argus-today / /argus-draft / /argus-transcribe                       │
 │                                                                         │
-│  pm_argus_patrol.py: 自律巡回 (30分間隔、矛盾検知・期限超過検出)          │
+│  pm_argus_patrol.py: 自律巡回 (30分間隔、期限超過・停滞検出)              │
 └──────────────────────┬──────────────────────────────────────────────────┘
                        │
           ┌────────────┼────────────┬────────────┐
@@ -75,7 +76,7 @@
 
 ---
 
-## 4層構造
+## 3層構造
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -84,17 +85,17 @@
 ├──────────────────────────────────────────────────────────────────┤
 │ ボトムアップ層: アクションアイテム・決定事項                         │
 │   Slack・議事録から LLM が自動抽出 → pm.db                           │
+│   decisions は rationale 付きで保存され、brief/risk の              │
+│   背景知識ソースとして使われる                                       │
 ├──────────────────────────────────────────────────────────────────┤
 │ エンリッチメント層: 過去ナレッジによる文脈補完                       │
 │   FTS5 検索 + embedding 類似度 + 構造化データで                      │
 │   判断者・根拠・関連IDを付与                                          │
-├──────────────────────────────────────────────────────────────────┤
-│ ナレッジ層: BOX 本文・議事録・決定事項を意思決定単位に蒸留           │
-│   → knowledge.db (プロジェクト全体共通)                              │
-│     brief/risk のプロンプトに常時同梱できる短文サマリと、            │
-│     investigate でフル展開できる根拠・代替案・制約を保持             │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+旧「ナレッジ層 (knowledge.db)」は 2026-06-16 廃止（経緯は LOG.md）。
+背景知識は pm.db.decisions の rationale で代替。
 
 **LLM と人間の役割分担**:
 
@@ -220,29 +221,6 @@ qa_index.db
 └── index_state     (差分更新管理)
 ```
 
-### ナレッジ蒸留 (pm_box_distill.py)
-
-```
-入力: box_docs.db / minutes/*.db / pm.db.decisions
-  │
-  ├─ Stage 1: gemma4 で意思決定単位に抽出
-  │  採否ポリシーでノイズ除外
-  │
-  └─ Stage 2: bge-m3 embedding → 既存ナレッジと類似度比較
-       ≥ 0.92 → 自動 merge
-       ≥ 0.85 → LLM 審査
-       < 0.85 → LLM keep/drop 判定
-  │
-  ▼
-knowledge.db
-├── knowledge
-├── knowledge_sources
-├── knowledge_relations
-├── knowledge_audit
-├── distill_state
-└── knowledge_embeddings
-```
-
 ---
 
 ## Pass 3: 検索・分析・生成（Argus AI）
@@ -268,8 +246,8 @@ pm_qa_server.py (Socket Mode デーモン)
   │   ├─ Worker A: PMデータ
   │   ├─ Worker B: Slack会話
   │   ├─ Worker C: 議事録
-  │   ├─ Worker D: ナレッジ一貫性
   │   └─ Orchestrator: 統合 → リスク報告
+  │     (背景知識として pm.db.decisions の rationale 付き上位を同梱)
   │
   ├── /argus-investigate ──→ マルチステップ Agent
   │   ├─ ツール並列実行 (ThreadPoolExecutor)
@@ -280,7 +258,6 @@ pm_qa_server.py (Socket Mode デーモン)
   ├── /argus-today      ──→ 日次サマリー（メンション抽出付き）
   ├── /argus-draft      ──→ アジェンダ/レポート草案
   ├── /argus-transcribe ──→ 録音 → 議事録パイプライン
-  ├── /argus-knowledge  ──→ ナレッジ編集
   └── /argus-narrate    ──→ TTS ナレーション (PPTX/PDF → mp4)
 ```
 
@@ -342,7 +319,7 @@ pm_qa_server.py (Socket Mode デーモン)
 | Decisions (ag-Grid) | 決定事項一覧・編集・保存 | pm.db → (保存時) Box XLSX 自動更新 |
 | Recording | 録音ファイルアップロード → 議事録パイプライン | processing/ → minutes/*.db |
 | Ingest | Slack/minutes/goals 取り込み実行 | AdminJobQueue → pm_ingest.py |
-| Knowledge | Distill / Embed 実行 | AdminJobQueue → pm_box_distill.py |
+| Knowledge | Embed (FTS5 索引再構築) 実行 | AdminJobQueue → pm_embed.py |
 | Reports | 週次レポート / 洞察 / XLSX 生成 | AdminJobQueue → pm_report.py |
 | Minutes | 議事録一覧・編集・削除 | minutes/*.db → (保存時) pm.db + Box 自動更新 |
 | Services | デーモン状態確認・起動停止・ログ閲覧 | pm_daemon.sh |
@@ -357,8 +334,7 @@ pm_qa_server.py (Socket Mode デーモン)
 | `data/minutes/{kind}.db` | 議事録詳細 | `pm_minutes_import.py` | `pm_ingest.py`, Argus, Web UI | ✅ |
 | `data/pm.db` | **正本**: action_items/decisions/meetings/goals/milestones | `pm_ingest.py`, `enrich_items.py`, Web UI, `pm_sync_canvas.py`, `pm_xlsx_sync.py` | 全スクリプト | ✅ |
 | `data/docs_*.db` | BOX ドキュメントメタデータ | `pm_slack_box_links.py` | `pm_box_crawl.py` | ✅ |
-| `data/box_docs.db` | BOX ドキュメント本文 (Markdown) | `pm_box_crawl.py` | `pm_box_distill.py`, `pm_embed.py` | ✅ |
-| `data/knowledge.db` | 蒸留ナレッジ | `pm_box_distill.py` | Argus (brief/risk/investigate) | ✅ |
+| `data/box_docs.db` | BOX ドキュメント本文 (Markdown) | `pm_box_crawl.py` | `pm_embed.py` | ✅ |
 | `data/web_articles.db` | 外部 Web 記事 | `pm_web_fetch.py` | `pm_embed.py` | ✅ |
 | `data/qa_index.db` | FTS5 全文検索 + embedding | `pm_embed.py` | Argus (investigate/ask) | ✅ |
 | `data/patrol_state.db` | Patrol 冪等性・承認待ち | `pm_argus_patrol.py` | `pm_argus_patrol.py` | ✅ |
@@ -373,7 +349,6 @@ pm_qa_server.py (Socket Mode デーモン)
 |---|---|---|
 | 02:00 毎日 | `pm_box_update.sh` | BOX収集 + FTS5 索引更新 |
 | 03:00 毎日 | `pm_web_update.sh` | Web 記事収集 |
-| 04:00 毎日 | `pm_box_distill.py --source all --since 昨日` | ナレッジ蒸留 |
 | 06:57 月〜金 | `pm_argus_daily.sh` | ブリーフィング生成 → Canvas |
 | 07:00 月〜金 | `canvas_report.sh` | 各種レポート Canvas 投稿 |
 | 16:50 月〜金 | `pm_from_slack_daily.sh` | Slack 走査 → argus-today |
@@ -415,7 +390,6 @@ Box XLSX で編集
 | `pm_screen.py` | pm.db の重複・類似・曖昧アイテムを検出（CSV出力）|
 | `pm_relink.py` | CSV 経由で一括編集（LLM 不使用）|
 | `pm_sync_canvas.py` | Canvas 編集を pm.db に反映 |
-| `pm_knowledge_edit.py` | knowledge.db の人手編集 |
 
 ---
 
@@ -437,7 +411,6 @@ scripts/
 │   ├── pm_slack_box_links.py          Slack上のBOXリンク収集
 │   ├── pm_box_crawl.py                BOX本文取得 → box_docs.db
 │   ├── pm_box_relevance.py            box_docs.db relevance 判定
-│   ├── pm_box_distill.py              ナレッジ蒸留 → knowledge.db
 │   ├── pm_embed.py                    FTS5 + embedding 索引構築
 │   ├── pm_web_fetch.py                外部Web → web_articles.db
 │   └── pm_users_sync.py               Slack ユーザー → argus_config.yaml
@@ -449,15 +422,12 @@ scripts/
 │
 ├── enrich/                            Pass 2: エンリッチメント
 │   ├── enrich_items.py                pm.db 補完
-│   ├── knowledge_context.py           ナレッジ文脈
+│   ├── knowledge_context.py           過去ナレッジ取得（FTS5 検索）
 │   └── pm_link_milestones.py          マイルストーン LLM 紐づけ
 │
 ├── quality/                           データ品質
 │   ├── pm_screen.py                   重複検出
-│   ├── pm_relink.py                   CSV一括編集
-│   ├── pm_knowledge_edit.py           knowledge.db 編集CLI
-│   ├── pm_knowledge_dedupe.py         knowledge dedupe
-│   └── pm_knowledge_inspect.py        knowledge 検査
+│   └── pm_relink.py                   CSV一括編集
 │
 ├── reporting/                         レポート・エクスポート
 │   ├── pm_report.py                   進捗レポート → Canvas

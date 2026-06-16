@@ -78,20 +78,21 @@ Slackの日常的なやり取りと会議議事録を統合し、決定事項・
 
 ## システム概要（要約）
 
-情報の流れは **2パス + ナレッジ蒸留** で構成される。詳細図とスクリプト一覧は `docs/architecture.md` を参照。
+情報の流れは **収集 → エンリッチ → 索引化** の 3 段で構成される。詳細図とスクリプト一覧は `docs/architecture.md` を参照。
 
 - **Pass 1 抽出** — Slack / 議事録 / goals.yaml → `pm.db`（`scripts/ingest/`）
-- **Pass 2 エンリッチ** — 過去ナレッジから判断者・根拠・関連IDを補完（`scripts/enrich/`）
-- **Pass 3 蒸留** — BOX 本文・議事録・決定事項を意思決定単位に蒸留 → `data/knowledge.db`（`pm_box_distill.py`）
+- **Pass 2 エンリッチ** — 過去ナレッジから判断者・根拠・関連IDを補完、決定事項に rationale を付与（`scripts/enrich/`）
+- **Pass 2 索引化** — Slack / 議事録 / BOX 本文 / Web 記事を FTS5 + bge-m3 embedding で索引化（`pm_embed.py`）
 - データ品質管理は `pm_screen.py`（重複検出）→ `pm_relink.py`（CSV 一括編集）
+
+brief/risk の「背景知識」は `pm.db.decisions`（rationale 付き）から、investigate の意思決定根拠は `search_text` + `search_decisions` で取得する。旧 `knowledge.db` 蒸留レイヤは 2026-06-16 に廃止（経緯は LOG.md 参照）。
 
 **主要 DB の役割**（スキーマ詳細は `pm-schema` Skill）:
 - `data/slack.db` — Slack 全チャンネル統合（`channel_id` 列で絞り込む）
-- `data/pm.db` — action_items / decisions / meetings / goals / milestones の唯一の正本
+- `data/pm.db` — action_items / decisions / meetings / goals / milestones の唯一の正本。`decisions` は rationale 付き
 - `data/minutes/{kind}.db` — 議事録詳細（会議名ごとに独立）
 - `data/box_docs.db` — BOX 本文 Markdown + relevance 判定
-- `data/knowledge.db` — 蒸留ナレッジレイヤ（プロジェクト全体共通）
-- `data/qa_index.db` — FTS5 統合インデックス（`chunk_indexes` で論理 index 分離）
+- `data/qa_index.db` — FTS5 統合インデックス + bge-m3 embedding（`chunk_indexes` で論理 index 分離）
 
 会議録音処理 `pm_from_recording.sh --meeting-name` は VTT 自動検出 + mp4 ならスライド OCR 自動実行。詳細は `pm-commands` Skill。
 
@@ -158,7 +159,6 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_inge
 - `slack-canvas-api` — `docs/canvas_api.md`。Canvas を投稿・編集・再作成するとき
 - `pm-roadmap` — `docs/roadmap.md`。実装済みフェーズ・未実装課題を確認するとき
 - `pm-ingest-plugin` — `docs/ingest_plugin.md`。`scripts/ingest/` に新ソースを追加するとき
-- `pm-distill-policy` — `docs/distill_policy.md`。ナレッジ蒸留 (knowledge.db) の採否基準を引くとき
 - `pm-argus-commands` — `docs/argus_outcomes.md`。Argus 5 コマンドの使い方・引数・内部ツール仕様を触るとき
 - `pm-reports` — `docs/reports.md`。pm_report / pm_biweekly_report / pm_insight / canvas_report.sh のオプションを引くとき
 - `docs/minutes_consensus.md` — Self-Consistency 議事録生成（`--consensus N`）のアルゴリズム・CLI・環境変数分離を触るとき

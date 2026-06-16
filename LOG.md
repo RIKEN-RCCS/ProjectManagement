@@ -7,7 +7,21 @@
 
 ---
 
-## 2026-06-16 scripts/ 再編 + Box CLI ヘルパー集約 + 暗号化 OOXML スキップ
+## 2026-06-16 knowledge.db 全廃、背景知識を pm.db.decisions に集約
+
+**背景**: 1,801 件中 active 1,552、うち 66% が superseded、人手編集 0 件、Patrol の conflicts_with 検出も 0 件。実消費は brief/risk のプロンプト同梱と investigate の search_knowledge のみで、knowledge.db ⊃ pm.db.decisions の関係が二重化していた（KN-1794 と D-1254 など）。蒸留は毎日 68 回の LLM 呼び出しを消費していたが、その出力の上位は既に pm.db.decisions に rationale 付き 78% で記録されていた。
+
+**決定**: 「目的（判断の背景知識を提供）は維持、実装としての knowledge.db は廃止」の方針で、4 段階で全撤去：
+- Stage 1: `fetch_background_knowledge()` を新設し、brief/risk から `pm.db.decisions` (rationale 付き) を引いて Markdown 化
+- Stage 2: search_knowledge / get_knowledge ツール、detect_knowledge_conflicts、`/argus-knowledge` を全削除
+- Stage 3: pm_box_distill.py + pm_knowledge_* を scripts/archive/knowledge_db_deprecated/ へ、_KNOWLEDGE_SCHEMA / open_knowledge_db を削除、data/knowledge.db.deprecated_20260616 にリネーム
+- Stage 4: docs/architecture.md（4 層 → 3 層）、CLAUDE.md、pm-distill-policy Skill、docs/distill_policy.md 削除
+
+**影響**: brief/risk 同梱の背景知識は KN-XXXX → D-XXX 形式に変化。`/argus-knowledge` Slack コマンドは消滅。Patrol の knowledge_conflict 検出器は消滅（30 日間ゼロ検出だったため実害なし）。LLM 蒸留コスト約 2,000 req/月 削減。cron の 04:00 daily pm_box_distill.sh エントリの crontab 編集はユーザー手動対応。
+
+**他案の検討**: 案 Y (pm.db に policy_constraints 新設)・案 Z (Markdown を git で人手承認制) も検討したが、pm.db.decisions の rationale 78% カバレッジで brief/risk の品質が十分担保できることが実測でわかり、最小実装の案 X を採用。
+
+---
 
 **背景**: `scripts/` 直下に Python 28 + shell 16 がフラットに並び `docs/architecture.md` の論理分類と乖離。また `pm_box_update.sh` の cron が暗号化 PPTX を毎回再変換しようとして失敗ループ、OCR が gemma-4 で動かず RiVault に流れていた。
 
