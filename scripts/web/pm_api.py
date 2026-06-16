@@ -626,6 +626,76 @@ def admin_quality_screen(req: ScreenRequest):
     return {"job_id": job_id, "status": "queued"}
 
 
+@app.get("/api/admin/quality/screen-preview")
+def admin_quality_screen_preview(
+    include_decisions: bool = Query(False),
+    short_threshold: int = Query(25),
+    prefix_len: int = Query(20),
+):
+    """重複・類似・曖昧グループを同期的に検出して JSON で返す。
+    UI で削除対象を選択してから /delete-items に POST する想定。"""
+    try:
+        sys.path.insert(0, str(_REPO / "scripts" / "quality"))
+        from pm_screen import screen_for_web  # type: ignore
+
+        db_path = _state.get("db_path") or _DEFAULT_DB
+        conn = open_db(db_path, encrypt=True)
+        try:
+            result = screen_for_web(
+                conn,
+                include_decisions=include_decisions,
+                short_threshold=short_threshold,
+                prefix_len=prefix_len,
+            )
+        finally:
+            conn.close()
+        return result
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+class DeleteItemsRequest(BaseModel):
+    action_item_ids: list[int] = []
+    decision_ids: list[int] = []
+
+
+@app.post("/api/admin/quality/delete-items")
+def admin_quality_delete_items(req: DeleteItemsRequest):
+    """指定 ID のアクションアイテム・決定事項を論理削除 (deleted=1)。"""
+    ai_ids = list(req.action_item_ids or [])
+    dec_ids = list(req.decision_ids or [])
+    if not ai_ids and not dec_ids:
+        return JSONResponse({"error": "削除対象 ID が指定されていません"}, status_code=400)
+    try:
+        db_path = _state.get("db_path") or _DEFAULT_DB
+        conn = open_db(db_path, encrypt=True)
+        try:
+            ai_count = 0
+            for aid in ai_ids:
+                cur = conn.execute(
+                    "UPDATE action_items SET deleted=1 WHERE id=? AND COALESCE(deleted,0)=0",
+                    (aid,),
+                )
+                if cur.rowcount:
+                    ai_count += cur.rowcount
+                    audit(conn, "action_items", aid, "deleted", 0, 1)
+            dec_count = 0
+            for did in dec_ids:
+                cur = conn.execute(
+                    "UPDATE decisions SET deleted=1 WHERE id=? AND COALESCE(deleted,0)=0",
+                    (did,),
+                )
+                if cur.rowcount:
+                    dec_count += cur.rowcount
+                    audit(conn, "decisions", did, "deleted", 0, 1)
+            conn.commit()
+        finally:
+            conn.close()
+        return {"deleted_action_items": ai_count, "deleted_decisions": dec_count}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/admin/quality/relink-export")
 def admin_quality_relink_export():
     """Relink CSV をダウンロード。"""

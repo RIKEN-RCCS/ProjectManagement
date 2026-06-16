@@ -256,6 +256,68 @@ def export_csv(
     log(f"     python3 scripts/pm_relink.py --import {output_path}")
 
 
+def screen_for_web(
+    conn,
+    *,
+    include_decisions: bool = False,
+    short_threshold: int = 25,
+    prefix_len: int = 20,
+    since: str | None = None,
+) -> dict:
+    """Web UI 向けに重複・類似・曖昧グループを JSON 互換 dict で返す。
+
+    返り値:
+      {
+        "action_items": {
+          "groups": [{"category": "exact_dup"|"near_dup"|"ambiguous",
+                       "items": [{id, content, assignee, due_date, source, ...}, ...]}],
+          "total_flagged": int,
+        },
+        "decisions": {... 同上, include_decisions=True のときのみ},
+      }
+    各グループの先頭アイテムが「残す推奨」、それ以降が「削除候補」。
+    """
+    ais = fetch_active_action_items(conn, since=since)
+    ai_groups: list[dict] = []
+    ai_flagged: set[int] = set()
+    for cat, group in detect_exact_duplicates(ais):
+        ai_groups.append({"category": cat, "items": group})
+        for it in group:
+            ai_flagged.add(it["id"])
+    for cat, group in detect_near_duplicates(ais, prefix_len):
+        ai_groups.append({"category": cat, "items": group})
+        for it in group:
+            ai_flagged.add(it["id"])
+    for cat, group in detect_ambiguous(ais, short_threshold):
+        ai_groups.append({"category": cat, "items": group})
+        for it in group:
+            ai_flagged.add(it["id"])
+
+    result: dict = {
+        "action_items": {"groups": ai_groups, "total_flagged": len(ai_flagged)},
+    }
+
+    if include_decisions:
+        decs = fetch_active_decisions(conn, since=since)
+        dec_groups: list[dict] = []
+        dec_flagged: set[int] = set()
+        for cat, group in detect_exact_duplicates(decs):
+            dec_groups.append({"category": cat, "items": group})
+            for it in group:
+                dec_flagged.add(it["id"])
+        for cat, group in detect_near_duplicates(decs, prefix_len):
+            dec_groups.append({"category": cat, "items": group})
+            for it in group:
+                dec_flagged.add(it["id"])
+        for cat, group in detect_ambiguous(decs, short_threshold):
+            dec_groups.append({"category": cat, "items": group})
+            for it in group:
+                dec_flagged.add(it["id"])
+        result["decisions"] = {"groups": dec_groups, "total_flagged": len(dec_flagged)}
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="pm.db のアクションアイテム・決定事項をスクリーニング（重複・類似・曖昧を検出）"
