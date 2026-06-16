@@ -14,6 +14,8 @@ registerAdminPage('ingest', async (container) => {
         slackSince: '',
         minutesKind: '',
         minutesSince: '',
+        embedIndex: '',
+        embedFullRebuild: false,
         loading: true,
         loadError: '',
         history: [],
@@ -39,8 +41,14 @@ registerAdminPage('ingest', async (container) => {
       },
       async loadHistory() {
         try {
-          const data = await api('GET', '/admin/jobs?kind=ingest&limit=15');
-          this.history = data.jobs || [];
+          const [ingestData, embedData] = await Promise.all([
+            api('GET', '/admin/jobs?kind=ingest&limit=15'),
+            api('GET', '/admin/jobs?kind=embed&limit=10'),
+          ]);
+          const jobs = [...(ingestData.jobs || []), ...(embedData.jobs || [])]
+            .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+            .slice(0, 20);
+          this.history = jobs;
           this.historyLoaded = true;
         } catch (_) {
           this.historyLoaded = true;
@@ -69,7 +77,20 @@ registerAdminPage('ingest', async (container) => {
           toast('Error: ' + e.message, 'negative');
         }
       },
+      async runEmbed() {
+        const params = {};
+        if (this.embedIndex) params.index_name = this.embedIndex;
+        params.full_rebuild = this.embedFullRebuild;
+        try {
+          const res = await api('POST', '/admin/knowledge/embed', params);
+          toast(`Embed started! Job: ${res.job_id}`, 'positive');
+          this.loadHistory();
+        } catch (e) {
+          toast('Error: ' + e.message, 'negative');
+        }
+      },
       jobSource(job) {
+        if (job.kind === 'embed') return 'embed';
         try { return JSON.parse(job.params_json || '{}').source || '-'; }
         catch (_) { return '-'; }
       },
@@ -88,8 +109,8 @@ registerAdminPage('ingest', async (container) => {
       if (this._pollTimer) clearInterval(this._pollTimer);
     },
     template: `
-      <div class="max-w-4xl mx-auto">
-        <h2 class="text-xl font-bold text-white mb-4">Data Ingestion</h2>
+      <div class="max-w-5xl mx-auto">
+        <h2 class="text-xl font-bold text-white mb-4">Data Ingestion &amp; Indexing</h2>
 
         <div v-if="loading" class="flex items-center justify-center py-12">
           <div class="spinner"></div>
@@ -101,7 +122,7 @@ registerAdminPage('ingest', async (container) => {
         </div>
 
         <template v-else>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
 
             <!-- Slack Card -->
             <div class="admin-card">
@@ -159,17 +180,37 @@ registerAdminPage('ingest', async (container) => {
                       class="w-full bg-green-600 hover:bg-green-700 text-white rounded px-3 py-2 text-sm font-medium">Run Ingest</button>
             </div>
 
+            <!-- Embed Card -->
+            <div class="admin-card">
+              <div class="text-2xl mb-2">🔍</div>
+              <h3 class="text-sm font-bold text-gray-200 mb-1">Rebuild Search Index</h3>
+              <p class="text-xs text-gray-500 mb-3">Rebuild FTS5 + bge-m3 embedding indexes for Argus QA</p>
+              <div class="mb-3">
+                <label class="text-xs text-gray-400 block mb-1">Index name (optional)</label>
+                <input type="text" v-model="embedIndex" placeholder="Default index"
+                       class="bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm w-full text-gray-200">
+              </div>
+              <div class="flex items-center gap-2 mb-3">
+                <input type="checkbox" v-model="embedFullRebuild" id="efr"
+                       class="rounded bg-gray-700 border-gray-600">
+                <label for="efr" class="text-xs text-gray-400">Full rebuild (drop &amp; recreate)</label>
+              </div>
+              <button @click="runEmbed"
+                      class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded px-3 py-2 text-sm font-medium">Run Embed</button>
+            </div>
+
           </div>
 
           <!-- Job History -->
           <div class="admin-card">
-            <h3 class="text-sm font-bold text-gray-300 mb-2">Recent Ingest Jobs</h3>
+            <h3 class="text-sm font-bold text-gray-300 mb-2">Recent Ingest &amp; Embed Jobs</h3>
             <p v-if="!historyLoaded" class="text-gray-500 italic text-sm">Loading...</p>
             <p v-else-if="history.length === 0" class="text-gray-500 italic text-sm">No history</p>
             <table v-else class="w-full text-xs">
               <thead>
                 <tr class="text-gray-500 border-b border-gray-700">
                   <th class="text-left py-1 pr-2">Job</th>
+                  <th class="text-left py-1 pr-2">Kind</th>
                   <th class="text-left py-1 pr-2">Source</th>
                   <th class="text-left py-1 pr-2">Status</th>
                   <th class="text-left py-1 pr-2">Started</th>
@@ -180,6 +221,7 @@ registerAdminPage('ingest', async (container) => {
                 <tr v-for="j in history" :key="j.id"
                     class="border-b border-gray-700/50 hover:bg-gray-700/30">
                   <td class="py-1 pr-2 font-mono text-gray-400">{{ j.id }}</td>
+                  <td class="py-1 pr-2 text-gray-300">{{ j.kind }}</td>
                   <td class="py-1 pr-2 text-gray-200">{{ jobSource(j) }}</td>
                   <td class="py-1 pr-2">{{ statusIcon(j) }} {{ j.status }}</td>
                   <td class="py-1 pr-2 text-gray-400">{{ fmtDateTime(j.started_at) }}</td>
