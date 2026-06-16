@@ -32,9 +32,9 @@ from pm_minutes_import import init_minutes_db, reconstruct_minutes_md
 from pm_report import (
     fetch_open_action_items, fetch_recent_decisions, detect_risk_items,
 )
+from box_cli import box_find_file, box_upload_or_version, box_json
 from pm_xlsx_report import (
-    build_workbook, box_upload_or_version, box_find_file,
-    load_report_config, _build_meeting_url_map,
+    build_workbook, load_report_config, _build_meeting_url_map,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -47,15 +47,10 @@ DEFAULT_FILENAME = "pm_report.xlsx"
 # Box helpers
 # --------------------------------------------------------------------------- #
 
-def _box_json(cmd: list[str], timeout: int = 120):
-    raw = subprocess.check_output(cmd, text=True, timeout=timeout)
-    return json.loads(raw)
-
-
 def get_file_modified_at(file_id: str) -> str | None:
     """Box ファイルの modified_at を取得する。"""
     try:
-        info = _box_json(
+        info = box_json(
             ["box", "files:get", file_id, "--json", "--fields", "modified_at"],
             timeout=60,
         )
@@ -116,7 +111,7 @@ def _update_minutes_md_on_box(
         tmp.write(md)
         tmp.close()
 
-        _box_json(
+        box_json(
             ["box", "files:versions:upload", box_file_id, str(tmp_path), "--json"],
             timeout=120,
         )

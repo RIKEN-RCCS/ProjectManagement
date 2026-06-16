@@ -73,98 +73,11 @@ def load_meetings_config(config_path: Path) -> dict[str, dict]:
     return meetings
 
 
-# --------------------------------------------------------------------------- #
-# Box CLI ラッパ
-# --------------------------------------------------------------------------- #
-def _box_json(cmd: list[str], timeout: int = 120) -> dict | list:
-    raw = subprocess.check_output(cmd, text=True, timeout=timeout)
-    return json.loads(raw)
-
-
-def box_find_file_in_folder(folder_id: str, filename: str) -> str | None:
-    """同じ親フォルダに同名ファイルがあれば file_id を返す。"""
-    try:
-        items = _box_json(
-            ["box", "folders:items", folder_id, "--json",
-             "--fields", "name,type"],
-            timeout=60,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        raise RuntimeError(f"box folders:items 失敗 (folder_id={folder_id}): {e}")
-    for item in items:
-        if item.get("type") == "file" and item.get("name") == filename:
-            return str(item.get("id"))
-    return None
-
-
-def box_upload_or_version(local_path: Path, folder_id: str, filename: str,
-                           log) -> str:
-    """新規アップロードまたは既存ファイルへのバージョン更新。file_id を返す。"""
-    existing = box_find_file_in_folder(folder_id, filename)
-    if existing:
-        log(f"  [BOX] 既存ファイル (id={existing}) のバージョン更新: {filename}")
-        try:
-            info = _box_json(
-                ["box", "files:versions:upload", existing, str(local_path),
-                 "--json"],
-                timeout=300,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            raise RuntimeError(f"box files:versions:upload 失敗: {e}")
-        # files:versions:upload は新バージョンの file version id を返すことが
-        # あるため、元の file_id を使う
-        return existing
-
-    log(f"  [BOX] 新規アップロード: {filename} → folder {folder_id}")
-    try:
-        info = _box_json(
-            ["box", "files:upload", str(local_path),
-             "--parent-id", folder_id,
-             "--name", filename,
-             "--json"],
-            timeout=300,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        raise RuntimeError(f"box files:upload 失敗: {e}")
-    if isinstance(info, list):
-        info = info[0] if info else {}
-    file_id = str(info.get("id", ""))
-    if not file_id:
-        raise RuntimeError(f"box files:upload のレスポンスに id がありません: {info}")
-    return file_id
-
-
-def box_get_or_create_shared_link(file_id: str, log) -> str:
-    """共有リンクを取得（なければ作成）。URL を返す。"""
-    try:
-        info = _box_json(
-            ["box", "files:get", file_id, "--json",
-             "--fields", "shared_link"],
-            timeout=60,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        raise RuntimeError(f"box files:get 失敗 (file_id={file_id}): {e}")
-    if isinstance(info, list):
-        info = info[0] if info else {}
-    shared = info.get("shared_link")
-    if shared and shared.get("url"):
-        return shared["url"]
-
-    log(f"  [BOX] 共有リンクを作成: file {file_id}")
-    try:
-        info = _box_json(
-            ["box", "files:share", file_id, "--access", "open", "--json"],
-            timeout=60,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        raise RuntimeError(f"box files:share 失敗 (file_id={file_id}): {e}")
-    if isinstance(info, list):
-        info = info[0] if info else {}
-    shared = info.get("shared_link") or {}
-    url = shared.get("url")
-    if not url:
-        raise RuntimeError(f"共有リンク作成のレスポンスに url がありません: {info}")
-    return url
+from box_cli import (
+    box_find_file as box_find_file_in_folder,
+    box_upload_or_version,
+    box_get_or_create_shared_link,
+)
 
 
 # --------------------------------------------------------------------------- #

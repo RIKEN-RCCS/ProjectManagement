@@ -73,29 +73,7 @@ def _parse_delete_flag(raw) -> int:
 # --------------------------------------------------------------------------- #
 # Box CLI
 # --------------------------------------------------------------------------- #
-def _box_json(cmd: list[str], timeout: int = 120):
-    raw = subprocess.check_output(cmd, text=True, timeout=timeout)
-    return json.loads(raw)
-
-
-def box_find_file(folder_id: str, filename: str) -> str | None:
-    items = _box_json(
-        ["box", "folders:items", folder_id, "--json", "--fields", "name,type"],
-        timeout=60,
-    )
-    for item in items:
-        if item.get("type") == "file" and item.get("name") == filename:
-            return str(item.get("id"))
-    return None
-
-
-def box_download(file_id: str, dest: Path, log) -> None:
-    log(f"  [BOX] ダウンロード: file_id={file_id} → {dest}")
-    subprocess.check_call(
-        ["box", "files:download", file_id, "--destination", str(dest.parent),
-         "--save-as", dest.name, "--overwrite"],
-        timeout=300,
-    )
+from box_cli import box_find_file, box_download
 
 
 def fetch_xlsx_from_box(folder_id: str, filename: str, dest_dir: Path,

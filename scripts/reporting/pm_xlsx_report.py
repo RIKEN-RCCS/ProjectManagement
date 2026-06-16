@@ -394,68 +394,9 @@ def build_workbook(
 # --------------------------------------------------------------------------- #
 # Box CLI
 # --------------------------------------------------------------------------- #
-def _box_json(cmd: list[str], timeout: int = 120):
-    raw = subprocess.check_output(cmd, text=True, timeout=timeout)
-    return json.loads(raw)
-
-
-def box_find_file(folder_id: str, filename: str) -> str | None:
-    items = _box_json(
-        ["box", "folders:items", folder_id, "--json", "--fields", "name,type"],
-        timeout=60,
-    )
-    for item in items:
-        if item.get("type") == "file" and item.get("name") == filename:
-            return str(item.get("id"))
-    return None
-
-
-def box_upload_or_version(local_path: Path, folder_id: str, filename: str,
-                          log) -> str:
-    existing = box_find_file(folder_id, filename)
-    if existing:
-        log(f"  [BOX] 既存ファイル (id={existing}) のバージョン更新: {filename}")
-        _box_json(
-            ["box", "files:versions:upload", existing, str(local_path), "--json"],
-            timeout=300,
-        )
-        return existing
-    log(f"  [BOX] 新規アップロード: {filename} → folder {folder_id}")
-    info = _box_json(
-        ["box", "files:upload", str(local_path),
-         "--parent-id", folder_id, "--name", filename, "--json"],
-        timeout=300,
-    )
-    if isinstance(info, list):
-        info = info[0] if info else {}
-    file_id = str(info.get("id", ""))
-    if not file_id:
-        raise RuntimeError(f"box files:upload のレスポンスに id がありません: {info}")
-    return file_id
-
-
-def box_get_or_create_shared_link(file_id: str, log) -> str:
-    info = _box_json(
-        ["box", "files:get", file_id, "--json", "--fields", "shared_link"],
-        timeout=60,
-    )
-    if isinstance(info, list):
-        info = info[0] if info else {}
-    shared = info.get("shared_link")
-    if shared and shared.get("url"):
-        return shared["url"]
-    log(f"  [BOX] 共有リンクを作成: file {file_id}")
-    info = _box_json(
-        ["box", "files:share", file_id, "--access", "open", "--json"],
-        timeout=60,
-    )
-    if isinstance(info, list):
-        info = info[0] if info else {}
-    shared = info.get("shared_link") or {}
-    url = shared.get("url")
-    if not url:
-        raise RuntimeError(f"共有リンク作成のレスポンスに url がありません: {info}")
-    return url
+from box_cli import (
+    box_find_file, box_upload_or_version, box_get_or_create_shared_link,
+)
 
 
 # --------------------------------------------------------------------------- #
