@@ -54,7 +54,6 @@ from argus.patrol.detect import (
     detect_stale_items,
     detect_milestone_health,
     detect_weekly_trend_alert,
-    detect_knowledge_conflicts,
 )
 
 logger = logging.getLogger("argus_patrol")
@@ -114,7 +113,6 @@ DETECTORS: dict[str, Any] = {
     "stale": detect_stale_items,
     "milestone": detect_milestone_health,
     "trend": detect_weekly_trend_alert,
-    "knowledge_conflict": detect_knowledge_conflicts,
 }
 
 

@@ -1042,92 +1042,6 @@ def format_slack_response(question: str, chunks: list[dict], answer: str,
     return header + body
 
 
-# --- /argus-knowledge ハンドラ ---
-
-_KNOWLEDGE_HELP = (
-    "*knowledge.db 操作*\n"
-    "```\n"
-    "/argus-knowledge list                       # 一覧（最大30件）\n"
-    "/argus-knowledge KN-0042                    # 詳細表示\n"
-    "/argus-knowledge invalidate KN-0042         # 論理削除（deleted=1）\n"
-    "/argus-knowledge restore KN-0042            # 復活（deleted=0）\n"
-    "/argus-knowledge supersede KN-0042 KN-0099  # 上書き連鎖\n"
-    "/argus-knowledge confidence KN-0042 medium  # high/medium/low\n"
-    "```\n"
-    "詳細は `docs/distill_policy.md` 参照。"
-)
-
-
-def _run_knowledge(respond, command, text: str) -> None:
-    """Slack /argus-knowledge のバックグラウンド処理。
-    pm_knowledge_edit.py の cmd_* 関数を直接呼ぶ。"""
-    from db_utils import open_knowledge_db
-    knowledge_db = _REPO_ROOT / "data" / "knowledge.db"
-    if not knowledge_db.exists():
-        respond(text=":warning: knowledge.db が未構築です（pm_box_distill.py を先に実行）",
-                response_type="ephemeral")
-        return
-
-    parts = text.split()
-    if not parts:
-        respond(text=_KNOWLEDGE_HELP, response_type="ephemeral")
-        return
-
-    actor = command.get("user_name") or command.get("user_id") or "slack"
-
-    # コマンド共有: pm_knowledge_edit.py の関数を流用
-    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-    from pm_knowledge_edit import (  # type: ignore
-        cmd_invalidate, cmd_restore, cmd_supersede, cmd_confidence,
-        cmd_show, cmd_list,
-    )
-
-    # ログ収集用
-    buf: list[str] = []
-    def log(s: str) -> None:
-        buf.append(str(s))
-
-    sub = parts[0].lower()
-    try:
-        conn = open_knowledge_db(knowledge_db, no_encrypt=False)
-    except Exception as e:
-        respond(text=f":warning: knowledge.db 接続失敗: {e}",
-                response_type="ephemeral")
-        return
-
-    try:
-        if sub == "list":
-            cmd_list(conn, include_deleted=False, log=log)
-        elif sub.startswith("kn-"):
-            kid = parts[0].upper()
-            cmd_show(conn, kid, log)
-        elif sub == "invalidate" and len(parts) >= 2:
-            cmd_invalidate(conn, parts[1].upper(), actor=actor, log=log)
-        elif sub == "restore" and len(parts) >= 2:
-            cmd_restore(conn, parts[1].upper(), actor=actor, log=log)
-        elif sub == "supersede" and len(parts) >= 3:
-            cmd_supersede(conn, parts[1].upper(), parts[2].upper(),
-                          actor=actor, log=log)
-        elif sub == "confidence" and len(parts) >= 3:
-            cmd_confidence(conn, parts[1].upper(), parts[2].lower(),
-                           actor=actor, log=log)
-        else:
-            respond(text=_KNOWLEDGE_HELP, response_type="ephemeral")
-            return
-    finally:
-        conn.close()
-
-    body = "\n".join(buf) or "(出力なし)"
-    if len(body) > 2900:
-        body = body[:2800] + "\n…(truncated)"
-    respond(
-        blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                                              "text": f"```\n{body}\n```"}}],
-        response_type="ephemeral",
-        replace_original=True,
-    )
-
-
 # --- Slack Bolt ハンドラ ---
 
 def _run_qa(question: str, respond, index_name: str, index_db: Path,
@@ -1242,12 +1156,6 @@ def build_app():
         ack()
         respond(text=":hourglass_flowing_sand: Argus リスク分析中...", response_type="ephemeral")
         executor.submit(_run_risk, respond, command)
-
-    @app.command("/argus-knowledge")
-    def handle_argus_knowledge(ack, respond, command):
-        ack()
-        text = (command.get("text") or "").strip()
-        executor.submit(_run_knowledge, respond, command, text)
 
     @app.command("/argus-investigate")
     def handle_argus_investigate(ack, respond, command):
