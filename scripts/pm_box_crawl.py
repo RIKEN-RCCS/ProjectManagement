@@ -664,18 +664,21 @@ def _ocr_image(img_path: Path, base_url: str, prompt: str | None = None) -> str 
     with open(img_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
 
-    # OCR は vision 対応モデルが必要。RIVAULT_OCR_MODEL が明示指定されている場合のみ
-    # RiVault トークンを使う。RIVAULT_MODEL (テキスト専用) は OCR に使わない。
-    rivault_ocr_model = os.environ.get("RIVAULT_OCR_MODEL", "").strip()
-    if rivault_ocr_model and os.environ.get("RIVAULT_TOKEN"):
-        api_key = os.environ["RIVAULT_TOKEN"]
+    # base_url が RiVault を指している場合のみ RiVault のトークン・モデルを使う。
+    # 通常は LOCAL_LLM_URL (ローカル vLLM, gemma-4 等) でローカルマルチモーダル。
+    from cli_utils import detect_vllm_model
+    rivault_url = os.environ.get("RIVAULT_URL", "").rstrip("/")
+    if rivault_url and base_url.rstrip("/") == rivault_url:
+        api_key = os.environ.get("RIVAULT_TOKEN", "dummy")
+        model = os.environ.get("RIVAULT_OCR_MODEL", "").strip()
     else:
         api_key = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
-    from cli_utils import detect_vllm_model
-    try:
-        model = os.environ.get("LOCAL_LLM_MODEL") or rivault_ocr_model or detect_vllm_model(base_url)
-    except Exception:
-        return None
+        model = os.environ.get("LOCAL_LLM_MODEL", "").strip()
+    if not model:
+        try:
+            model = detect_vllm_model(base_url)
+        except Exception:
+            return None
 
     payload = {
         "model": model,

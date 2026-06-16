@@ -195,16 +195,14 @@ def ocr_slides(
     if not frames:
         return []
     if base_url is None:
-        # OCR は vision 対応モデルが必要。RIVAULT_OCR_MODEL が明示指定されている場合のみ
-        # RiVault を使う。それ以外は ARGUS_PREFER_RIVAULT=1 でもローカル vLLM を使う
-        # (DeepSeek-V4-Flash 等テキスト専用モデルへの 400 エラーを防ぐため)。
-        if os.environ.get("RIVAULT_OCR_MODEL", "").strip() and os.environ.get("RIVAULT_URL"):
+        # OCR は vision 対応モデルが必要。LOCAL_LLM_URL (gemma-4 等のローカル
+        # マルチモーダルモデル) を優先し、未設定時のみ RiVault にフォールバック。
+        base_url = os.environ.get("LOCAL_LLM_URL")
+        if not base_url and os.environ.get("RIVAULT_OCR_MODEL", "").strip() and os.environ.get("RIVAULT_URL"):
             base_url = os.environ["RIVAULT_URL"].rstrip("/")
             token = os.environ.get("RIVAULT_TOKEN", "")
             if token:
                 os.environ["LOCAL_LLM_TOKEN"] = token
-        else:
-            base_url = os.environ.get("LOCAL_LLM_URL")
     if not base_url:
         logger.warning("LOCAL_LLM_URL 未設定のため OCR をスキップします")
         return [""] * len(frames)
