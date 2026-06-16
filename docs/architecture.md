@@ -421,45 +421,53 @@ Box XLSX で編集
 
 ## スクリプト分類一覧
 
+2026-06-16 のリファクタで scripts/ 配下を機能別サブディレクトリに分割した。
+旧パス (`scripts/pm_box_crawl.py` 等) は symlink を残してあるので、CRON や
+シェルスクリプトからの呼び出しは引き続き動作する。
+
 ```
 scripts/
-├── 一次情報収集 (Pass 1)
+├── ingest/                            Pass 1: pm_ingest.py プラグイン
+│   ├── pm_ingest.py                   統合ランナー
+│   ├── slack.py / minutes.py / goals.py
+│   └── ingest_plugin.py
+│
+├── data-pipeline/                     Pass 1: 一次情報収集
 │   ├── slack_pipeline.py              Slack差分取得
-│   ├── ingest/                        pm_ingest.py プラグイン
-│   │   ├── pm_ingest.py               統合ランナー
-│   │   ├── slack.py                   Slack → pm.db
-│   │   ├── minutes.py                 議事録DB → pm.db
-│   │   ├── goals.py                   goals.yaml → pm.db
-│   │   └── ingest_plugin.py           プラグインインタフェース
-│   ├── pm_minutes_import.py           議事録MD → 議事録DB
-│   ├── pm_minutes_catalog.py          議事録 Box アップロード + Canvas 目録
-│   ├── pm_minutes_publish.py          minutes編集 → pm.db + Box XLSX/MD  ← NEW
 │   ├── pm_slack_box_links.py          Slack上のBOXリンク収集
 │   ├── pm_box_crawl.py                BOX本文取得 → box_docs.db
 │   ├── pm_box_relevance.py            box_docs.db relevance 判定
-│   └── pm_web_fetch.py                外部Web → web_articles.db
-│
-├── エンリッチ・索引 (Pass 2)
-│   ├── enrich/
-│   │   ├── enrich_items.py            pm.db 補完
-│   │   └── knowledge_context.py       ナレッジ文脈
-│   ├── pm_embed.py                    FTS5 + embedding 索引構築  ← 更新
 │   ├── pm_box_distill.py              ナレッジ蒸留 → knowledge.db
-│   └── pm_knowledge_edit.py           knowledge.db 編集CLI
+│   ├── pm_embed.py                    FTS5 + embedding 索引構築
+│   ├── pm_web_fetch.py                外部Web → web_articles.db
+│   └── pm_users_sync.py               Slack ユーザー → argus_config.yaml
 │
-├── データ品質
+├── minutes/                           議事録パイプライン
+│   ├── pm_minutes_import.py           議事録MD → 議事録DB
+│   ├── pm_minutes_catalog.py          Box アップロード + Canvas 目録
+│   └── pm_minutes_publish.py          minutes編集 → pm.db + Box XLSX/MD
+│
+├── enrich/                            Pass 2: エンリッチメント
+│   ├── enrich_items.py                pm.db 補完
+│   ├── knowledge_context.py           ナレッジ文脈
+│   └── pm_link_milestones.py          マイルストーン LLM 紐づけ
+│
+├── quality/                           データ品質
 │   ├── pm_screen.py                   重複検出
 │   ├── pm_relink.py                   CSV一括編集
-│   └── pm_sync_canvas.py              Canvas → pm.db 同期
+│   ├── pm_knowledge_edit.py           knowledge.db 編集CLI
+│   ├── pm_knowledge_dedupe.py         knowledge dedupe
+│   └── pm_knowledge_inspect.py        knowledge 検査
 │
-├── レポート・エクスポート
+├── reporting/                         レポート・エクスポート
 │   ├── pm_report.py                   進捗レポート → Canvas
+│   ├── pm_biweekly_report.py          隔週レポート pptx
+│   ├── pm_insight.py                  LLM 洞察
 │   ├── pm_xlsx_report.py              pm.db → Box XLSX
 │   ├── pm_xlsx_sync.py                Box XLSX → pm.db
-│   ├── pm_insight.py                  LLM 洞察
-│   └── canvas_report.sh               CRON レポート
+│   └── pm_sync_canvas.py              Canvas → pm.db 同期
 │
-├── argus/ (Pass 3: 検索・分析・生成)
+├── argus/                             Pass 3: 検索・分析・生成
 │   ├── pm_qa_server.py                Socket Mode デーモン
 │   ├── pm_argus.py                    ブリーフィング/リスク/草案
 │   ├── pm_argus_agent.py              Investigation Agent
@@ -472,25 +480,34 @@ scripts/
 │   ├── whisper_vad.py                 Whisper ASR
 │   └── slide_ocr.py                   スライドOCR
 │
-├── Web UI
+├── web/                               Web UI (FastAPI)
 │   ├── pm_api.py                      FastAPI サーバー
-│   ├── web_admin.py                   AdminJobQueue + Minutes CRUD  ← NEW
-│   ├── web_utils.py                   pm.db 保存ロジック
-│   └── static/                        Vue 3 SPA + ag-Grid
+│   ├── web_admin.py                   AdminJobQueue + Minutes CRUD
+│   └── web_utils.py                   pm.db 保存ロジック
 │
-├── 共通
+├── tts/                               音声合成
+│   └── pm_tts.py
+│
+├── utils/                             共通ユーティリティ
 │   ├── db_utils.py                    DB 接続
 │   ├── cli_utils.py                   LLM 呼び出し
-│   ├── format_utils.py                Markdown 整形
+│   ├── embed_utils.py                 bge-m3 embedding
 │   ├── canvas_utils.py                Canvas 操作
-│   ├── embed_utils.py                 bge-m3 embedding  ← NEW
-│   └── web_utils.py                   Web UI 共通
+│   ├── format_utils.py                Markdown 整形
+│   ├── box_cli.py                     Box CLI ヘルパ
+│   ├── voice_uploads.py               TTS 投稿履歴
+│   └── pptx_theme.py                  PPTX テーマ
 │
-└── シェルスクリプト
-    ├── pm_daemon.sh                   統合管理 (qa/web)
-    ├── pm_box_update.sh               夜間BOX更新
-    ├── pm_web_update.sh               夜間Web記事更新
-    ├── pm_argus_daily.sh              CRON ブリーフィング
-    ├── pm_from_recording.sh           録音 → 議事録
-    └── pm_from_slack_daily.sh         CRON Slack走査
+├── static/                            Vue 3 SPA + ag-Grid
+│
+├── bin/                               シェルスクリプト
+│   ├── pm_daemon.sh                   統合管理 (qa/web)
+│   ├── pm_box_update.sh               夜間BOX更新
+│   ├── pm_web_update.sh               夜間Web記事更新
+│   ├── pm_argus_daily.sh              CRON ブリーフィング
+│   ├── pm_from_recording.sh           録音 → 議事録
+│   ├── pm_from_slack_daily.sh         CRON Slack走査
+│   └── …                              (16 本)
+│
+└── archive/                           廃止スクリプト退避先（test/unused/eval）
 ```
