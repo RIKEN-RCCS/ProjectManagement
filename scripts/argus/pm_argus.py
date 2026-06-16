@@ -264,6 +264,72 @@ _KNOWLEDGE_MAX_ITEMS_DEFAULT = 30
 _KNOWLEDGE_MAX_CHARS = 4000
 
 
+def fetch_background_knowledge(
+    *,
+    pm_db_paths: list[Path],
+    no_encrypt: bool = False,
+    max_items: int = _KNOWLEDGE_MAX_ITEMS_DEFAULT,
+    max_chars: int = _KNOWLEDGE_MAX_CHARS,
+) -> str:
+    """brief/risk プロンプト同梱用『背景知識』を pm.db.decisions から構築する。
+
+    旧 fetch_knowledge_summary (knowledge.db 由来) の置き換え。
+    pm.db.decisions のうち rationale が入っている現役エントリを
+    決定日降順で取り出し、Markdown 箇条書きで返す。
+
+    BOX 由来の制約・方針は investigate の search_text で取得する想定。
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    for db_path in pm_db_paths:
+        try:
+            conn = open_pm_db(db_path, no_encrypt=no_encrypt)
+        except Exception as e:
+            logger.warning(f"pm.db 接続失敗 ({db_path}): {e}")
+            continue
+        try:
+            rows = conn.execute(
+                """SELECT id, content, rationale, decided_at, decided_by
+                     FROM decisions
+                    WHERE COALESCE(deleted, 0) = 0
+                      AND rationale IS NOT NULL
+                      AND TRIM(rationale) != ''
+                    ORDER BY COALESCE(decided_at, '') DESC, id DESC
+                    LIMIT ?""",
+                (max_items,),
+            ).fetchall()
+        except Exception as e:
+            logger.warning(f"decisions クエリ失敗 ({db_path}): {e}")
+            rows = []
+        finally:
+            conn.close()
+        for r in rows:
+            key = f"D-{r['id']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            content = (r["content"] or "").strip()
+            rationale = (r["rationale"] or "").strip()
+            decided_at = r["decided_at"] or ""
+            decided_by = r["decided_by"] or ""
+            who = f" by {decided_by}" if decided_by else ""
+            line = f"- **[{key}]** {content} — 根拠: {rationale}（決定: {decided_at}{who}）"
+            lines.append(line)
+
+    body = "\n".join(lines[:max_items])
+    if len(body) > max_chars:
+        truncated = body[:max_chars]
+        last_nl = truncated.rfind("\n")
+        if last_nl > 0:
+            truncated = truncated[:last_nl]
+        omitted = max(0, len(lines) - len(truncated.splitlines()))
+        if omitted > 0:
+            body = truncated + f"\n_…他 {omitted} 件は省略_"
+        else:
+            body = truncated
+    return body
+
+
 def fetch_knowledge_summary(
     *,
     no_encrypt: bool = False,
@@ -1260,8 +1326,9 @@ def _collect_all_data(
             f = pool.submit(_fetch_single_pm_stats, p, today, since_date, no_encrypt)
             pm_futs.append(f)
 
-        # knowledge: 独立 fetch
-        kn_fut = pool.submit(fetch_knowledge_summary, no_encrypt=no_encrypt, data_dir=data_dir)
+        # background knowledge: pm.db.decisions の rationale 付きから取得
+        kn_fut = pool.submit(fetch_background_knowledge,
+                             pm_db_paths=pm_db_paths, no_encrypt=no_encrypt)
 
         # Slack 結果を集約
         for f in concurrent.futures.as_completed(msg_futs):
