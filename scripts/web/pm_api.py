@@ -563,29 +563,10 @@ def admin_ingest_sources():
 
 # --- Knowledge endpoints --- #
 
-class DistillRequest(BaseModel):
-    source: str | None = None
-    since: str | None = None
-    force: bool = False
-    dry_run: bool = False
-
-
 class EmbedRequest(BaseModel):
     index_name: str | None = None
     full_rebuild: bool = False
     dry_run: bool = False
-
-
-@app.post("/api/admin/knowledge/distill")
-def admin_knowledge_distill(req: DistillRequest):
-    """Distill (ナレッジ蒸留) ジョブを開始。"""
-    queue = _state.get("job_queue")
-    if not queue:
-        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
-    params = req.model_dump()
-    job_id = queue.enqueue("distill", params)
-    queue.start(job_id)
-    return {"job_id": job_id, "status": "queued"}
 
 
 @app.post("/api/admin/knowledge/embed")

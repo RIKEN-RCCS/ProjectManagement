@@ -200,18 +200,6 @@ class AdminJobQueue:
                 cmd += ["--no-auto-enrich"]
             return cmd
 
-        if kind == "distill":
-            cmd = [py, str(self.scripts_dir / "pm_box_distill.py")]
-            if params.get("source"):
-                cmd += ["--source", params["source"]]
-            if params.get("since"):
-                cmd += ["--since", params["since"]]
-            if params.get("force"):
-                cmd += ["--force"]
-            if params.get("dry_run"):
-                cmd += ["--dry-run"]
-            return cmd
-
         if kind == "embed":
             cmd = [py, str(self.scripts_dir / "pm_embed.py")]
             if params.get("index_name"):

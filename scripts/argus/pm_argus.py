@@ -44,7 +44,7 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from db_utils import (
-    open_db, open_pm_db, open_knowledge_db,
+    open_db, open_pm_db,
     fetch_milestone_progress, fetch_assignee_workload,
     fetch_overdue_items, fetch_unacknowledged_decisions,
     fetch_unlinked_items_count, fetch_no_assignee_count,
@@ -327,81 +327,6 @@ def fetch_background_knowledge(
             body = truncated + f"\n_…他 {omitted} 件は省略_"
         else:
             body = truncated
-    return body
-
-
-def fetch_knowledge_summary(
-    *,
-    no_encrypt: bool = False,
-    data_dir: Path | None = None,
-    max_items: int = _KNOWLEDGE_MAX_ITEMS_DEFAULT,
-) -> str:
-    """data/knowledge.db から brief/risk プロンプト同梱用の短文サマリを生成する。
-
-    抽出条件（docs/distill_policy.md 参照）:
-    - deleted = 0
-    - superseded_by IS NULL（現役のみ）
-    - confidence IN ('high', 'medium')（low は書き込まれない想定だが念のためフィルタ）
-
-    並び順: confidence high → medium、その中で last_validated_at 降順。
-    出力は Markdown 箇条書きで、1 行に
-      - **[KN-XXXX | KIND | conf]** topic — current_state（last_validated: YYYY-MM-DD）
-    まで詰める。テキスト全体を _KNOWLEDGE_MAX_CHARS で打ち切る。
-    """
-    data_dir = data_dir or _DATA_DIR
-    db_path = data_dir / "knowledge.db"
-    if not db_path.exists():
-        return ""
-
-    try:
-        conn = open_knowledge_db(db_path, no_encrypt=no_encrypt)
-    except Exception as e:
-        logger.warning(f"knowledge.db 接続失敗: {e}")
-        return ""
-
-    try:
-        rows = conn.execute(
-            """SELECT id, kind, topic, current_state, confidence,
-                       last_validated_at, decided_at, owners, tags
-                  FROM knowledge
-                 WHERE COALESCE(deleted, 0) = 0
-                   AND superseded_by IS NULL
-                   AND confidence IN ('high', 'medium')
-                 ORDER BY CASE confidence WHEN 'high' THEN 0 ELSE 1 END,
-                          COALESCE(last_validated_at, decided_at, '') DESC
-                 LIMIT ?""",
-            (max_items,),
-        ).fetchall()
-    except Exception as e:
-        logger.warning(f"knowledge.db クエリ失敗: {e}")
-        conn.close()
-        return ""
-    conn.close()
-
-    if not rows:
-        return ""
-
-    lines = []
-    for r in rows:
-        kid = r["id"]
-        kind = (r["kind"] or "")[:10]
-        conf = r["confidence"] or ""
-        topic = (r["topic"] or "").strip()
-        cs = (r["current_state"] or "").strip()
-        validated = r["last_validated_at"] or r["decided_at"] or ""
-        validated_str = f" (validated: {validated})" if validated else ""
-        line = f"- **[{kid} | {kind} | {conf}]** {topic} — {cs}{validated_str}"
-        lines.append(line)
-
-    body = "\n".join(lines)
-    if len(body) > _KNOWLEDGE_MAX_CHARS:
-        # 末尾を切り捨てて省略マーカーを付ける
-        truncated = body[:_KNOWLEDGE_MAX_CHARS]
-        last_nl = truncated.rfind("\n")
-        if last_nl > 0:
-            truncated = truncated[:last_nl]
-        omitted = len(rows) - len(truncated.splitlines())
-        body = truncated + f"\n_…他 {omitted} 件は省略_"
     return body
 
 

@@ -1,1 +1,0 @@
-quality/pm_knowledge_inspect.py
