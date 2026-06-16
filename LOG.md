@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-06-16 scripts/ 再編 + Box CLI ヘルパー集約 + 暗号化 OOXML スキップ
+
+**背景**: `scripts/` 直下に Python 28 + shell 16 がフラットに並び `docs/architecture.md` の論理分類と乖離。また `pm_box_update.sh` の cron が暗号化 PPTX を毎回再変換しようとして失敗ループ、OCR が gemma-4 で動かず RiVault に流れていた。
+
+**決定**:
+- Phase 1: Python を機能別に 7 サブディレクトリ集約（utils/, data-pipeline/, minutes/, reporting/, quality/, web/, tts/）。後方互換のため scripts/ 直下に symlink を残す方針を採用。Phase 2（symlink 解除）は data-pipeline がハイフン名なこと・CRON 影響が大きいことから費用対効果が悪く skip。
+- Phase 3: pm_xlsx_report / pm_xlsx_sync / pm_minutes_catalog / pm_minutes_publish で重複していた Box CLI ヘルパー (`box_find_file` 等) を `utils/box_cli.py` に統合（純減 75 行）。
+- 暗号化 OOXML 検出を `pm_box_crawl.convert_to_markdown` 先頭で実施し placeholder 行を書いて再変換ループを止めた。LibreOffice 並列起動には `-env:UserInstallation` を付与し silent fail を回避。
+- OCR endpoint 選択を反転：LOCAL_LLM_URL があれば localhost (gemma-4) 優先、なければ RiVault フォールバック。
+
+**影響**: 既存 cron / シェルスクリプトは symlink 経由で動作継続。Phase 2 は将来必要になったとき再着手（`data-pipeline` → `data_pipeline` リネーム + 全 import 書き換え + CRON 更新）。詳細計画 `~/.claude/plans/plan-stateful-curry.md` は破棄。
+
+---
+
 ## 2026-06-11 Admin Web Dashboard 実装
 
 **背景**: 管理者が SSH + コマンド実行で行っていた全操作（録音処理→議事録生成、データ取り込み、ナレッジ蒸留、レポート生成、サービス管理）をブラウザから実行できるようにする必要があった。
