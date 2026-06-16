@@ -265,8 +265,22 @@ def _file_sha256(path: Path) -> str:
 # Format conversion
 # ---------------------------------------------------------------------------
 
+def _is_encrypted_office(path: Path) -> bool:
+    """OOXML (pptx/docx/xlsx) がパスワード暗号化されているかをマジックバイトで判定。
+    通常の OOXML は ZIP (PK\\x03\\x04) で始まるが、暗号化されたものは
+    OLE compound document (D0 CF 11 E0) として暗号化パッケージをラップする。"""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\xd0\xcf\x11\xe0"
+    except Exception:
+        return False
+
+
 def convert_to_markdown(file_path: Path, fmt: str) -> tuple[str, str]:
     """ファイルを Markdown に変換する。(content_md, convert_method) を返す。"""
+    if fmt in ("pptx", "docx", "xlsx") and _is_encrypted_office(file_path):
+        return "[ENCRYPTED — password-protected file, cannot extract content]", "encrypted"
+
     converters = {
         "md": _convert_md,
         "txt": _convert_md,
@@ -404,9 +418,13 @@ def _extract_boxnote_text(data: dict) -> str:
 
 def _libreoffice_to_html_to_md(path: Path, convert_filter: str) -> str | None:
     with tempfile.TemporaryDirectory() as tmpdir:
+        # 並列ワーカー間で LibreOffice の user profile を競合させないため、
+        # 呼び出しごとに専用 UserInstallation を割り当てる（無いと多重起動が silent fail する）
+        lo_profile = f"file://{tmpdir}/lo_profile"
         try:
             result = subprocess.run(
-                ["libreoffice", "--headless", "--convert-to", convert_filter,
+                ["libreoffice", f"-env:UserInstallation={lo_profile}",
+                 "--headless", "--convert-to", convert_filter,
                  "--outdir", tmpdir, str(path)],
                 timeout=300,  # 120秒 → 300秒に延長（複雑なdocxファイル対応）
                 capture_output=True,  # stdout/stderrをキャプチャ
@@ -584,9 +602,13 @@ def _convert_via_multimodal(path: Path) -> str | None:
 
 
 def _to_pdf(path: Path, tmpdir: Path) -> Path | None:
+    # 並列ワーカー間で LibreOffice の user profile を競合させないため、
+    # 呼び出しごとに専用 UserInstallation を割り当てる
+    lo_profile = f"file://{tmpdir}/lo_profile"
     try:
         subprocess.check_call(
-            ["libreoffice", "--headless", "--convert-to", "pdf",
+            ["libreoffice", f"-env:UserInstallation={lo_profile}",
+             "--headless", "--convert-to", "pdf",
              "--outdir", str(tmpdir), str(path)],
             timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -910,7 +932,10 @@ def convert_single_file(
             logger.info(f"    変換中... (pid={pid})")
             content_md, method = convert_to_markdown(file_path, fmt)
 
-            if not content_md.strip():
+            if method == "encrypted":
+                logger.warning(f"    [SKIP] 暗号化ファイル (pid={pid})")
+                # placeholder row を書き込み、以降の再変換ループでスキップさせる
+            elif not content_md.strip():
                 logger.warning(f"    [WARN] 変換結果が空 (method={method}, pid={pid})")
                 return {"status": "conversion_failed", "file_id": fid, "name": name}
 

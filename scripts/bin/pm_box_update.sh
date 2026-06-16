@@ -27,6 +27,7 @@ set -euo pipefail
 export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
 
 . ~/.secrets/slack_tokens.sh
+[ -f ~/.secrets/localLLM.sh ] && . ~/.secrets/localLLM.sh
 
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
@@ -40,8 +41,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
-export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
+# LOCAL_LLM_* は ~/.secrets/localLLM.sh で設定（gemma-4 / RiVault 等）
 
 # --------------------------------------------------------------------------- #
 # ログ出力先
