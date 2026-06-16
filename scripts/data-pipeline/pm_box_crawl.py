@@ -276,10 +276,29 @@ def _is_encrypted_office(path: Path) -> bool:
         return False
 
 
+def _is_encrypted_pdf(path: Path) -> bool:
+    """PDF がパスワード暗号化されているかを trailer の `/Encrypt` で判定。
+
+    PDF の trailer dictionary はファイル末尾にあり、暗号化 PDF はそこに
+    `/Encrypt` 参照を必ず持つ。末尾 64KB に絞ることで本文中の偶然一致
+    （フォント辞書名等）を避ける。
+    """
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            f.seek(max(0, size - 65536))
+            tail = f.read()
+        return b"/Encrypt" in tail
+    except Exception:
+        return False
+
+
 def convert_to_markdown(file_path: Path, fmt: str) -> tuple[str, str]:
     """ファイルを Markdown に変換する。(content_md, convert_method) を返す。"""
     if fmt in ("pptx", "docx", "xlsx") and _is_encrypted_office(file_path):
         return "[ENCRYPTED — password-protected file, cannot extract content]", "encrypted"
+    if fmt == "pdf" and _is_encrypted_pdf(file_path):
+        return "[ENCRYPTED — password-protected PDF, cannot extract content]", "encrypted"
 
     converters = {
         "md": _convert_md,

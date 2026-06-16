@@ -744,12 +744,16 @@ def main() -> None:
     else:
         logger.warning("SudachiPy: 利用不可（trigramのみでインデックスを構築します）")
 
+    # CWD 非依存のため REPO_ROOT 起点の絶対パスを使う（cron 実行で CWD=$HOME のケース対応）
+    _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
     if args.config:
         config_path = Path(args.config)
+        if not config_path.is_absolute():
+            config_path = _REPO_ROOT / config_path
     else:
-        config_path = Path("data/argus_config.yaml")
+        config_path = _REPO_ROOT / "data" / "argus_config.yaml"
         if not config_path.exists():
-            config_path = Path("data/qa_config.yaml")
+            config_path = _REPO_ROOT / "data" / "qa_config.yaml"
     if not config_path.exists():
         logger.error(f"設定ファイルが見つかりません: {config_path}")
         sys.exit(1)
