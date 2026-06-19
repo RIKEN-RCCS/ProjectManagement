@@ -36,7 +36,23 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_argus_llm, load_claude_md_context
 from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
-from argus.pm_argus import _run_brief, _run_draft, _run_risk, _run_today_only, _run_transcribe, _transcribe_jobs, _transcribe_lock, _run_narrate, _narrate_jobs, _narrate_lock
+from argus.retrieval import (  # 検索層（後方互換のため * 相当を個別 import）
+    TOP_K_RETRIEVE, TOP_K_RERANK,
+    _RECENCY_HALF_LIFE_DAYS, _RECENCY_WEIGHT, _VECTOR_SEARCH_WEIGHT, _VECTOR_K,
+    _sudachi_tokenizer, _sudachi_split_mode, _SUDACHI_TARGET_POS,
+    _init_sudachi, sudachi_tokenize_query,
+    sanitize_fts_query, _fts5_search, _fts_tokens_search,
+    retrieve_chunks, retrieve_chunks_vector, retrieve_chunks_hybrid,
+    _rrf_merge, _recency_score, _combined_score,
+    extract_search_keywords, expand_query_hyde, retrieve_chunks_hyde,
+    rerank_chunks,
+)
+from argus.pm_argus import (
+    _run_brief, _run_draft, _run_risk, _run_today_only,
+    _run_transcribe, _transcribe_jobs, _transcribe_lock,
+    _run_narrate, _run_narrate_build, _run_narrate_cancel,
+    _narrate_sessions, _narrate_lock,
+)
 from argus.pm_argus_agent import _run_investigate
 from argus.patrol.confirm import handle_approve_close, handle_reject_close
 from argus.patrol.state import PatrolState
@@ -48,54 +64,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pm_qa_server")
 
-# --- SudachiPy 形態素解析 ---
-
-_sudachi_tokenizer = None
-_sudachi_split_mode = None
-_SUDACHI_TARGET_POS = {"名詞", "動詞", "形容詞", "副詞"}
-
-
-def _init_sudachi() -> bool:
-    """SudachiPy の初期化。利用可能なら True を返す。"""
-    global _sudachi_tokenizer, _sudachi_split_mode
-    try:
-        import sudachipy
-        try:
-            _sudachi_tokenizer = sudachipy.Dictionary().create()
-            _sudachi_split_mode = sudachipy.SplitMode.C
-            return True
-        except Exception:
-            from sudachipy import tokenizer as tm
-            _sudachi_tokenizer = tm.Tokenizer()
-            _sudachi_split_mode = tm.Tokenizer.SplitMode.C
-            return True
-    except ImportError:
-        return False
-
-
-def sudachi_tokenize_query(question: str) -> list[str]:
-    """質問文をSudachiPyで形態素解析し、検索用トークンリストを返す。"""
-    if _sudachi_tokenizer is None:
-        return []
-    try:
-        morphemes = _sudachi_tokenizer.tokenize(question, _sudachi_split_mode)
-        tokens: list[str] = []
-        seen: set[str] = set()
-        for m in morphemes:
-            pos = m.part_of_speech()[0]
-            if pos in _SUDACHI_TARGET_POS:
-                form = m.dictionary_form()
-                if len(form) >= 2 and form not in seen:
-                    seen.add(form)
-                    tokens.append(form)
-        return tokens
-    except Exception:
-        return []
-
+# SudachiPy / 検索定数 / 検索関数群は argus.retrieval に移動済み
 
 # --- 設定 ---
-TOP_K_RETRIEVE = 30   # FTS検索で広めに取得する件数
-TOP_K_RERANK = 5      # re-rank後に回答生成へ渡す件数
+MAX_TOKENS = 1024  # (TOP_K_RETRIEVE / TOP_K_RERANK は retrieval から import)
+TOP_K_RETRIEVE = TOP_K_RETRIEVE  # noqa: F811 — retrieval からの import を可視化
 MAX_TOKENS = 1024
 LLM_TIMEOUT = 120
 RERANK_TIMEOUT = 60  # 30 → 60秒（議事録生成の re-rank に十分な時間を確保）
@@ -176,537 +149,9 @@ def resolve_index_db(channel_id: str) -> tuple[str, Path, list[Path]]:
     return index_name, db_path, pm_db_paths
 
 
-# --- FTS5検索 ---
-
-def sanitize_fts_query(q: str) -> str:
-    """FTS5 trigram 用にクエリを変換する。
-    ひらがな連続列で分割し、意味のある語句（3文字以上）を AND 条件として返す。
-    """
-    q = re.sub(r'["\'\*\^\(\)\[\]？?。、,，.．！!\n\r]', " ", q)
-    parts = re.split(r'[ぁ-ん]+', q)
-    tokens = [t.strip() for t in parts if len(t.strip()) >= 3]
-    if not tokens:
-        return re.sub(r'["\'\*\^\(\)\[\]？?。、！!]', " ", q).strip()
-    return " ".join(tokens)
-
-
-def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
-                 date_filter: str = "1=1", date_params: list = [],
-                 index_name: str | None = None) -> list[dict]:
-    try:
-        if index_name:
-            sql = (
-                "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
-                "       c.content, c.source_ref, fts.rank"
-                " FROM fts"
-                " JOIN chunks c ON fts.rowid = c.id"
-                " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
-                " WHERE fts MATCH ? AND ci.index_name = ? AND " + date_filter +
-                " ORDER BY rank LIMIT ?"
-            )
-            params = [query, index_name] + date_params + [k]
-        else:
-            sql = (
-                "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
-                "       c.content, c.source_ref, fts.rank"
-                " FROM fts"
-                " JOIN chunks c ON fts.rowid = c.id"
-                " WHERE fts MATCH ? AND " + date_filter +
-                " ORDER BY rank LIMIT ?"
-            )
-            params = [query] + date_params + [k]
-        rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
-    except sqlite3.OperationalError as e:
-        logger.debug(f"FTS5クエリエラー: {e} (query={query!r})")
-        return []
-
-
-def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
-                       date_filter: str = "1=1", date_params: list = [],
-                       index_name: str | None = None) -> list[dict]:
-    """fts_tokens（SudachiPy形態素解析）テーブルで段階的AND検索を行う。"""
-    # 全トークン → 先頭3 → 先頭2 → 先頭1 の順で試行
-    token_sets = [tokens]
-    if len(tokens) > 3:
-        token_sets.append(tokens[:3])
-    if len(tokens) > 2:
-        token_sets.append(tokens[:2])
-    if len(tokens) > 1:
-        token_sets.append(tokens[:1])
-
-    for tset in token_sets:
-        query = " ".join(tset)
-        try:
-            if index_name:
-                sql = (
-                    "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
-                    "       c.content, c.source_ref, fts_tokens.rank"
-                    " FROM fts_tokens"
-                    " JOIN chunks c ON fts_tokens.rowid = c.id"
-                    " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
-                    " WHERE fts_tokens MATCH ? AND ci.index_name = ? AND " + date_filter +
-                    " ORDER BY rank LIMIT ?"
-                )
-                params = [query, index_name] + date_params + [k]
-            else:
-                sql = (
-                    "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
-                    "       c.content, c.source_ref, fts_tokens.rank"
-                    " FROM fts_tokens"
-                    " JOIN chunks c ON fts_tokens.rowid = c.id"
-                    " WHERE fts_tokens MATCH ? AND " + date_filter +
-                    " ORDER BY rank LIMIT ?"
-                )
-                params = [query] + date_params + [k]
-            rows = conn.execute(sql, params).fetchall()
-            if rows:
-                return [dict(r) for r in rows]
-        except sqlite3.OperationalError as e:
-            logger.debug(f"fts_tokensクエリエラー: {e} (query={query!r})")
-            return []
-    return []
-
-
-def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
-                    since_date: str | None = None,
-                    index_name: str | None = None) -> list[dict]:
-    """統合 qa_index.db から関連チャンクを取得する。
-
-    検索戦略（順番に試行）:
-    1. SudachiPy形態素解析 → fts_tokens AND検索（段階的トークン削減）
-    2. trigram FTS5 AND検索（段階的トークン削減）
-    3. LIKE 検索フォールバック
-    4. 最新日付レコードのフォールバック
-
-    Args:
-        question: 検索クエリ
-        index_db: 統合インデックスDBのパス（通常 data/qa_index.db）
-        k: 取得件数上限
-        since_date: YYYY-MM-DD形式。指定時はこの日付以降のレコードのみ検索
-        index_name: 指定すると chunk_indexes 経由で当該 index に紐づくチャンクのみ
-    """
-    if not index_db.exists():
-        logger.warning(f"インデックスDBが見つかりません: {index_db}")
-        return []
-
-    conn = sqlite3.connect(str(index_db))
-    conn.row_factory = sqlite3.Row
-    try:
-        # 日付フィルタ条件句の構築
-        date_filter = "c.held_at >= ?" if since_date else "1=1"
-        date_params = [since_date] if since_date else []
-
-        # LIKE/最新フォールバック用に、index_name フィルタの SQL 片を組み立てる
-        if index_name:
-            ci_join = " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
-            ci_where = "ci.index_name = ? AND "
-            ci_params = [index_name]
-        else:
-            ci_join = ""
-            ci_where = ""
-            ci_params: list = []
-
-        idx_label = f"{index_db.name}[{index_name}]" if index_name else index_db.name
-
-        # --- Step 1: SudachiPy形態素解析 + fts_tokens 検索 ---
-        sudachi_tokens = sudachi_tokenize_query(question)
-        if sudachi_tokens:
-            has_fts_tokens = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='fts_tokens'"
-            ).fetchone() is not None
-
-            if has_fts_tokens:
-                rows = _fts_tokens_search(
-                    conn, sudachi_tokens, k,
-                    date_filter.replace("c.held_at", "c.held_at"),
-                    date_params, index_name=index_name,
-                )
-                if rows:
-                    logger.info(
-                        f"SudachiPy FTSマッチ ({len(rows)}件): {sudachi_tokens} in {idx_label}"
-                    )
-                    return rows
-                logger.debug(f"SudachiPy FTS: ヒットなし ({sudachi_tokens})")
-
-        # --- Step 2: trigram FTS5 検索 ---
-        sanitized = sanitize_fts_query(question)
-        valid_tokens = [t for t in sanitized.split() if len(t) >= 3]
-
-        token_sets = []
-        if valid_tokens:
-            token_sets.append(valid_tokens)
-            if len(valid_tokens) > 3:
-                token_sets.append(valid_tokens[:3])
-            if len(valid_tokens) > 2:
-                token_sets.append(valid_tokens[:2])
-            if len(valid_tokens) > 1:
-                token_sets.append(valid_tokens[:1])
-
-        for tset in token_sets:
-            q = " ".join(tset)
-            rows = _fts5_search(
-                conn, q, k, date_filter, date_params, index_name=index_name,
-            )
-            if rows:
-                logger.info(f"trigram FTSマッチ ({len(rows)}件): [{q}] in {idx_label}")
-                return rows
-
-        # --- Step 3: LIKE 検索 ---
-        keyword = (sudachi_tokens[0] if sudachi_tokens else
-                   (valid_tokens[0] if valid_tokens else ""))
-        if keyword:
-            sql = (
-                "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
-                " c.content, c.source_ref, 0 AS rank"
-                " FROM chunks c" + ci_join +
-                " WHERE " + ci_where + date_filter + " AND c.content LIKE ? LIMIT ?"
-            )
-            params = ci_params + date_params + [f"%{keyword}%", k]
-            rows = conn.execute(sql, params).fetchall()
-            if rows:
-                logger.info(f"LIKE検索フォールバック ({len(rows)}件): [{keyword}]")
-                return [dict(r) for r in rows]
-
-        # --- Step 4: 最新記録フォールバック ---
-        logger.info(f"マッチなし → 最新記録フォールバック (sudachi={sudachi_tokens})")
-        sql = (
-            "SELECT c.source_type, c.source_db, c.record_id, c.held_at,"
-            " c.content, c.source_ref, 0 AS rank"
-            " FROM chunks c" + ci_join +
-            " WHERE " + ci_where + date_filter +
-            " AND c.held_at IS NOT NULL ORDER BY c.held_at DESC LIMIT ?"
-        )
-        params = ci_params + date_params + [k]
-        rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
-
-    finally:
-        conn.close()
-
-
-# --- クエリ意図抽出（メタ語除去）---
-
-def extract_search_keywords(query: str, timeout: int = 30) -> str:
-    """ユーザー質問から FTS 検索に使うべきキーワードだけを抽出する。
-
-    「議論」「推移」「経緯」「整理して」のようなメタ要求語・指示動詞は
-    検索キーワードとして AND 条件に入ると本来欲しい文書を弾いてしまう。
-    LLM で純粋な検索対象キーワードだけを残す。
-
-    エラー時は元クエリをそのまま返す（フォールバック）。
-    """
-    prompt = (
-        "あなたは検索クエリの整理役です。\n"
-        "ユーザーの質問から、FTS全文検索で実際に当てるべき「検索対象キーワード」"
-        "だけをスペース区切りで抽出してください。\n\n"
-        "除外する語の例:\n"
-        "- メタ要求語: 議論, 検討, 討議, 進捗, 経緯, 推移, 動向, 状況, 内容\n"
-        "- 指示動詞: 整理, まとめ, 要約, 教えて, 知りたい, 説明, 整理して\n"
-        "- 一般的な疑問詞: いつ, どこ, なぜ, どう, どのように\n"
-        "- 時間範囲表現: 最近, 直近, 過去, 今, 現在\n\n"
-        "残すべき語:\n"
-        "- 固有名詞・技術用語（スケールアウトネットワーク, MONAKA-X, 帯域幅, FP8 等）\n"
-        "- 人名・組織名（富士通, NVIDIA, 西澤 等）\n"
-        "- 略語・型番（NVL72, M3, SubWG3 等）\n\n"
-        f"質問: {query}\n\n"
-        "出力（キーワードをスペース区切り、説明文・コードブロック禁止、1行のみ）:"
-    )
-    try:
-        from cli_utils import call_argus_llm
-        response = call_argus_llm(prompt, max_tokens=100, timeout=timeout)
-        # 1 行目だけ取り、余計な記号を除去
-        line = response.strip().splitlines()[0].strip() if response.strip() else ""
-        import re as _re
-        line = _re.sub(r"^[-*\d.）)\s]+", "", line).strip()
-        # 出力が空・元クエリと同一・極端に短い（記号のみ等）場合はフォールバック
-        if not line or len(line) < 2:
-            return query
-        return line
-    except Exception as e:
-        logger.warning(f"[KeywordExtract] 失敗: {e}")
-        return query
-
-
-# --- 鮮度スコアリング ---
-
-# 鮮度の半減期（日数）。180 日 = 約 6 ヶ月で recency_score が 0.5 になる
-_RECENCY_HALF_LIFE_DAYS = 180.0
-# 統合スコアでの鮮度重み（0=BM25 のみ、1=鮮度のみ）
-_RECENCY_WEIGHT = 0.4
-
-
-def _recency_score(held_at: str | None, today=None) -> float:
-    """指数減衰での鮮度スコア（0.0〜1.0、新しいほど 1 に近い）。
-
-    held_at が不明な場合は中央値 0.5 を返す。
-    half_life_days 経過で 0.5、その2倍で 0.25、と指数減衰する。
-    """
-    import math
-    from datetime import date as _date
-    if today is None:
-        today = _date.today()
-    if not held_at:
-        return 0.5
-    try:
-        d = _date.fromisoformat(str(held_at)[:10])
-    except (ValueError, TypeError):
-        return 0.5
-    age_days = max(0, (today - d).days)
-    return math.exp(-age_days / _RECENCY_HALF_LIFE_DAYS * math.log(2))
-
-
-def _combined_score(chunk: dict, today=None) -> float:
-    """BM25 ランクと鮮度スコアを加重和で統合（高いほど良い）。
-
-    FTS5 の rank は負の値で「小さいほど（より負ほど）良い」ため正規化する。
-    """
-    raw_rank = chunk.get("rank")
-    if raw_rank is None:
-        bm25_norm = 0.5
-    else:
-        # rank は通常 -10〜0 の範囲。-rank を取って 1/(1+x) で 0..1 に正規化。
-        try:
-            r = -float(raw_rank)
-            bm25_norm = 1.0 / (1.0 + max(0.0, r) * 0.1)
-        except (TypeError, ValueError):
-            bm25_norm = 0.5
-    rec = _recency_score(chunk.get("held_at"), today)
-    return (1.0 - _RECENCY_WEIGHT) * bm25_norm + _RECENCY_WEIGHT * rec
-
-
-# --- HyDE クエリ拡張 ---
-
-def expand_query_hyde(query: str, n_extra: int = 2, timeout: int = 30) -> list[str]:
-    """HyDE 風クエリ拡張: 元クエリ + LLM 生成の別表現を返す。
-
-    富岳NEXT プロジェクトの議事録・Slack は日本語と英語の用語が混在する
-    （例: "スケールアウトネットワーク" vs "scale-out network"、"演算性能" vs "FP8 performance"）。
-    片方の言語だけで FTS 検索すると半分の文書しか当たらないため、
-    必ず日本語版・英語版の両方を生成する。
-    エラー時は元クエリのみ返す（フォールバック）。
-    """
-    prompt = (
-        f"以下の検索クエリを、日本語と英語が混在するドキュメントの全文検索で\n"
-        f"当たりやすくするため別表現に書き換えてください。\n"
-        f"必ず以下を含めること:\n"
-        f"  - 日本語の別表現1つ（カタカナ語・漢字熟語など本文に出てきそうな語彙）\n"
-        f"  - 英語訳1つ（プロジェクト・技術用語）\n"
-        f"残りは日本語または英語の補助クエリ。\n\n"
-        f"元クエリ: {query}\n\n"
-        f"出力フォーマット（各行1クエリ、コードブロック禁止、説明文禁止、{n_extra}行のみ）:"
-    )
-    try:
-        from cli_utils import call_argus_llm
-        response = call_argus_llm(prompt, max_tokens=200, timeout=timeout)
-        extras = [ln.strip() for ln in response.splitlines() if ln.strip()]
-        import re as _re
-        extras = [_re.sub(r"^[-*\d.）)\s]+", "", ln).strip() for ln in extras]
-        extras = [e for e in extras if e and e != query][:n_extra]
-    except Exception as e:
-        logger.warning(f"[HyDE] 拡張失敗: {e}")
-        extras = []
-    return [query] + extras
-
-
-def retrieve_chunks_hyde(
-    question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
-    since_date: str | None = None, n_extra: int = 2, max_merged: int = 60,
-    index_name: str | None = None,
-) -> list[dict]:
-    """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。retrieve_chunks のラッパ。
-
-    前段で意図抽出（メタ要求語・指示動詞の除去）を行ってから HyDE で言い換えを生成する。
-    """
-    cleaned = extract_search_keywords(question)
-    if cleaned != question:
-        logger.info(f"[KeywordExtract] '{question}' → '{cleaned}'")
-    queries = expand_query_hyde(cleaned, n_extra=n_extra)
-    logger.info(f"[HyDE] queries={queries}")
-    seen: set = set()
-    merged: list[dict] = []
-    for q in queries:
-        for c in retrieve_chunks_hybrid(q, index_db, k=k, since_date=since_date,
-                                        index_name=index_name):
-            key = (c.get("source_db"), c.get("record_id"), c.get("content", "")[:80])
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(c)
-    logger.info(f"[HyDE] マージ後 {len(merged)} チャンク")
-    # 鮮度を加味した統合スコアで再ソート（新しい情報を優先）
-    from datetime import date as _date
-    today = _date.today()
-    merged.sort(key=lambda c: _combined_score(c, today), reverse=True)
-    return merged[:max_merged]
-
-
-# --- ベクトル検索（embedding） ---
-
-_VECTOR_SEARCH_WEIGHT = 0.4  # RRF での vector スコアの重み
-_VECTOR_K = 50  # vector 検索の取得件数
-
-
-def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTOR_K,
-                           index_name: str | None = None) -> list[dict]:
-    """chunk_embeddings を使って cosine similarity 検索を行う。"""
-    try:
-        from embed_utils import embed_one, blob_to_vector, cosine_similarity_matrix
-    except ImportError:
-        logger.warning("embed_utils が利用できません — vector 検索をスキップ")
-        return []
-
-    # クエリを embedding
-    try:
-        qvec = embed_one(query)
-    except Exception as e:
-        logger.warning(f"embedding 取得エラー: {e}")
-        return []
-
-    # 対象 index のチャンク embedding を全件ロード
-    sql = """
-        SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,
-               c.content, c.source_ref, e.vector, e.dim
-        FROM chunks c
-        JOIN chunk_embeddings e ON e.chunk_id = c.id
-        JOIN chunk_indexes ci ON ci.chunk_id = c.id
-        WHERE ci.index_name = ?
-    """
-    rows = conn.execute(sql, (index_name,)).fetchall() if index_name else conn.execute(
-        "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
-        " c.content, c.source_ref, e.vector, e.dim"
-        " FROM chunks c"
-        " JOIN chunk_embeddings e ON e.chunk_id = c.id"
-    ).fetchall()
-
-    if not rows:
-        return []
-
-    import numpy as np
-    chunks = [dict(r) for r in rows]
-    vecs = []
-    for c in chunks:
-        dim = c.pop("dim")
-        vec = blob_to_vector(c.pop("vector"), dim) if dim else None
-        vecs.append(vec)
-    vectors = np.stack(vecs)
-    sims = cosine_similarity_matrix(qvec, vectors)
-    top_k = np.argsort(-sims)[:k]
-    results = []
-    for i in top_k:
-        c = chunks[i]
-        c["vector_score"] = float(sims[i])
-        results.append(c)
-    return results
-
-
-def _rrf_merge(fts_chunks: list[dict], vec_chunks: list[dict], k: int,
-               rrf_k: int = 60) -> list[dict]:
-    """Reciprocal Rank Fusion で FTS5 と vector の結果を統合する。"""
-    rank_map: dict[int, float] = {}
-
-    for rank, c in enumerate(fts_chunks):
-        cid = c["id"]
-        rank_map[cid] = rank_map.get(cid, 0.0) + 1.0 / (rrf_k + rank)
-
-    for rank, c in enumerate(vec_chunks):
-        cid = c["id"]
-        rank_map[cid] = rank_map.get(cid, 0.0) + _VECTOR_SEARCH_WEIGHT / (rrf_k + rank)
-
-    sorted_ids = sorted(rank_map.keys(), key=lambda cid: -rank_map[cid])
-
-    # ID → chunk の辞書を作成（vec_chunks を優先、なければ fts）
-    chunk_dict = {c["id"]: c for c in vec_chunks}
-    for c in fts_chunks:
-        if c["id"] not in chunk_dict:
-            chunk_dict[c["id"]] = c
-
-    merged = []
-    for cid in sorted_ids[:k]:
-        c = dict(chunk_dict[cid])
-        c["rrf_score"] = rank_map[cid]
-        merged.append(c)
-    return merged
-
-
-def retrieve_chunks_hybrid(
-    question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
-    since_date: str | None = None, index_name: str | None = None,
-) -> list[dict]:
-    """FTS5 + vector のハイブリッド検索。RRF で統合する。"""
-    # FTS5 検索
-    fts_results = retrieve_chunks(question, index_db, k=k+20,
-                                  since_date=since_date, index_name=index_name)
-    # Vector 検索
-    conn = sqlite3.connect(str(index_db))
-    conn.row_factory = sqlite3.Row
-    try:
-        vec_results = retrieve_chunks_vector(question, conn, k=_VECTOR_K,
-                                             index_name=index_name)
-    finally:
-        conn.close()
-
-    if not vec_results:
-        return fts_results[:k]
-
-    return _rrf_merge(fts_results, vec_results, k)
-
-
-# --- Re-ranking ---
-
-def rerank_chunks(question: str, chunks: list[dict]) -> list[dict]:
-    """LLMを使って質問に最も関連するチャンクをTOP_K_RERANK件に絞り込む。
-    LLMが利用不可またはエラー時は先頭TOP_K_RERANK件をそのまま返す。
-    """
-    if not chunks or len(chunks) <= TOP_K_RERANK:
-        return chunks
-
-    if not _OPENAI_BASE:
-        return chunks[:TOP_K_RERANK]
-
-    lines = []
-    for i, chunk in enumerate(chunks):
-        label = _format_source_label(chunk)
-        preview = chunk["content"][:400].strip().replace("\n", " ")
-        lines.append(f"[{i}] {label}\n{preview}")
-    context_str = "\n\n".join(lines)
-
-    prompt = (
-        f"以下のチャンク一覧から、質問に最も関連するものを{TOP_K_RERANK}件選んでください。\n"
-        f"**直近の議論を優先してください。**\n"
-        f"番号のみをスペース区切りで出力してください（例: 0 3 7 12 15）。\n\n"
-        f"質問: {question}\n\n"
-        f"チャンク一覧:\n{context_str}"
-    )
-
-    try:
-        result = call_argus_llm(
-            prompt=prompt,
-            max_tokens=30,
-            timeout=60,
-            temperature=0.0,
-        )
-        indices: list[int] = []
-        for token in result.strip().split():
-            try:
-                idx = int(token)
-                if 0 <= idx < len(chunks) and idx not in indices:
-                    indices.append(idx)
-            except ValueError:
-                continue
-
-        if indices:
-            logger.info(f"  re-rank選択: {indices} → {len(indices)} 件")
-            return [chunks[i] for i in indices[:TOP_K_RERANK]]
-
-        logger.warning("re-rank: 有効な番号が得られず先頭件数で代替")
-    except Exception as e:
-        logger.warning(f"re-rankエラー: {e}. 日付降順フォールバックを使用")
-        # フォールバック: 日付降順でソート
-        return sorted(chunks, key=lambda x: x.get("held_at", ""), reverse=True)[:TOP_K_RERANK]
-
-    return chunks[:TOP_K_RERANK]
-
+# --- 検索関数群は argus.retrieval に移動済み（import でアクセス可能）---
+# sanitize_fts_query, retrieve_chunks, retrieve_chunks_hybrid 等は
+# retrieval import から利用する。
 
 # --- プロンプト構築 ---
 
@@ -1106,20 +551,6 @@ def build_app():
     app = App(token=bot_token)
     executor = ThreadPoolExecutor(max_workers=4)
 
-    @app.command("/argus-ask")
-    def handle_ask(ack, respond, command):
-        """互換性のため残存。内部は argus-investigate に転送する。"""
-        ack()
-        question = (command.get("text") or "").strip()
-        if not question:
-            respond(
-                text="質問を入力してください。例: `/argus-ask 設計方針について`",
-                response_type="ephemeral",
-            )
-            return
-        respond(text=f":mag: `{question[:80]}`", response_type="ephemeral")
-        executor.submit(_run_investigate, respond, command)
-
     # --- Argus コマンドハンドラ ---
 
     @app.command("/argus-brief")
@@ -1256,21 +687,46 @@ def build_app():
             )
             return
         with _narrate_lock:
-            if _narrate_jobs:
+            if _narrate_sessions:
                 running = ", ".join(
-                    f"`{fname}` (ch={chid})"
-                    for _, (fname, chid) in _narrate_jobs.items()
+                    f"`{s.filename}` (ch={s.channel_id}, phase={s.phase})"
+                    for s in _narrate_sessions.values()
                 )
                 respond(
                     text=f":warning: 現在処理中の要約動画ジョブがあります。完了後に再実行してください。\n処理中: {running}",
                     response_type="ephemeral",
                 )
                 return
-        respond(
-            text=f":hourglass_flowing_sand: `{filename}` の要約動画生成を開始します...",
-            response_type="ephemeral",
-        )
+        # 進捗はチャンネル親メッセージで示すので ephemeral は出さない
         executor.submit(_run_narrate, respond, command)
+
+    @app.action("argus_narrate_build")
+    def handle_argus_narrate_build(ack, body, respond):
+        ack()
+        try:
+            thread_ts = (body.get("actions") or [{}])[0].get("value", "")
+        except Exception:
+            thread_ts = ""
+        user_id = (body.get("user") or {}).get("id", "")
+        if not thread_ts:
+            return
+        with _narrate_lock:
+            sess = _narrate_sessions.get(thread_ts)
+        if sess is None or sess.phase != "draft":
+            return  # 多重押下・期限切れは静かに無視
+        executor.submit(_run_narrate_build, thread_ts, user_id)
+
+    @app.action("argus_narrate_cancel")
+    def handle_argus_narrate_cancel(ack, body, respond):
+        ack()
+        try:
+            thread_ts = (body.get("actions") or [{}])[0].get("value", "")
+        except Exception:
+            thread_ts = ""
+        user_id = (body.get("user") or {}).get("id", "")
+        if not thread_ts:
+            return
+        executor.submit(_run_narrate_cancel, thread_ts, user_id)
 
     def _delete_thread_files(client, channel_id: str, thread_ts: str) -> tuple[int, list[str]]:
         """スレッド配下の全 reply に添付された files を削除する。
@@ -1308,98 +764,6 @@ def build_app():
             logger.debug(f"[delete] voice_uploads cleanup failed: {e}")
 
         return deleted, errors
-
-    def _handle_delete(ack, client, command):
-        """/argus-delete /delete 共通ハンドラ。
-
-        - スレッド内で引数なし → スレッド配下の全添付ファイルを削除（議事録 md + mp3 や argus-* 音声）
-        - 引数あり (filename / file_id) → 後方互換: ファイル名検索で削除、F0... なら直接削除
-        - スレッド外で引数なし → 使い方
-        """
-        text = (command.get("text") or "").strip().strip("*")
-        channel_id = command.get("channel_id", "")
-        thread_ts = command.get("thread_ts", "")
-
-        # 1. スレッド内 + 引数なし: スレッド配下を一括削除
-        if thread_ts and not text:
-            ack(":wastebasket: スレッド内のファイルを削除します...")
-            deleted, errors = _delete_thread_files(client, channel_id, thread_ts)
-            if deleted == 0 and not errors:
-                client.chat_postMessage(
-                    channel=channel_id, thread_ts=thread_ts,
-                    text="このスレッドに削除対象のファイルが見つかりませんでした。",
-                )
-                return
-            msg = f":white_check_mark: {deleted} 件のファイルを削除しました。"
-            if errors:
-                msg += "\n失敗:\n" + "\n".join(f"• {e}" for e in errors[:5])
-            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=msg)
-            return
-
-        if not text:
-            ack(
-                "使い方:\n"
-                "• 削除したいファイルがあるスレッド内で引数なしで `/argus-delete` を実行 → そのスレッドの全添付ファイルを削除\n"
-                "• `/argus-delete <ファイル名>` → チャンネルからファイル名で検索して削除（後方互換）\n"
-                "• `/argus-delete F0123ABCD` → file_id を直接指定して削除"
-            )
-            return
-
-        # 2. 引数が file_id らしい (F で始まり英数字)
-        if re.fullmatch(r"F[A-Z0-9]+", text):
-            ack(f"`{text}` を削除します...")
-            try:
-                client.files_delete(file=text)
-                client.chat_postMessage(channel=channel_id, text=f":white_check_mark: file_id `{text}` を削除しました。")
-            except Exception as e:
-                client.chat_postMessage(channel=channel_id, text=f":warning: file_id `{text}` の削除に失敗: {e}")
-            return
-
-        # 3. 引数がファイル名 (既存挙動)
-        filename = text if "." in text else f"{text}.md"
-        ack(f"`{filename}` を検索して削除します...")
-
-        files = []
-        cursor = None
-        for _ in range(20):
-            kwargs = {"channel": channel_id, "types": "all", "count": 200}
-            if cursor:
-                kwargs["cursor"] = cursor
-            response = client.files_list(**kwargs)
-            files.extend(response.get("files", []))
-            cursor = (response.get("response_metadata") or {}).get("next_cursor") or ""
-            if not cursor:
-                break
-
-        target = filename.lower()
-        matched = [f for f in files if (f.get("name") or "").lower() == target]
-        if not matched:
-            matched = [f for f in files if (f.get("title") or "").lower() == target]
-        if not matched:
-            matched = [f for f in files if target in (f.get("name") or "").lower()]
-
-        if not matched:
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"`{filename}` がこのチャンネルに見つかりませんでした。",
-            )
-            return
-
-        file_id = matched[0]["id"]
-        try:
-            client.files_delete(file=file_id)
-            client.chat_postMessage(channel=channel_id, text=f"`{filename}` を削除しました。")
-        except Exception as e:
-            logger.error("ファイル削除に失敗: %s", e)
-            client.chat_postMessage(channel=channel_id, text=f"`{filename}` の削除に失敗しました: {e}")
-
-    @app.command("/argus-delete")
-    def handle_argus_delete(ack, client, command):
-        _handle_delete(ack, client, command)
-
-    @app.command("/delete")
-    def handle_delete(ack, client, command):
-        _handle_delete(ack, client, command)
 
     # --- デバッグ用: 受信した event を全てログ ---
     # （Slack App の Event Subscriptions に reaction_added が登録されているか
@@ -1580,7 +944,7 @@ def build_app():
                 AgentContext, build_seed_data, run_agent,
                 _DEFAULT_SINCE_DAYS, _DATA_DIR, _MINUTES_DIR,
             )
-            from pm_argus import _to_slack_mrkdwn
+            from utils.slack_post import _to_slack_mrkdwn
 
             today = date.today().isoformat()
             since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()

@@ -55,6 +55,17 @@ from format_utils import (
     format_milestone_table, format_overdue_list, format_assignee_table,
     format_weekly_trends as format_trends_table, format_decisions_list,
 )
+from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks, _SLACK_SECTION_LIMIT
+from argus.prompts import (  # noqa: F401 — 後方互換のため全プロンプト定数を再 export
+    _BRIEF_PROMPT, _DAILY_SUMMARY_PROMPT,
+    _DRAFT_AGENDA_PROMPT, _DRAFT_REPORT_PROMPT, _DRAFT_REQUEST_PROMPT,
+    _RISK_PROMPT,
+    _RISK_WORKER_PM_PROMPT, _RISK_WORKER_CONVERSATION_PROMPT,
+    _RISK_WORKER_MINUTES_PROMPT, _RISK_WORKER_KNOWLEDGE_PROMPT,
+    _RISK_ORCHESTRATOR_PROMPT,
+    _BRIEF_WORKER_PM_PROMPT, _BRIEF_WORKER_CONVERSATION_PROMPT,
+    _BRIEF_WORKER_MINUTES_PROMPT, _BRIEF_ORCHESTRATOR_PROMPT,
+)
 
 # --------------------------------------------------------------------------- #
 # 設定
@@ -77,7 +88,26 @@ _transcribe_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, ch
 _transcribe_lock = threading.Lock()
 
 # /argus-narrate ジョブ排他制御 (PPTX/PDF → mp4)
-_narrate_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, channel_id)
+# Phase1 (原稿生成→Slack 投稿) と Phase2 (ユーザー修正後の動画化) の 2 段構成。
+# セッションは Phase1 完了時に登録し、build/cancel ボタン押下で破棄する。
+from dataclasses import dataclass, field
+
+
+@dataclass
+class _NarrateSession:
+    thread_ts: str
+    channel_id: str
+    filename: str
+    work_dir: Path
+    slides: list = field(default_factory=list)        # list[build_slide_video.Slide]
+    narrations: list[str] = field(default_factory=list)  # 現在採用中の narration (各 build 後に更新)
+    lang: str = "ja"
+    command: dict = field(default_factory=dict)        # _post_argus_video に渡す元 command
+    phase: str = "draft"                                # "draft" | "rendering"
+    iteration: int = 0                                  # 何回目の build か (build 成功時に +1)
+
+
+_narrate_sessions: dict[str, _NarrateSession] = {}     # thread_ts → session
 _narrate_lock = threading.Lock()
 
 from recording.transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
@@ -403,560 +433,6 @@ def merge_pm_stats(stats_list: list[dict]) -> dict:
 # --------------------------------------------------------------------------- #
 # プロンプト構築
 # --------------------------------------------------------------------------- #
-
-_BRIEF_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下のデータを分析し、**プロジェクト全体として今日 {today} 中に優先的に対応すべきこと**を
-最大5件、優先度順にリストアップしてください。
-個人の担当タスク管理ではなく、プロジェクトのゴール達成・マイルストーン進捗・
-リスク軽減の観点からプロジェクト全体を俯瞰してください。
-
-各項目の形式:
-- **[優先度: 高/中/低]** タイトル
-  - 状況: （プロジェクト全体での現状の簡潔な説明）
-  - 次の一手: （誰が何を確認/決定/依頼すべきかを含む具体的なアクション）
-  - 根拠: （データ上の根拠: マイルストーン名・アイテムID・担当者名・期限など）
-
-## プロジェクト文脈
-
-{context}
-
-## 確定済みナレッジ（蒸留 / 上書き未済）
-
-これらは富岳NEXTプロジェクト全体に渡って有効と判定されている確定事項です。
-推奨アクションが既存の意思決定 / 制約と整合しているかを必ず照合し、参照したレコードは
-回答中に `D-XXX` 形式で引用してください。空の場合は無視して構いません。
-
-{knowledge_summary}
-
-## 集計日: {today}（{period_desc}）
-
-## pm.db 統計サマリー
-
-- オープンAI: {total_open}件 / 完了AI: {total_closed}件
-- 期限超過（open）: {overdue_count}件
-- 未確認決定事項: {unacknowledged_decisions}件
-- マイルストーン未紐づけ: {unlinked_count}件 / 担当者なし: {no_assignee_count}件
-
-## マイルストーン進捗
-
-{milestone_table}
-
-## 期限超過アクションアイテム（上位10件）
-
-{overdue_list}
-
-## 担当者別負荷
-
-{assignee_table}
-
-## 未確認決定事項
-
-{decisions_list}
-
-## 週次トレンド（直近4週）
-
-{weekly_trends}
-
-## 直近の Slack 生メッセージ（{period_desc}）
-
-{messages}
-
-## 直近の議事録（{period_desc}）
-
-{minutes}
-
----
-
-上記データを踏まえ、富岳NEXTプロジェクト全体として今日取るべきアクションを5件以内で提示してください。
-特定の個人のタスク管理ではなく、プロジェクトのゴール達成・マイルストーン到達・リスク軽減に
-直結する事項を優先してください。
-データが示す具体的な懸案（マイルストーン名・期限超過のID・担当者名）を必ず引用してください。
-"""
-
-
-def _to_slack_mrkdwn(text: str) -> str:
-    """GitHub Flavored Markdown を Slack mrkdwn に変換。
-
-    - `## heading` / `### heading` → `*heading*`
-    - `**bold**` → `*bold*`
-    - 入れ子箇条書き (`- ` / `  - ` / `    - `) は section block では
-      先頭スペースが消えてフラット表示になるため、Unicode のブレット文字と
-      NBSP (　) インデントに置換して階層感を保つ:
-        `- item`     → `• item`
-        `  - item`   → `　　◦ item`
-        `    - item` → `　　　　▪ item`
-    """
-    import re
-    # ヘッダー (## ... / ### ...) を太字に変換
-    text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
-    # **bold** → *bold*
-    text = re.sub(r'\*\*([^*\n]+?)\*\*', r'*\1*', text)
-
-    # 箇条書きを Unicode ブレット + NBSP インデントに変換
-    def _bullet(m: 're.Match') -> str:
-        leading = m.group(1)
-        # 先頭の空白量からインデント階層を推定（4 sp / 2 sp / tab を 1 段とみなす）
-        spaces = leading.replace("\t", "    ")
-        depth = len(spaces) // 2
-        if depth >= 2:
-            marker = "▪"
-        elif depth == 1:
-            marker = "◦"
-        else:
-            marker = "•"
-        # NBSP (U+3000 全角空白) で深さ × 2 段の見た目を作る
-        indent = "　　" * depth
-        return f"{indent}{marker} "
-    text = re.sub(r'^([ \t]*)[-*]\s+', _bullet, text, flags=re.MULTILINE)
-
-    return text
-
-
-# Slack section block の text は 3000 文字上限。超過するとブロック全体が無音で破棄される。
-_SLACK_SECTION_LIMIT = 2900  # 安全マージン
-
-
-def _split_mrkdwn_to_blocks(text: str) -> list[dict]:
-    """長文 mrkdwn を Slack section block の上限内で分割する。
-
-    改行優先で区切り、超過する単一行は文字数で強制切断する。
-    """
-    blocks: list[dict] = []
-    buf = ""
-    for line in text.split("\n"):
-        # 単一行が上限を超える場合は強制分割
-        while len(line) > _SLACK_SECTION_LIMIT:
-            if buf:
-                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": buf}})
-                buf = ""
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line[:_SLACK_SECTION_LIMIT]}})
-            line = line[_SLACK_SECTION_LIMIT:]
-        # 通常の改行単位で詰める
-        candidate = (buf + "\n" + line) if buf else line
-        if len(candidate) > _SLACK_SECTION_LIMIT:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": buf}})
-            buf = line
-        else:
-            buf = candidate
-    if buf:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": buf}})
-    return blocks
-
-
-_DAILY_SUMMARY_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下のデータを分析し、**本日 {today} のプロジェクト活動記録**をサマライズしてください。
-
-## プロジェクト文脈
-
-{context}
-
-## 確定済みナレッジ（蒸留 / 上書き未済）
-
-本日の議論が既存の確定事項と矛盾している場合は明示してください。引用は `D-XXX` 形式。
-空の場合は無視して構いません。
-
-{knowledge_summary}
-
-## 本日のSlackメッセージ
-
-{messages}
-
-## 本日の議事録
-
-{minutes}
-
----
-
-以下の観点で本日の活動をサマライズしてください:
-
-### 1. 主な議論トピック
-本日Slack・会議で議論された主要なテーマ（3〜5件）
-
-### 2. 決定事項
-誰が何を決定したか、決定の背景・理由
-
-### 3. 新規アクションアイテム
-誰が何を担当することになったか、期限が設定されているか
-
-### 4. 重要な進捗・変更
-プロジェクトに影響する技術的進展・方針変更
-
-**データがない場合は「本日は活動記録がありません」と簡潔に記載してください。**
-"""
-
-
-_DRAFT_AGENDA_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下のデータを基に、**次回「{subject}」のための会議アジェンダ草案**を生成してください。
-
-## プロジェクト文脈
-
-{context}
-
-## 未確認決定事項（要フォローアップ）
-
-{decisions_list}
-
-## 直近の未完了アクションアイテム（期限超過含む）
-
-{overdue_list}
-
-## 直近 14 日間の Slack 生メッセージ（議論の流れ）
-
-{messages}
-
----
-
-アジェンダ草案を以下の形式で生成してください:
-
-# 会議アジェンダ: {subject}
-日時: （調整中）
-参加者: （調整中）
-
-## 1. 前回決定事項の確認（10分）
-（前回未確認の決定事項をリストアップ）
-
-## 2. アクションアイテム進捗確認（15分）
-（期限超過・要注意アイテムを担当者別にリスト）
-
-## 3. 主要議題（30分）
-（Slackの議論と統計データから浮上している課題を3〜5件）
-
-## 4. 次回アクションアイテムの確定（5分）
-
----
-_Argus 生成: {today}_
-"""
-
-_DRAFT_REPORT_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下のデータを基に、**進捗報告「{subject}」の草案**を生成してください。
-
-## プロジェクト文脈
-
-{context}
-
-## マイルストーン進捗
-
-{milestone_table}
-
-## 直近 2 週間の完了アクションアイテム
-
-{closed_items}
-
-## 期限超過アクションアイテム
-
-{overdue_list}
-
-## 担当者別負荷
-
-{assignee_table}
-
----
-
-進捗報告草案を以下の形式で生成してください:
-
-# 進捗報告: {subject}
-報告日: {today}
-
-## 全体状況
-（マイルストーン進捗サマリー・完了率・ヘルス評価）
-
-## マイルストーン別進捗
-（各マイルストーンの状況・完了数・懸念事項）
-
-## 直近2週間の主な成果
-（完了AIのリスト）
-
-## 課題・リスク
-（期限超過・担当者過負荷・要注意事項）
-
-## 次期アクション
-（優先対応事項3件以内）
-
----
-_Argus 生成: {today}_
-"""
-
-_DRAFT_REQUEST_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下のデータを基に、**確認依頼「{subject}」のメッセージ草案**を生成してください。
-
-## プロジェクト文脈
-
-{context}
-
-## 担当者別負荷（期限超過が多い担当者に優先して確認）
-
-{assignee_table}
-
-## 期限超過アクションアイテム
-
-{overdue_list}
-
-## 関連する直近 14 日間の Slack メッセージ
-
-{messages}
-
----
-
-確認依頼メッセージ草案を生成してください。
-対象者が複数いる場合は担当者ごとにメッセージを分けてください。
-丁寧かつ具体的に（アイテムID・期限・内容を明示）してください。
-
----
-_Argus 生成: {today}_
-"""
-
-_RISK_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下のデータを分析し、**顕在化しているリスクと放置すると問題になりうる予兆**を列挙してください。
-
-各リスクの形式:
-- **[高/中/低]** リスクタイトル
-  - 状況: （現状の説明）
-  - 根拠: （具体的なデータの引用）
-  - 推奨対応: （今すぐやるべき対応）
-
-## プロジェクト文脈
-
-{context}
-
-## 確定済みナレッジ（蒸留 / 上書き未済）
-
-これらは確定事項です。Slack 上の発言・議事録の議論がこれらと矛盾している場合は、
-それ自体が高優先度のリスクです（不整合・周知漏れ・古い前提に基づく作業）。
-参照したレコードは `D-XXX` 形式で引用してください。空の場合は無視して構いません。
-
-{knowledge_summary}
-
-## 集計日: {today}（{period_desc}）
-
-## pm.db 統計サマリー
-
-- オープンAI: {total_open}件 / 完了AI: {total_closed}件
-- 期限超過（open）: {overdue_count}件
-- 未確認決定事項: {unacknowledged_decisions}件
-- マイルストーン未紐づけ: {unlinked_count}件 / 担当者なし: {no_assignee_count}件
-
-## マイルストーン進捗
-
-{milestone_table}
-
-## 期限超過アクションアイテム（上位15件）
-
-{overdue_list}
-
-## 担当者別負荷
-
-{assignee_table}
-
-## 週次トレンド（直近4週）
-
-{weekly_trends}
-
-## 未確認決定事項
-
-{decisions_list}
-
-## 直近の Slack 生メッセージ（{period_desc}）
-
-{messages}
-
-## 直近の議事録（{period_desc}）
-
-{minutes}
-
----
-
-定量データと会話の文脈から、富岳NEXTプロジェクト全体に影響するリスクを分析してください。
-特定の個人の作業遅延ではなく、マイルストーン達成・プロジェクトゴールへの影響度を軸に、
-顕在化しているリスクと放置すると問題になりうる予兆の両方を列挙してください。
-各リスクに優先度（高/中/低）と推奨対応を付けてください。
-"""
-
-
-# =========================================================================== #
-#  リスク分析: マルチWorker + Orchestrator
-# =========================================================================== #
-
-_RISK_WORKER_PM_PROMPT = """\
-あなたは富岳NEXTプロジェクトのPMデータ分析エージェントです。
-以下の pm.db の定量データを分析し、プロジェクトの**スケジュール・リソース・プロセス**観点の
-リスクを3〜5件、優先度順に列挙してください。
-
-各項目の形式:
-- **[高/中/低]** リスクタイトル
-  - 状況: （現状の説明）
-  - 根拠: （マイルストーン名・アイテムID・件数・担当者名を必ず含める）
-
-{stats_section}
-"""
-
-_RISK_WORKER_CONVERSATION_PROMPT = """\
-あなたは富岳NEXTプロジェクトのSlack会話分析エージェントです。
-以下の Slack メッセージを分析し、**未解決の議論・対立・認識齟齬・停滞**を
-リスクとして3〜5件、優先度順に列挙してください。
-
-各項目の形式:
-- **[高/中/低]** リスクタイトル
-  - 状況: （現状の説明）
-  - 根拠: （メッセージ内容・チャンネル・発言者を引用）
-
-{conversation_section}
-"""
-
-_RISK_WORKER_MINUTES_PROMPT = """\
-あなたは富岳NEXTプロジェクトの議事録分析エージェントです。
-以下の議事録を分析し、**決定の反転・未対応事項・認識のズレ**を
-リスクとして3〜5件、優先度順に列挙してください。
-
-各項目の形式:
-- **[高/中/低]** リスクタイトル
-  - 状況: （現状の説明）
-  - 根拠: （会議名・発言内容を引用）
-
-{minutes_section}
-"""
-
-_RISK_WORKER_KNOWLEDGE_PROMPT = """\
-あなたは富岳NEXTプロジェクトのナレッジ一貫性チェックエージェントです。
-以下の確定ナレッジを分析し、**ナレッジ間の矛盾・陳腐化した前提・欠落している情報**を
-リスクとして3〜5件、優先度順に列挙してください。
-
-各項目の形式:
-- **[高/中/低]** リスクタイトル
-  - 状況: （現状の説明）
-  - 根拠: （D-XXX 形式で引用）
-
-{knowledge_section}
-"""
-
-_RISK_ORCHESTRATOR_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下の 4 つの視点から提出されたリスク分析結果を統合し、重複を除去し、
-優先順位を付けて最終的なリスク報告を生成してください。
-
-各リスクの形式:
-- **[高/中/低]** リスクタイトル
-  - 状況: （現状の説明）
-  - 根拠: （具体的なデータの引用）
-  - 推奨対応: （今すぐやるべき対応）
-
-## プロジェクト文脈
-
-{context}
-
-## フォーカス指定
-
-{focus_section}
-
-## Worker A — PMデータからのリスク分析
-
-{worker_pm}
-
-## Worker B — Slack会話からのリスク分析
-
-{worker_conversation}
-
-## Worker C — 議事録からのリスク分析
-
-{worker_minutes}
-
-## Worker D — ナレッジ一貫性チェック
-
-{worker_knowledge}
-
----
-
-上記4視点の分析結果を統合し、重複しているリスクは1つにまとめ、
-優先順位を付けて最終的なリスク報告を出力してください。
-各リスクには根拠と推奨対応を必ず含めてください。
-"""
-
-
-# =========================================================================== #
-#  ブリーフィング: マルチWorker + Orchestrator
-# =========================================================================== #
-
-_BRIEF_WORKER_PM_PROMPT = """\
-あなたは富岳NEXTプロジェクトのPMデータ分析エージェントです。
-以下の pm.db の定量データを分析し、**プロジェクトとして今日対応すべきアクション候補**を
-3〜5件、優先度順に列挙してください。
-
-各項目には具体的な根拠（マイルストーン名・アイテムID・担当者名・期限）を必ず含めてください。
-
-{stats_section}
-"""
-
-_BRIEF_WORKER_CONVERSATION_PROMPT = """\
-あなたは富岳NEXTプロジェクトのSlack会話分析エージェントです。
-以下の Slack メッセージを分析し、**プロジェクトとして今日対応すべきアクション候補**を
-3〜5件、優先度順に列挙してください。
-
-各項目には具体的な根拠（チャンネル名・発言者・メッセージ内容の引用）を必ず含めてください。
-
-{conversation_section}
-"""
-
-_BRIEF_WORKER_MINUTES_PROMPT = """\
-あなたは富岳NEXTプロジェクトの議事録分析エージェントです。
-以下の議事録を分析し、**プロジェクトとして今日対応すべきアクション候補**を
-3〜5件、優先度順に列挙してください。
-
-各項目には具体的な根拠（会議名・決定事項・アクションアイテムの引用）を必ず含めてください。
-
-{minutes_section}
-"""
-
-_BRIEF_ORCHESTRATOR_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
-以下の 3 つの視点から提出されたアクション候補を統合し、重複を除去し、
-優先順位を付けて**最大5件**のブリーフィングを生成してください。
-
-各項目の形式:
-- **[優先度: 高/中/低]** タイトル
-  - 状況: （プロジェクト全体での現状の簡潔な説明）
-  - 次の一手: （誰が何を確認/決定/依頼すべきかを含む具体的なアクション）
-  - 根拠: （データ上の根拠: マイルストーン名・アイテムID・担当者名・期限など）
-
-## プロジェクト文脈
-
-{context}
-
-## 確定済みナレッジ（蒸留 / 上書き未済）
-
-推奨アクションが既存の意思決定 / 制約と整合しているかを必ず照合し、
-参照したレコードは `D-XXX` 形式で引用してください。
-空の場合は無視して構いません。
-
-{knowledge_summary}
-
-## フォーカス指定
-
-{focus_section}
-
-## Worker A — PMデータからのアクション候補
-
-{worker_pm}
-
-## Worker B — Slack会話からのアクション候補
-
-{worker_conversation}
-
-## Worker C — 議事録からのアクション候補
-
-{worker_minutes}
-
----
-
-上記3視点の分析結果を統合し、重複しているアクションは1つにまとめ、
-優先順位を付けて**最大5件**のブリーフィングを出力してください。
-各アクションには状況・次の一手・根拠を必ず含めてください。
-"""
-
 
 def _fmt_closed_items(conns, since_date: str, limit: int = 20) -> str:
     if not isinstance(conns, list):
@@ -2183,24 +1659,114 @@ def _run_transcribe(respond, command):
 
 # --------------------------------------------------------------------------- #
 # /argus-narrate: PPTX/PDF → 要約読み上げ付き mp4
+# Phase1: 原稿生成 → スレッドに投稿（ユーザーが修正できるようにする）
+# Phase2: 「動画を生成」ボタン押下 → 最新原稿で TTS + mp4 化
 # --------------------------------------------------------------------------- #
 
-def _run_narrate(respond, command):
-    """Slack /argus-narrate のバックグラウンド処理。
+# ハイフン (-), em-dash (—), en-dash (–) いずれも許容。
+# 「スライド」「Slide」「slide」など日英どちらの表記でも拾う。
+_NARRATE_SLIDE_HEADER_RE = re.compile(
+    r"^\s*[-—–]{2,}\s*(?:スライド|slide)\s*(\d+)\s*[-—–]{2,}\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
 
-    実行チャンネルにアップロードされた PPTX/PDF をダウンロードし、
-    build_slide_video で要約読み上げ付き mp4 を生成してチャンネルに投稿する。
+
+def _format_narration_message(narrations: list[str], lang: str = "ja") -> str:
+    """narration 一覧を「--- スライド N ---」または「--- Slide N ---」見出し付きに整形。"""
+    label = "Slide" if lang == "en" else "スライド"
+    parts: list[str] = []
+    for i, narration in enumerate(narrations, 1):
+        parts.append(f"--- {label} {i} ---\n{narration.strip()}")
+    return "\n\n".join(parts)
+
+
+def _parse_narration_message(
+    text: str, expected_count: int, originals: list[str],
+) -> tuple[list[str], int] | None:
+    """ユーザー返信から修正済み narration を抽出して originals にマージする。
+
+    - 見出しは日英・ダッシュ種別を許容（_NARRATE_SLIDE_HEADER_RE 参照）
+    - 一部スライドだけの編集も許容（残りは originals のまま）
+    - 有効な編集が 1 件以上あれば (merged_narrations, edited_count) を返す
+    - 1 件もマッチしなければ None
+    """
+    if not text:
+        return None
+    matches = list(_NARRATE_SLIDE_HEADER_RE.finditer(text))
+    if not matches:
+        return None
+    found: dict[int, str] = {}
+    for i, m in enumerate(matches):
+        idx = int(m.group(1))
+        if idx < 1 or idx > expected_count:
+            continue
+        body_start = m.end()
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[body_start:body_end].strip()
+        if body:
+            found[idx] = body
+    if not found:
+        return None
+    merged = list(originals)
+    for idx, body in found.items():
+        merged[idx - 1] = body
+    return merged, len(found)
+
+
+def _narrate_action_blocks(thread_ts: str) -> list[dict]:
+    """「動画を生成」「キャンセル」ボタンの Block Kit ペイロード。"""
+    return [
+        {
+            "type": "actions",
+            "block_id": f"argus_narrate_actions_{thread_ts}",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": "argus_narrate_build",
+                    "style": "primary",
+                    "text": {"type": "plain_text", "text": ":movie_camera: 動画を生成"},
+                    "value": thread_ts,
+                    "confirm": {
+                        "title": {"type": "plain_text", "text": "動画を生成しますか?"},
+                        "text": {"type": "mrkdwn", "text": "現在の原稿（修正があればスレッド最新返信）で TTS + mp4 を作ります。"},
+                        "confirm": {"type": "plain_text", "text": "生成する"},
+                        "deny": {"type": "plain_text", "text": "戻る"},
+                    },
+                },
+                {
+                    "type": "button",
+                    "action_id": "argus_narrate_cancel",
+                    "style": "danger",
+                    "text": {"type": "plain_text", "text": "終了"},
+                    "value": thread_ts,
+                    "confirm": {
+                        "title": {"type": "plain_text", "text": "編集セッションを終了しますか?"},
+                        "text": {"type": "mrkdwn", "text": "セッションを閉じ、中間ファイル (work_dir) を削除します。投稿済みの動画はそのまま残ります。"},
+                        "confirm": {"type": "plain_text", "text": "終了する"},
+                        "deny": {"type": "plain_text", "text": "戻る"},
+                    },
+                },
+            ],
+        },
+    ]
+
+
+def _run_narrate(respond, command):
+    """Slack /argus-narrate の Phase1 (原稿生成 → スレッド投稿)。
+
+    アップロード済み PPTX/PDF を取得して LLM で各スライドの narration を生成し、
+    その原稿をコマンド実行チャンネルのスレッドに投稿する。ユーザーが原稿を
+    確認・必要なら同形式でスレッド返信して修正したのち、「動画を生成」ボタンを
+    押すと _run_narrate_build (Phase2) に進む。
     """
     text = (command.get("text") or "").strip()
     text = text.strip("*_`~'\"「」​‌‍﻿")
 
-    # --lang ja / --lang en の解析
     lang = "ja"
-    import re as _re
-    lang_m = _re.search(r"--lang\s+(ja|en)\b", text)
+    lang_m = re.search(r"--lang\s+(ja|en)\b", text)
     if lang_m:
         lang = lang_m.group(1)
-        text = (_re.sub(r"--lang\s+(ja|en)\b", "", text)).strip()
+        text = re.sub(r"--lang\s+(ja|en)\b", "", text).strip()
 
     filename = text
     if filename and not Path(filename).suffix:
@@ -2249,7 +1815,6 @@ def _run_narrate(respond, command):
         )
         return
 
-    # チャンネルからファイルを検索
     try:
         listing = bot_client.files_list(channel=channel_id, types="all")
         files = listing.get("files", [])
@@ -2279,11 +1844,12 @@ def _run_narrate(respond, command):
         )
         return
 
-    # 進捗をスレッドで知らせる
+    # スレッド親メッセージは「原稿レビュー用ヘッダ」1 行のみ。
+    # 進捗は chat_update で上書きしてチャンネルへの追加投稿を増やさない。
     try:
         progress = bot_client.chat_postMessage(
             channel=channel_id,
-            text=f":hourglass_flowing_sand: `{filename}` の要約動画を生成しています...",
+            text=f":scroll: `{filename}` のナレーション原稿（生成中）",
         )
         thread_ts = progress["ts"]
     except Exception as exc:
@@ -2294,10 +1860,15 @@ def _run_narrate(respond, command):
         )
         return
 
-    with _narrate_lock:
-        _narrate_jobs[thread_ts] = (filename, channel_id)
-
+    # 原稿生成中はセッション登録だけ先行 (Phase2 と排他)
     work_dir = Path(tempfile.mkdtemp(prefix="argus_narrate_"))
+    session = _NarrateSession(
+        thread_ts=thread_ts, channel_id=channel_id, filename=filename,
+        work_dir=work_dir, lang=lang, command=dict(command), phase="draft",
+    )
+    with _narrate_lock:
+        _narrate_sessions[thread_ts] = session
+
     try:
         import requests as _req
         src_path = work_dir / filename
@@ -2312,15 +1883,142 @@ def _run_narrate(respond, command):
                 f.write(chunk)
 
         try:
-            from build_slide_video import build_slide_video
+            from build_slide_video import prepare_slides, summarize_all_slides
         except ImportError as exc:
             raise RuntimeError(f"build_slide_video の import 失敗: {exc}")
 
-        mp4_path = work_dir / (Path(filename).stem + ".narrate.mp4")
-        logger.info(f"[argus-narrate] 開始: {filename}")
-        build_slide_video(src_path, mp4_path, lang=lang, quiet=True)
+        logger.info(f"[argus-narrate] Phase1 開始: {filename}")
+        slides = prepare_slides(src_path, work_dir)
+        narrations = summarize_all_slides(slides, lang=lang, quiet=True)
+        logger.info(f"[argus-narrate] 原稿生成完了: {len(narrations)} 枚")
+
+        session.slides = slides
+        session.narrations = narrations
+
+        narration_text = _format_narration_message(narrations, lang=lang)
+        # 1) スレッド: 原稿本文（修正は同形式で全件返信、ガイド文は親へ）
+        bot_client.chat_postMessage(
+            channel=channel_id, thread_ts=thread_ts,
+            text=narration_text,
+        )
+        # 2) スレッド: 動画生成 / キャンセル ボタンのみ（テキストは fallback）
+        bot_client.chat_postMessage(
+            channel=channel_id, thread_ts=thread_ts,
+            text="動画を生成しますか?",
+            blocks=_narrate_action_blocks(thread_ts),
+        )
+        # 3) チャンネル親メッセージを更新（追加投稿はしない）
+        try:
+            bot_client.chat_update(
+                channel=channel_id, ts=thread_ts,
+                text=(
+                    f":scroll: `{filename}` のナレーション原稿（{len(narrations)} 枚）— "
+                    "スレッドの原稿を確認し、修正したいスライドだけ同形式で返信、"
+                    "「動画を生成」で何度でも作り直せます（編集を終えたら「終了」）"
+                ),
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.exception("[argus-narrate] Phase1 エラー")
+        try:
+            bot_client.chat_postMessage(
+                channel=channel_id, thread_ts=thread_ts,
+                text=f":warning: 原稿生成に失敗しました: {exc}",
+            )
+        except Exception:
+            pass
+        respond(
+            text=f":warning: 原稿生成エラー: {exc}",
+            response_type="ephemeral",
+            replace_original=True,
+        )
+        # 失敗時はセッションごと破棄
+        with _narrate_lock:
+            _narrate_sessions.pop(thread_ts, None)
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _run_narrate_build(thread_ts: str, user_id: str) -> None:
+    """Phase2: スレッドの最新返信を読み込み、修正済み narration で動画を生成。
+
+    ボタンハンドラ (pm_qa_server.py) から呼ばれる。Slack への通知も内部で完結する。
+    """
+    with _narrate_lock:
+        session = _narrate_sessions.get(thread_ts)
+        if session is None:
+            return
+        if session.phase != "draft":
+            return  # 多重押下を無視
+        session.phase = "rendering"
+
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not bot_token:
+        logger.warning("[argus-narrate] Phase2: SLACK_BOT_TOKEN 未設定")
+        return
+    try:
+        from slack_sdk import WebClient
+        bot_client = WebClient(token=bot_token)
+    except ImportError:
+        logger.warning("[argus-narrate] Phase2: slack_sdk なし")
+        return
+
+    channel_id = session.channel_id
+    filename = session.filename
+    expected = len(session.slides)
+
+    # スレッドから最新の修正済み narration を拾う
+    final_narrations = list(session.narrations)
+    edited = False
+    edited_count = 0
+    try:
+        replies = bot_client.conversations_replies(channel=channel_id, ts=thread_ts, limit=200)
+        bot_user_id = None
+        try:
+            auth = bot_client.auth_test()
+            bot_user_id = auth.get("user_id")
+        except Exception:
+            pass
+        candidate_msgs: list[dict] = []
+        for msg in reversed(replies.get("messages", []) or []):
+            if msg.get("ts") == thread_ts:
+                continue
+            if bot_user_id and msg.get("user") == bot_user_id:
+                continue
+            if msg.get("bot_id"):
+                continue
+            candidate_msgs.append(msg)
+        for msg in candidate_msgs:
+            parsed = _parse_narration_message(msg.get("text") or "", expected, session.narrations)
+            if parsed is not None:
+                final_narrations, edited_count = parsed
+                edited = True
+                logger.info(f"[argus-narrate] Phase2: ユーザー修正 {edited_count}/{expected} 枚を採用 (ts={msg.get('ts')})")
+                break
+        if not edited and candidate_msgs:
+            latest = candidate_msgs[0]
+            preview = (latest.get("text") or "")[:240].replace("\n", " | ")
+            logger.warning(
+                f"[argus-narrate] Phase2: ユーザー返信が見出し形式と合致せず元原稿を使用 "
+                f"(返信件数={len(candidate_msgs)}, latest_ts={latest.get('ts')}, preview={preview!r})"
+            )
+    except Exception as exc:
+        logger.warning(f"[argus-narrate] Phase2: スレッド取得失敗 {exc}")
+
+    work_dir = session.work_dir
+    try:
+        from build_slide_video import render_video
+
+        iteration = session.iteration + 1
+        # 同名上書きにすると Slack 側で「同じ mp4」と扱われる可能性があるので回ごとに名前を分ける
+        mp4_path = work_dir / f"{Path(filename).stem}.narrate.r{iteration}.mp4"
+        logger.info(f"[argus-narrate] Phase2 開始 r{iteration}: {filename} (edited={edited})")
+        render_video(
+            session.slides, final_narrations, mp4_path, work_dir,
+            lang=session.lang, quiet=True,
+        )
         logger.info(
-            f"[argus-narrate] mp4 生成完了 size={mp4_path.stat().st_size} bytes"
+            f"[argus-narrate] mp4 生成完了 r{iteration} size={mp4_path.stat().st_size} bytes"
         )
 
         try:
@@ -2328,42 +2026,76 @@ def _run_narrate(respond, command):
             credit = pm_tts.credit_line(pm_tts.DEFAULT_SPEAKER)
         except Exception:
             credit = ""
+        round_note = f" (Round {iteration})"
         initial_comment = (
-            ":movie_camera: スライド要約動画です。\n"
+            f":movie_camera: スライド要約動画{round_note}です。\n"
             + (f"_{credit}_\n" if credit else "")
-            + "削除する場合はこのメッセージに :wastebasket: リアクションを付けてください。"
+            + "原稿を直したい場合はこのスレッドに修正版を返信し、再度「動画を生成」を押してください。\n"
+            + "完了したらスレッドの「終了」ボタンで編集セッションを閉じてください。"
         )
         _post_argus_video(
-            command,
+            session.command,
             kind="narrate",
             mp4_path=mp4_path,
-            title=f"{Path(filename).stem} 要約動画",
+            title=f"{Path(filename).stem} 要約動画 r{iteration}",
             initial_comment=initial_comment,
         )
-
-        respond(
-            text=f":white_check_mark: `{filename}` の要約動画を投稿しました。",
-            response_type="ephemeral",
-            replace_original=True,
-        )
-    except Exception as exc:
-        logger.exception("[argus-narrate] エラー")
+        # セッションを次のラウンドに繰り越す: narrations を「今回採用した版」で更新し、
+        # 次回 reply は前回採用版に対して差分マージされる。
+        with _narrate_lock:
+            session.narrations = final_narrations
+            session.iteration = iteration
+            session.phase = "draft"
         try:
-            bot_client.chat_postMessage(
-                channel=channel_id, thread_ts=thread_ts,
-                text=f":warning: 要約動画の生成に失敗しました: {exc}",
+            if edited:
+                note = f"（直近 {edited_count}/{expected} 枚を修正）"
+            else:
+                note = ""
+            bot_client.chat_update(
+                channel=channel_id, ts=thread_ts,
+                text=(
+                    f":white_check_mark: `{filename}` Round {iteration} 完了{note} — "
+                    "原稿を再修正してもう一度「動画を生成」、または「終了」で締めてください"
+                ),
             )
         except Exception:
             pass
-        respond(
-            text=f":warning: 要約動画生成エラー: {exc}",
-            response_type="ephemeral",
-            replace_original=True,
-        )
-    finally:
+    except Exception as exc:
+        logger.exception("[argus-narrate] Phase2 エラー")
+        try:
+            bot_client.chat_postMessage(
+                channel=channel_id, thread_ts=thread_ts,
+                text=f":warning: 動画生成に失敗しました: {exc}",
+            )
+        except Exception:
+            pass
+        # 失敗時はリトライできるよう draft に戻すだけでセッションは残す
         with _narrate_lock:
-            _narrate_jobs.pop(thread_ts, None)
-        shutil.rmtree(work_dir, ignore_errors=True)
+            sess = _narrate_sessions.get(thread_ts)
+            if sess is not None:
+                sess.phase = "draft"
+
+
+def _run_narrate_cancel(thread_ts: str, user_id: str) -> None:
+    """編集セッションを終了し、work_dir を破棄して親メッセージを更新する。"""
+    with _narrate_lock:
+        session = _narrate_sessions.pop(thread_ts, None)
+    if session is None:
+        return
+    shutil.rmtree(session.work_dir, ignore_errors=True)
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not bot_token:
+        return
+    try:
+        from slack_sdk import WebClient
+        rounds = session.iteration
+        suffix = f"（{rounds} 回生成）" if rounds else "（動画は生成されませんでした）"
+        WebClient(token=bot_token).chat_update(
+            channel=session.channel_id, ts=thread_ts,
+            text=f":checkered_flag: `{session.filename}` のナレーション編集を終了しました{suffix}",
+        )
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
