@@ -691,7 +691,7 @@ def _fetch_slack_references_for_box(box_file_id: str, limit: int = 2) -> list[st
 
 def _append_sources_section(answer: str, ctx: AgentContext) -> str:
     """ctx.cited_chunks にあるチャンクから「## 出典」セクションを生成して回答末尾に付与する。"""
-    from pm_qa_server import _format_source_label
+    from argus.pm_qa_server import _format_source_label
 
     extra_sections: list[str] = []
 

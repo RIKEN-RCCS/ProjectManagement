@@ -148,7 +148,7 @@ def _tool_get_unacknowledged_decisions(args: dict, ctx: AgentContext) -> str:
 
 
 def _tool_search_action_items(args: dict, ctx: AgentContext) -> str:
-    from pm_qa_server import _query_action_items
+    from argus.qa_engine import _query_action_items
     items: list = []
     for conn in ctx.conns:
         items.extend(_query_action_items(
@@ -185,7 +185,7 @@ def _tool_search_action_items(args: dict, ctx: AgentContext) -> str:
 
 
 def _tool_search_decisions(args: dict, ctx: AgentContext) -> str:
-    from pm_qa_server import _query_decisions
+    from argus.qa_engine import _query_decisions
     items: list = []
     for conn in ctx.conns:
         items.extend(_query_decisions(
@@ -209,7 +209,8 @@ def _tool_search_decisions(args: dict, ctx: AgentContext) -> str:
 
 
 def _tool_search_text(args: dict, ctx: AgentContext) -> str:
-    from pm_qa_server import retrieve_chunks_hyde, rerank_chunks, _format_source_label
+    from argus.retrieval import retrieve_chunks_hyde, rerank_chunks
+    from argus.pm_qa_server import _format_source_label
     query = args.get("query", "")
     if not query:
         return "（検索クエリが空です）"
