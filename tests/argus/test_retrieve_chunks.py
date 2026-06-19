@@ -251,7 +251,7 @@ class TestRetrieveChunksHybrid:
 class TestArgusWorkers:
     def test_brief_worker_pm_calls_llm(self, monkeypatch):
         """_run_brief_worker("pm") が call_argus_llm を呼んで結果を返す。"""
-        import argus.pm_argus as pm_argus
+        import argus.narrate as pm_argus
         monkeypatch.setattr(pm_argus, "call_argus_llm", lambda *a, **kw: "brief result")
         from argus.pm_argus import _run_brief_worker
         result = _run_brief_worker("pm", "test data")
@@ -264,13 +264,13 @@ class TestArgusWorkers:
         assert "不明" in result
 
     def test_brief_worker_conversation(self, monkeypatch):
-        import argus.pm_argus as pm_argus
+        import argus.narrate as pm_argus
         monkeypatch.setattr(pm_argus, "call_argus_llm", lambda *a, **kw: "conv result")
         from argus.pm_argus import _run_brief_worker
         assert _run_brief_worker("conversation", "data") == "conv result"
 
     def test_brief_worker_minutes(self, monkeypatch):
-        import argus.pm_argus as pm_argus
+        import argus.narrate as pm_argus
         monkeypatch.setattr(pm_argus, "call_argus_llm", lambda *a, **kw: "minutes result")
         from argus.pm_argus import _run_brief_worker
         assert _run_brief_worker("minutes", "data") == "minutes result"

@@ -50,6 +50,8 @@ from argus.retrieval import (  # 検索層（後方互換のため * 相当を�
 from argus.pm_argus import (
     _run_brief, _run_draft, _run_risk, _run_today_only,
     _run_transcribe, _transcribe_jobs, _transcribe_lock,
+)
+from argus.narrate import (
     _run_narrate, _run_narrate_build, _run_narrate_cancel,
     _narrate_sessions, _narrate_lock,
 )

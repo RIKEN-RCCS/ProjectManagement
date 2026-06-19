@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-06-19 Argus モジュール責務分割（テスト基盤 + Phase 2/3 リファクタリング）
+
+**背景**: Opus 4.7 が完了した scripts/ 再編は「ファイルを正しい場所に移す」段階まで。`pm_argus.py`(2832行)・`pm_qa_server.py`(1805行)・`pm_argus_agent.py`(1465行)・`cli_utils.py`(1118行) が依然として巨大モノリスで、LLM 出力の非決定性・Slack API 副作用・SQLite スキーマ変更に対するレグレッションガードが皆無だった。リファクタリングを安全に進めるにはテストが前提と判断。
+
+**決定**: テスト基盤（pytest 102 件）を先に整備し、通過を確認しながら 6 ステップで責務分割を実施。
+- Phase 2（横断レイヤー）: `slack_post.py`・`retrieval.py`・`llm.py` を新設し、mrkdwn ヘルパ / FTS5+ベクトル検索 / LLM ラッパを抽出
+- Phase 3（縦割り）: `prompts.py`・`agent_tools.py`・`transcript.py` を新設し、プロンプト定数 / ツール実装群 / Whisper パーサを分離
+- 後方互換のため各元ファイルは `from <新モジュール> import *` で再 export し、既存の CRON・シェルスクリプトへの影響はゼロ
+
+**副産物バグ修正**: `_fts5_search` / `_fts_tokens_search` の SELECT で `c.id` が欠落しており、ハイブリッド検索時に `_rrf_merge` で `KeyError: 'id'` が発生していた（テスト作成で発覚）。
+
+**影響**: 削減行数 — `pm_argus.py` 543行、`pm_argus_agent.py` 526行、`pm_qa_server.py` 560行、`cli_utils.py` 524行。次のリファクタリング（pm_qa_server の Bolt ハンドラ分離、pm_argus の Orchestrator / TTS 分離）はテスト保護が整った状態で着手できる。
+
+---
+
 ## 2026-06-16 knowledge.db 全廃、背景知識を pm.db.decisions に集約
 
 **背景**: 1,801 件中 active 1,552、うち 66% が superseded、人手編集 0 件、Patrol の conflicts_with 検出も 0 件。実消費は brief/risk のプロンプト同梱と investigate の search_knowledge のみで、knowledge.db ⊃ pm.db.decisions の関係が二重化していた（KN-1794 と D-1254 など）。蒸留は毎日 68 回の LLM 呼び出しを消費していたが、その出力の上位は既に pm.db.decisions に rationale 付き 78% で記録されていた。
