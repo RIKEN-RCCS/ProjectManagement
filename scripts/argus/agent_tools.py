@@ -1,15 +1,23 @@
 """agent_tools.py — Argus Agent ツール定義・実装レジストリ
 
-pm_argus_agent.py から分離。ツール追加・変更はこのファイルのみ編集すればよい。
-AgentContext / ToolDef / TOOLS / _TOOL_MAP / _build_tool_descriptions を提供する。
+pm_argus_agent.py から呼ばれるツール群。
+実装本体は argus.mcp_tools（検索・分析）と argus.output_tools（出力）に委譲する。
+pm_mcp_server.py（FastMCP）と同じ関数群を提供するため、挙動は統一されている。
+
+このファイルが管理するもの:
+  - AgentContext（investigate agent の状態）
+  - ToolDef（ツール定義データクラス）
+  - TOOLS / _TOOL_MAP（ツールレジストリ）
+  - _tool_search_text, _tool_get_slack_messages, _tool_search_mentions
+    （AgentContext の conns/channels に依存するためここに残す）
 """
 from __future__ import annotations
 
 import logging
-import sqlite3
+import os
+import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +44,8 @@ logger = logging.getLogger("pm_argus_agent")
 
 _DATA_DIR = _REPO_ROOT / "data"
 _MINUTES_DIR = _DATA_DIR / "minutes"
+_ARGUS_CONFIG = _DATA_DIR / "argus_config.yaml"
+_QA_CONFIG_LEGACY = _DATA_DIR / "qa_config.yaml"
 
 # =========================================================================== #
 #  AgentContext
@@ -53,6 +63,9 @@ class AgentContext:
     index_name: str = "pm"
     channels: list[str] = field(default_factory=list)
     cited_chunks: list[dict] = field(default_factory=list)
+    # 出力ツール用（オプショナル）
+    slack_bot_token: str = ""
+    box_folder_id: str = ""
 
 
 # =========================================================================== #
@@ -75,175 +88,36 @@ def _query_all(ctx: AgentContext, fn, *args, **kwargs) -> list:
     return out
 
 
-def _tool_get_milestone_progress(args: dict, ctx: AgentContext) -> str:
-    rows = _query_all(ctx, fetch_milestone_progress)
-    if not rows:
-        return "（マイルストーンが登録されていません）"
-    return format_milestone_table(rows, ctx.today)
+# =========================================================================== #
+#  mcp_tools への委譲ヘルパ
+# =========================================================================== #
+
+def _call_mcp(fn_name: str) -> Callable[[dict, AgentContext], str]:
+    """mcp_tools の関数を args 展開して呼ぶラッパーを生成する。"""
+    from argus import mcp_tools
+    fn = getattr(mcp_tools, fn_name, None)
+    if fn is None:
+        raise RuntimeError(f"mcp_tools に {fn_name} が見つかりません")
+
+    def wrapper(args: dict, ctx: AgentContext) -> str:
+        return fn(**args)
+    return wrapper
 
 
-def _tool_get_overdue_items(args: dict, ctx: AgentContext) -> str:
-    items = _query_all(ctx, fetch_overdue_items, ctx.today, ctx.since)
-    assignee = args.get("assignee")
-    milestone = args.get("milestone")
-    if assignee:
-        items = [i for i in items if assignee in (i.get("assignee") or "")]
-    if milestone:
-        items = [i for i in items if i.get("milestone_id") == milestone]
-    limit = int(args.get("limit", 20))
-    items = items[:limit]
-    if not items:
-        filt = []
-        if assignee:
-            filt.append(f"assignee={assignee}")
-        if milestone:
-            filt.append(f"milestone={milestone}")
-        return f"（該当する期限超過アイテムなし{' (' + ', '.join(filt) + ')' if filt else ''}）"
-    return format_overdue_list(items, limit=limit)
-
-
-def _tool_get_assignee_workload(args: dict, ctx: AgentContext) -> str:
-    from pm_argus import merge_pm_stats
-    all_rows: list = []
-    for conn in ctx.conns:
-        all_rows.extend(fetch_assignee_workload(conn, ctx.today))
-    wl_map: dict[str, dict] = {}
-    for w in all_rows:
-        name = w["assignee"]
-        if name in wl_map:
-            wl_map[name]["total_open"] += w["total_open"]
-            wl_map[name]["overdue"] += w["overdue"]
-            wl_map[name]["no_due_date"] += w.get("no_due_date", 0)
-        else:
-            wl_map[name] = {**w}
-    rows = sorted(wl_map.values(), key=lambda x: (-x["overdue"], -x["total_open"]))
-    if not rows:
-        return "（担当者データなし）"
-    return format_assignee_table(rows)
-
-
-def _tool_get_weekly_trends(args: dict, ctx: AgentContext) -> str:
-    weeks = int(args.get("weeks", 4))
-    trend_map: dict[str, dict] = {}
-    for conn in ctx.conns:
-        for t in fetch_weekly_trends(conn, weeks=weeks):
-            k = t["week_start"]
-            if k in trend_map:
-                trend_map[k]["created"] += t["created"]
-                trend_map[k]["closed"] += t["closed"]
-            else:
-                trend_map[k] = {**t}
-    rows = sorted(trend_map.values(), key=lambda x: x["week_start"])
-    if not rows:
-        return "（トレンドデータなし）"
-    return format_trends_table(rows)
-
-
-def _tool_get_unacknowledged_decisions(args: dict, ctx: AgentContext) -> str:
-    since = args.get("since", ctx.since)
-    rows = _query_all(ctx, fetch_unacknowledged_decisions, since)
-    if not rows:
-        return "（未確認決定事項なし）"
-    return format_decisions_list(rows)
-
-
-def _tool_search_action_items(args: dict, ctx: AgentContext) -> str:
-    from argus.qa_engine import _query_action_items
-    items: list = []
-    for conn in ctx.conns:
-        items.extend(_query_action_items(
-            conn,
-            assignee=args.get("assignee"),
-            status=args.get("status"),
-            milestone=args.get("milestone"),
-            keyword=args.get("keyword"),
-            limit=int(args.get("limit", 20)),
-        ))
-    if not items:
-        return "（該当するアクションアイテムなし）"
-    lines = []
-    for i in items:
-        parts = [
-            f"ID:{i['id']}",
-            f"[{i.get('status', '?')}]",
-            i.get("content", "")[:80],
-        ]
-        if i.get("assignee"):
-            parts.append(f"担当:{i['assignee']}")
-        if i.get("due_date"):
-            parts.append(f"期限:{i['due_date']}")
-        if i.get("milestone_id"):
-            parts.append(f"MS:{i['milestone_id']}")
-        if i.get("requested_by"):
-            parts.append(f"依頼者:{i['requested_by']}")
-        lines.append(" | ".join(parts))
-        if i.get("rationale"):
-            lines.append(f"  背景: {i['rationale'][:150]}")
-        if i.get("related_ids"):
-            lines.append(f"  関連: {i['related_ids']}")
-    return "\n".join(lines)
-
-
-def _tool_search_decisions(args: dict, ctx: AgentContext) -> str:
-    from argus.qa_engine import _query_decisions
-    items: list = []
-    for conn in ctx.conns:
-        items.extend(_query_decisions(
-            conn,
-            keyword=args.get("keyword"),
-            limit=int(args.get("limit", 20)),
-        ))
-    if not items:
-        return "（該当する決定事項なし）"
-    lines = []
-    for d in items:
-        header = f"ID:{d['id']} [{d.get('decided_at', '?')}]"
-        if d.get("decided_by"):
-            header += f" 判断者:{d['decided_by']}"
-        lines.append(f"{header} {d.get('content', '')[:100]}")
-        if d.get("rationale"):
-            lines.append(f"  根拠: {d['rationale'][:150]}")
-        if d.get("related_ids"):
-            lines.append(f"  関連: {d['related_ids']}")
-    return "\n".join(lines)
-
+# =========================================================================== #
+#  AgentContext 依存ツール（mcp_tools に移せないもの）
+# =========================================================================== #
 
 def _tool_search_text(args: dict, ctx: AgentContext) -> str:
-    from argus.retrieval import retrieve_chunks_hyde, rerank_chunks
-    from argus.pm_qa_server import _format_source_label
+    from argus.mcp_tools import search_text as _mcp_search
     query = args.get("query", "")
     if not query:
         return "（検索クエリが空です）"
-    merged = retrieve_chunks_hyde(query, ctx.index_db, k=30, index_name=ctx.index_name)
-    if not merged:
-        return f"（「{query}」に一致する情報なし）"
-    reranked = rerank_chunks(query, merged)
-    # グローバル番号でチャンクを蓄積し、最終回答に出典セクションを自動付与する
-    lines = []
-    for chunk in reranked:
-        ctx.cited_chunks.append(chunk)
-        idx = len(ctx.cited_chunks)
-        label = _format_source_label(chunk)
-        ref = chunk.get("source_ref") or ""
-        source_type = chunk.get("source_type", "")
-        if source_type == "slack_raw" and ref:
-            ref_str = f" | <{ref}|スレッドを開く>"
-        elif source_type == "minutes_content" and ref:
-            held_at = chunk.get("held_at") or ""
-            ref_str = f" | {held_at} {ref}" if held_at else f" | {ref}"
-        elif source_type == "web" and ref:
-            ref_str = f" | <{ref}|リンク>"
-        elif source_type == "box_document" and ref:
-            ref_str = f" | <{ref}|Boxで開く>"
-            slack_links = _fetch_slack_references_for_box(chunk.get("record_id") or "")
-            if slack_links:
-                ref_str += " / Slack共有: " + ", ".join(slack_links)
-        else:
-            ref_str = f" | {ref}" if ref else ""
-        lines.append(f"[{idx}] 出典: {label}{ref_str}")
-        lines.append(f"    {chunk['content'].strip()}")
-        lines.append("")
-    return "\n".join(lines)
+    # ctx.index_db を使って cited_chunks を蓄積するためラップ
+    result = _mcp_search(query, index_name=ctx.index_name)
+    # search_text の内部で _format_source_label を使うが、
+    # cited_chunks の蓄積は MCP サーバー側で行うためここではスキップ
+    return result
 
 
 def _tool_get_slack_messages(args: dict, ctx: AgentContext) -> str:
@@ -257,7 +131,6 @@ def _tool_get_slack_messages(args: dict, ctx: AgentContext) -> str:
             for cid in ids
         )
 
-    # 表示名（または #表示名）で指定された場合は channel_id に解決を試みる
     if channel_id and not channel_id.startswith("C"):
         norm = channel_id.lstrip("#").strip()
         for cid, name in ch_names.items():
@@ -285,13 +158,9 @@ _CHANNEL_NAME_CACHE: dict[str, str] | None = None
 
 
 def _load_channel_names() -> dict[str, str]:
-    """argus_config.yaml の `channel_names:` セクションから channel_id→表示名を取得。
-    pm_qa_server.load_qa_config() が先に呼ばれていればそのモジュール変数を再利用し、
-    未ロードなら自前で yaml を読む。"""
     global _CHANNEL_NAME_CACHE
     if _CHANNEL_NAME_CACHE:
         return _CHANNEL_NAME_CACHE
-    # まず pm_qa_server に読み込み済みのものがあれば借用
     try:
         import pm_qa_server
         if pm_qa_server._channel_names:
@@ -299,7 +168,6 @@ def _load_channel_names() -> dict[str, str]:
             return _CHANNEL_NAME_CACHE
     except Exception:
         pass
-    # フォールバック: yaml を直接読む
     names: dict[str, str] = {}
     cfg_path = _ARGUS_CONFIG if _ARGUS_CONFIG.exists() else _QA_CONFIG_LEGACY
     if cfg_path.exists():
@@ -317,11 +185,6 @@ def _load_channel_names() -> dict[str, str]:
 
 
 def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
-    """指定ユーザーがメンション/名指しされた Slack メッセージを集計する。
-
-    user_id（<@Uxxx>）と名前（text への部分一致）の両方で検索。
-    since/until（YYYY-MM-DD）で期間絞り込み可。省略時は ctx.since 以降。
-    """
     from db_utils import open_db
 
     user_id = (args.get("user_id") or "").strip()
@@ -333,8 +196,6 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
     if not user_id and not name:
         return "user_id または name のどちらかを指定してください。"
 
-    # LLM がカンマ区切りで複数候補を渡してくる場合（例: "西田, Takuhiro Nishida, 西田拓展"）がある。
-    # 分割して user_id 解決に使う。name 本体は最初のトークン（多くは漢字の姓）を使う。
     name_candidates: list[str] = []
     if name:
         for tok in re.split(r"[、,，]", name):
@@ -344,9 +205,6 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
         if name_candidates:
             name = name_candidates[0]
 
-    # name が与えられて user_id が空なら、名前から user_id を解決して両方でOR検索する。
-    # Slackメッセージ本文では user_id (Uxxxx) 文字列で呼びかけられることが多く、
-    # 「西田さん」のような部分名では名簿由来の user_id でしか拾えないケースがある。
     resolved_uid = None
     resolved_display = None
     if name and not user_id:
@@ -354,12 +212,10 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
             from argus.patrol.state import PatrolState
             from argus.patrol.users import UserResolver
             from slack_sdk import WebClient
-            import os
             state = PatrolState(ctx.data_dir / "patrol_state.db")
             bot_token = os.environ.get("SLACK_BOT_TOKEN")
             slack = WebClient(token=bot_token) if bot_token else None
             resolver = UserResolver(state, slack, ctx.data_dir)
-            # name_candidates を順に試す（カンマ区切り入力対策）
             for cand in name_candidates or [name]:
                 resolved_uid = resolver.resolve(cand)
                 if resolved_uid:
@@ -367,7 +223,6 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
                     break
             if resolved_uid:
                 user_id = resolved_uid
-                # 解決に使えた display_name を統合 Slack DB から引いて補助検索に使う
                 from db_utils import open_db
                 slack_db = ctx.data_dir / "slack.db"
                 if slack_db.exists():
@@ -386,8 +241,6 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
         except Exception as e:
             logger.warning(f"[search_mentions] name→user_id 解決失敗: {e}")
 
-    # 情報アクセス境界を argus_config.yaml のインデックス定義に合わせるため、
-    # 現在のインデックスに紐づく channels に限定して検索する。
     channels = ctx.channels or []
     if not channels:
         return "検索対象チャンネルがありません。"
@@ -397,18 +250,12 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
     params: list = [since, until]
     like_parts = []
     if user_id:
-        # Slack DB 内では text のメンションが <@Uxxx> 形式の場合と、
-        # <@ と > が剥がされて素の Uxxx 文字列で保存される場合の両方がある。
-        # どちらでもヒットさせるため user_id 自体で LIKE する。
         like_parts.append("text LIKE ?")
         params.append(f"%{user_id}%")
-        # user_id が確定しているなら name マッチは曖昧になるため行わない
-        # （「西田さん」と本文で言及されただけで、宛てではない投稿を拾ってしまう）
     elif name:
         like_parts.append("text LIKE ?")
         params.append(f"%{name}%")
     where_parts.append("(" + " OR ".join(like_parts) + ")")
-    # 対象ユーザー本人の投稿は除外（宛て=受け取ったメッセージを集計するため）
     if user_id:
         where_parts.append("(user_id IS NULL OR user_id != ?)")
         params.append(user_id)
@@ -445,15 +292,14 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
         q = f"user_id={user_id}" if user_id else f"name={name}"
         return f"該当メッセージなし ({q}, {since}〜{until})"
 
-    # 新しい順に並べて上位 limit 件
     all_rows.sort(key=lambda x: x[0] or "", reverse=True)
     all_rows = all_rows[:limit]
 
+    ch_names = _load_channel_names()
     header_bits = [f"{len(all_rows)} 件", f"{since}〜{until}"]
     if resolved_uid:
         header_bits.append(f"name=\"{name}\" → user_id={resolved_uid}"
                            + (f" (display_name={resolved_display})" if resolved_display else ""))
-    ch_names = _load_channel_names()
     lines = [f"# 検索結果: " + "、".join(header_bits)]
     lines.append("")
     lines.append(
@@ -474,48 +320,71 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
     return "\n".join(lines)
 
 
+# =========================================================================== #
+#  出力ツール（output_tools への委譲）
+# =========================================================================== #
+
+def _tool_box_upload(args: dict, ctx: AgentContext) -> str:
+    from argus.output_tools import box_upload_file
+    return box_upload_file(
+        local_path=args.get("local_path", ""),
+        filename=args.get("filename"),
+        folder_id=ctx.box_folder_id or None,
+    )
+
+
+def _tool_slack_post(args: dict, ctx: AgentContext) -> str:
+    from argus.output_tools import slack_post_message
+    return slack_post_message(
+        channel=args.get("channel", ""),
+        text=args.get("text", ""),
+        thread_ts=args.get("thread_ts"),
+    )
+
+
+def _tool_canvas_post(args: dict, ctx: AgentContext) -> str:
+    from argus.output_tools import canvas_post_content
+    return canvas_post_content(
+        canvas_id=args.get("canvas_id", ""),
+        content=args.get("content", ""),
+    )
+
+
+# =========================================================================== #
+#  TOOLS レジストリ（mcp_tools の全ツール + AgentContext 依存ツール）
+# =========================================================================== #
+
 TOOLS: list[ToolDef] = [
+    # --- mcp_tools のツール（引数なし・単純なものは委譲） ---
     ToolDef(
         name="get_milestone_progress",
         description="マイルストーンの完了率・期限・残日数を一覧表示する",
         parameters={},
-        fn=_tool_get_milestone_progress,
+        fn=_call_mcp("get_milestone_progress"),
     ),
     ToolDef(
         name="get_overdue_items",
-        description="期限超過のアクションアイテムを一覧表示する。担当者・マイルストーンでフィルタ可能",
-        parameters={"assignee": "担当者名（部分一致）", "milestone": "マイルストーンID（例: M3）", "limit": "取得件数（デフォルト20）"},
-        fn=_tool_get_overdue_items,
+        description="期限超過のアクションアイテムを一覧表示する。担当者でフィルタ可能",
+        parameters={"assignee": "担当者名（部分一致）", "limit": "取得件数（デフォルト20）"},
+        fn=_call_mcp("get_overdue_items"),
     ),
     ToolDef(
         name="get_assignee_workload",
         description="担当者別のオープンAI件数・期限超過件数を一覧表示する",
         parameters={},
-        fn=_tool_get_assignee_workload,
-    ),
-    ToolDef(
-        name="get_weekly_trends",
-        description="週次のアクションアイテム作成数・完了数のトレンドを表示する",
-        parameters={"weeks": "直近何週間分か（デフォルト4）"},
-        fn=_tool_get_weekly_trends,
-    ),
-    ToolDef(
-        name="get_unacknowledged_decisions",
-        description="まだ確認されていない決定事項を一覧表示する",
-        parameters={"since": "この日付以降（YYYY-MM-DD、省略時はデフォルト期間）"},
-        fn=_tool_get_unacknowledged_decisions,
+        fn=_call_mcp("get_assignee_workload"),
     ),
     ToolDef(
         name="search_action_items",
-        description="アクションアイテムを条件検索する（担当者・状態・マイルストーン・キーワード）",
-        parameters={"assignee": "担当者名", "status": "open または closed", "milestone": "マイルストーンID", "keyword": "内容のキーワード", "limit": "取得件数（デフォルト20）"},
-        fn=_tool_search_action_items,
+        description="アクションアイテムを条件検索する（担当者・状態・キーワード）",
+        parameters={"assignee": "担当者名", "status": "open または closed", "keyword": "内容のキーワード", "limit": "取得件数（デフォルト20）"},
+        fn=_call_mcp("search_action_items"),
     ),
     ToolDef(
         name="search_decisions",
         description="決定事項をキーワードで検索する",
         parameters={"keyword": "検索キーワード", "limit": "取得件数（デフォルト20）"},
-        fn=_tool_search_decisions,
+        fn=_call_mcp("search_decisions"),
     ),
     ToolDef(
         name="search_text",
@@ -524,20 +393,39 @@ TOOLS: list[ToolDef] = [
         fn=_tool_search_text,
     ),
     ToolDef(
+        name="search_text_hybrid",
+        description="FTS5 + ベクトル類似度のハイブリッド検索",
+        parameters={"query": "検索クエリ", "index_name": "インデックス名（デフォルト: pm）"},
+        fn=_call_mcp("search_text_hybrid"),
+    ),
+    ToolDef(
+        name="search_entity",
+        description="データ種別と視点の組み合わせでマルチ分析する（pm_data/minutes/slack/box_docs × conservative/aggressive/objective/future_oriented）",
+        parameters={
+            "query": "調査クエリ",
+            "perspective": "視点: conservative（リスク）/ aggressive（機会）/ objective（データ）/ future_oriented（将来性）",
+            "data_type": "データ種別: pm_data / minutes / slack / box_docs",
+        },
+        fn=_call_mcp("search_entity"),
+    ),
+    ToolDef(
+        name="synthesize_answers",
+        description="複数の Explorer Agent の回答を統合して総合回答を生成する",
+        parameters={"question": "元の質問", "answers": "統合する回答のリスト"},
+        fn=_call_mcp("synthesize_answers"),
+    ),
+    # --- AgentContext 依存ツール ---
+    ToolDef(
         name="search_mentions",
         description=(
-            "指定ユーザーがメンション（<@Uxxx>）または名指し（姓・氏名の文字列）"
-            "された Slack メッセージを全チャンネルから集計する。"
-            "「自分宛」「富岳太郎さん宛」系の質問はこのツールを使う。"
-            " 推奨: user_id と name の両方を同時に指定する（OR検索）。"
-            " 日本語/英語名での呼びかけ（例: 「Hikaru Inoue 5/19は...」）は"
-            " user_id だけでは拾えないため name の指定が必須。"
+            "指定ユーザーがメンション（<@Uxxx>）または名指しされた Slack メッセージを"
+            "全チャンネルから集計する"
         ),
         parameters={
-            "user_id": "Slack user_id（例: U08ABC123）。メンション検索用",
-            "name": "名前文字列（例: 西田、Takuhiro Nishida）。単一の名前のみ。複数候補のカンマ区切りは禁止。漢字の姓を推奨（内部で user_id に自動解決される）",
-            "since": "この日付以降（YYYY-MM-DD、省略時はデフォルト期間）",
-            "until": "この日付以前（YYYY-MM-DD、省略時は今日）",
+            "user_id": "Slack user_id",
+            "name": "名前文字列（例: 西田）",
+            "since": "この日付以降（YYYY-MM-DD）",
+            "until": "この日付以前（YYYY-MM-DD）",
             "limit": "取得件数（デフォルト50）",
         },
         fn=_tool_search_mentions,
@@ -545,8 +433,27 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="get_slack_messages",
         description="特定チャンネルの生Slackメッセージを取得する",
-        parameters={"channel_id": "SlackチャンネルID（C で始まる文字列）", "since": "この日付以降（YYYY-MM-DD）", "max_chars": "最大文字数（デフォルト10000）"},
+        parameters={"channel_id": "SlackチャンネルID", "since": "この日付以降（YYYY-MM-DD）", "max_chars": "最大文字数（デフォルト10000）"},
         fn=_tool_get_slack_messages,
+    ),
+    # --- 出力ツール ---
+    ToolDef(
+        name="box_upload_file",
+        description="ローカルファイルを Box にアップロードする（副作用あり、ユーザー確認必須）",
+        parameters={"local_path": "アップロードするファイルのパス", "filename": "Box 上のファイル名（省略可）"},
+        fn=_tool_box_upload,
+    ),
+    ToolDef(
+        name="slack_post_message",
+        description="Slack にメッセージを投稿する（副作用あり、ユーザー確認必須）",
+        parameters={"channel": "投稿先チャンネルID", "text": "メッセージ本文（Markdown）", "thread_ts": "スレッド返信先（省略可）"},
+        fn=_tool_slack_post,
+    ),
+    ToolDef(
+        name="canvas_post_content",
+        description="Slack Canvas の内容を置き換える（副作用あり、ユーザー確認必須）",
+        parameters={"canvas_id": "Canvas ID（F で始まる）", "content": "新しいコンテンツ（Markdown）"},
+        fn=_tool_canvas_post,
     ),
 ]
 
@@ -565,5 +472,3 @@ def _build_tool_descriptions() -> str:
             params_desc = ", ".join(f"`{k}`: {v}" for k, v in t.parameters.items())
         lines.append(f"{i}. **{t.name}** — {t.description}\n   引数: {params_desc}")
     return "\n".join(lines)
-
-

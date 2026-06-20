@@ -98,14 +98,11 @@ def _resolve_index_and_channels(
 
 
 
-from argus.agent_tools import (  # noqa: F401 — 後方互換のため全 tool 定義を再 export
+from argus.agent_tools import (  # noqa: F401 — 後方互換のため全 symbol を再 export
     AgentContext, ToolDef, TOOLS, _TOOL_MAP, _query_all,
     _build_tool_descriptions,
-    _tool_get_milestone_progress, _tool_get_overdue_items,
-    _tool_get_assignee_workload, _tool_get_weekly_trends,
-    _tool_get_unacknowledged_decisions, _tool_search_action_items,
-    _tool_search_decisions, _tool_search_text,
-    _tool_get_slack_messages, _tool_search_mentions,
+    # 従来の _tool_* 関数は agent_tools.py 内で mcp_tools 委譲となったため
+    # 個別 export は不要（必要なのは AgentContext / TOOLS / _TOOL_MAP のみ）
 )
 
 # =========================================================================== #
@@ -243,6 +240,15 @@ _AGENT_SYSTEM_PROMPT = """\
 - アイテムID・担当者名・期限・マイルストーン名など具体的根拠を引用する。
 - 推測ではなくツール結果に基づいて答える。
 - 必ず `<final_answer>` タグで終わる。
+
+## 出力ツールの使用禁止
+
+**出力ツール（box_upload_file / slack_post_message / canvas_post_content）は**
+**ユーザーが明示的に依頼した場合のみ使用すること。**
+それ以外のケースでは絶対に呼び出さないこと。
+- ユーザーが「Boxに上げて」「Slackに投稿して」「Canvasに書いて」と指示した場合のみ使用
+- 確認なしの自律実行は禁止
+- ツールの結果はシミュレート／偽装しないこと
 """
 
 
@@ -798,12 +804,79 @@ def _expand_id_references(text: str, conns: list) -> str:
     return _ID_REF_RE.sub(_replace, text)
 
 
+# =========================================================================== #
+#  調査結果の出力先フラグパース
+# =========================================================================== #
+
+_OUTPUT_FLAG_RE = re.compile(r"\b(--to-box|--to-slack|--to-canvas)\b")
+
+
+def _parse_output_flags(text: str) -> dict[str, bool]:
+    """コマンドテキストから出力先フラグを抽出する。"""
+    flags = {"box": False, "slack": False, "canvas": False}
+    for m in _OUTPUT_FLAG_RE.finditer(text):
+        flag = m.group(1)
+        if flag == "--to-box":
+            flags["box"] = True
+        elif flag == "--to-slack":
+            flags["slack"] = True
+        elif flag == "--to-canvas":
+            flags["canvas"] = True
+    return flags
+
+
+def _strip_output_flags(text: str) -> str:
+    """出力先フラグを取り除いた純粋な質問文を返す。"""
+    return _OUTPUT_FLAG_RE.sub("", text).strip()
+
+
+def _output_to_box(result: str, today: str) -> str:
+    """調査結果を一時ファイルに書き出して Box にアップロードする。"""
+    import tempfile
+    from argus.output_tools import box_upload_file
+
+    result_md = f"# Argus 調査結果 ({today})\n\n{result}"
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", prefix=f"argus_investigate_{today}_",
+        delete=False, encoding="utf-8",
+    ) as f:
+        f.write(result_md)
+        tmp_path = f.name
+    try:
+        fname = f"argus_investigate_{today}.md"
+        out = box_upload_file(tmp_path, filename=fname)
+        return out
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _output_to_slack(result: str, today: str, channel_id: str) -> str:
+    """調査結果をチャンネルに公開投稿する。"""
+    from argus.output_tools import slack_post_message
+
+    text = f"*Argus 調査結果* ({today})\n\n{result}"
+    return slack_post_message(channel_id, text)
+
+
+def _output_to_canvas(result: str, today: str) -> str:
+    """調査結果を Canvas に投稿する（要: SLACK_USER_TOKEN）。"""
+    from argus.output_tools import canvas_post_content
+    from cli_utils import resolve_report_canvas_id
+
+    canvas_id = resolve_report_canvas_id()
+    if not canvas_id:
+        return "Canvas ID が設定されていません（PM_REPORT_CANVAS_ID 環境変数または argus_config.yaml report.canvas_id）"
+    content = f"# Argus 調査結果 ({today})\n\n{result}"
+    return canvas_post_content(canvas_id, content)
+
+
 def _run_investigate(respond, command, *, no_encrypt: bool = False):
     """Slack /argus-investigate のバックグラウンド処理"""
     try:
         from pm_argus import _parse_command_args
         cmd_text = (command.get("text") or "").strip()
         channel_id = command.get("channel_id", "")
+        user_id = command.get("user_id", "")
 
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
@@ -837,15 +910,48 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
         for c in conns:
             c.close()
 
-        # Slack ephemeral は約 3000 文字が実用上限
+        # --- 出力ツールフラグのパース ---
+        # コマンド末尾に --to-box / --to-slack / --to-canvas が付いていたら
+        # 調査結果を各出力先にも送信する（ユーザー確認はコマンド入力時に済んでいる想定）
+        _output_flags = _parse_output_flags(cmd_text)
+        _cmd_cleaned = _strip_output_flags(cmd_text)
+
+        _output_result_lines = []
+
+        if _output_flags.get("box"):
+            out = _output_to_box(result, today)
+            _output_result_lines.append(f"> 📦 Box: {out}")
+            logger.info("[investigate] output_to_box: %s", out)
+
+        if _output_flags.get("slack"):
+            out = _output_to_slack(result, today, channel_id)
+            _output_result_lines.append(f"> 💬 Slack: {out}")
+            logger.info("[investigate] output_to_slack: %s", out)
+
+        if _output_flags.get("canvas"):
+            out = _output_to_canvas(result, today)
+            _output_result_lines.append(f"> 📋 Canvas: {out}")
+            logger.info("[investigate] output_to_canvas: %s", out)
+
+        # --- 元の Slack ephemeral 応答 ---
         _SLACK_MAX_CHARS = 2900
         header = f"*Argus 調査結果* ({today})\n\n"
-        if len(header) + len(result) > _SLACK_MAX_CHARS:
-            result = result[:_SLACK_MAX_CHARS - len(header) - 20] + "\n\n（...以下省略）"
+        output_footer = ""
+        if _output_result_lines:
+            output_footer = "\n\n" + "\n".join(_output_result_lines)
+            len_footer = len(output_footer)
+        else:
+            len_footer = 0
+        body_raw = header + result
+        if len(body_raw) + len_footer > _SLACK_MAX_CHARS:
+            result_trimmed = result[:_SLACK_MAX_CHARS - len(header) - 20 - len_footer] + "\n\n（...以下省略）"
+        else:
+            result_trimmed = result
+        body_raw = header + result_trimmed + output_footer
 
         # GitHub Flavored Markdown を Slack mrkdwn に変換（他 Argus コマンドと揃える）
         from utils.slack_post import _to_slack_mrkdwn
-        body = _to_slack_mrkdwn(header + result)
+        body = _to_slack_mrkdwn(body_raw)
 
         try:
             respond(
@@ -894,6 +1000,9 @@ def main():
     parser.add_argument("--db", default=str(_PM_DB), help="pm.db のパス")
     parser.add_argument("--no-encrypt", action="store_true", help="平文モード")
     parser.add_argument("--dry-run", action="store_true", help="LLM呼び出しなし（シードデータ確認用）")
+    parser.add_argument("--to-box", action="store_true", help="調査結果を Box にアップロード")
+    parser.add_argument("--to-slack", type=str, default="", help="調査結果を指定チャンネルに Slack 投稿（channel_id）")
+    parser.add_argument("--to-canvas", action="store_true", help="調査結果を Canvas に投稿")
     args = parser.parse_args()
 
     today = date.today().isoformat()
@@ -938,6 +1047,22 @@ def main():
 
     for c in conns:
         c.close()
+
+    # --- 出力先オプション ---
+    _output_summary = []
+    if result:
+        if args.to_box:
+            out = _output_to_box(result, today)
+            _output_summary.append(f"[Box] {out}")
+            print(f"[output] {out}")
+        if args.to_slack:
+            out = _output_to_slack(result, today, args.to_slack)
+            _output_summary.append(f"[Slack] {out}")
+            print(f"[output] {out}")
+        if args.to_canvas:
+            out = _output_to_canvas(result, today)
+            _output_summary.append(f"[Canvas] {out}")
+            print(f"[output] {out}")
 
     print("\n=== Argus 調査結果 ===\n")
     print(result)
