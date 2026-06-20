@@ -41,8 +41,6 @@
 
 ## 機能マップ
 
-本システムの機能を、解決するPM課題ごとに整理する。
-
 ### 1. 情報の自動収集 — 「手作業で情報を集めなくて済む」
 
 週次会議・Slackの投稿から、決定事項・アクションアイテム・担当者・期限をLLMが自動抽出して pm.db に蓄積する。
@@ -50,16 +48,14 @@
 **会議録音 → 議事録 → pm.db**（録音を置くだけで完結）
 
 ```sh
-# data/ に .m4a を置いて実行するだけ
-bash scripts/pm_from_recording_auto.sh
+# sbatch で実行（SLURM）
+sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
 
-# Slack投稿も自動化
-bash scripts/pm_from_recording_auto.sh -c CHANNEL_ID
+# スラッシュコマンドでも可能（pm_qa_server 起動中）
+/argus-transcribe 2026-04-20_Leader_Meeting.m4a
 ```
 
-処理フロー: 音声 → Whisper文字起こし → ローカルLLMで議事録生成 → 議事録DB保存 → pm.db転記（平文ファイルはディスクに残らない）
-
-**Zoom VTT による話者情報の活用**: 同名の VTT ファイル（`{stem}.transcript.vtt` または `{stem}.vtt`）が存在する場合、Zoom の正確な話者名を Whisper の高品質日本語文字起こしと統合し、アクションアイテムの担当者推定精度を向上させる。VTT がなければ従来どおり Whisper のみで動作する。
+処理フロー: 音声 → Whisper 文字起こし（VTT 話者情報・スライドOCR と統合） → ローカルLLMで議事録生成 → 議事録DB保存 → pm.db転記（平文ファイルは自動削除）
 
 **Slack → pm.db**
 
@@ -67,7 +63,7 @@ bash scripts/pm_from_recording_auto.sh -c CHANNEL_ID
 bash scripts/pm_from_slack.sh -c CHANNEL_ID
 ```
 
-処理フロー: Slackメッセージ差分取得 → 生メッセージから決定事項・アクションアイテム抽出 → pm.db保存
+処理フロー: Slackメッセージ差分取得（統合 `data/slack.db`） → LLM抽出 → pm.db保存
 
 ### 2. ゴール管理 — 「今どこにいるかが分かる」
 
@@ -85,203 +81,160 @@ python3 scripts/ingest/pm_ingest.py goals --goals-list
 
 ### 3. 進捗の可視化とレビュー — 「会議で使えるレポートが自動で出る」
 
-pm.db から週次進捗レポートを自動生成し、Slack Canvas に投稿する。会議中にCanvas上で直接編集でき、変更はDBに同期される。
-
-**会議前: レポート投稿**
+pm.db から週次進捗レポートを自動生成し、Slack Canvas に投稿する。
 
 ```sh
 source ~/.secrets/slack_tokens.sh
-bash scripts/canvas_report.sh --db data/pm.db --canvas-id <CANVAS_ID>
+bash scripts/canvas_report.sh
 ```
 
-レポート構成:
-1. **プロジェクトの現在地** — マイルストーン達成率・残日数（DBから自動計算）
-2. **サマリー** — LLMによる全体概況
-3. **直近の決定事項** — 未確認はチェックボックスで管理
-4. **要注意事項** — 期限超過・担当者不明のアイテム
-5. **未完了アクションアイテム** — 表形式（Canvas上で各列を直接編集可能）
+会議中にCanvas上で各列（担当者・内容・期限・マイルストーン・状況）を直接編集でき、`pm_sync_canvas.py` でDBに反映される。
 
-**会議中: Canvas上で編集**
+### 4. Argus AI — 「問題に気づくのが遅れない」
 
-Canvas上で編集可能な列: **担当者・内容・期限・マイルストーン・状況・対応状況**
-
-- **状況** 列にチェックを入れる or 「完了」「done」等を記入 → 完了扱い
-- **決定事項** のチェックボックスにチェック → 確認済みとして次回レポートから非表示
-
-**会議後: DB同期**（次回レポート投稿時に自動実行。単独実行も可能）
-
-```sh
-python3 scripts/pm_sync_canvas.py --db data/pm.db --canvas-id <CANVAS_ID>
-```
-
-### 4. リスク検知とインサイト — 「問題に気づくのが遅れない」
-
-**Argus AI秘書** — 毎朝のブリーフィングを自動生成（cron 平日8:57）
-
-Slack生メッセージ・議事録・pm.db統計を統合分析し、今日やるべきことを優先度順に提示する。Slackスラッシュコマンドで誰でも利用可能。
+Slack スラッシュコマンドでプロジェクトデータを即座に分析する。全コマンドは `pm_qa_server.py`（Socket Mode デーモン）が処理する。
 
 ```
-/argus-brief                 ← 今日の状況サマリーと優先アクション（最大5件）
-/argus-brief @西澤            ← 特定担当者にフォーカス
-/argus-draft agenda 次回リーダー会議  ← 会議アジェンダ草案
-/argus-risk                  ← リスク一覧と予兆の検知
+/argus-brief                     ← 今やるべきこと（優先アクション5件）
+/argus-risk                      ← リスク一覧と予兆
+/argus-investigate M3の遅延原因   ← マルチステップ調査（Agent）
+/argus-today                     ← 本日の活動 + 自分宛メンション
+/argus-draft agenda 次回会議      ← 文書草案生成
+/argus-transcribe Recording.mp4   ← 録音から議事録生成
 ```
 
-**LLMインサイト** — プロジェクト健全性のA/B/C/D評価
+`/argus-investigate` は15種類のツール（pm.db検索・FTS5全文検索・Explorer Agent・Box/Slack/Canvas出力）をLLMが自律選択するマルチステップエージェント。
 
-```sh
-python3 scripts/pm_insight.py --db data/pm.db --dry-run
+出力先フラグ（末尾に付加）:
+```
+/argus-investigate M3の遅延原因 --to-box      # Box に md 保存
+/argus-investigate M3の遅延原因 --to-slack     # チャンネルに公開投稿
+/argus-investigate M3の遅延原因 --to-canvas    # Canvas に投稿
 ```
 
-期限超過・担当者負荷・完了速度の推移等を統計集計し、LLMが「なぜ遅れているか」「次に何をすべきか」を解釈・提案する。
+**Patrol Agent（自律巡回）**: cron 30分ごとに pm.db を巡回し、完了シグナル検出・期限超過リマインダー・長期停滞検出・マイルストーン健全性チェックを自動実行する。
 
 ### 5. 過去の議論を検索 — 「あの話どこで決まったっけ？」
 
-`/argus-ask` コマンドで議事録本文・Slack生メッセージ・ドキュメント・構造化データを横断検索できる。
-
-**ハイブリッド検索**: 質問の種類をLLMが自動分類し、最適な検索戦略を選択する。
+FTS5（SudachiPy 形態素解析 + trigram） + bge-m3 embedding のハイブリッド検索で、議事録・Slack生メッセージ・BOXドキュメント・Web記事を横断検索する。
 
 ```
-/argus-ask GPU性能の評価方針について          ← テキスト検索（議事録・Slack）
-/argus-ask 西澤さんの担当タスクは？          ← 構造化検索（pm.db SQL）
-/argus-ask GPU性能に関する決定事項は？        ← ハイブリッド（SQL + FTS5）
-/argus-ask Benchparkの資料はどこ？           ← ドキュメントレジストリも検索
+/argus-investigate GPU性能の評価方針について
+/argus-investigate Benchparkの資料はどこ？
+/argus-investigate 設計方針に関する決定事項は？
 ```
 
-テキスト検索: SudachiPy形態素解析 + FTS5 + LLM re-ranking。構造化検索: pm.db の担当者・期限・マイルストーン・統計を直接SQLクエリ。
+### 6. Box ドキュメント本文の索引化
 
-### 5b. ドキュメントレジストリ — 「あの資料どこにあったっけ？」
-
-Slack上に散在するBOXリンク（ファイル共有URL）を自動収集し、ローカルLLMでメタデータ（タイトル・種別・説明・トピック）を構造化して保存する。
+BOX フォルダ内のドキュメント（pptx/docx/pdf/xlsx/md）を Markdown 化し、relevance 判定（core/related/noise）を経て FTS5 インデックスに組み込む。
 
 ```sh
-# BOXリンクを収集・構造化
-python3 scripts/pm_slack_box_links.py
-
-# FTS5インデックスに組み込み（/argus-ask で検索可能に）
-python3 scripts/pm_embed.py --full-rebuild
-
-# 一覧表示
-python3 scripts/pm_slack_box_links.py --list
-
-# Canvas に投稿
-python3 scripts/pm_slack_box_links.py --post-to-canvas --canvas-id F0XXXXXX --index-name pm
+bash scripts/pm_box_update.sh                           # 走査・変換・FTS5一括更新
+python3 scripts/pm_box_relevance.py --judge --stats      # relevance 判定・分布確認
 ```
 
-### 6. データの編集と修正 — 「LLMの誤りを人間が正せる」
+### 7. マルチエージェント MCP Server（pm-multi-agent）
 
-LLMの抽出は完璧ではない。誤った担当者・期限・マイルストーン紐づけを人間が修正できる手段を複数提供する。
-
-**Web UI**（ブラウザで編集）
+`pm_mcp_server.py` は FastMCP サーバーとして動作し、Claude Code（Orchestrator）から全ツールを呼び出せる。`/argus-investigate` と全く同一のツール群を提供する。
 
 ```sh
-python3 scripts/pm_api.py --port 8501 --db data/pm.db
+source ~/.secrets/slack_tokens.sh
+source ~/.secrets/rivault_tokens.sh
+PYTHONPATH=scripts ~/.venv_aarch64/bin/python3 scripts/pm_mcp_server.py
+```
+
+Claude Code の `.claude/settings.json` に MCP サーバーとして登録することで、分析結果を Box/Slack/Canvas に直接出力できる。
+
+### 8. データの編集と修正 — 「LLMの誤りを人間が正せる」
+
+**Web UI**（ブラウザで編集）:
+```sh
+bash scripts/pm_daemon.sh start web
 # → http://localhost:8501
 ```
 
-**CLI一括編集**（CSV経由）
-
+**CLI一括編集**（CSV経由）:
 ```sh
 python3 scripts/pm_relink.py --export          # CSVにエクスポート
-# CSVを編集...
 python3 scripts/pm_relink.py --import relink.csv  # DBに反映
-```
-
-**議事録の修正と再インポート**
-
-```sh
-python3 scripts/pm_minutes_import.py --export 2026-03-10_Leader_Meeting -o corrected.md
-# corrected.md を修正...
-python3 scripts/pm_minutes_import.py corrected.md --meeting-name Leader_Meeting \
-    --held-at 2026-03-10 --no-llm --force
 ```
 
 ---
 
-## 情報の流れ
+## 情報の流れ（3パスアーキテクチャ）
 
 ```
-[Slack] ─── slack_pipeline.py ───→ {channel_id}.db
-                                          ↓
-[会議録音]                          pm.db ←─ pm_ingest.py slack
-  data/*.m4a (+.vtt)   │          (決定事項・               ↑
-                       │        アクションアイテム)   {channel_id}.db
-                       │                  ↓
-                       │            pm_report.py → Slack Canvas
-                       │            pm_insight.py → 健全性評価
-                       │            pm_argus.py → ブリーフィング
-                       │
-                       └─ pm_minutes_import.py ──→ data/minutes/{kind}.db
-                                    ↓          （詳細議事録・担当者・期限）
-                         pm_ingest.py minutes ──→ pm.db
+入力元: Slack / 会議録音 / Zoom VTT / goals.yaml / Box / Web記事
+
+Pass 1: 収集・抽出
+  slack_pipeline.py       → data/slack.db（全チャンネル統合）
+  pm_minutes_import.py    → data/minutes/{kind}.db
+  pm_ingest.py            → data/pm.db（正本: actions/decisions/meetings/goals/milestones）
+  pm_box_crawl.py         → data/box_docs.db（本文Markdown）
+  pm_web_fetch.py         → data/web_articles.db
+
+Pass 2: エンリッチメント・索引化
+  enrich_items.py         → pm.db に判断者・根拠・関連IDを補完
+  pm_embed.py             → qa_index.db（FTS5 + bge-m3 embedding）
+
+Pass 3: 検索・分析・生成（Argus AI / pm-multi-agent）
+  pm_qa_server.py（Slack Socket Mode）→ /argus-* コマンド
+  pm_mcp_server.py（FastMCP）         → Claude Code からのツール呼び出し
+  pm_argus_patrol.py                  → 自律巡回
 ```
 
-![情報の流れ](minutes.png)
+詳細なアーキテクチャ図・データの流れは `docs/architecture.md` を参照。
 
 ---
 
 ## データベース構成
 
-| DB | 役割 | 単位 |
-|----|------|------|
-| `data/{channel_id}.db` | Slackメッセージ（親メッセージ・返信） | チャンネルごとに独立 |
-| `data/minutes/{kind}.db` | 議事録詳細（議事内容・決定事項・AI） | 会議名ごとに独立 |
-| `data/pm.db` | PM統合データ（全チャンネル・全会議を横断） | 1ファイル |
-| `data/docs_*.db` | ドキュメントレジストリ（BOXリンクのメタデータ） | インデックスごとに独立 |
-| `data/qa_pm*.db` | QA検索インデックス（FTS5、ドキュメント含む） | インデックスごとに独立 |
+| DB | 役割 | 暗号化 |
+|----|------|--------|
+| `data/slack.db` | Slack 生メッセージ（全チャンネル統合） | ✅ |
+| `data/minutes/{kind}.db` | 議事録詳細（議事内容・決定事項・AI） | ✅ |
+| `data/pm.db` | **正本**: アクションアイテム・決定事項・会議・ゴール・マイルストーン | ✅ |
+| `data/box_docs.db` | BOX ドキュメント本文 + relevance 判定 | ✅ |
+| `data/web_articles.db` | 外部Web記事 | ✅ |
+| `data/qa_index.db` | FTS5 統合インデックス + bge-m3 embedding | ✅ |
+| `data/docs_*.db` | ドキュメントレジストリ（BOXリンクメタデータ） | ✅ |
+| `data/patrol_state.db` | Patrol Agent 冪等性管理 | - |
 
-### pm.db のテーブル
+### pm.db の主要テーブル
 
 | テーブル | 内容 |
 |---------|------|
-| `action_items` | アクションアイテム（担当者・期限・status・note・milestone_id） |
-| `decisions` | 決定事項（確認済み管理付き） |
-| `goals` / `milestones` | goals.yaml から同期したゴール・マイルストーン |
-| `meetings` | 会議情報（開催日・種別・要約） |
-| `slack_extractions` | 抽出済みスレッド管理（差分処理用） |
-| `audit_log` | 全変更履歴（Canvas同期・relink・Web UI操作を記録） |
-
-変更履歴の確認:
-```sh
-python3 scripts/db_utils.py --audit-log
-python3 scripts/db_utils.py --audit-log --source canvas_sync --limit 50
-```
+| `action_items` | アクションアイテム（担当者・期限・status・milestone_id） |
+| `decisions` | 決定事項（rationale 付き、確認済み管理） |
+| `goals` / `milestones` | goals.yaml から同期 |
+| `meetings` | 会議情報 |
+| `audit_log` | 全変更履歴 |
 
 ---
 
 ## セキュリティ
 
-### 機密情報の保護方針
+- **LLM処理は全てローカル**: 議事録・Slackメッセージ等の機密情報は外部サービスに送出しない。ローカル vLLM（gemma4）または RiVault で処理する
+- **DB暗号化**: 全DBに SQLCipher AES-256 暗号化を適用
+- **トークン管理**: `~/.secrets/` 配下（`chmod 600`）。`.bashrc` への直書き禁止
 
-- **LLM処理は全てローカル**: 議事録・Slackメッセージ等の機密情報は外部サービスに送出しない。組織内で稼働するローカルLLM（vLLMサーバ）で処理する
-- **DB暗号化**: 全DBにSQLCipher AES-256暗号化を適用。ファイルが漏洩しても鍵なしでは内容を読めない
-- **議事録の平文残存防止**: `--meeting-name` 指定時は処理完了後に .md ファイルを自動削除
-- **トークン管理**: `~/.secrets/` 配下にファイルとして保管（`chmod 600`）。`.bashrc` への直書き禁止
-
-### DB暗号化の初回セットアップ
+### 初回セットアップ
 
 ```sh
-python3 scripts/db_utils.py --gen-key                    # 鍵生成
-python3 scripts/db_utils.py --migrate data/pm.db data/C*.db  # 平文→暗号化変換
-```
+# 鍵生成
+python3 scripts/db_utils.py --gen-key
 
-**鍵を紛失すると暗号化済みDBは復元不可能。** パスワードマネージャー等に必ずバックアップすること。
+# 平文→暗号化変換
+python3 scripts/db_utils.py --migrate data/pm.db
 
----
+# FTS5 インデックス構築
+python3 scripts/pm_embed.py --full-rebuild
 
-## 環境セットアップ
-
-### 動作要件
-
-- Python 3.10 以上
-- **ローカルLLM（推奨）**: OpenAI互換APIサーバ（vLLM等）を起動し、環境変数で接続先を設定
-- 文字起こし機能を使用する場合: GPU環境（NVIDIA L40S / GH200 等）
-
-### トークン設定
-
-```sh
+# 環境変数
 mkdir -p ~/.secrets && chmod 700 ~/.secrets
 cat > ~/.secrets/slack_tokens.sh << 'EOF'
+export SLACK_BOT_TOKEN="xoxb-..."
+export SLACK_APP_TOKEN="xapp-..."
 export SLACK_USER_TOKEN="xoxp-..."
 export OPENAI_API_BASE="http://localhost:8000/v1"
 export OPENAI_API_KEY="dummy"
@@ -289,76 +242,58 @@ EOF
 chmod 600 ~/.secrets/slack_tokens.sh
 ```
 
-### Slack User Token のスコープ
-
-`channels:history`, `channels:read`, `users:read`, `files:read`, `files:write`, `canvases:read`, `canvases:write`
-
-### QAサーバー・Argus の起動
+### デーモン起動
 
 ```sh
-bash scripts/pm_daemon.sh start qa    # /argus-ask・/argus-* が有効になる
-bash scripts/pm_daemon.sh stop qa     # 停止
+bash scripts/pm_daemon.sh start qa    # Slack スラッシュコマンド有効化
+bash scripts/pm_daemon.sh start web   # Web UI（port 8501）
 ```
 
 ---
 
-## スクリプト一覧
+## スクリプト構成
 
-詳細なオプションは `CLAUDE.md` の[コマンドリファレンス](docs/commands.md)を参照。
+```
+scripts/
+├── ingest/              Pass 1: pm_ingest.py プラグイン
+│   ├── pm_ingest.py    統合ランナー
+│   ├── slack.py / minutes.py / goals.py
+│   └── ingest_plugin.py
+├── data-pipeline/       Pass 1: 一次情報収集
+│   ├── slack_pipeline.py / pm_embed.py
+│   ├── pm_box_crawl.py / pm_box_relevance.py
+│   └── pm_web_fetch.py / pm_slack_box_links.py
+├── minutes/             議事録パイプライン
+│   ├── pm_minutes_import.py / pm_minutes_catalog.py
+│   └── pm_minutes_publish.py
+├── enrich/              Pass 2: エンリッチメント
+│   ├── enrich_items.py / knowledge_context.py
+│   └── pm_link_milestones.py
+├── argus/               Pass 3: 検索・分析・生成
+│   ├── pm_qa_server.py     Slack Socket Mode デーモン
+│   ├── pm_argus_agent.py   Investigation Agent + CLI（--to-box 等対応）
+│   ├── pm_argus.py         ブリーフィング/リスク/草案生成
+│   ├── pm_argus_patrol.py  自律巡回 Patrol Agent
+│   ├── agent_tools.py      ToolDef レジストリ（mcp_tools 委譲）
+│   ├── mcp_tools.py        MCP 全ツール実装本体（pm-multi-agent と共有）
+│   ├── output_tools.py     Box/Slack/Canvas 出力実装
+│   ├── mcp_explorer.py     Explorer Agent
+│   └── retrieval.py        FTS5 + embedding 検索
+├── pm_mcp_server.py      FastMCP Server "pm-multi-agent"
+├── reporting/           レポート・エクスポート
+│   ├── pm_report.py / pm_insight.py
+│   └── pm_xlsx_report.py / pm_xlsx_sync.py
+├── recording/           会議録音処理
+│   └── generate_minutes_local.py / whisper_vad.py / slide_ocr.py
+├── web/                 Web UI（FastAPI + Vue 3）
+│   ├── pm_api.py / web_admin.py / web_utils.py
+│   └── static/          SPA フロントエンド
+├── bin/                 シェルスクリプト
+│   └── pm_daemon.sh / canvas_report.sh / pm_box_update.sh 等17本
+└── utils/               共通ユーティリティ
+    ├── db_utils.py / cli_utils.py / format_utils.py
+    ├── box_cli.py / canvas_utils.py / slack_post.py
+    └── embed_utils.py / transcript.py / voice_uploads.py
+```
 
-### 日常運用（シェルスクリプト）
-
-| スクリプト | 用途 |
-|-----------|------|
-| `pm_from_recording_auto.sh` | 録音ファイルの自動検出・文字起こし・議事録生成・pm.db登録（同名VTTも自動移動） |
-| `pm_from_recording.sh` | 録音ファイルを指定して文字起こし・議事録生成（同名VTT自動検出、`--vtt` で明示指定も可） |
-| `pm_from_slack.sh` | Slack取得・pm.db抽出を一括実行 |
-| `canvas_report.sh` | Canvas同期 → レポート生成・Canvas投稿 |
-| `pm_daemon.sh start qa` / `pm_daemon.sh stop qa` | QA・Argusデーモンの起動・停止 |
-
-### 情報収集・抽出
-
-| スクリプト | 用途 |
-|-----------|------|
-| `slack_pipeline.py` | Slack差分取得・DB保存 |
-| `pm_ingest.py slack` | Slack生メッセージからアクションアイテム・決定事項を抽出 |
-| `pm_minutes_import.py` | 議事録をLLM解析して議事録DBに保存 |
-| `pm_ingest.py minutes` | 議事録DBからpm.dbに転記（LLM不使用） |
-| `generate_minutes_local.py` | ローカルLLMで高品質議事録を生成（`--vtt` でZoom VTT話者情報を活用） |
-| `transcribe_pipeline.py` | `/argus-transcribe` 用パイプライン（Slackからダウンロード → 文字起こし → 議事録生成。同名VTT自動検出） |
-| `whisper_vad.py` | VAD+Whisperによる話者分離・文字起こし |
-
-### レポート・分析
-
-| スクリプト | 用途 |
-|-----------|------|
-| `pm_report.py` | 週次進捗レポート生成・Canvas投稿 |
-| `pm_insight.py` | プロジェクト健全性評価・リスク特定・改善提案 |
-| `pm_argus.py` | Argus AI秘書（ブリーフィング・草案・リスク分析） |
-
-### データ編集・同期
-
-| スクリプト | 用途 |
-|-----------|------|
-| `pm_sync_canvas.py` | Canvas上の編集内容をpm.dbに同期 |
-| `pm_relink.py` | CSV経由でアクションアイテム・決定事項を一括編集 |
-| `pm_ingest.py goals` | goals.yaml → pm.db 完全同期 |
-| `pm_api.py` | Web UI（FastAPI REST API + フロントエンド） |
-
-### QA・検索
-
-| スクリプト | 用途 |
-|-----------|------|
-| `pm_qa_server.py` | Slack Socket Modeデーモン（/argus-ask・/argus-*を統合処理）。ハイブリッド検索対応 |
-| `pm_embed.py` | QAインデックス構築（SudachiPy+FTS5、ドキュメントレジストリも索引化） |
-| `pm_slack_box_links.py` | Slack BOXリンク収集・ローカルLLMで構造化 → docs_*.db に保存 |
-
-### 共通ライブラリ
-
-| モジュール | 用途 |
-|-----------|------|
-| `db_utils.py` | DB接続・統計クエリ・暗号化（全スクリプト共通） |
-| `cli_utils.py` | LLM呼び出し・ログ・argparse・VTTパース・話者マッピング（全スクリプト共通） |
-| `web_utils.py` | Web UI用DB読み書き・楽観的排他制御 |
-| `format_utils.py` | Markdownテーブル整形 |
-| `canvas_utils.py` | Slack Canvas操作 |
+各スクリプトの詳細なオプションは `pm-commands` スキルまたは `docs/commands.md` を参照。
