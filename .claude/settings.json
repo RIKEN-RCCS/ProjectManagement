@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pm-multi-agent": {
+      "command": "env",
+      "args": [
+        "PYTHONPATH=scripts",
+        "/home/users/hikaru.inoue/.venv_aarch64/bin/python3",
+        "scripts/pm_mcp_server.py"
+      ]
+    }
+  }
+}
