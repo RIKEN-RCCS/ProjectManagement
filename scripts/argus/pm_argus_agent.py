@@ -803,7 +803,8 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             logger.info("[investigate] output_to_canvas: %s", out)
 
         # --- 元の Slack ephemeral 応答 ---
-        _SLACK_MAX_CHARS = 2900
+        # ephemeral は section block 3000 文字上限。超過時は分割して複数ブロックにする
+        _SLACK_BLOCK_LIMIT = 2900
         header = f"*Argus 調査結果* ({today})\n\n"
         output_footer = ""
         if _output_result_lines:
@@ -811,25 +812,17 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             len_footer = len(output_footer)
         else:
             len_footer = 0
-        body_raw = header + result
-        if len(body_raw) + len_footer > _SLACK_MAX_CHARS:
-            result_trimmed = result[:_SLACK_MAX_CHARS - len(header) - 20 - len_footer] + "\n\n（...以下省略）"
-        else:
-            result_trimmed = result
-        body_raw = header + result_trimmed + output_footer
+        body_raw = header + result + output_footer
 
-        # GitHub Flavored Markdown を Slack mrkdwn に変換（他 Argus コマンドと揃える）
-        from utils.slack_post import _to_slack_mrkdwn
+        from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks
+
+        # Section block の制限内に分割
         body = _to_slack_mrkdwn(body_raw)
+        blocks = _split_mrkdwn_to_blocks(body)
 
         try:
             respond(
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": body},
-                    }
-                ],
+                blocks=blocks,
                 response_type="ephemeral",
                 replace_original=True,
             )
