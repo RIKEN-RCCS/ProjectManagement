@@ -19,6 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$REPO_ROOT/logs"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
 # --------------------------------------------------------------------------- #
 # サービス定義
@@ -39,6 +40,33 @@ declare -A SERVICES=(
 )
 
 # --------------------------------------------------------------------------- #
+# .claude/settings.json から env を読み取って export する
+# --------------------------------------------------------------------------- #
+load_claude_settings_env() {
+    if [[ ! -f "$CLAUDE_SETTINGS" ]]; then
+        return 0
+    fi
+    # jq で env オブジェクトのキー・値を取り出して export
+    if command -v jq &>/dev/null; then
+        while IFS="=" read -r key value; do
+            if [[ -n "$key" && -z "${!key:-}" ]]; then
+                export "$key"="$value"
+            fi
+        done < <(jq -r '.env // {} | to_entries[] | .key + "=" + .value' "$CLAUDE_SETTINGS" 2>/dev/null || true)
+    else
+        # jq がない場合: python3 でパース
+        if command -v python3 &>/dev/null; then
+            export $(python3 -c "
+import json
+with open('$CLAUDE_SETTINGS') as f:
+    cfg = json.load(f)
+for k, v in cfg.get('env', {}).items():
+    print(f'{k}={v}')
+" 2>/dev/null) || true
+        fi
+    fi
+}
+
 # 共通ヘルパ
 # --------------------------------------------------------------------------- #
 detect_python() {
@@ -72,6 +100,9 @@ cmd_start() {
 
     local python3; python3="$(detect_python)"
     [[ -x "$python3" ]] || { echo "Python3が見つかりません: $python3" >&2; exit 1; }
+
+    # Claude Code settings.json から ANTHROPIC_* を読み込む（未設定の場合のみ）
+    load_claude_settings_env
 
     # トークン読み込み
     if [[ -f "$HOME/.secrets/slack_tokens.sh" ]]; then

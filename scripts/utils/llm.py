@@ -359,6 +359,41 @@ def call_rivault(
 
 
 # --------------------------------------------------------------------------- #
+# Claude Code 互換 LLM 呼び出し（ANTHROPIC_BASE_URL 向け）
+# --------------------------------------------------------------------------- #
+
+def _call_anthropic_compat(
+    prompt: str,
+    *,
+    timeout: int = 300,
+    max_tokens: int = 4096,
+    system: str = "",
+    think: bool = False,
+    temperature: float | None = None,
+) -> str:
+    """Claude Code 用エンドポイント（OpenAI 互換 API）を呼び出す。
+
+    settings.json の env に書かれた ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
+    ANTHROPIC_DEFAULT_OPUS_MODEL を環境変数から読み取り、OpenAI 互換
+    /chat/completions にリクエストする。
+    """
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("ANTHROPIC_BASE_URL が設定されていません")
+    api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "dummy")
+    model = (
+        os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+        or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        or "deepseek-ai/DeepSeek-V4-Flash"
+    )
+    return _call_local_llm_inner(
+        prompt, model=model, base_url=base_url, api_key=api_key,
+        timeout=timeout, max_tokens=max_tokens, system=system,
+        no_stream=True, think=think, temperature=temperature,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Argus 統合エントリポイント（ルーティング付き）
 # --------------------------------------------------------------------------- #
 
@@ -373,19 +408,34 @@ def call_argus_llm(
     no_chat_template_kwargs: bool = False,
     fallback: bool = True,
 ) -> str:
-    """Argus 用 LLM 呼び出し。prefer_rivault / ARGUS_PREFER_RIVAULT でルーティング。"""
-    prefer_rv = _prefer_rivault.get() or os.environ.get("ARGUS_PREFER_RIVAULT") == "1" \
-        or bool(os.environ.get("RIVAULT_URL"))
-    if _prefer_rivault.get():
-        reason = "prefer_rivault()"
-    elif os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
-        reason = "ARGUS_PREFER_RIVAULT=1"
-    elif os.environ.get("RIVAULT_URL"):
-        reason = "RIVAULT_URL set"
+    """Argus 用 LLM 呼び出し。ルーティング優先順位:
+
+    1. ANTHROPIC_BASE_URL が設定 → claude_code ルート
+    2. prefer_rivault / ARGUS_PREFER_RIVAULT / RIVAULT_URL → rivault
+    3. 上記なし → local（gemma4 / vLLM）
+    """
+    anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+
+    # ANTHROPIC_BASE_URL が設定されていれば最優先（Claude Code と同じエンドポイント）
+    if anthropic_url:
+        _route = "claude_code"
+        _reason = "ANTHROPIC_BASE_URL set"
+    elif _prefer_rivault.get() or os.environ.get("ARGUS_PREFER_RIVAULT") == "1" \
+            or bool(os.environ.get("RIVAULT_URL")):
+        _route = "rivault"
+        _reason = "RIVAULT_URL set" if os.environ.get("RIVAULT_URL") else (
+            "prefer_rivault()" if _prefer_rivault.get() else "ARGUS_PREFER_RIVAULT=1")
     else:
-        reason = "default-local"
-    print(f"[INFO] call_argus_llm: route={'rivault' if prefer_rv else 'local'} "
-          f"reason={reason} think={think} fallback={fallback}", file=sys.stderr)
+        _route = "local"
+        _reason = "default-local"
+    print(f"[INFO] call_argus_llm: route={_route} reason={_reason} "
+          f"think={think} fallback={fallback}", file=sys.stderr)
+
+    def _try_claude_code() -> str:
+        return _call_anthropic_compat(
+            prompt, timeout=timeout, max_tokens=max_tokens, system=system,
+            think=think, temperature=temperature,
+        )
 
     def _try_rivault() -> str:
         return call_rivault(
@@ -410,9 +460,16 @@ def call_argus_llm(
             temperature=temperature,
         )
 
-    primary, secondary = (_try_rivault, _try_local) if prefer_rv else (_try_local, _try_rivault)
-    primary_name = "rivault" if prefer_rv else "local"
-    secondary_name = "local" if prefer_rv else "rivault"
+    # プライマリ・セカンダリの順序を決定
+    if _route == "claude_code":
+        primary, primary_name = _try_claude_code, "claude_code"
+        secondary, secondary_name = _try_local, "local"
+    elif _route == "rivault":
+        primary, primary_name = _try_rivault, "rivault"
+        secondary, secondary_name = _try_local, "local"
+    else:
+        primary, primary_name = _try_local, "local"
+        secondary, secondary_name = _try_rivault, "rivault"
 
     try:
         return primary()
