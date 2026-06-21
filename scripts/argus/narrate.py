@@ -747,7 +747,7 @@ def _collect_all_data(
 
 
 def _run_brief(respond, command, *, no_encrypt: bool = False):
-    """Slack /argus-brief のバックグラウンド処理 — マルチWorker + Orchestrator 版"""
+    """Slack /argus-brief のバックグラウンド処理 — single-shot（pm-multi-agent 統合）"""
     import logging
     logger = logging.getLogger("pm_argus")
     try:
@@ -768,14 +768,12 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         ])
         logger.info(f"[argus-brief] since={since_date}{focus_desc}")
 
-        # Phase 1: 並列データ収集
+        # データ収集
         context = load_claude_md_context()
         messages, minutes, stats, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
-        # Phase 2: 多視点 Worker の並列 LLM 呼び出し
-        logger.info("[argus-brief] Worker LLM 呼び出し（並列）")
         s = stats.get("stats", {})
         stats_section = _build_stats_section(stats, s, today)
         conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
@@ -788,32 +786,32 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
             focus_lines.append(f"話題フォーカス: {topic}")
         focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
 
-        worker_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            wfuts = {
-                pool.submit(_run_brief_worker, "pm", stats_section): "pm",
-                pool.submit(_run_brief_worker, "conversation", conversation_section): "conversation",
-                pool.submit(_run_brief_worker, "minutes", minutes_section): "minutes",
-            }
-            for f in concurrent.futures.as_completed(wfuts):
-                name = wfuts[f]
-                try:
-                    worker_results[name] = f.result()
-                except Exception as e:
-                    worker_results[name] = f"（{name} Worker エラー: {e}）"
-                    logger.warning(f"[argus-brief] Worker {name} 失敗: {e}")
-
-        # Phase 3: Orchestrator 統合
-        logger.info("[argus-brief] Orchestrator 統合")
-        orch_prompt = _BRIEF_ORCHESTRATOR_PROMPT.format(
-            context=context,
-            knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
-            focus_section=focus_section_str,
-            worker_pm=worker_results.get("pm", "（エラー）"),
-            worker_conversation=worker_results.get("conversation", "（エラー）"),
-            worker_minutes=worker_results.get("minutes", "（エラー）"),
+        # プロジェクト文脈と全データを1つのプロンプトにまとめて LLM に投げる
+        prompt = (
+            f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
+            f"以下のプロジェクトデータを分析し、ブリーフィングを生成してください。\n"
+            f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
+            f"必要に応じて使い、多角的な視点から分析してください。\n\n"
+            f"## プロジェクト文脈\n\n{context}\n\n"
+            f"## フォーカス指定\n\n{focus_section_str}\n\n"
+            f"## pm.db 統計\n\n{stats_section}\n\n"
+            f"## Slack 会話\n\n{conversation_section}\n\n"
+            f"## 議事録\n\n{minutes_section}\n\n"
+            f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+            f"## 指示\n\n"
+            f"- 上記のデータを統合し、優先順位を付けたブリーフィングを生成してください\n"
+            f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
+            f"- 回答の長さに制限はありません。必要なだけ詳しく説明してください\n"
+            f"- `<final_answer>` タグで回答を囲んでください\n"
         )
-        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。", max_tokens=32768)
+
+        # <final_answer> タグがあれば抽出
+        final = re.search(r"<final_answer>(.*?)</final_answer>", result, re.DOTALL)
+        if final:
+            result = final.group(1).strip()
+        else:
+            result = re.sub(r"<[^>]+>", "", result).strip()
 
         header = f"*Argus ブリーフィング ({today})*"
         if assignee:
@@ -945,7 +943,7 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
 
 
 def _run_risk(respond, command, *, no_encrypt: bool = False):
-    """Slack /argus-risk のバックグラウンド処理 — マルチWorker + Orchestrator 版"""
+    """Slack /argus-risk のバックグラウンド処理 — single-shot（pm-multi-agent 統合）"""
     import logging
     logger = logging.getLogger("pm_argus")
     try:
@@ -964,24 +962,18 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         ])
         logger.info(f"[argus-risk] since={since_date}{focus_desc}")
 
-        # Phase 1: 並列データ収集
-        logger.info("[argus-risk] データ収集（並列）")
+        # データ収集
+        logger.info("[argus-risk] データ収集")
         context = load_claude_md_context()
         messages, minutes, stats, knowledge_summary = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
-        # Phase 2: 多視点 Worker の並列 LLM 呼び出し
-        logger.info("[argus-risk] Worker LLM 呼び出し（並列）")
-
-        # 各 Worker の入力データを構築
         s = stats.get("stats", {})
         stats_section = _build_stats_section(stats, s, today)
         conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
         minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
-        knowledge_section = knowledge_summary or "（蒸留ナレッジなし）"
 
-        # フォーカス指定
         focus_lines = []
         if assignee:
             focus_lines.append(f"担当者フォーカス: {assignee}")
@@ -989,34 +981,33 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
             focus_lines.append(f"話題フォーカス: {topic}")
         focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
 
-        # Worker を並列実行
-        worker_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            wfuts = {
-                pool.submit(_run_risk_worker, "pm", stats_section): "pm",
-                pool.submit(_run_risk_worker, "conversation", conversation_section): "conversation",
-                pool.submit(_run_risk_worker, "minutes", minutes_section): "minutes",
-                pool.submit(_run_risk_worker, "knowledge", knowledge_section): "knowledge",
-            }
-            for f in concurrent.futures.as_completed(wfuts):
-                name = wfuts[f]
-                try:
-                    worker_results[name] = f.result()
-                except Exception as e:
-                    worker_results[name] = f"（{name} Worker エラー: {e}）"
-                    logger.warning(f"[argus-risk] Worker {name} 失敗: {e}")
-
-        # Phase 3: Orchestrator 統合
-        logger.info("[argus-risk] Orchestrator 統合")
-        orch_prompt = _RISK_ORCHESTRATOR_PROMPT.format(
-            context=context,
-            focus_section=focus_section_str,
-            worker_pm=worker_results.get("pm", "（エラー）"),
-            worker_conversation=worker_results.get("conversation", "（エラー）"),
-            worker_minutes=worker_results.get("minutes", "（エラー）"),
-            worker_knowledge=worker_results.get("knowledge", "（エラー）"),
+        # プロジェクト文脈と全データを1つのプロンプトにまとめて LLM に投げる
+        prompt = (
+            f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
+            f"以下のプロジェクトデータを分析し、リスク分析レポートを生成してください。\n"
+            f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
+            f"必要に応じて使い、多角的な視点からリスクを洗い出してください。\n\n"
+            f"## プロジェクト文脈\n\n{context}\n\n"
+            f"## フォーカス指定\n\n{focus_section_str}\n\n"
+            f"## pm.db 統計\n\n{stats_section}\n\n"
+            f"## Slack 会話\n\n{conversation_section}\n\n"
+            f"## 議事録\n\n{minutes_section}\n\n"
+            f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+            f"## 指示\n\n"
+            f"- 上記のデータからリスク・懸念・予兆を洗い出し、優先度付きで報告してください\n"
+            f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
+            f"- リスクは「顕在化しているリスク」と「放置すると問題になりうる予兆」に分けて記載\n"
+            f"- 回答の長さに制限はありません。必要なだけ詳しく説明してください\n"
+            f"- `<final_answer>` タグで回答を囲んでください\n"
         )
-        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。", max_tokens=32768)
+
+        # <final_answer> タグがあれば抽出
+        final = re.search(r"<final_answer>(.*?)</final_answer>", result, re.DOTALL)
+        if final:
+            result = final.group(1).strip()
+        else:
+            result = re.sub(r"<[^>]+>", "", result).strip()
 
         header = f"*Argus リスク分析 ({today})*"
         if assignee:
