@@ -380,6 +380,10 @@ def _call_anthropic_compat(
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
     if not base_url:
         raise RuntimeError("ANTHROPIC_BASE_URL が設定されていません")
+    # settings.json の ANTHROPIC_BASE_URL は "http://localhost:8001"（/v1 なし）。
+    # _call_local_llm_inner は base_url + "/chat/completions" で呼ぶので /v1 を補う。
+    if not base_url.endswith("/v1"):
+        base_url = base_url + "/v1"
     api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "dummy")
     model = (
         os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
