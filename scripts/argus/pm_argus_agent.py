@@ -418,6 +418,13 @@ def run_agent(
     max_steps: int = _DEFAULT_MAX_STEPS,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> str:
+    """質問を1回のLLM呼び出しで処理する。
+
+    マルチステップのツール実行ループは行わない。
+    LLM は内部 reasoning でツール呼び出しを判断するか、直接回答を生成する。
+    Orchestrator（Claude Code + pm-multi-agent）に任せられないタスクは
+    DeepSeek-V4-Flash などのモデルが single-shot で処理する。
+    """
     tool_desc = _build_tool_descriptions()
     system_prompt = _AGENT_SYSTEM_PROMPT.format(
         tool_descriptions=tool_desc,
@@ -425,9 +432,8 @@ def run_agent(
     )
 
     progress = _make_progress_updater(None)
-
-    # 質問リライト（意図解釈 → 関連語 → 推奨クエリ）
     progress("質問の意図を解釈中...")
+
     rewrite = _rewrite_query(question)
     rewrite_block = ""
     if rewrite:
@@ -438,188 +444,86 @@ def run_agent(
             f" queries={rewrite.get('search_queries')}"
         )
 
-    messages: list[dict] = [
-        {"role": "user", "content": f"## 調査依頼\n\n{question}\n\n{rewrite_block}{seed_data}"},
-    ]
-
     intent_header = ""
     if rewrite and rewrite.get("intent"):
         intent_header = f"> **ご質問の解釈**: {rewrite['intent']}\n\n"
 
-    def _finalize(answer: str) -> str:
-        return intent_header + _append_sources_section(answer, ctx)
+    user_prompt = (
+        f"## 調査依頼\n\n{question}\n\n"
+        f"{rewrite_block}"
+        f"{seed_data}\n\n"
+        f"上記のプロジェクトデータとツールを活用して調査し、"
+        f"`<final_answer>` タグで回答してください。"
+        f"ツールを使う場合は `<tool_call>` 形式で呼び出し、"
+        f"その結果を受け取ったら続けて回答を生成してください。"
+    )
 
-    progress(f"シードデータ収集完了。調査開始（最大{max_steps}ステップ）")
-
-    call_history: list[str] = []
-    parse_error_count = 0
+    progress("LLM に問い合わせ中...")
     start_time = time.monotonic()
+    try:
+        response = call_argus_llm(
+            user_prompt,
+            system=system_prompt,
+            max_tokens=32768,
+            timeout=int(timeout),
+            think=True,
+        )
+    except Exception as e:
+        logger.exception(f"[investigate] LLM呼び出しエラー: {e}")
+        return f"調査中にエラーが発生しました: {e}"
 
-    for step in range(1, max_steps + 1):
-        elapsed = time.monotonic() - start_time
-        if elapsed > timeout:
-            logger.warning(f"タイムアウト ({timeout}s) に到達。ステップ {step} で中断")
-            progress(f"タイムアウト（{int(elapsed)}秒経過）。現時点の分析結果を返します")
-            break
+    elapsed = time.monotonic() - start_time
+    logger.info(f"[investigate] 完了 {len(response)} chars, {elapsed:.1f}s")
 
-        if _estimate_chars(messages) > _CONTEXT_CHAR_LIMIT:
-            messages = _compact_messages(messages)
-            logger.info(f"コンテキスト圧縮: {_estimate_chars(messages)} chars")
+    final = parse_final_answer(response)
+    if final:
+        return intent_header + _append_sources_section(final, ctx)
 
-        prompt = _serialize_conversation(system_prompt, messages)
-        logger.info(f"[investigate] Step {step}/{max_steps}: LLM呼び出し ({len(prompt)} chars)")
-
-        llm_t0 = time.time()
+    # tool_call が含まれていれば実行して再帰
+    tool_calls = parse_tool_calls(response)
+    if tool_calls:
+        progress(f"ツール{len(tool_calls)}件を実行中...")
+        result_parts = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            fut_map = {pool.submit(execute_tool, tc["name"], tc["args"], ctx): tc for tc in tool_calls}
+            for future in concurrent.futures.as_completed(fut_map, timeout=120):
+                tc = fut_map[future]
+                try:
+                    result = future.result()
+                    result_parts.append(f"[Tool Result: {tc['name']}]\n{result}")
+                except Exception as e:
+                    result_parts.append(f"[Tool Error: {tc['name']}]\n{type(e).__name__}: {e}")
+        tool_results = "\n\n".join(result_parts)
+        # ツール結果を加えて2回目呼び出し
+        final_prompt = (
+            f"{user_prompt}\n\n"
+            f"上記のツールを実行した結果:\n\n{tool_results}\n\n"
+            f"これらの結果を踏まえて `<final_answer>` で回答してください。"
+        )
         try:
-            response = call_argus_llm(
-                prompt,
+            response2 = call_argus_llm(
+                final_prompt,
+                system=system_prompt,
                 max_tokens=32768,
-                timeout=max(30, int(timeout - elapsed)),
+                timeout=int(timeout),
                 think=True,
             )
         except Exception as e:
-            logger.exception(f"[investigate] LLM呼び出しエラー: {e}")
-            progress(f"LLMエラー: {e}")
-            break
-        llm_elapsed = time.time() - llm_t0
-        logger.info(
-            f"[investigate] Step {step}/{max_steps}: LLM応答 "
-            f"{len(response)} chars, {llm_elapsed:.1f}s"
-        )
-        logger.info(
-            f"[investigate] Step {step}/{max_steps} 生成内容:\n"
-            f"----8<---- raw response ----8<----\n{response}\n----8<---- end ----8<----"
-        )
+            logger.exception(f"[investigate] 2回目LLMエラー: {e}")
+            return intent_header + _append_sources_section(
+                f"ツール実行結果:\n{tool_results}\n（回答生成中にエラー: {e}）", ctx)
 
-        final = parse_final_answer(response)
+        final = parse_final_answer(response2)
         if final:
-            logger.info(f"[investigate] <final_answer> 検出 (Step {step})")
-            return _finalize(final)
+            return intent_header + _append_sources_section(final, ctx)
+        # 最終回答タグがなければ生テキストを返す
+        clean = re.sub(r"<[^>]+>", "", response2).strip()
+        return intent_header + _append_sources_section(clean if clean else response2, ctx)
 
-        tool_calls = parse_tool_calls(response)
-
-        if not tool_calls:
-            parse_error_count += 1
-            if parse_error_count >= 2:
-                logger.warning("[investigate] 2回連続でツール呼び出し/最終回答なし。生テキストを返却")
-                clean = re.sub(r"<[^>]+>", "", response).strip()
-                return _finalize(clean if clean else response)
-            messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "user", "content": (
-                "[System] ツール呼び出しか最終回答が検出できませんでした。\n"
-                "ツールを使う場合は <tool_call>{...}</tool_call> 形式で、\n"
-                "回答が完了したら <final_answer>...</final_answer> 形式で出力してください。"
-            )})
-            continue
-
-        parse_error_count = 0
-        messages.append({"role": "assistant", "content": response})
-
-        result_parts = []
-        # 重複・過剰呼び出しチェックを事前フィルタリング（並列実行前に実施）
-        valid_calls = []
-        pre_errors = []
-        for tc in tool_calls:
-            if "error" in tc:
-                pre_errors.append(f"[Tool Error]\n{tc['error']}")
-                continue
-            call_key = json.dumps(tc, sort_keys=True, ensure_ascii=False)
-            if call_key in call_history:
-                pre_errors.append(
-                    f"[Tool Result: {tc['name']}]\n"
-                    f"（同一引数での再呼び出し。前回と同じ結果です。別の引数を試すか <final_answer> で回答してください）"
-                )
-                continue
-            same_name_count = sum(1 for k in call_history if f'"name": "{tc["name"]}"' in k)
-            if same_name_count >= 2:
-                pre_errors.append(
-                    f"[Tool Result: {tc['name']}]\n"
-                    f"（同一ツール {tc['name']} が既に{same_name_count}回呼ばれています。"
-                    f"**別のツール**を試すか、これまでの結果で <final_answer> を出力してください。"
-                    f"特に `search_text` はまだ試していなければ最優先で使うこと。）"
-                )
-                call_history.append(call_key)
-                continue
-            call_history.append(call_key)
-            valid_calls.append(tc)
-        result_parts = list(pre_errors)
-
-        # 有効なツール呼び出しを並列実行
-        if valid_calls:
-            remaining = max(10.0, timeout - (time.monotonic() - start_time))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                fut_map = {
-                    pool.submit(execute_tool, tc["name"], tc["args"], ctx): tc
-                    for tc in valid_calls
-                }
-                try:
-                    for future in concurrent.futures.as_completed(fut_map, timeout=remaining):
-                        tc = fut_map[future]
-                        try:
-                            tool_name = tc["name"]
-                            tool_args = tc["args"]
-                            args_desc = ", ".join(f"{k}={v}" for k, v in tool_args.items()) if tool_args else ""
-                            progress(f"Step {step}/{max_steps}: {tool_name}({args_desc})")
-                            tool_t0 = time.time()
-                            result = future.result()
-                            tool_elapsed = time.time() - tool_t0
-                            logger.info(
-                                f"[investigate] Step {step}/{max_steps} tool={tool_name}"
-                                f" args={tool_args} result_len={len(str(result))} chars, {tool_elapsed:.1f}s"
-                            )
-                            result_parts.append(f"[Tool Result: {tool_name}]\n{result}")
-                        except Exception as e:
-                            result_parts.append(f"[Tool Error: {tc['name']}]\n{type(e).__name__}: {e}")
-                except concurrent.futures.TimeoutError:
-                    for fut in fut_map:
-                        fut.cancel()
-                    for tc in valid_calls:
-                        result_parts.append(
-                            f"[Tool Result: {tc['name']}]\n（タイムアウトにより結果取得できず）"
-                        )
-
-        messages.append({"role": "user", "content": "\n\n".join(result_parts)})
-
-    # ステップ上限到達: ここまでのツール結果で最終回答を強制合成する
-    progress("ステップ上限到達。これまでの結果で最終回答を合成します")
-    messages.append({"role": "user", "content": (
-        "[System] 調査ステップの上限に到達しました。これ以上ツールは呼べません。\n"
-        "**ここまでの全ツール結果を根拠**に、必ず `<final_answer>...</final_answer>` で回答を出力してください。\n"
-        "情報が乏しい場合でも、得られた事実と不足している点を率直にまとめること。"
-    )})
-    if _estimate_chars(messages) > _CONTEXT_CHAR_LIMIT:
-        messages = _compact_messages(messages)
-    final_prompt = _serialize_conversation(system_prompt, messages)
-    logger.info(f"[investigate] 強制合成: LLM呼び出し ({len(final_prompt)} chars)")
-    try:
-        elapsed = time.monotonic() - start_time
-        synth_response = call_argus_llm(
-            final_prompt,
-            max_tokens=32768,
-            timeout=max(30, int(timeout - elapsed)) if elapsed < timeout else 60,
-            think=True,
-        )
-        logger.info(
-            f"[investigate] 強制合成 応答 {len(synth_response)} chars\n"
-            f"----8<---- raw response ----8<----\n{synth_response}\n----8<---- end ----8<----"
-        )
-        final = parse_final_answer(synth_response)
-        if final:
-            return _finalize(final)
-        clean = re.sub(r"<tool_call>.*?</tool_call>", "", synth_response, flags=re.DOTALL)
-        clean = re.sub(r"<[^>]+>", "", clean).strip()
-        if clean:
-            return _finalize(clean)
-    except Exception as e:
-        logger.exception(f"[investigate] 強制合成エラー: {e}")
-
-    # 強制合成も失敗した場合のフォールバック: 最後のアシスタント応答を使う
-    for msg in reversed(messages):
-        if msg["role"] == "assistant":
-            clean = re.sub(r"<tool_call>.*?</tool_call>", "", msg["content"], flags=re.DOTALL).strip()
-            if clean:
-                return _finalize(clean)
-    return "調査が完了しませんでした。より具体的な質問で再度お試しください。"
+    # tool_call も final_answer もない場合
+    clean = re.sub(r"<[^>]+>", "", response).strip()
+    logger.warning(f"[investigate] final_answer なし。生テキストを返却 ({len(clean)} chars)")
+    return intent_header + _append_sources_section(clean if clean else response, ctx)
 
 
 _SLACK_REF_CACHE: dict[str, list[str]] = {}
