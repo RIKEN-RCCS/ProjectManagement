@@ -7,6 +7,29 @@
 
 ---
 
+## 2026-06-20〜22 pm-multi-agent (MCP) 導入・出力スキル統合・agent ループ全廃
+
+**背景**: Claude Code から pm.db 検索・分析・Box/Slack/Canvas 出力を直接呼び出せる
+MCP サーバーの要求。同時に Slack Bot (/argus-investigate) と挙動が異なり品質差が生じていた。
+
+**決定**:
+- `argus/mcp_tools.py` / `argus/output_tools.py` を新設 — MCP 全ツールの実装本体を
+  pm_mcp_server.py と agent_tools.py で共有。pm-commands と pm-argus-commands は同一ツール群を提供
+- agent ループ（`run_agent` のマルチステップ ToolCall→実行→ToolCall ループ + 重複防止 + 過剰呼び出し制限 +
+  強制合成）を全廃し、single-shot 実行に変更。LLM の内部 reasoning に委譲
+- 同様に `_run_brief` / `_run_risk` の Worker+Orchestrator パターンを廃止、single-shot 化
+- `call_argus_llm()` のルーティングに claude_code ルートを追加（ANTHROPIC_BASE_URL 最優先、
+  ARGUS_PREFER_RIVAULT より上位）。pm_daemon.sh は .claude/settings.json の env を自動読み込み
+- --to-box / --to-slack / --to-canvas 出力先フラグを CLI と Slack コマンドの両方に追加
+- pm-multi-agent / pm-argus-commands Skill を新規作成。argus-system Skill を更新
+
+**影響**: argus-investigate / brief / risk の制約（1200字・5ステップ・早期終了）を全解除。
+出力ツールは MCP と Slack の両方から使用可能。回答品質は使用する LLM に依存
+（claude_code > rivault > local）。従来の agent_tools 専用ツール（get_weekly_trends,
+get_unacknowledged_decisions）は廃止。
+
+---
+
 ## 2026-06-19 Argus モジュール責務分割（テスト基盤 + Phase 2/3 リファクタリング）
 
 **背景**: Opus 4.7 が完了した scripts/ 再編は「ファイルを正しい場所に移す」段階まで。`pm_argus.py`(2832行)・`pm_qa_server.py`(1805行)・`pm_argus_agent.py`(1465行)・`cli_utils.py`(1118行) が依然として巨大モノリスで、LLM 出力の非決定性・Slack API 副作用・SQLite スキーマ変更に対するレグレッションガードが皆無だった。リファクタリングを安全に進めるにはテストが前提と判断。
