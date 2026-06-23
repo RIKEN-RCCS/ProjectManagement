@@ -350,13 +350,12 @@ def retrieve_knowledge_for_extraction(
         return ""
 
     try:
-        # pm_qa_server.py から検索関数をインポート（scripts/argus/ 配下）
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "argus"))
-        from pm_qa_server import retrieve_chunks_hyde, rerank_chunks, format_context
-
-        # enrich/knowledge_context.py からキーワード抽出をインポート
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "enrich"))
-        from knowledge_context import extract_topic_keywords
+        # scripts/ を sys.path に追加（argus/pm_qa_server, enrich/knowledge_context の解決用）
+        _scripts_dir = str(Path(__file__).resolve().parent.parent)
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        from argus.pm_qa_server import retrieve_chunks_hyde, rerank_chunks, format_context
+        from enrich.knowledge_context import extract_topic_keywords
 
         # トピックキーワード抽出（名詞・固有名詞のみ）
         keywords = extract_topic_keywords(query_text)
