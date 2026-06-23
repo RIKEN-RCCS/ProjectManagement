@@ -88,9 +88,15 @@ def transfer_meeting(
     source_ref = file_path or ""
 
     if force:
-        pm_conn.execute("DELETE FROM meetings WHERE meeting_id = ?", (meeting_id,))
-        pm_conn.execute("DELETE FROM decisions WHERE meeting_id = ?", (meeting_id,))
-        pm_conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
+        # 手動削除(deleted=1)されたレコードは残し、それ以外を削除してからINSERTする。
+        pm_conn.execute(
+            "DELETE FROM decisions WHERE meeting_id = ? AND COALESCE(deleted,0)=0",
+            (meeting_id,),
+        )
+        pm_conn.execute(
+            "DELETE FROM action_items WHERE meeting_id = ? AND COALESCE(deleted,0)=0",
+            (meeting_id,),
+        )
 
     pm_conn.execute(
         "INSERT OR IGNORE INTO meetings (meeting_id, held_at, kind, file_path, summary, parsed_at)"

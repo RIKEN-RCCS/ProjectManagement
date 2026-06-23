@@ -691,18 +691,17 @@ def save_slack_items(
 ) -> tuple[int, int]:
     post_date = timestamp[:10] if timestamp else datetime.now().strftime("%Y-%m-%d")
     source_ref = permalink or f"slack://{channel_id}/{thread_ts}"
-    fallback_ref = f"slack://{channel_id}/{thread_ts}"
 
-    # 再抽出時の重複防止: 同一スレッド由来の既存 slack レコードを削除してから INSERT する。
-    # permalink が後から付与・変更されるケースを考慮し、fallback 形式の source_ref も対象に含める。
-    pm_conn.execute(
-        "DELETE FROM action_items WHERE source='slack' AND source_ref IN (?, ?)",
-        (source_ref, fallback_ref),
-    )
-    pm_conn.execute(
-        "DELETE FROM decisions WHERE source='slack' AND source_ref IN (?, ?)",
-        (source_ref, fallback_ref),
-    )
+    # 再抽出時、手動削除(deleted=1)されたレコードは残し、
+    # それ以外の既存 slack レコードを削除してから INSERT する。
+    # これにより、ユーザーが Detect Duplicates 等で削除したレコードが
+    # 再抽出で復活する問題を防ぐ。
+    for table in ("action_items", "decisions"):
+        pm_conn.execute(
+            f"DELETE FROM {table}"
+            " WHERE source='slack' AND source_ref=? AND COALESCE(deleted,0)=0",
+            (source_ref,),
+        )
 
     d_count = 0
     for d in extracted.get("decisions", []):
