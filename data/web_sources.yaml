@@ -1,7 +1,7 @@
 # web_sources.yaml — 外部Webソース定義
 #
 # フィールド:
-#   name          : 表示名（/argus-ask レスポンスに使用）
+#   name          : 表示名（/argus-investigate 検索に使用）
 #   url           : フェッチ対象URL（RSSフィードまたはHTMLインデックスページ）
 #   type          : "rss" | "html_index"
 #   link_pattern  : (html_index のみ) 記事リンクを絞り込む正規表現
@@ -29,18 +29,77 @@ sources:
     target_indices: [pm, pm-hpc, pm-bmt, pm-all]
     enabled: true
 
-  - name: "HPCwire"
-    url: "https://www.hpcwire.com/feed/"
-    type: rss
-    keywords: [Fugaku, RIKEN, Japan, TOP500, supercomputer, HPC, exascale, benchmark]
-    max_articles: 50
-    target_indices: [pm, pm-hpc, pm-bmt, pm-all]
-    enabled: true
-
   - name: "NVIDIA Developer Blog"
     url: "https://developer.nvidia.com/blog/feed/"
     type: rss
     keywords: [NVLink, NVSwitch, Hopper, Blackwell, HPC, supercomputer, Japan, MLPerf, benchmark]
     max_articles: 30
     target_indices: [pm, pm-hpc, pm-bmt, pm-all]
+    enabled: true
+
+  - name: "TechnoEdge AI/LLM"
+    url: "https://www.techno-edge.net/special/266/recent/AI"
+    type: html_index
+    link_pattern: "/article/\\d+"
+    keywords: [LLM, AI, 生成AI, 大規模言語モデル, GPU, HPC, 深層学習, 半導体]
+    max_articles: 20
+    target_indices: [pm-all]
+    enabled: true
+
+  - name: "LLM-jp お知らせ"
+    url: "https://llm-jp.nii.ac.jp/"
+    type: html_index
+    link_pattern: "/news/"
+    keywords: [LLM, 大規模言語モデル, 言語モデル, GPU, HPC, 深層学習]
+    max_articles: 20
+    target_indices: [pm-all]
+    enabled: true
+
+  - name: "HPC-AI Tech Blog (company)"
+    url: "https://company.hpc-ai.com/blog/rss.xml"
+    type: rss
+    keywords: [GPU, HPC, AI, LLM, deep learning, training, inference, fine-tuning, NVIDIA, cluster]
+    max_articles: 20
+    target_indices: [pm-hpc, pm-all]
+    enabled: true
+
+  - name: "AWS HPC Blog (ja)"
+    url: "https://aws.amazon.com/jp/blogs/hpc/feed/"
+    type: rss
+    keywords: [HPC, GPU, cluster, parallel, ハイパフォーマンスコンピューティング, AI, deep learning]
+    max_articles: 20
+    target_indices: [pm-hpc, pm-all]
+    enabled: true
+
+  - name: "HPC.co.jp Tech Blog"
+    url: "https://www.hpc.co.jp/tech-blog/"
+    type: html_index
+    link_pattern: "/tech-blog/[0-9]{4}/[0-9]{2}/[0-9]{2}/"
+    keywords: [GPU, HPC, NVIDIA, AI, 深層学習, 機械学習, 計算機, 半導体]
+    max_articles: 20
+    target_indices: [pm-hpc, pm-all]
+    enabled: true
+
+  - name: "Google Cloud Blog"
+    url: "https://cloud.google.com/blog/feed"
+    type: rss
+    keywords: [HPC, GPU, AI, TPU, machine learning, deep learning, Google Cloud, cluster, parallel]
+    max_articles: 20
+    target_indices: [pm-hpc, pm-all]
+    enabled: true
+
+  - name: "Sakana AI Blog"
+    url: "https://sakana.ai/feed.xml"
+    type: rss
+    keywords: [AI, LLM, model, evolution, 進化的, foundation model, agent, GPU, HPC]
+    max_articles: 20
+    target_indices: [pm-all]
+    enabled: true
+
+  - name: "Preferred Networks Tech Blog (en)"
+    url: "https://tech.preferred.jp/en/feed/"
+    type: rss
+    keywords: [AI, deep learning, GPU, HPC, ML, machine learning, neural network, parallel computing, optimization]
+    max_articles: 20
+    target_indices: [pm-all]
     enabled: true
