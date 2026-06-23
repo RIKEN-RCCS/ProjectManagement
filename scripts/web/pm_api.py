@@ -237,15 +237,15 @@ def create_decision(req: NewDecisionRequest):
 @app.post("/api/decisions/ack-all")
 def ack_all_decisions():
     conn = _get_conn()
-    if _state["dec_df"] is None:
-        return JSONResponse({"error": "データ未読込"}, status_code=400)
     now = datetime.now(timezone.utc).isoformat()
-    unacked = _state["dec_df"][_state["dec_df"]["acknowledged_at"] == ""]
-    for dec_id in unacked["id"].tolist():
-        audit(conn, "decisions", int(dec_id), "acknowledged_at", None, now)
-        conn.execute("UPDATE decisions SET acknowledged_at=? WHERE id=?", (now, int(dec_id)))
+    cur = conn.execute(
+        "UPDATE decisions SET acknowledged_at=? WHERE COALESCE(deleted,0)=0"
+        " AND (acknowledged_at IS NULL OR acknowledged_at='')",
+        (now,),
+    )
+    count = cur.rowcount
     conn.commit()
-    return {"count": len(unacked)}
+    return {"count": count}
 
 
 # --- Minutes endpoint --- #

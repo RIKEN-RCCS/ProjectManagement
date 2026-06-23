@@ -649,8 +649,13 @@ def delete_minutes_instance(meeting_id: str, kind: str,
         result["decisions"] = cur.rowcount
         cur = conn.execute("DELETE FROM action_items WHERE meeting_id=?", (meeting_id,))
         result["action_items"] = cur.rowcount
-        cur = conn.execute("DELETE FROM upload_log WHERE meeting_id=?", (meeting_id,))
-        result["upload_log"] = cur.rowcount
+        # upload_log は catalog 済み DB にしか存在しない
+        has_upload_log = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='upload_log'"
+        ).fetchone() is not None
+        if has_upload_log:
+            cur = conn.execute("DELETE FROM upload_log WHERE meeting_id=?", (meeting_id,))
+            result["upload_log"] = cur.rowcount
         cur = conn.execute("DELETE FROM instances WHERE meeting_id=?", (meeting_id,))
         result["instances"] = cur.rowcount
         conn.commit()
