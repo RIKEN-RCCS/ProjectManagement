@@ -4,7 +4,7 @@ pm_web_fetch.py — 外部Webページ・RSSフィードを取得し data/web_ar
 
 web_sources.yaml に定義されたソースを処理し、キーワードフィルタを通過した記事のみ保存する。
 保存したコンテンツは pm_embed.py --web-only で FTS5 インデックスに組み込まれ、
-/argus-ask で検索可能になる。
+/argus-investigate の search_text で検索可能になる。
 
 使い方:
   python3 scripts/pm_web_fetch.py                    # 全ソース差分取得

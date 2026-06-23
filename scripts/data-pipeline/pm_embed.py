@@ -760,6 +760,8 @@ def main() -> None:
 
     config = load_qa_config(config_path)
     data_dir = Path(args.data_dir)
+    if not data_dir.is_absolute():
+        data_dir = _REPO_ROOT / data_dir
 
     if args.dry_run:
         logger.info("[DRY-RUN] 書き込みは行いません")
