@@ -165,8 +165,17 @@ class TestCallRivault:
 # --------------------------------------------------------------------------- #
 
 class TestCallArgusLlm:
+    # -- 後方互換モード（config なし = env-var ベース） --
+
+    def _patch_no_config(self, monkeypatch):
+        """_load_llm_routing_priority を None 返しに差し替え + ANTHROPIC_BASE_URL を無効化。"""
+        from utils import llm as _llm
+        monkeypatch.setattr(_llm, "_load_llm_routing_priority", lambda: None)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
+
     def test_uses_local_by_default(self, monkeypatch):
         """RIVAULT_URL 未設定 → ローカル LLM を使う。"""
+        self._patch_no_config(monkeypatch)
         monkeypatch.setenv("RIVAULT_URL", "")
         monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
 
@@ -177,7 +186,6 @@ class TestCallArgusLlm:
 
         from utils import llm as cli_utils
         monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
-        # health check をスキップ
         monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
         monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
 
@@ -187,7 +195,7 @@ class TestCallArgusLlm:
 
     def test_uses_rivault_when_url_set(self, monkeypatch):
         """RIVAULT_URL が設定されている → RiVault を優先。"""
-        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        self._patch_no_config(monkeypatch)
         monkeypatch.setenv("RIVAULT_TOKEN", "tok")
 
         called = {}
@@ -204,6 +212,7 @@ class TestCallArgusLlm:
 
     def test_fallback_to_local_on_rivault_failure(self, monkeypatch):
         """RiVault 失敗時は fallback=True なら local にフォールバック。"""
+        self._patch_no_config(monkeypatch)
         monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
 
         def fake_rivault(*a, **kw):
@@ -223,6 +232,7 @@ class TestCallArgusLlm:
 
     def test_no_fallback_raises_on_failure(self, monkeypatch):
         """fallback=False では失敗時に例外を再送出する。"""
+        self._patch_no_config(monkeypatch)
         monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
 
         def fake_rivault(*a, **kw):
@@ -233,3 +243,224 @@ class TestCallArgusLlm:
 
         with pytest.raises(RuntimeError, match="RiVault down"):
             cli_utils.call_argus_llm("test", fallback=False)
+
+    # -- Config-driven モード --
+
+    def _patch_config(self, monkeypatch, priority: list[str]):
+        """_load_llm_routing_priority を monkeypatch で差し替え。"""
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "_load_llm_routing_priority", lambda: priority)
+
+    def test_config_priority_respected(self, monkeypatch):
+        """config priority が [local, rivault] → local が先に呼ばれる。"""
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        self._patch_config(monkeypatch, ["local", "rivault"])
+
+        call_order = []
+        def fake_local(*a, **kw):
+            call_order.append("local")
+            return "local result"
+        def fake_rivault(*a, **kw):
+            call_order.append("rivault")
+            return "rivault result"
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+        monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        result = cli_utils.call_argus_llm("test")
+        assert call_order == ["local"]
+        assert result == "local result"
+
+    def test_config_priority_skips_unconfigured(self, monkeypatch):
+        """claude_code が優先度にあっても ANTHROPIC_BASE_URL 未設定ならスキップ。"""
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "")  # 未設定
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        self._patch_config(monkeypatch, ["claude_code", "local"])
+
+        called = {}
+        def fake_local(*a, **kw):
+            called["local"] = True
+            return "local result"
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        result = cli_utils.call_argus_llm("test")
+        assert called.get("local")
+        assert result == "local result"
+
+    def test_config_priority_all_skipped_raises(self, monkeypatch):
+        """全ルートスキップ → RuntimeError。"""
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
+        monkeypatch.setenv("RIVAULT_URL", "")
+        self._patch_config(monkeypatch, ["claude_code", "rivault"])
+
+        from utils import llm as cli_utils
+        with pytest.raises(RuntimeError, match="No LLM routes available"):
+            cli_utils.call_argus_llm("test")
+
+    def test_config_priority_fallback_chain(self, monkeypatch):
+        """rivault 失敗 → local にフォールバック。"""
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        self._patch_config(monkeypatch, ["rivault", "local"])
+
+        def fake_rivault(*a, **kw):
+            raise RuntimeError("RiVault down")
+        def fake_local(*a, **kw):
+            return "local fallback"
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        result = cli_utils.call_argus_llm("test", fallback=True)
+        assert result == "local fallback"
+
+    def test_config_priority_no_fallback_raises(self, monkeypatch):
+        """fallback=False → rivault 失敗時に例外再送出。"""
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        self._patch_config(monkeypatch, ["rivault", "local"])
+
+        def fake_rivault(*a, **kw):
+            raise RuntimeError("RiVault down")
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
+
+        with pytest.raises(RuntimeError, match="RiVault down"):
+            cli_utils.call_argus_llm("test", fallback=False)
+
+    def test_config_priority_prefer_rivault_override(self, monkeypatch):
+        """config priority [local, rivault] + prefer_rivault() → rivault が先頭。"""
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        self._patch_config(monkeypatch, ["local", "rivault"])
+
+        call_order = []
+        def fake_local(*a, **kw):
+            call_order.append("local")
+            return "local result"
+        def fake_rivault(*a, **kw):
+            call_order.append("rivault")
+            return "rivault result"
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+        monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        with cli_utils.prefer_rivault():
+            result = cli_utils.call_argus_llm("test")
+        assert call_order == ["rivault"]
+        assert result == "rivault result"
+
+
+# --------------------------------------------------------------------------- #
+# generate_minutes_local.py — smoke tests
+# --------------------------------------------------------------------------- #
+
+class TestGenerateMinutesLocal:
+    """最小限の smoke test: main() のパースと変数参照が正常に動作すること。"""
+
+    def test_main_rejects_nonexistent_file(self):
+        """存在しないファイルパス → exit 1。"""
+        from recording.generate_minutes_local import main
+        with patch.object(sys, "argv", ["prog", "/nonexistent/file.md"]):
+            rc = main()
+        assert rc == 1
+
+    def test_main_parses_args_without_nameerror(self, monkeypatch):
+        """引数パース + 初期処理で NameError／AttributeError が起きない。"""
+        import tempfile
+        monkeypatch.setenv("RIVAULT_URL", "")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False, mode="w") as f:
+            f.write("dummy")
+            tmp = f.name
+        try:
+            from recording.generate_minutes_local import main
+            with patch.object(sys, "argv", ["prog", tmp, "--multi-stage", "--consensus", "1"]):
+                rc = main()
+            assert rc == 1  # parse_transcript 失敗で exit 1。NameError でないこと
+        finally:
+            import os as _os
+            _os.unlink(tmp)
+class TestGenerateMinutesCore:
+
+    def _make_transcript_md(self, tmp_path, segments=None):
+        if segments is None:
+            segments = [
+                "#### [00:01:00 - 00:02:00] SPEAKER_00\nテスト発言1です",
+                "#### [00:02:00 - 00:03:00] SPEAKER_01\nテスト発言2です",
+            ]
+        path = tmp_path / "test_transcript.md"
+        path.write_text("\n\n".join(segments), encoding="utf-8")
+        return str(path)
+
+    def test_parse_transcript_basic(self, tmp_path):
+        from recording.generate_minutes_local import parse_transcript
+        segs = parse_transcript(self._make_transcript_md(tmp_path))
+        assert len(segs) == 2
+
+    def test_parse_transcript_skips_ellipsis(self, tmp_path):
+        from recording.generate_minutes_local import parse_transcript
+        segs = parse_transcript(self._make_transcript_md(tmp_path, [
+            "#### [00:01:00 - 00:02:00] SPEAKER_00\n...",
+            "#### [00:02:00 - 00:03:00] SPEAKER_01\n通常発言",
+        ]))
+        assert len(segs) == 1
+
+    def test_chunk_transcript(self, tmp_path):
+        from recording.generate_minutes_local import (parse_transcript, chunk_transcript)
+        chunks = chunk_transcript(parse_transcript(self._make_transcript_md(tmp_path)), 3600)
+        assert len(chunks) == 1
+
+    def test_extract_from_chunk_routes_via_call_argus_llm(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        called = {}
+        def fake_llm(prompt, **kw):
+            called["called"] = True
+            return "抽出結果"
+        monkeypatch.setattr("recording.generate_minutes_local.call_argus_llm", fake_llm)
+        monkeypatch.setenv("RIVAULT_URL", "")
+        from recording.generate_minutes_local import extract_from_chunk
+        result = extract_from_chunk("テキスト", 1, 2, "00:01:00〜00:02:00", "", 300)
+        assert called.get("called") and result == "抽出結果"
+
+    def test_load_local_llm_endpoint_default(self, monkeypatch):
+        monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+        monkeypatch.delenv("LOCAL_LLM_TOKEN", raising=False)
+        from recording.generate_minutes_local import load_local_llm_endpoint
+        url, token = load_local_llm_endpoint()
+        assert url == "http://localhost:8000/v1" and token == "dummy"
+
+    def test_load_local_llm_endpoint_env(self, monkeypatch):
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://my-server:8080/v1")
+        monkeypatch.setenv("LOCAL_LLM_TOKEN", "my-token")
+        from recording.generate_minutes_local import load_local_llm_endpoint
+        url, token = load_local_llm_endpoint()
+        assert url == "http://my-server:8080/v1" and token == "my-token"
+
+    def test_generate_minutes_basic(self, monkeypatch, tmp_path):
+        def fake_llm(prompt, **kw):
+            return "### テスト\n\n本文"
+        from utils import llm
+        monkeypatch.setattr(llm, "call_argus_llm", fake_llm)
+        monkeypatch.setenv("RIVAULT_URL", "")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        from recording.generate_minutes_local import generate_minutes
+        out = generate_minutes(self._make_transcript_md(tmp_path), str(tmp_path), 30,
+                               multi_stage=False, consensus_n=1,
+                               slide_context="")
+        assert (tmp_path / out).exists()
