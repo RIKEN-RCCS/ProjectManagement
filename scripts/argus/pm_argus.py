@@ -162,7 +162,7 @@ def main() -> None:
     print(f"[INFO] since: {since_date} / today: {today} / "
           f"index: {args.index_name or '(default)'}", file=sys.stderr)
 
-    messages, minutes, stats, knowledge_summary = _collect_all_data(
+    messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
         today, since_date,
         no_encrypt=args.no_encrypt,
         pm_db_paths=pm_db_paths_cli,
