@@ -105,14 +105,14 @@
           すべて
         </button>
       </div>
-      <button onclick="loadActionItems()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">検索</button>
+      <button onclick="loadActionItems()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">検索</button>
     </div>
 
     <div class="flex items-center gap-2 flex-none">
       <button onclick="saveActionItems()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
-      <button id="btn-ai-del" onclick="bulkToggle('ai','deleted')" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">全件削除</button>
-      <button id="btn-ai-done" onclick="bulkToggle('ai','done')" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">全件完了</button>
-      <button onclick="loadActionItems()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">再読み込み</button>
+      <button id="btn-ai-del" onclick="bulkToggle('ai','deleted')" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">全件削除</button>
+      <button id="btn-ai-done" onclick="bulkToggle('ai','done')" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">全件完了</button>
+      <button onclick="loadActionItems()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">再読み込み</button>
       <button onclick="openDialog('dialog-ai-new')" class="border border-blue-500 text-blue-400 hover:bg-blue-900/30 rounded px-3 py-1 text-sm">+ 新規追加</button>
     </div>
 
@@ -140,13 +140,13 @@
           すべて
         </button>
       </div>
-      <button onclick="loadDecisions()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">検索</button>
+      <button onclick="loadDecisions()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">検索</button>
     </div>
 
     <div class="flex items-center gap-2 flex-none">
       <button onclick="saveDecisions()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
-      <button onclick="ackAll()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">未確認を一括確認</button>
-      <button onclick="loadDecisions()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">再読み込み</button>
+      <button onclick="ackAll()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">未確認を一括確認</button>
+      <button onclick="loadDecisions()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">再読み込み</button>
       <button onclick="openDialog('dialog-dec-new')" class="border border-blue-500 text-blue-400 hover:bg-blue-900/30 rounded px-3 py-1 text-sm">+ 新規追加</button>
     </div>
 
@@ -166,9 +166,9 @@
         日付（以降）
         <input id="f-files-since" type="text" placeholder="YYYY-MM-DD" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-36 text-gray-200">
       </label>
-      <button onclick="loadFiles()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">検索</button>
-      <button onclick="loadFiles()" class="bg-gray-700 hover:bg-gray-600 rounded px-3 py-1 text-sm text-gray-200">再読み込み</button>
-      <span id="files-count" class="text-xs text-gray-500 self-end pb-1"></span>
+      <button onclick="loadFiles()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">検索</button>
+      <button onclick="loadFiles()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">再読み込み</button>
+      <span id="files-count" class="text-xs text-gray-400 self-end pb-1"></span>
     </div>
 
     <div id="grid-files" class="ag-theme-quartz-dark flex-1 min-h-0"></div>

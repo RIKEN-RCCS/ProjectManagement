@@ -134,7 +134,7 @@ registerAdminPage('recording', async (container) => {
             const lines = data.lines || [];
             this.logModalContent = lines.length === 0
               ? '(empty log)'
-              : `<div class="text-xs text-gray-500 mb-1">${esc(data.file)} &mdash; ${data.total_lines} total lines</div><pre class="text-xs text-gray-300 leading-relaxed">${lines.map(l => esc(l)).join('')}</pre>`;
+              : `<div class="text-xs text-gray-400 mb-1">${esc(data.file)} &mdash; ${data.total_lines} total lines</div><pre class="text-xs text-gray-300 leading-relaxed">${lines.map(l => esc(l)).join('')}</pre>`;
           }
         } catch (e) {
           this.logModalContent = 'Failed to load log: ' + e.message;

@@ -152,8 +152,8 @@ function renderEnrichSection(label, value) {
   if (!value) return '';
   const text = escapeHtml(value).replace(/\n/g, '<br>');
   return `<div>
-    <div class="text-xs font-bold text-gray-500 mb-1">${label}</div>
-    <div class="bg-gray-50 border rounded p-2 whitespace-pre-wrap">${text}</div>
+    <div class="text-xs font-bold text-gray-400 mb-1">${label}</div>
+    <div class="bg-gray-700 border rounded p-2 whitespace-pre-wrap text-gray-200">${text}</div>
   </div>`;
 }
 
@@ -169,9 +169,9 @@ function renderRelatedIds(related) {
   if (ids.length === 0 && typeof related === 'string') {
     ids = [related];
   }
-  const items = ids.map(id => `<code class="bg-blue-50 px-1 rounded text-xs">${escapeHtml(id)}</code>`).join(' ');
+  const items = ids.map(id => `<code class="bg-blue-900 text-blue-200 px-1 rounded text-xs">${escapeHtml(id)}</code>`).join(' ');
   return `<div>
-    <div class="text-xs font-bold text-gray-500 mb-1">関連ID</div>
+    <div class="text-xs font-bold text-gray-400 mb-1">関連ID</div>
     <div>${items}</div>
   </div>`;
 }
@@ -185,11 +185,11 @@ function openEnrichDialog(kind, data) {
   const conf = kind === 'AI' ? (data.requested_by_confidence || '') : (data.decided_by_confidence || '');
   title.textContent = `${kind} #${data.id || '-'}`;
   const contentSection = `<div>
-    <div class="text-xs font-bold text-gray-500 mb-1">内容</div>
-    <div class="bg-gray-50 border rounded p-2 whitespace-pre-wrap">${escapeHtml(data.content || '')}</div>
+    <div class="text-xs font-bold text-gray-400 mb-1">内容</div>
+    <div class="bg-gray-700 border rounded p-2 whitespace-pre-wrap text-gray-200">${escapeHtml(data.content || '')}</div>
   </div>`;
   const actorSection = actor ? `<div>
-    <div class="text-xs font-bold text-gray-500 mb-1">${actorLabel}${conf ? ` <span class="font-normal text-gray-400">(${escapeHtml(conf)})</span>` : ''}</div>
+    <div class="text-xs font-bold text-gray-400 mb-1">${actorLabel}${conf ? ` <span class="font-normal text-gray-500">(${escapeHtml(conf)})</span>` : ''}</div>
     <div>${escapeHtml(actor)}</div>
   </div>` : '';
   const parts = [
@@ -200,7 +200,7 @@ function openEnrichDialog(kind, data) {
     renderRelatedIds(data.related_ids),
   ].filter(Boolean);
   if (parts.length <= 1) {
-    parts.push('<div class="text-gray-500 italic">エンリッチメント情報はまだありません。scripts/enrich/enrich_items.py を実行してください。</div>');
+    parts.push('<div class="text-gray-400 italic">エンリッチメント情報はまだありません。scripts/enrich/enrich_items.py を実行してください。</div>');
   }
   body.innerHTML = parts.join('');
   dlg.showModal();
@@ -581,12 +581,12 @@ function _updateSourceFilterButtonLabel(target) {
   if (!btn) return;
   if (n === 0) {
     btn.textContent = 'すべて';
-    btn.classList.remove('bg-blue-50', 'border-blue-400', 'text-blue-700');
+    btn.classList.remove('bg-blue-900', 'border-blue-400', 'text-blue-200');
   } else {
     const ch = sf.channels?.length || 0;
     const mk = sf.meeting_kinds?.length || 0;
     btn.textContent = `絞り込み中 (ch:${ch}, 会議:${mk})`;
-    btn.classList.add('bg-blue-50', 'border-blue-400', 'text-blue-700');
+    btn.classList.add('bg-blue-900', 'border-blue-400', 'text-blue-200');
   }
 }
 
@@ -610,7 +610,7 @@ function openSourceFilter(target) {
     btn.type = 'button';
     const label = p.kind === 'meeting_kinds' ? `会議: ${p.name}` : p.name;
     btn.textContent = label;
-    btn.className = 'border rounded-full px-3 py-0.5 text-xs bg-white hover:bg-blue-50 hover:border-blue-400';
+    btn.className = 'border rounded-full px-3 py-0.5 text-xs bg-gray-700 text-gray-200 hover:bg-blue-900 hover:text-blue-200 hover:border-blue-400';
     btn.onclick = () => {
       const sf = sourceFilter[_sourceFilterTarget];
       const arr = sf[p.kind];
@@ -636,7 +636,7 @@ function openSourceFilter(target) {
   chEl.innerHTML = '';
   chList.forEach(id => {
     const lbl = document.createElement('label');
-    lbl.className = 'flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-50 px-1 rounded';
+    lbl.className = 'flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-700 px-1 rounded';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.value = id;
@@ -667,7 +667,7 @@ function openSourceFilter(target) {
   mkEl.innerHTML = '';
   mkList.forEach(name => {
     const lbl = document.createElement('label');
-    lbl.className = 'flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-50 px-1 rounded';
+    lbl.className = 'flex items-center gap-2 py-0.5 cursor-pointer hover:bg-gray-700 px-1 rounded';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.value = name;

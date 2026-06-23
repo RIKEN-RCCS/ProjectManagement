@@ -53,7 +53,7 @@ registerAdminPage('services', async (container) => {
             const lines = data.lines || [];
             this.logContent = lines.length === 0
               ? 'Empty log file'
-              : `<div class="text-xs text-gray-500 mb-1">${esc(data.file)} &mdash; ${data.total_lines} total lines</div><pre>${lines.map(l => esc(l)).join('')}</pre>`;
+              : `<div class="text-xs text-gray-400 mb-1">${esc(data.file)} &mdash; ${data.total_lines} total lines</div><pre>${lines.map(l => esc(l)).join('')}</pre>`;
           }
         } catch (e) {
           this.logContent = 'Failed to load log: ' + e.message;
