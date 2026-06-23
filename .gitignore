@@ -45,3 +45,4 @@ fish.tar
 scripts/fish_seed_sweep.sh
 scripts/eval/
 scripts/ingest/*.bak
+scripts/data/voice_uploads.db
