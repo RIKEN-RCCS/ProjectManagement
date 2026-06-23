@@ -234,7 +234,7 @@ pm_qa_server.py (Socket Mode デーモン)
   │
   ├── ThreadPoolExecutor(max_workers=4)
   │
-  ├── /argus-ask        ──→ 意図分類 (structured/text/hybrid) → 検索 → 回答
+  ├── /argus-investigate ──→ マルチステップ Agent
   │
   ├── /argus-brief      ──→ Orchestrator-Worker パターン
   │   ├─ Worker A: PMデータ → アクション候補
@@ -290,7 +290,6 @@ pm_qa_server.py (Socket Mode デーモン)
 | `/argus-brief` | 実行者のみ (ephemeral) | Block Kit + mrkdwn |
 | `/argus-risk` | 実行者のみ (ephemeral) | Block Kit + mrkdwn |
 | `/argus-investigate` | 実行者のみ (ephemeral) | Block Kit + mrkdwn |
-| `/argus-ask` | 実行者のみ (ephemeral) | Block Kit + mrkdwn |
 | Patrol Agent | リーダー会議チャンネル | Block Kit + 承認ボタン |
 
 ### 2. Slack Canvas (永続)
