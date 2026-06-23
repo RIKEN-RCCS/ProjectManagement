@@ -51,7 +51,7 @@ PROJECT_MD = REPO_ROOT / "docs" / "project.md"
 
 sys.path.insert(0, str(SCRIPT_DIR))
 from cli_utils import (
-    strip_think_blocks, call_local_llm, load_claude_md_context, detect_vllm_model,
+    strip_think_blocks, call_argus_llm, load_claude_md_context,
     enrich_combined_with_vtt, retrieve_knowledge_for_extraction,
 )
 
@@ -181,17 +181,9 @@ Write "（未定）" ONLY when none of the above heuristics yield a name.
 # 認証情報の読み込み
 # --------------------------------------------------------------------------- #
 def load_local_llm_endpoint() -> tuple[str, str]:
-    """LLM エンドポイント (URL, token) を返す。
-
-    ARGUS_PREFER_RIVAULT=1 の場合は RIVAULT_URL / RIVAULT_TOKEN を優先する。
-    それ以外は LOCAL_LLM_URL / LOCAL_LLM_TOKEN（ローカル vLLM）を使う。
+    """互換性のため残す。引数からの env var 上書きのみ行う。
+    call_argus_llm() にルーティングを委ねる。
     """
-    if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
-        url = os.environ.get("RIVAULT_URL", "").rstrip("/")
-        token = os.environ.get("RIVAULT_TOKEN", "")
-        if url and token:
-            return url, token
-        print("[WARN] ARGUS_PREFER_RIVAULT=1 だが RIVAULT_URL/TOKEN 未設定。ローカルにフォールバック", file=sys.stderr)
     url = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
     token = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
     return url, token
@@ -302,12 +294,8 @@ def extract_from_chunk(
     total_chunks: int,
     time_range: str,
     claude_md_context: str,
-    model: str,
-    base_url: str,
-    api_key: str,
     timeout: int,
     think: bool = False,
-    no_stream: bool = False,
     no_chat_template_kwargs: bool = False,
     temperature: Optional[float] = None,
     max_tokens: int = 4096,
@@ -326,10 +314,10 @@ def extract_from_chunk(
     # thinking モデルは思考トークン分を考慮して max_tokens をそのまま使用
     # 非 thinking モデルは 1024 で十分
     chunk_max_tokens = max_tokens if (think or no_chat_template_kwargs) else 1024
-    result = call_local_llm(
-        prompt, model, base_url, api_key, timeout,
-        think=think, max_tokens=chunk_max_tokens, no_stream=no_stream, system=system,
-        no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+    result = call_argus_llm(
+        prompt, timeout=timeout, max_tokens=chunk_max_tokens, system=system,
+        think=think, temperature=temperature,
+        no_chat_template_kwargs=no_chat_template_kwargs,
     )
     return result
 
@@ -425,13 +413,9 @@ def _sample_n_times(
     prompt: str,
     n: int,
     *,
-    model: str,
-    base_url: str,
-    api_key: str,
     timeout: int,
     think: bool,
     max_tokens: int,
-    no_stream: bool,
     no_chat_template_kwargs: bool,
     base_temperature: Optional[float],
     label: str,
@@ -457,18 +441,11 @@ def _sample_n_times(
         t = max(0.05, min(1.5, base_t + d))
         print(f"[INFO] {label} サンプル {i}/{n} (temperature={t:.2f}) 生成中...", file=sys.stderr)
         try:
-            text = call_local_llm(
-                prompt, model, base_url, api_key, timeout,
-                think=think, max_tokens=max_tokens, no_stream=no_stream,
-                no_chat_template_kwargs=no_chat_template_kwargs, temperature=t,
+            text = call_argus_llm(
+                prompt, timeout=timeout, max_tokens=max_tokens,
+                think=think, temperature=t,
+                no_chat_template_kwargs=no_chat_template_kwargs,
             )
-            if not text and not no_stream:
-                print(f"[WARN] {label} サンプル {i} が空のためリトライ（no_stream=True）", file=sys.stderr)
-                text = call_local_llm(
-                    prompt, model, base_url, api_key, timeout,
-                    think=think, max_tokens=max_tokens, no_stream=True,
-                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=t,
-                )
         except Exception as e:
             print(f"[WARN] {label} サンプル {i} 失敗: {e}", file=sys.stderr)
             text = ""
@@ -637,13 +614,9 @@ def _consensus_stage2(
     *,
     min_vote: int,
     threshold: float,
-    model: str,
-    base_url: str,
-    api_key: str,
     timeout: int,
     think: bool,
     max_tokens: int,
-    no_stream: bool,
     no_chat_template_kwargs: bool,
     temperature: Optional[float],
 ) -> str:
@@ -706,10 +679,10 @@ def _consensus_stage2(
         )
         print(f"[INFO]   クラスタ {ci}/{len(accepted)}: '{title}' ({len(cluster_drafts)} ドラフト)", file=sys.stderr)
         try:
-            merged = call_local_llm(
-                prompt, model, base_url, api_key, timeout,
-                think=think, max_tokens=max_tokens, no_stream=no_stream,
-                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            merged = call_argus_llm(
+                prompt, timeout=timeout, max_tokens=max_tokens,
+                think=think, temperature=temperature,
+                no_chat_template_kwargs=no_chat_template_kwargs,
             )
         except Exception as e:
             print(f"[WARN] Stage 2 集約失敗（'{title}'）: {e}、最長ドラフトを採用", file=sys.stderr)
@@ -728,13 +701,9 @@ def _consensus_stage3(
     min_vote: int,
     threshold: float,
     claude_md_context: str,
-    model: str,
-    base_url: str,
-    api_key: str,
     timeout: int,
     think: bool,
     max_tokens: int,
-    no_stream: bool,
     no_chat_template_kwargs: bool,
     temperature: Optional[float],
 ) -> str:
@@ -787,10 +756,10 @@ def _consensus_stage3(
             )
             print(f"[INFO] Stage 3 決定事項集約: {len(accepted)} クラスタを LLM に投入", file=sys.stderr)
             try:
-                decisions_md = call_local_llm(
-                    prompt, model, base_url, api_key, timeout,
-                    think=think, max_tokens=max_tokens, no_stream=no_stream,
-                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+                decisions_md = call_argus_llm(
+                    prompt, timeout=timeout, max_tokens=max_tokens,
+                    think=think, temperature=temperature,
+                    no_chat_template_kwargs=no_chat_template_kwargs,
                 )
             except Exception as e:
                 print(
@@ -855,10 +824,10 @@ def _consensus_stage3(
             )
             print(f"[INFO] Stage 3 AI集約: {len(accepted)} クラスタを LLM に投入", file=sys.stderr)
             try:
-                actions_md = call_local_llm(
-                    prompt, model, base_url, api_key, timeout,
-                    think=think, max_tokens=max_tokens, no_stream=no_stream,
-                    no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+                actions_md = call_argus_llm(
+                    prompt, timeout=timeout, max_tokens=max_tokens,
+                    think=think, temperature=temperature,
+                    no_chat_template_kwargs=no_chat_template_kwargs,
                 )
             except Exception as e:
                 print(
@@ -889,15 +858,11 @@ def _consensus_stage3(
 def generate_minutes(
     transcript_path: str,
     output_dir: str,
-    model: str,
-    base_url: str,
-    api_key: str,
     timeout: int,
     think: bool = False,
     max_tokens: int = 8192,
     multi_stage: bool = False,
     chunk_minutes: int = 30,
-    no_stream: bool = False,
     no_chat_template_kwargs: bool = False,
     from_combined: Optional[str] = None,
     temperature: Optional[float] = None,
@@ -962,7 +927,7 @@ def generate_minutes(
         print(f"[INFO] combined ファイルを読み込み中: {from_combined}")
         combined = Path(from_combined).read_text(encoding="utf-8")
         print(f"[INFO] combined テキスト: {len(combined)} 字")
-        print(f"[INFO] ローカルLLM（{model}）で議事録を統合生成中...")
+        print(f"[INFO] call_argus_llm で議事録を統合生成中...")
         prompt = PROMPT_TEMPLATE.format(
             claude_md_context=claude_md_context,
             transcript=combined,
@@ -970,26 +935,25 @@ def generate_minutes(
         )
         if consensus_enabled:
             drafts = _sample_n_times(
-                prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
-                timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+                prompt, consensus_n,
+                timeout=timeout, think=think, max_tokens=max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs,
                 base_temperature=temperature, label="Stage 2 (from-combined)",
             )
             if len(drafts) >= 2:
                 minutes_text = _consensus_stage2(
                     drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
-                    model=model, base_url=base_url, api_key=api_key, timeout=timeout,
-                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    timeout=timeout, think=think, max_tokens=max_tokens,
                     no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
                 )
             else:
                 print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
                 minutes_text = drafts[0] if drafts else ""
         else:
-            minutes_text = call_local_llm(
-                prompt, model, base_url, api_key, timeout,
-                think=think, max_tokens=max_tokens, no_stream=no_stream,
-                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            minutes_text = call_argus_llm(
+                prompt, timeout=timeout, max_tokens=max_tokens,
+                think=think, temperature=temperature,
+                no_chat_template_kwargs=no_chat_template_kwargs,
             )
         input_text = combined
 
@@ -1014,19 +978,19 @@ def generate_minutes(
             try:
                 extraction = extract_from_chunk(
                     chunk_text, i, total, time_range,
-                    claude_md_context, model, base_url, api_key, timeout,
-                    think=think, no_stream=no_stream,
+                    claude_md_context, timeout,
+                    think=think,
                     no_chat_template_kwargs=no_chat_template_kwargs,
                     temperature=temperature, max_tokens=max_tokens,
                     slide_context_block=slide_context_block,
                 )
-                # 空チャンク（reasoning parser が content を返さなかった場合等）はリトライ
-                if not extraction and not no_stream:
-                    print(f"[WARN] チャンク {i} が空のためリトライ（no_stream=True）...")
+                # 空チャンクのリトライ（call_argus_llm の fallback 後でも空の場合）
+                if not extraction:
+                    print(f"[WARN] チャンク {i} が空のためリトライ...")
                     extraction = extract_from_chunk(
                         chunk_text, i, total, time_range,
-                        claude_md_context, model, base_url, api_key, timeout,
-                        think=think, no_stream=True,
+                        claude_md_context, timeout,
+                        think=think,
                         no_chat_template_kwargs=no_chat_template_kwargs,
                         temperature=temperature, max_tokens=max_tokens,
                     )
@@ -1045,7 +1009,7 @@ def generate_minutes(
         combined_path.write_text(combined, encoding="utf-8")
         print(f"[INFO] combined キャッシュを保存しました: {combined_path}")
 
-        print(f"[INFO] ローカルLLM（{model}）で議事録を統合生成中...")
+        print(f"[INFO] call_argus_llm で議事録を統合生成中...")
         prompt = PROMPT_TEMPLATE.format(
             claude_md_context=claude_md_context,
             transcript=combined,
@@ -1053,26 +1017,25 @@ def generate_minutes(
         )
         if consensus_enabled:
             drafts = _sample_n_times(
-                prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
-                timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+                prompt, consensus_n,
+                timeout=timeout, think=think, max_tokens=max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs,
                 base_temperature=temperature, label="Stage 2 (multi-stage)",
             )
             if len(drafts) >= 2:
                 minutes_text = _consensus_stage2(
                     drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
-                    model=model, base_url=base_url, api_key=api_key, timeout=timeout,
-                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    timeout=timeout, think=think, max_tokens=max_tokens,
                     no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
                 )
             else:
                 print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
                 minutes_text = drafts[0] if drafts else ""
         else:
-            minutes_text = call_local_llm(
-                prompt, model, base_url, api_key, timeout,
-                think=think, max_tokens=max_tokens, no_stream=no_stream,
-                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            minutes_text = call_argus_llm(
+                prompt, timeout=timeout, max_tokens=max_tokens,
+                think=think, temperature=temperature,
+                no_chat_template_kwargs=no_chat_template_kwargs,
             )
         input_text = combined
     else:
@@ -1082,32 +1045,32 @@ def generate_minutes(
         transcript_text = format_transcript(segments)
         prompt = PROMPT_TEMPLATE.format(
             claude_md_context=claude_md_context,
+            slide_context_block=slide_context_block,
             transcript=transcript_text,
         )
         think_label = "有効" if think else "無効"
-        print(f"[INFO] ローカルLLM（{model}）で議事録を生成中... （思考モード: {think_label}）")
+        print(f"[INFO] call_argus_llm で議事録を生成中... （思考モード: {think_label}）")
         if consensus_enabled:
             drafts = _sample_n_times(
-                prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
-                timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
+                prompt, consensus_n,
+                timeout=timeout, think=think, max_tokens=max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs,
                 base_temperature=temperature, label="Stage 2 (single-pass)",
             )
             if len(drafts) >= 2:
                 minutes_text = _consensus_stage2(
                     drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
-                    model=model, base_url=base_url, api_key=api_key, timeout=timeout,
-                    think=think, max_tokens=max_tokens, no_stream=no_stream,
+                    timeout=timeout, think=think, max_tokens=max_tokens,
                     no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
                 )
             else:
                 print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
                 minutes_text = drafts[0] if drafts else ""
         else:
-            minutes_text = call_local_llm(
-                prompt, model, base_url, api_key, timeout,
-                think=think, max_tokens=max_tokens, no_stream=no_stream,
-                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+            minutes_text = call_argus_llm(
+                prompt, timeout=timeout, max_tokens=max_tokens,
+                think=think, temperature=temperature,
+                no_chat_template_kwargs=no_chat_template_kwargs,
             )
         input_text = transcript_text
 
@@ -1129,7 +1092,7 @@ def generate_minutes(
         else:
             print(f"[WARN] VTT セグメントが見つかりません。話者情報なしで続行します")
 
-    print(f"[INFO] ローカルLLM（{model}）で決定事項・アクションアイテムを生成中...")
+    print(f"[INFO] call_argus_llm で決定事項・アクションアイテムを生成中...")
 
     # ナレッジ検索（Phase 3追加）— いったん停止
     # knowledge_context = retrieve_knowledge_for_extraction(
@@ -1151,36 +1114,27 @@ def generate_minutes(
     decisions_timeout = timeout * 2
     if consensus_enabled:
         drafts = _sample_n_times(
-            decisions_prompt, consensus_n, model=model, base_url=base_url, api_key=api_key,
+            decisions_prompt, consensus_n,
             timeout=decisions_timeout, think=think, max_tokens=decisions_max_tokens,
-            no_stream=no_stream, no_chat_template_kwargs=no_chat_template_kwargs,
+            no_chat_template_kwargs=no_chat_template_kwargs,
             base_temperature=temperature, label="Stage 3",
         )
         if len(drafts) >= 2:
             decisions_text = _consensus_stage3(
                 drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
                 claude_md_context=claude_md_context,
-                model=model, base_url=base_url, api_key=api_key, timeout=decisions_timeout,
-                think=think, max_tokens=decisions_max_tokens, no_stream=no_stream,
+                timeout=decisions_timeout, think=think, max_tokens=decisions_max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
             )
         else:
             print("[WARN] Stage 3 ドラフトが不足、単発フォールバック", file=sys.stderr)
             decisions_text = drafts[0] if drafts else ""
     else:
-        decisions_text = call_local_llm(
-            decisions_prompt, model, base_url, api_key, decisions_timeout,
-            think=think, max_tokens=decisions_max_tokens, no_stream=no_stream,
-            no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
+        decisions_text = call_argus_llm(
+            decisions_prompt, timeout=decisions_timeout, max_tokens=decisions_max_tokens,
+            think=think, temperature=temperature,
+            no_chat_template_kwargs=no_chat_template_kwargs,
         )
-        # 空の場合は no_stream でリトライ（reasoning parser の streaming 問題に対応）
-        if not decisions_text and not no_stream:
-            print("[WARN] 決定事項が空のためリトライ（no_stream=True）...")
-            decisions_text = call_local_llm(
-                decisions_prompt, model, base_url, api_key, decisions_timeout,
-                think=think, max_tokens=decisions_max_tokens, no_stream=True,
-                no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
-            )
     # 決定事項のスクラッチパッド除去
     for marker in ("## 決定事項\n\n", "## 決定事項\n"):
         idx = decisions_text.find(marker)
@@ -1357,25 +1311,6 @@ def main() -> int:
         os.environ["LOCAL_LLM_URL"] = args.url
     if args.token:
         os.environ["LOCAL_LLM_TOKEN"] = args.token
-    base_url, api_key = load_local_llm_endpoint()
-
-    using_rivault = os.environ.get("ARGUS_PREFER_RIVAULT") == "1" and base_url == os.environ.get("RIVAULT_URL", "").rstrip("/")
-    if using_rivault:
-        if args.think:
-            print("[INFO] ARGUS_PREFER_RIVAULT=1: think モードを自動無効化します", file=sys.stderr)
-            args.think = False
-        args.no_chat_template_kwargs = True
-        print(f"[INFO] RiVault モード: {base_url}")
-
-    if not args.model:
-        if using_rivault and os.environ.get("RIVAULT_MODEL", "").strip():
-            args.model = os.environ["RIVAULT_MODEL"].strip()
-            print(f"[INFO] モデル      : {args.model}（RIVAULT_MODEL）")
-        else:
-            args.model = detect_vllm_model(base_url)
-            print(f"[INFO] モデル      : {args.model}（自動取得）")
-    else:
-        print(f"[INFO] モデル      : {args.model}")
     print(f"[INFO] 思考モード  : {'有効' if args.think else '無効'}")
     if args.think and args.no_chat_template_kwargs:
         print(f"[INFO] chat_template_kwargs: 送信しない（常時 reasoning モデル）")
@@ -1383,7 +1318,7 @@ def main() -> int:
     print(f"[INFO] マルチステージ: {'有効' if args.multi_stage else '無効'}")
     if args.multi_stage:
         print(f"[INFO] チャンク    : {args.chunk_minutes} 分")
-    print(f"[INFO] ストリーミング: {'無効' if args.no_stream else '有効'}")
+    # ルーティングは call_argus_llm が解決
     if args.temperature is not None:
         print(f"[INFO] temperature : {args.temperature}")
     if args.vtt:
@@ -1392,15 +1327,13 @@ def main() -> int:
         print(f"[INFO] スライド文脈  : {args.slide_context}")
     if args.consensus and args.consensus >= 2:
         print(f"[INFO] consensus    : N={args.consensus}, threshold={args.consensus_threshold}")
-    print(f"[INFO] LLM URL     : {base_url}")
     print(f"[INFO] トリアージ  : {'無効' if args.no_triage else '有効'}")
 
     try:
         output_path = generate_minutes(
-            args.transcript, args.output, args.model, base_url, api_key, args.timeout,
+            args.transcript, args.output, args.timeout,
             think=args.think, max_tokens=args.max_tokens,
             multi_stage=args.multi_stage, chunk_minutes=args.chunk_minutes,
-            no_stream=args.no_stream,
             no_chat_template_kwargs=args.no_chat_template_kwargs,
             from_combined=args.from_combined,
             temperature=args.temperature,
