@@ -339,6 +339,46 @@ def fetch_background_knowledge(
     return body
 
 
+
+
+def fetch_recent_web_articles(
+    qa_index_path: Path,
+    *,
+    index_name: str = "pm",
+    max_chars: int = 4000,
+) -> str:
+    """brief プロンプト同梱用: qa_index.db から source_type='web' の直近記事を取得する。"""
+    import sqlite3
+    if not qa_index_path.exists():
+        return ""
+    conn = sqlite3.connect(str(qa_index_path))
+    try:
+        rows = conn.execute(
+            "SELECT c.content, c.source_ref, c.held_at "
+            "FROM chunks c "
+            "JOIN chunk_indexes ci ON c.id = ci.chunk_id "
+            "WHERE ci.index_name = ? AND c.source_type = 'web' "
+            "ORDER BY c.held_at DESC LIMIT 20",
+            (index_name,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return ""
+    NL = chr(10)
+    lines = ["## 最近の外部記事" + NL]
+    for content, url, held_at in rows:
+        title = ((content or "").split(NL)[0]) or "(無題)"
+        snippet = (content or "")[:200].replace(NL, " ")
+        date_str = held_at or ""
+        lines.append(f"- [{title}]({url}) ({date_str})")
+        lines.append(f"  {snippet}")
+    body = NL.join(lines)
+    if len(body) > max_chars:
+        body = body[:max_chars]
+    return body
+
+
 def fetch_pm_stats(conn, today: str, since: str | None = None) -> dict:
     """pm.db から統計データを収集する"""
     return {
@@ -661,9 +701,10 @@ def _collect_all_data(
     pm_db_path: Path | None = None,
     pm_db_paths: list[Path] | None = None,
     index_name: str | None = None,
-) -> tuple[str, str, dict, list, str]:
+    qa_index_path: Path | None = None,
+) -> tuple[str, str, dict, list, str, str]:
     """messages/minutes/stats/knowledge を一括収集し
-    (messages, minutes, stats, conns, knowledge_summary) を返す。
+    (messages, minutes, stats, conns, knowledge_summary, web_articles) を返す。
     conns は呼び出し元で全てクローズすること。
     knowledge_summary は data/knowledge.db から取得した蒸留サマリ（プロジェクト全体共通、
     index_name の影響を受けない）。
@@ -686,6 +727,9 @@ def _collect_all_data(
     minutes = ""
     stats = {}
     knowledge_summary = ""
+    web_articles = ""
+    if qa_index_path is None:
+        qa_index_path = data_dir / "qa_index.db"
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         # Slack messages: チャンネルごと並列 fetch
@@ -705,6 +749,9 @@ def _collect_all_data(
         for p in pm_db_paths:
             f = pool.submit(_fetch_single_pm_stats, p, today, since_date, no_encrypt)
             pm_futs.append(f)
+
+        # qa_index.db から Web 記事を取得
+        web_fut = pool.submit(fetch_recent_web_articles, qa_index_path, index_name=index_name)
 
         # background knowledge: pm.db.decisions の rationale 付きから取得
         kn_fut = pool.submit(fetch_background_knowledge,
@@ -743,7 +790,13 @@ def _collect_all_data(
         except Exception:
             knowledge_summary = ""
 
-    return messages, minutes, stats, knowledge_summary
+        # Web 記事結果
+        try:
+            web_articles = web_fut.result()
+        except Exception:
+            web_articles = ""
+
+    return messages, minutes, stats, knowledge_summary, web_articles
 
 
 def _run_brief(respond, command, *, no_encrypt: bool = False):
@@ -770,7 +823,7 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
 
         # データ収集
         context = load_claude_md_context()
-        messages, minutes, stats, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
@@ -798,6 +851,7 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
             f"## Slack 会話\n\n{conversation_section}\n\n"
             f"## 議事録\n\n{minutes_section}\n\n"
             f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+            f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
             f"## 指示\n\n"
             f"- 上記のデータを統合し、優先順位を付けたブリーフィングを生成してください\n"
             f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
@@ -915,7 +969,7 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-draft] purpose={purpose} subject={subject} index={index_name}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
@@ -965,7 +1019,7 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         # データ収集
         logger.info("[argus-risk] データ収集")
         context = load_claude_md_context()
-        messages, minutes, stats, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
@@ -993,6 +1047,7 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
             f"## Slack 会話\n\n{conversation_section}\n\n"
             f"## 議事録\n\n{minutes_section}\n\n"
             f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+            f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
             f"## 指示\n\n"
             f"- 上記のデータからリスク・懸念・予兆を洗い出し、優先度付きで報告してください\n"
             f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
@@ -1447,7 +1502,7 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-today] requester={requester} user_id={user_id} index={index_name}")
 
         context = load_claude_md_context()
-        messages, minutes, stats, knowledge_summary = _collect_all_data(
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
                 # 3. ユーザーIDマップを構築（テキスト内のID展開用）

@@ -194,7 +194,9 @@ _AGENT_SYSTEM_PROMPT = """\
 ## 進め方
 
 - 質問の内容に応じて適切なツールを選択すること
-- `search_text` で全文検索、`search_decisions` で決定事項検索、
+- `search_text` で全文検索（決定事項・議事録・Slack・BOX文書・外部Web記事を含む）。
+  特に外部技術記事（AI/LLM/HPCの最新動向）を調べる際は積極的に使うこと。
+  `search_decisions` で決定事項検索、
   `search_entity` で異なる視点（conservative/aggressive/objective/future_oriented）
   とデータ種別（pm_data/minutes/slack/box_docs）の組み合わせで多角的に分析すること
 - 複数の視点とデータ種別を掛け合わせて検索すると、より深い洞察が得られる

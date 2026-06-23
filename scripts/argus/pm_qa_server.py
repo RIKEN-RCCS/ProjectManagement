@@ -2,8 +2,8 @@
 """
 pm_qa_server.py - Slack Slash Command QA サーバー（Socket Mode）
 
-/argus-ask <質問> を受け取り、実行チャンネルに対応するインデックスDB (FTS5) で
-関連情報を検索し、ローカルLLMで回答を生成してSlackにephemeralで返す。
+スラッシュコマンド（/argus-brief, /argus-risk, /argus-investigate 等）を
+実行チャンネルに応じてルーティングし、ローカルLLMで処理する。
 
 起動方法:
   source ~/.secrets/slack_tokens.sh
@@ -958,7 +958,7 @@ def main() -> None:
         logger.error("SLACK_APP_TOKEN が未設定です")
         sys.exit(1)
 
-    logger.info("Socket Mode で接続中... /argus-ask コマンドを待機します")
+    logger.info("Socket Mode で接続中... スラッシュコマンドを待機します")
     handler = SocketModeHandler(app, app_token)
     handler.start()
 
