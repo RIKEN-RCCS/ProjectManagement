@@ -308,6 +308,37 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
     )
 
 
+def _build_channel_kind_condition(
+    channel_ids: list[str] | None,
+    minutes_names: list[str] | None,
+    table_alias: str = "a",
+) -> tuple[str, list[str]]:
+    """channel_ids / minutes_names から action_items/decisions 用のフィルタ条件を構築する。
+    両方 None の場合は無条件（全体検索）。
+
+    table_alias: テーブルの alias（例: "a" → "a.source"。空文字の場合は "source"）。
+    主テーブルに alias がある場合はそれを指定し、ない場合は空文字を渡す。
+    Returns: (where_clause_fragment, params)
+    """
+    tbl = f"{table_alias}." if table_alias else ""
+    clauses: list[str] = []
+    params: list[str] = []
+    if channel_ids:
+        ph = ",".join("?" * len(channel_ids))
+        clauses.append(f"({tbl}source='slack' AND {tbl}channel_id IN ({ph}))")
+        params.extend(channel_ids)
+    if minutes_names:
+        ph = ",".join("?" * len(minutes_names))
+        clauses.append(
+            f"({tbl}source='meeting' AND {tbl}meeting_id IN "
+            f"(SELECT meeting_id FROM meetings WHERE kind IN ({ph})))"
+        )
+        params.extend(minutes_names)
+    if not clauses:
+        return "", []
+    return " AND (" + " OR ".join(clauses) + ")", params
+
+
 def fetch_milestone_progress(conn: "_sqlite3.Connection") -> list[dict]:
     """マイルストーンごとのアクションアイテム完了率を取得する"""
     try:
@@ -329,12 +360,19 @@ def fetch_milestone_progress(conn: "_sqlite3.Connection") -> list[dict]:
         return []
 
 
-def fetch_assignee_workload(conn: "_sqlite3.Connection", today: str) -> list[dict]:
+def fetch_assignee_workload(
+    conn: "_sqlite3.Connection",
+    today: str,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> list[dict]:
     """担当者別の負荷（オープンアイテム数・期限超過数・期限未設定数）を取得する（LLM不使用）"""
     try:
-        rows = conn.execute(
-            "SELECT assignee, due_date FROM action_items WHERE status = 'open' AND COALESCE(deleted,0)=0"
-        ).fetchall()
+        base_query = "SELECT assignee, due_date FROM action_items WHERE status = 'open' AND COALESCE(deleted,0)=0"
+        cond, params = _build_channel_kind_condition(channel_ids, minutes_names)
+        if cond:
+            base_query += cond
+        rows = conn.execute(base_query, params).fetchall()
     except Exception:
         return []
 
@@ -353,7 +391,13 @@ def fetch_assignee_workload(conn: "_sqlite3.Connection", today: str) -> list[dic
     return result
 
 
-def fetch_overdue_items(conn: "_sqlite3.Connection", today: str, since: str | None) -> list[dict]:
+def fetch_overdue_items(
+    conn: "_sqlite3.Connection",
+    today: str,
+    since: str | None,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> list[dict]:
     """期限超過（status='open' かつ due_date < today）のアイテムを取得"""
     query = """
         SELECT id, content, assignee, due_date, milestone_id,
@@ -362,6 +406,10 @@ def fetch_overdue_items(conn: "_sqlite3.Connection", today: str, since: str | No
         WHERE status = 'open' AND COALESCE(deleted,0)=0 AND due_date IS NOT NULL AND due_date < ?
     """
     params: list = [today]
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
+    if cond:
+        query += cond
+        params.extend(cond_params)
     if since:
         query += " AND extracted_at >= ?"
         params.append(since)
@@ -369,42 +417,68 @@ def fetch_overdue_items(conn: "_sqlite3.Connection", today: str, since: str | No
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
-def fetch_unlinked_items_count(conn: "_sqlite3.Connection", since: str | None) -> int:
+def fetch_unlinked_items_count(
+    conn: "_sqlite3.Connection",
+    since: str | None,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> int:
     """milestone_id が未設定の open アイテム数（計画の穴）"""
     query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND COALESCE(deleted,0)=0 AND milestone_id IS NULL"
     params: list = []
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
+    if cond:
+        query += cond
+        params.extend(cond_params)
     if since:
         query += " AND extracted_at >= ?"
         params.append(since)
     return conn.execute(query, params).fetchone()[0]
 
 
-def fetch_no_assignee_count(conn: "_sqlite3.Connection", since: str | None) -> int:
+def fetch_no_assignee_count(
+    conn: "_sqlite3.Connection",
+    since: str | None,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> int:
     """担当者なしの open アイテム数"""
     query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND COALESCE(deleted,0)=0 AND (assignee IS NULL OR assignee = '')"
     params: list = []
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
+    if cond:
+        query += cond
+        params.extend(cond_params)
     if since:
         query += " AND extracted_at >= ?"
         params.append(since)
     return conn.execute(query, params).fetchone()[0]
 
 
-def fetch_weekly_trends(conn: "_sqlite3.Connection", weeks: int = 4) -> list[dict]:
+def fetch_weekly_trends(
+    conn: "_sqlite3.Connection",
+    weeks: int = 4,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> list[dict]:
     """直近 N 週の「作成件数」と「完了件数」の近似トレンド"""
     from datetime import date, timedelta
     today_dt = date.today()
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
     result = []
     for w in range(weeks, 0, -1):
         week_start = (today_dt - timedelta(weeks=w)).isoformat()
         week_end   = (today_dt - timedelta(weeks=w - 1)).isoformat()
-        created = conn.execute(
-            "SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND extracted_at >= ? AND extracted_at < ?",
-            (week_start, week_end),
-        ).fetchone()[0]
-        closed = conn.execute(
-            "SELECT COUNT(*) FROM action_items WHERE status='closed' AND COALESCE(deleted,0)=0 AND extracted_at >= ? AND extracted_at < ?",
-            (week_start, week_end),
-        ).fetchone()[0]
+        params_created = [week_start, week_end] + cond_params
+        created_query = "SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND extracted_at >= ? AND extracted_at < ?"
+        if cond:
+            created_query += cond
+        created = conn.execute(created_query, params_created).fetchone()[0]
+        params_closed = [week_start, week_end] + cond_params
+        closed_query = "SELECT COUNT(*) FROM action_items WHERE status='closed' AND COALESCE(deleted,0)=0 AND extracted_at >= ? AND extracted_at < ?"
+        if cond:
+            closed_query += cond
+        closed = conn.execute(closed_query, params_closed).fetchone()[0]
         result.append({
             "week_start": week_start,
             "week_end": week_end,
@@ -414,10 +488,19 @@ def fetch_weekly_trends(conn: "_sqlite3.Connection", weeks: int = 4) -> list[dic
     return result
 
 
-def fetch_unacknowledged_decisions(conn: "_sqlite3.Connection", since: str | None) -> list[dict]:
+def fetch_unacknowledged_decisions(
+    conn: "_sqlite3.Connection",
+    since: str | None,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> list[dict]:
     """未確認（acknowledged_at IS NULL）の決定事項（最大20件）"""
     query = "SELECT id, content, decided_at, decided_by, rationale FROM decisions WHERE COALESCE(deleted,0)=0 AND acknowledged_at IS NULL"
     params: list = []
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
+    if cond:
+        query += cond
+        params.extend(cond_params)
     if since:
         query += " AND decided_at >= ?"
         params.append(since)
@@ -425,31 +508,43 @@ def fetch_unacknowledged_decisions(conn: "_sqlite3.Connection", since: str | Non
     return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
-def fetch_summary_stats(conn: "_sqlite3.Connection", since: str | None, today: str) -> dict:
-    """全体統計"""
+def fetch_summary_stats(
+    conn: "_sqlite3.Connection",
+    since: str | None,
+    today: str,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> dict:
+    """統計（channel_ids/minutes_names でフィルタ可能）"""
     def _count(query: str, params: list) -> int:
         return conn.execute(query, params).fetchone()[0]
 
     p_since = [since] if since else []
     since_filter_ai = " AND extracted_at >= ?" if since else ""
     since_filter_d  = " AND decided_at >= ?" if since else ""
+    cond_ai, cond_ai_params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
+    cond_d, cond_d_params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
 
     return {
         "total_open": _count(
-            f"SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='open'{since_filter_ai}", p_since
+            f"SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='open'{cond_ai}{since_filter_ai}",
+            cond_ai_params + p_since,
         ),
         "total_closed": _count(
-            f"SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='closed'{since_filter_ai}", p_since
+            f"SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='closed'{cond_ai}{since_filter_ai}",
+            cond_ai_params + p_since,
         ),
         "overdue_count": _count(
-            "SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='open' AND due_date IS NOT NULL AND due_date < ?",
-            [today],
+            f"SELECT COUNT(*) FROM action_items WHERE COALESCE(deleted,0)=0 AND status='open' AND due_date IS NOT NULL AND due_date < ?{cond_ai}",
+            [today] + cond_ai_params,
         ),
         "total_decisions": _count(
-            f"SELECT COUNT(*) FROM decisions WHERE COALESCE(deleted,0)=0{since_filter_d}", p_since
+            f"SELECT COUNT(*) FROM decisions WHERE COALESCE(deleted,0)=0{cond_d}{since_filter_d}",
+            cond_d_params + p_since,
         ),
         "unacknowledged_decisions": _count(
-            "SELECT COUNT(*) FROM decisions WHERE COALESCE(deleted,0)=0 AND acknowledged_at IS NULL", []
+            f"SELECT COUNT(*) FROM decisions WHERE COALESCE(deleted,0)=0 AND acknowledged_at IS NULL{cond_d}",
+            cond_d_params,
         ),
     }
 

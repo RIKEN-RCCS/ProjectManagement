@@ -89,6 +89,20 @@ def transfer_meeting(
 
     if force:
         # 手動削除(deleted=1)されたレコードは残し、それ以外を削除してからINSERTする。
+        # 削除済みレコードの内容を収集しておき、同一内容の再INSERTを防ぐ。
+        deleted_decisions = set()
+        deleted_actions = set()
+        for row in pm_conn.execute(
+            "SELECT content FROM decisions WHERE meeting_id = ? AND COALESCE(deleted,0)=1",
+            (meeting_id,),
+        ).fetchall():
+            deleted_decisions.add(row["content"])
+        for row in pm_conn.execute(
+            "SELECT content FROM action_items WHERE meeting_id = ? AND COALESCE(deleted,0)=1",
+            (meeting_id,),
+        ).fetchall():
+            deleted_actions.add(row["content"])
+
         pm_conn.execute(
             "DELETE FROM decisions WHERE meeting_id = ? AND COALESCE(deleted,0)=0",
             (meeting_id,),
@@ -105,6 +119,9 @@ def transfer_meeting(
     )
 
     for d in decisions:
+        if force and d["content"] in deleted_decisions:
+            log(f"    [SKIP] 削除済みの決定事項をスキップ: {d['content'][:60]}")
+            continue
         pm_conn.execute(
             "INSERT INTO decisions"
             " (meeting_id, content, decided_at, source, source_ref, source_context, extracted_at)"
@@ -113,6 +130,9 @@ def transfer_meeting(
         )
 
     for a in action_items:
+        if force and a["content"] in deleted_actions:
+            log(f"    [SKIP] 削除済みのアクションアイテムをスキップ: {a['content'][:60]}")
+            continue
         pm_conn.execute(
             "INSERT INTO action_items"
             " (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at)"

@@ -184,6 +184,12 @@ def _apply_action_items(conn, rows: dict[int, dict], dry_run: bool, log) -> tupl
         cur = current[rid]
         for field, new_val in new_vals.items():
             if field == "deleted":
+                # XLSX の「削除」列が空/0/Falseの場合は上書きしない。
+                # ユーザーが明示的に削除フラグを立てた場合（✓/x/1/削除等）のみ
+                # pm.db の deleted 列を更新する。これにより、Argus Console 等で
+                # 既に deleted=1 になったレコードが XLSX 同期で復活するのを防ぐ。
+                if not new_val or str(new_val).strip() in ("", "0", "False", "false"):
+                    continue
                 new_val = _parse_delete_flag(new_val)
                 old_val = cur.get("deleted") or 0
                 if old_val != new_val:
@@ -239,6 +245,11 @@ def _apply_decisions(conn, rows: dict[int, dict], dry_run: bool, log) -> tuple[i
         cur = current[rid]
         for label, new_val in new_vals.items():
             if label == "acknowledged":
+                # XLSX の「確認済み」列が空の場合は上書きしない。
+                # deleted と同様、Web で一括確認した acknowledged_at が
+                # XLSX 同期でリセットされるのを防ぐ。
+                if not new_val or str(new_val).strip() in ("", "0", "False", "false"):
+                    continue
                 ack = bool(new_val) and str(new_val).strip().lower() in ("✓", "x", "y", "yes", "true", "1", "○", "済")
                 old_val = cur.get("acknowledged_at")
                 new_db = today if ack else None
@@ -248,6 +259,9 @@ def _apply_decisions(conn, rows: dict[int, dict], dry_run: bool, log) -> tuple[i
                 if (old_val or None) != (new_db or None):
                     by_item[rid].append(("acknowledged_at", old_val, new_db))
             elif label == "deleted":
+                # XLSX の「削除」列が空/0/Falseの場合は上書きしない（action_items側と同様）。
+                if not new_val or str(new_val).strip() in ("", "0", "False", "false"):
+                    continue
                 new_flag = _parse_delete_flag(new_val)
                 old_flag = cur.get("deleted") or 0
                 if old_flag != new_flag:

@@ -379,17 +379,26 @@ def fetch_recent_web_articles(
     return body
 
 
-def fetch_pm_stats(conn, today: str, since: str | None = None) -> dict:
-    """pm.db から統計データを収集する"""
+def fetch_pm_stats(
+    conn,
+    today: str,
+    since: str | None = None,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> dict:
+    """pm.db から統計データを収集する。
+    channel_ids/minutes_names を指定すると、該当チャンネル・議事録に由来する
+    アクションアイテム・決定事項のみに絞り込んで集計する（省略時は全体集計）。
+    """
     return {
         "milestones": fetch_milestone_progress(conn),
-        "overdue_items": fetch_overdue_items(conn, today, since),
-        "assignee_workload": fetch_assignee_workload(conn, today),
-        "unlinked_count": fetch_unlinked_items_count(conn, since),
-        "no_assignee_count": fetch_no_assignee_count(conn, since),
-        "weekly_trends": fetch_weekly_trends(conn),
-        "unacknowledged_decisions": fetch_unacknowledged_decisions(conn, since),
-        "stats": fetch_summary_stats(conn, since, today),
+        "overdue_items": fetch_overdue_items(conn, today, since, channel_ids=channel_ids, minutes_names=minutes_names),
+        "assignee_workload": fetch_assignee_workload(conn, today, channel_ids=channel_ids, minutes_names=minutes_names),
+        "unlinked_count": fetch_unlinked_items_count(conn, since, channel_ids=channel_ids, minutes_names=minutes_names),
+        "no_assignee_count": fetch_no_assignee_count(conn, since, channel_ids=channel_ids, minutes_names=minutes_names),
+        "weekly_trends": fetch_weekly_trends(conn, channel_ids=channel_ids, minutes_names=minutes_names),
+        "unacknowledged_decisions": fetch_unacknowledged_decisions(conn, since, channel_ids=channel_ids, minutes_names=minutes_names),
+        "stats": fetch_summary_stats(conn, since, today, channel_ids=channel_ids, minutes_names=minutes_names),
     }
 
 
@@ -680,12 +689,17 @@ def build_risk_prompt(
 # Slack コマンドのバックグラウンド処理
 # --------------------------------------------------------------------------- #
 
-def _fetch_single_pm_stats(p: Path, today: str, since_date: str, no_encrypt: bool) -> dict:
+def _fetch_single_pm_stats(
+    p: Path, today: str, since_date: str, no_encrypt: bool,
+    channel_ids: list[str] | None = None,
+    minutes_names: list[str] | None = None,
+) -> dict:
     """単一 pm.db から stats を取得（ThreadPoolExecutor 用）。
     コネクションはスレッド内で閉じて結果だけ返す。"""
     conn = open_pm_db(p, no_encrypt=no_encrypt)
     try:
-        stats = fetch_pm_stats(conn, today, since=since_date)
+        stats = fetch_pm_stats(conn, today, since=since_date,
+                               channel_ids=channel_ids, minutes_names=minutes_names)
     finally:
         conn.close()
     return stats
@@ -744,10 +758,11 @@ def _collect_all_data(
                               minutes_dir=minutes_dir, no_encrypt=no_encrypt,
                               minutes_names=minutes_names or None)
 
-        # pm.db stats: 全 pm.db を並列 fetch
+        # pm.db stats: 全 pm.db を並列 fetch（channel_ids/minutes_names でフィルタ）
         pm_futs = []
         for p in pm_db_paths:
-            f = pool.submit(_fetch_single_pm_stats, p, today, since_date, no_encrypt)
+            f = pool.submit(_fetch_single_pm_stats, p, today, since_date, no_encrypt,
+                            channel_ids=channel_ids, minutes_names=minutes_names)
             pm_futs.append(f)
 
         # qa_index.db から Web 記事を取得
