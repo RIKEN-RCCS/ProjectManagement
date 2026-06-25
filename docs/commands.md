@@ -803,26 +803,7 @@ sources:
 
 定期運用は `pm_box_update.sh` を crontab に登録、relevance 判定は新規追加時のみ実行する形が現実的。
 
-### 13. ハイブリッド検索テスト（pm_qa_server.py --test-hybrid）
-
-`/argus-investigate` のハイブリッド検索をSlackデーモン不要でCLIテストする。
-
-```sh
-# 構造化クエリ
-python3 scripts/pm_qa_server.py --test-hybrid "富岳太郎さんの担当タスクは？"
-python3 scripts/pm_qa_server.py --test-hybrid "M1マイルストーンの進捗は？"
-python3 scripts/pm_qa_server.py --test-hybrid "期限超過アイテムは？"
-
-# テキスト検索（既存動作）
-python3 scripts/pm_qa_server.py --test-hybrid "設計方針について"
-
-# ハイブリッド検索
-python3 scripts/pm_qa_server.py --test-hybrid "GPU性能に関する決定事項は？"
-```
-
-出力: Intent分類結果 → 構造化クエリ結果 → FTS検索結果 → LLM回答 を順に表示する。
-
-### 14. 外部Web情報取得（pm_web_fetch.py）
+### 13. 外部Web情報取得（pm_web_fetch.py）
 
 RIKEN公式サイト・HPCニュースサイト・NVIDIAブログなどの外部公開情報を取得し `data/web_articles.db` に保存する。
 取得対象・キーワードフィルタ・対象インデックスは `data/web_sources.yaml` で定義する。
@@ -876,7 +857,7 @@ sources:
     enabled: true
 ```
 
-### 15. エンリッチメント（enrich_items.py） — Pass 2
+### 14. エンリッチメント（enrich_items.py） — Pass 2
 
 pm.db の既存 `decisions` / `action_items` に対し、過去ナレッジを参照して **判断者・根拠・関連ID** を補完する。
 2パスアーキテクチャの Pass 2 に相当する（Pass 1 は `pm_ingest.py` による抽出）。全体像は `docs/architecture.md` 参照。
@@ -913,7 +894,7 @@ python3 scripts/enrich/enrich_items.py --since 2026-03-01
 
 `knowledge_context.py` は共通ライブラリ（単体実行なし、import して使用）。
 
-### 16. データ品質スクリーニング（pm_screen.py）
+### 15. データ品質スクリーニング（pm_screen.py）
 
 pm.db のアクションアイテム・決定事項から重複・類似・曖昧アイテムを検出する。`pm_relink.py --import` 互換CSVで出力するため、`deleted=1` を立てて一括削除できる。
 
@@ -954,7 +935,7 @@ python3 scripts/pm_screen.py --include-decisions
 2. CSVを人間が確認し、削除すべき行に `deleted=1` を立てる
 3. `pm_relink.py --import screen.csv` で一括削除を反映
 
-### 17. ナレッジ蒸留（pm_box_distill.py） — Pass 3
+### 16. ナレッジ蒸留（pm_box_distill.py） — Pass 3
 
 `box_docs.db` 本文・`data/minutes/{kind}.db`・`pm.db.decisions` を入力として、
 ローカル LLM (gemma4) で「**意思決定 / 制約 / 立場 / 用語**」の単位に蒸留し、
@@ -1031,7 +1012,7 @@ EMBED_API_KEY=$RIVAULT_TOKEN   # 省略時は RIVAULT_TOKEN
 EMBED_MODEL=bge-m3:567m        # 省略時のデフォルト（RiVault が提供）
 ```
 
-### 17a. ナレッジ重複・多重抽出の診断（pm_knowledge_inspect.py）
+### 16a. ナレッジ重複・多重抽出の診断（pm_knowledge_inspect.py）
 
 knowledge.db の件数が想定を超えたとき (例: 500 件超) に最初に走らせる読み取り専用ツール。
 蒸留プロンプトの粒度を見直す判断材料を出す。
@@ -1061,7 +1042,7 @@ python3 scripts/pm_knowledge_inspect.py --skip-source --skip-near
 | `--cs-prefix N` | `30` | (5) の current_state 先頭一致文字数 |
 | `--skip-source` / `--skip-topic` / `--skip-cs` / `--skip-near` | — | 個別検査をスキップ |
 
-### 17b. ナレッジ後追い dedupe（pm_knowledge_dedupe.py）
+### 16b. ナレッジ後追い dedupe（pm_knowledge_dedupe.py）
 
 `current_state` 完全一致でグループ化し、各グループから keeper を 1 件残して他を
 `superseded_by` で連鎖させる。`Stage 2` の embedding ベース dedupe を導入する前の
@@ -1098,7 +1079,7 @@ python3 scripts/pm_knowledge_dedupe.py --plan plan.csv --mode topic
 - `knowledge_audit` に `source='merge'`・`actor=<指定値>` で記録
 - 物理削除はしない
 
-### 18. ナレッジ人手編集（pm_knowledge_edit.py）
+### 17. ナレッジ人手編集（pm_knowledge_edit.py）
 
 普段使わない前提の人手介入 CLI。`/argus-investigate` などで間違いに気付いたときに最小手数で
 修正できるよう、即時操作と CSV 一括編集の両方を提供する。詳細は `docs/distill_policy.md` 参照。

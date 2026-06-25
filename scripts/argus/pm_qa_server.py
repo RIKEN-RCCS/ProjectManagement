@@ -34,8 +34,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_argus_llm, load_claude_md_context
-from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
+from db_utils import open_pm_db
 from argus.retrieval import (  # 検索層（後方互換のため * 相当を個別 import）
     TOP_K_RETRIEVE, TOP_K_RERANK,
     _RECENCY_HALF_LIFE_DAYS, _RECENCY_WEIGHT, _VECTOR_SEARCH_WEIGHT, _VECTOR_K,
@@ -70,8 +69,6 @@ logger = logging.getLogger("pm_qa_server")
 
 # --- 設定 ---
 # TOP_K_RETRIEVE / TOP_K_RERANK は retrieval から import 済み
-MAX_TOKENS = 1024
-LLM_TIMEOUT = 120
 
 _OPENAI_BASE = os.environ.get("LOCAL_LLM_URL", "")
 _OPENAI_KEY = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
@@ -82,23 +79,6 @@ if _OPENAI_BASE:
         _LOCAL_LLM_MODEL = detect_vllm_model(_OPENAI_BASE)
     except Exception as _e:
         print(f"[WARN] vLLM モデル自動検出に失敗: {_e}", file=sys.stderr)
-
-_PROJECT_CONTEXT = ""
-
-SYSTEM_PROMPT_TEMPLATE = """\
-あなたは富岳NEXTプロジェクトの情報検索アシスタントです。
-
-【回答ルール】
-- 以下の「取得した関連情報」のみを根拠として、日本語で回答してください
-- 構造化データ検索結果がある場合、そこに含まれるID・担当者・期限・件数は正確に記載してください
-- テキスト検索結果がある場合、出典の日付・会議名を可能な限り含めてください
-- 情報が見つからない場合は「記録が見つかりません」とだけ回答してください
-- 推測・創作はしないでください
-- 回答全体は500字以内を目安にしてください（長い場合は要点を箇条書きに）
-
-【プロジェクト文脈】
-{project_context}
-"""
 
 # --- 設定ロード ---
 
@@ -136,17 +116,6 @@ def load_qa_config(config_path: Path) -> None:
                 f"{len(_channel_index_map)} チャンネルマッピング, "
                 f"デフォルト={_default_index}")
 
-
-def resolve_index_db(channel_id: str) -> tuple[str, Path, list[Path]]:
-    """チャンネルIDからインデックス名・FTS DBパス（統合）・pm.dbパスリストを返す。
-    DBパスは全インデックス共通で data/qa_index.db。検索時に index_name で絞り込む。"""
-    index_name = _channel_index_map.get(channel_id, _default_index)
-    db_path = _index_db_map.get(index_name)
-    if db_path is None:
-        # 設定ロード前 / インデックス未定義時のフォールバック
-        db_path = _REPO_ROOT / "data" / "qa_index.db"
-    pm_db_paths = _pm_db_map.get(index_name, [])
-    return index_name, db_path, pm_db_paths
 
 
 # --- 検索関数群は argus.retrieval に移動済み（import でアクセス可能）---
@@ -252,14 +221,6 @@ def format_context(chunks: list[dict]) -> str:
 # --- Hybrid検索: Intent分類 + 構造化クエリ ---
 
 
-from argus.qa_engine import (  # noqa: F401 — 後方互換のため再 export
-    _CLASSIFY_PROMPT, SYSTEM_PROMPT_TEMPLATE,
-    classify_intent,
-    _query_action_items, _query_decisions,
-    run_structured_query,
-    generate_answer, format_slack_response,
-    _run_qa,
-)
 def build_app():
     from slack_bolt import App
 
@@ -826,9 +787,7 @@ def build_app():
 
 
 def _init_common() -> None:
-    """main / test-hybrid 共通の初期化処理。"""
-    global _PROJECT_CONTEXT
-
+    """main の共通初期化処理（SudachiPy / argus_config / index 統計）。"""
     if _init_sudachi():
         logger.info("SudachiPy: 初期化完了（形態素解析検索を使用します）")
     else:
@@ -864,77 +823,11 @@ def _init_common() -> None:
     else:
         logger.warning(f"  data/qa_index.db: 未構築（pm_embed.py を実行してください）")
 
-    try:
-        _PROJECT_CONTEXT = load_claude_md_context()
-        logger.info(f"CLAUDE.md 文脈ロード: {len(_PROJECT_CONTEXT)} 文字")
-    except Exception as e:
-        logger.warning(f"CLAUDE.md ロード失敗: {e}")
-        _PROJECT_CONTEXT = ""
-
-
-def test_hybrid(question: str) -> None:
-    """CLIテストモード: Slackデーモン不要でハイブリッド検索をテストする。"""
-    _init_common()
-
-    if not _OPENAI_BASE:
-        logger.warning("LOCAL_LLM_URL が未設定です")
-
-    index_name, index_db, _pm_dbs = resolve_index_db("")
-    print(f"\n質問: {question}")
-    print(f"インデックス: [{index_name}] {index_db}")
-    print("-" * 60)
-
-    # Intent分類
-    intent_result = classify_intent(question)
-    intent = intent_result.get("intent", "text")
-    entities = intent_result.get("entities", {})
-    print(f"Intent: {intent}")
-    print(f"Entities: {entities}")
-    print("-" * 60)
-
-    structured_context = ""
-    chunks: list[dict] = []
-
-    if intent in ("structured", "hybrid"):
-        structured_context = run_structured_query(entities)
-        if structured_context:
-            print(f"\n[構造化クエリ結果]\n{structured_context}")
-        else:
-            print("\n[構造化クエリ結果] なし")
-
-    if intent in ("text", "hybrid") or (intent == "structured" and not structured_context):
-        chunks = retrieve_chunks_hyde(question, index_db, index_name=index_name)
-        print(f"\n[FTS検索] {len(chunks)} チャンク取得（HyDE拡張後）")
-        chunks = rerank_chunks(question, chunks)
-        print(f"[re-rank後] {len(chunks)} チャンク")
-        for i, c in enumerate(chunks, 1):
-            print(f"  [{i}] {_format_source_label(c)}: {c['content'][:80]}...")
-
-    if structured_context and chunks:
-        search_mode = "ハイブリッド検索"
-    elif structured_context:
-        search_mode = "構造化検索"
-    else:
-        search_mode = "テキスト検索"
-
-    print(f"\n検索モード: {search_mode}")
-    print("-" * 60)
-
-    answer = generate_answer(question, chunks, structured_context=structured_context)
-    print(f"\n[回答]\n{answer}")
-    print(f"\n_（検索対象: {index_name} / {search_mode}）_")
-
 
 def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="Slack QA Server (Socket Mode)")
-    parser.add_argument("--test-hybrid", metavar="QUESTION",
-                        help="CLIテストモード: ハイブリッド検索をテスト（Slack不要）")
-    args = parser.parse_args()
-
-    if args.test_hybrid:
-        test_hybrid(args.test_hybrid)
-        return
+    parser.parse_args()
 
     logger.info("pm_qa_server 起動中...")
     _init_common()
