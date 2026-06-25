@@ -510,6 +510,8 @@ def run_agent(
     *,
     max_steps: int = _DEFAULT_MAX_STEPS,
     timeout: float = _DEFAULT_TIMEOUT,
+    include_intent_header: bool = True,
+    context: str = "",
 ) -> str:
     """質問を bounded multi-step agent loop で処理する。
 
@@ -519,6 +521,7 @@ def run_agent(
 
     max_steps=0 の場合はツールなしモードで seed_data のみから回答を生成する。
     timeout は LLM 呼び出しの総予算（wall-clock）として消費される。
+    context が指定された場合、調査依頼の前に背景情報として注入する（Pass 1 → Pass 2 の引き継ぎ用）。
     """
     tool_desc = _build_tool_descriptions()
     codesign_items = load_codesign_context() or "(コデザイン項目情報なし)"
@@ -547,10 +550,12 @@ def run_agent(
         )
 
     intent_header = ""
-    if rewrite and rewrite.get("intent"):
+    if include_intent_header and rewrite and rewrite.get("intent"):
         intent_header = f"> **ご質問の解釈**: {rewrite['intent']}\n\n"
 
+    context_block = f"## アプリケーション背景情報（事前調査済み）\n\n{context}\n\n" if context else ""
     base_prompt = (
+        f"{context_block}"
         f"## 調査依頼\n\n{question}\n\n"
         f"{rewrite_block}"
         f"{seed_data}\n\n"
@@ -680,6 +685,12 @@ def run_agent(
         if final:
             return intent_header + _append_sources_section(final, ctx)
         clean = re.sub(r"<[^>]+>", "", resp).strip()
+        # ツール呼び出し JSON が漏れている場合は捨てて収集データを返す
+        if parse_tool_calls(resp):
+            logger.warning("[forced-synthesis] final_answer なし・ツール呼び出しのみ返却 — 収集データにフォールバック")
+            dump = _format_tool_history(history, keep_recent=999)
+            return intent_header + _append_sources_section(
+                f"最終回答を生成できませんでした（LLM がツール呼び出しを繰り返しました）。\n\n## 収集データ\n\n{dump}", ctx)
         logger.warning("[forced-synthesis] final_answer タグなし、生応答を返却")
         return intent_header + _append_sources_section(clean or resp, ctx)
 
@@ -1029,6 +1040,8 @@ def main():
     parser.add_argument("--to-box", action="store_true", help="調査結果を Box にアップロード")
     parser.add_argument("--to-slack", type=str, default="", help="調査結果を指定チャンネルに Slack 投稿（channel_id）")
     parser.add_argument("--to-canvas", action="store_true", help="調査結果を Canvas に投稿")
+    parser.add_argument("--no-intent-header", action="store_true", help="ご質問の解釈ヘッダを出力しない（レポートファイル用）")
+    parser.add_argument("--context-file", help="事前調査結果等の背景情報ファイル（Pass 1 結果を Pass 2 に渡す際に使用）")
     args = parser.parse_args()
 
     today = date.today().isoformat()
@@ -1069,6 +1082,13 @@ def main():
             c.close()
         return
 
+    context_text = ""
+    if args.context_file:
+        try:
+            context_text = Path(args.context_file).read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"[WARN] --context-file 読み込み失敗: {e}", file=sys.stderr)
+
     result = run_agent(
         question=args.investigate,
         seed_data=seed_data,
@@ -1076,6 +1096,8 @@ def main():
         ctx=ctx,
         max_steps=args.max_steps,
         timeout=args.timeout,
+        include_intent_header=not args.no_intent_header,
+        context=context_text,
     )
 
     # ID 参照 (a:670 / d:42 / AI:670 / 決定:42 / ID:670) を content[:60] で展開
@@ -1100,7 +1122,7 @@ def main():
             _output_summary.append(f"[Canvas] {out}")
             print(f"[output] {out}")
 
-    print("\n=== Argus 調査結果 ===\n")
+    print("\n=== Argus 調査結果 ===\n", file=sys.stderr)
     print(result)
 
 
