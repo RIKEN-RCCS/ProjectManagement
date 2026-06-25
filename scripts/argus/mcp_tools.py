@@ -29,15 +29,6 @@ def _get_pm_conn():
     return open_pm_db(_DATA_DIR / "pm.db")
 
 
-def _get_qa_conn():
-    import sqlite3
-    if not _QA_INDEX.exists():
-        return None
-    conn = sqlite3.connect(str(_QA_INDEX))
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def _has_pm_db() -> bool:
     return (_DATA_DIR / "pm.db").exists()
 
@@ -250,20 +241,3 @@ def check_health() -> str:
     return "\n".join(lines)
 
 
-# =========================================================================== #
-#  全ツール辞書（名前→関数のマッピング）
-# =========================================================================== #
-
-MCP_TOOLS: dict[str, callable] = {
-    "search_decisions": search_decisions,
-    "search_action_items": search_action_items,
-    "get_milestone_progress": get_milestone_progress,
-    "get_overdue_items": get_overdue_items,
-    "get_assignee_workload": get_assignee_workload,
-    "search_text": search_text,
-    "search_text_hybrid": search_text_hybrid,
-    "search_entity": search_entity,
-    "synthesize_answers": synthesize_answers,
-    "check_health": check_health,
-    # 出力ツールは output_tools.py にあり、別途 import される
-}

@@ -24,32 +24,16 @@ import logging
 import re
 import sys
 import time
-from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_argus_llm, load_claude_md_context, load_codesign_context
-from db_utils import (
-    open_pm_db,
-    fetch_milestone_progress,
-    fetch_assignee_workload,
-    fetch_overdue_items,
-    fetch_weekly_trends,
-    fetch_unacknowledged_decisions,
-    fetch_summary_stats,
-)
-from format_utils import (
-    format_milestone_table,
-    format_overdue_list,
-    format_assignee_table,
-    format_weekly_trends as format_trends_table,
-    format_decisions_list,
-)
+from cli_utils import call_argus_llm, load_codesign_context
+from db_utils import open_pm_db
 
 import yaml
 
@@ -98,8 +82,8 @@ def _resolve_index_and_channels(
 
 
 
-from argus.agent_tools import (  # noqa: F401 — 後方互換のため全 symbol を再 export
-    AgentContext, ToolDef, TOOLS, _TOOL_MAP, _query_all,
+from argus.agent_tools import (  # noqa: F401 — 後方互換のため再 export
+    AgentContext, ToolDef, TOOLS, _TOOL_MAP,
     _build_tool_descriptions,
     # 従来の _tool_* 関数は agent_tools.py 内で mcp_tools 委譲となったため
     # 個別 export は不要（必要なのは AgentContext / TOOLS / _TOOL_MAP のみ）
@@ -316,38 +300,6 @@ def build_seed_data(ctx: AgentContext) -> str:
         "",
     ]
     return "\n".join(parts)
-
-
-# =========================================================================== #
-#  Conversation Serializer
-# =========================================================================== #
-
-def _serialize_conversation(system: str, messages: list[dict]) -> str:
-    parts = [f"[System]\n{system}"]
-    for msg in messages:
-        label = "[User]" if msg["role"] == "user" else "[Assistant]"
-        parts.append(f"\n{label}\n{msg['content']}")
-    return "\n".join(parts)
-
-
-def _estimate_chars(messages: list[dict]) -> int:
-    return sum(len(m["content"]) for m in messages)
-
-
-def _compact_messages(messages: list[dict]) -> list[dict]:
-    """古いツール結果を1行要約に圧縮し、直近2ターン分は維持する。"""
-    if len(messages) <= 4:
-        return messages
-    compacted = []
-    for msg in messages[:-4]:
-        if msg["role"] == "user" and msg["content"].startswith("[Tool Result:"):
-            first_line = msg["content"].split("\n", 1)[0]
-            char_count = len(msg["content"])
-            compacted.append({"role": "user", "content": f"{first_line} （{char_count}文字、圧縮済み）"})
-        else:
-            compacted.append(msg)
-    compacted.extend(messages[-4:])
-    return compacted
 
 
 # =========================================================================== #
@@ -954,10 +906,8 @@ def _output_to_canvas(result: str, today: str) -> str:
 def _run_investigate(respond, command, *, no_encrypt: bool = False):
     """Slack /argus-investigate のバックグラウンド処理"""
     try:
-        from pm_argus import _parse_command_args
         cmd_text = (command.get("text") or "").strip()
         channel_id = command.get("channel_id", "")
-        user_id = command.get("user_id", "")
 
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
@@ -1016,14 +966,10 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
 
         # --- 元の Slack ephemeral 応答 ---
         # ephemeral は section block 3000 文字上限。超過時は分割して複数ブロックにする
-        _SLACK_BLOCK_LIMIT = 2900
         header = f"*Argus 調査結果* ({today})\n\n"
         output_footer = ""
         if _output_result_lines:
             output_footer = "\n\n" + "\n".join(_output_result_lines)
-            len_footer = len(output_footer)
-        else:
-            len_footer = 0
         body_raw = header + result + output_footer
 
         from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks

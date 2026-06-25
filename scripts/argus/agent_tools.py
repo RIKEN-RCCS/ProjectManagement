@@ -64,7 +64,6 @@ class AgentContext:
     channels: list[str] = field(default_factory=list)
     cited_chunks: list[dict] = field(default_factory=list)
     # 出力ツール用（オプショナル）
-    slack_bot_token: str = ""
     box_folder_id: str = ""
 
 
@@ -78,14 +77,6 @@ class ToolDef:
     description: str
     parameters: dict[str, str]
     fn: Callable[[dict, AgentContext], str]
-
-
-def _query_all(ctx: AgentContext, fn, *args, **kwargs) -> list:
-    """全 conns に対して fn(conn, ...) を実行し結果リストを結合する。"""
-    out: list = []
-    for conn in ctx.conns:
-        out.extend(fn(conn, *args, **kwargs))
-    return out
 
 
 # =========================================================================== #

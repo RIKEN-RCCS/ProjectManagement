@@ -45,7 +45,7 @@ from format_utils import (
     format_milestone_table, format_overdue_list, format_assignee_table,
     format_weekly_trends as format_trends_table, format_decisions_list,
 )
-from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks, _SLACK_SECTION_LIMIT
+from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks
 from argus.prompts import (
     _BRIEF_PROMPT, _DAILY_SUMMARY_PROMPT,
     _DRAFT_AGENDA_PROMPT, _DRAFT_REPORT_PROMPT, _DRAFT_REQUEST_PROMPT,

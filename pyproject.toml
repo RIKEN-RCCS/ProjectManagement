@@ -12,7 +12,9 @@ filterwarnings = [
 #   90% 以上の検出は CI で fail させる候補。60-89% は手動レビュー。
 # --------------------------------------------------------------------------- #
 [tool.vulture]
-paths = ["scripts/argus", "scripts/utils", "scripts/ingest", "scripts/enrich"]
+# scripts/ 配下全体を対象に。pm_mcp_server.py 等の参照を vulture に見せるため
+# サブディレクトリ単位ではなく scripts 全体を渡す。
+paths = ["scripts"]
 # python-pptx の属性 setter パターン (paragraph.alignment = ... 等) が
 # vulture では使われない attribute として大量に誤検知されるため除外
 exclude = [

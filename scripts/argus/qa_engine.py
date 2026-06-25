@@ -9,24 +9,21 @@ from __future__ import annotations
 import logging
 import os
 import re
-import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_argus_llm, load_claude_md_context
-from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items, fetch_summary_stats
-from argus.retrieval import retrieve_chunks_hyde, rerank_chunks, TOP_K_RERANK
+from cli_utils import call_argus_llm
+from db_utils import open_pm_db, fetch_milestone_progress, fetch_overdue_items
+from argus.retrieval import retrieve_chunks_hyde, rerank_chunks
 
 logger = logging.getLogger("pm_qa_server")
 
 _DATA_DIR = _REPO_ROOT / "data"
 LLM_TIMEOUT = 120
-RERANK_TIMEOUT = 60
 
 _OPENAI_BASE = os.environ.get("LOCAL_LLM_URL", "")
 

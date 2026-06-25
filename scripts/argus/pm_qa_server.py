@@ -69,11 +69,9 @@ logger = logging.getLogger("pm_qa_server")
 # SudachiPy / 検索定数 / 検索関数群は argus.retrieval に移動済み
 
 # --- 設定 ---
-MAX_TOKENS = 1024  # (TOP_K_RETRIEVE / TOP_K_RERANK は retrieval から import)
-TOP_K_RETRIEVE = TOP_K_RETRIEVE  # noqa: F811 — retrieval からの import を可視化
+# TOP_K_RETRIEVE / TOP_K_RERANK は retrieval から import 済み
 MAX_TOKENS = 1024
 LLM_TIMEOUT = 120
-RERANK_TIMEOUT = 60  # 30 → 60秒（議事録生成の re-rank に十分な時間を確保）
 
 _OPENAI_BASE = os.environ.get("LOCAL_LLM_URL", "")
 _OPENAI_KEY = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
@@ -675,11 +673,9 @@ def build_app():
 
             # スレッド文脈の取り込み（メンションがスレッド内にある場合）
             thread_context = ""
-            is_threaded_followup = False
             parent_ts = event.get("thread_ts")
             current_ts = event.get("ts")
             if parent_ts and parent_ts != current_ts:
-                is_threaded_followup = True
                 try:
                     resp = client.conversations_replies(
                         channel=channel_id, ts=parent_ts, limit=50,
