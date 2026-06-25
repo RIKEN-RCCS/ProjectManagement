@@ -48,3 +48,20 @@ exclude = [
     "^scripts/archive/",
     "^scripts/build_slide_video\\.py$",
 ]
+
+# --------------------------------------------------------------------------- #
+# ruff: 一般的 lint (PEP 8 / 未使用 import / バグ検出 / モダン化)
+#   実行: ~/.venv_aarch64/bin/ruff check scripts
+#   自動修正: ~/.venv_aarch64/bin/ruff check --fix scripts
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["scripts/archive"]
+
+[tool.ruff.lint]
+# E,F = pycodestyle/pyflakes、I = isort、B = bugbear、UP = pyupgrade
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # line-too-long: プロジェクトでは長行を許容
+    "E402",  # module-import-not-at-top: sys.path.insert() 後の import が定型
+]

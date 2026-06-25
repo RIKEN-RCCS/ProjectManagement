@@ -82,7 +82,7 @@ def box_upload_file(
         成功時: "アップロード完了: {filename}\n  file_id: ...\n  共有リンク: ..."
         失敗時: "エラー: ..."
     """
-    from utils.box_cli import box_upload_or_version, box_get_or_create_shared_link
+    from utils.box_cli import box_get_or_create_shared_link, box_upload_or_version
 
     path = Path(local_path)
     if not path.exists():
@@ -141,7 +141,7 @@ def slack_post_message(
     if not client:
         return "エラー: SLACK_BOT_TOKEN が設定されていません。"
 
-    from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks
+    from utils.slack_post import _split_mrkdwn_to_blocks, _to_slack_mrkdwn
 
     mrkdwn = _to_slack_mrkdwn(text)
     blocks = _split_mrkdwn_to_blocks(mrkdwn)
@@ -180,7 +180,7 @@ def canvas_post_content(
     if not token:
         return "エラー: SLACK_USER_TOKEN が設定されていません。"
 
-    from utils.canvas_utils import sanitize_for_canvas, post_to_canvas
+    from utils.canvas_utils import post_to_canvas, sanitize_for_canvas
 
     sanitized = sanitize_for_canvas(content)
     try:

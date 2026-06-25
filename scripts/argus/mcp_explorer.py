@@ -86,9 +86,9 @@ _DATA_TYPE_NAMES = {
 
 def _search_pm_data(query: str, since: str | None = None) -> str:
     """pm.db のアクションアイテム・決定事項を検索"""
-    from argus.qa_engine import _query_action_items, _query_decisions
     from db_utils import open_pm_db
-    from format_utils import format_milestone_table
+
+    from argus.qa_engine import _query_action_items, _query_decisions
     _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
     conn = open_pm_db(_DATA_DIR / "pm.db")
     try:
@@ -112,8 +112,8 @@ def _search_pm_data(query: str, since: str | None = None) -> str:
 
 def _search_text_index(query: str, index_db: Path, index_name: str = "pm", since: str | None = None) -> str:
     """qa_index.db を全文検索して Markdown で返す"""
-    from argus.retrieval import retrieve_chunks_hyde
     from argus.pm_qa_server import _format_source_label
+    from argus.retrieval import retrieve_chunks_hyde
     merged = retrieve_chunks_hyde(query, index_db, index_name=index_name, max_merged=30, since_date=since)
     if not merged:
         return "該当する情報は見つかりませんでした。"
@@ -127,15 +127,15 @@ def _search_text_index(query: str, index_db: Path, index_name: str = "pm", since
 
 def _search_slack(query: str, index_db: Path, since: str | None = None) -> str:
     """Slack 生メッセージを検索"""
-    from argus.retrieval import retrieve_chunks
     from argus.pm_qa_server import _format_source_label
+    from argus.retrieval import retrieve_chunks
     # source_type=slack_raw を絞り込むため index_name ではなく、retrieve_chunks の
     # 検索結果をあとでフィルタ。ここでは一旦全 index で検索
     chunks = retrieve_chunks(query, index_db, k=40, index_name=None, since_date=since)
     slack_chunks = [c for c in chunks if c.get("source_type") == "slack_raw"][:10]
     if not slack_chunks:
         return "Slack メッセージに関連情報は見つかりませんでした。"
-    lines = [f"### Slack メッセージ検索結果"]
+    lines = ["### Slack メッセージ検索結果"]
     for c in slack_chunks:
         label = _format_source_label(c)
         lines.append(f"- {label}")

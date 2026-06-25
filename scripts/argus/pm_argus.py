@@ -26,14 +26,7 @@ Usage:
 import argparse
 import concurrent.futures
 import logging
-import os
-import re
-import shutil
 import sys
-import tempfile
-import threading
-
-import yaml
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -43,28 +36,24 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from db_utils import (
-    open_db, open_pm_db,
-    fetch_milestone_progress, fetch_assignee_workload,
-    fetch_overdue_items, fetch_unacknowledged_decisions,
-    fetch_unlinked_items_count, fetch_no_assignee_count,
-    fetch_weekly_trends, fetch_summary_stats,
-)
 from cli_utils import call_argus_llm, load_claude_md_context
-from format_utils import (
-    format_milestone_table, format_overdue_list, format_assignee_table,
-    format_weekly_trends as format_trends_table, format_decisions_list,
-)
-from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks
+
 from argus.prompts import (  # noqa: F401 — 後方互換のため全プロンプト定数を再 export
-    _BRIEF_PROMPT, _DAILY_SUMMARY_PROMPT,
-    _DRAFT_AGENDA_PROMPT, _DRAFT_REPORT_PROMPT, _DRAFT_REQUEST_PROMPT,
-    _RISK_PROMPT,
-    _RISK_WORKER_PM_PROMPT, _RISK_WORKER_CONVERSATION_PROMPT,
-    _RISK_WORKER_MINUTES_PROMPT, _RISK_WORKER_KNOWLEDGE_PROMPT,
+    _BRIEF_ORCHESTRATOR_PROMPT,
+    _BRIEF_PROMPT,
+    _BRIEF_WORKER_CONVERSATION_PROMPT,
+    _BRIEF_WORKER_MINUTES_PROMPT,
+    _BRIEF_WORKER_PM_PROMPT,
+    _DAILY_SUMMARY_PROMPT,
+    _DRAFT_AGENDA_PROMPT,
+    _DRAFT_REPORT_PROMPT,
+    _DRAFT_REQUEST_PROMPT,
     _RISK_ORCHESTRATOR_PROMPT,
-    _BRIEF_WORKER_PM_PROMPT, _BRIEF_WORKER_CONVERSATION_PROMPT,
-    _BRIEF_WORKER_MINUTES_PROMPT, _BRIEF_ORCHESTRATOR_PROMPT,
+    _RISK_PROMPT,
+    _RISK_WORKER_CONVERSATION_PROMPT,
+    _RISK_WORKER_KNOWLEDGE_PROMPT,
+    _RISK_WORKER_MINUTES_PROMPT,
+    _RISK_WORKER_PM_PROMPT,
 )
 
 # --------------------------------------------------------------------------- #
@@ -82,30 +71,51 @@ _DRAFT_REPORT_SINCE_DAYS = 14
 _WORKER_MAX_CHARS = 8000  # Worker に渡す各セクションの最大文字数
 
 from argus.narrate import (  # noqa: F401 — 後方互換のため全シンボルを再 export
-    # transcribe ジョブ管理（narrate.py に移動済み）
-    _transcribe_jobs, _transcribe_lock,
-    # narrate セッション
-    _NarrateSession, _narrate_sessions, _narrate_lock,
-    _post_argus_voice, _post_argus_video, _post_today_voice,
-    _narrate_action_blocks,
-    _run_narrate, _run_narrate_build, _run_narrate_cancel,
-    # 設定・データ収集（pm_qa_server / pm_argus_agent からも参照）
-    _load_argus_config, _load_channel_ids, _load_minutes_names,
-    load_pm_db_paths, resolve_index_name,
-    fetch_raw_messages, fetch_recent_minutes, fetch_background_knowledge,
-    fetch_pm_stats, merge_pm_stats,
-    _fmt_closed_items, _parse_command_args, _format_period_description,
-    _fetch_single_pm_stats, _collect_all_data,
-    _build_channel_name_map, _filter_mentions_for_user,
-    # プロンプト構築
-    build_brief_prompt, build_draft_prompt, build_risk_prompt,
+    _build_channel_name_map,
     _build_stats_section,
+    _collect_all_data,
+    _fetch_single_pm_stats,
+    _filter_mentions_for_user,
+    _fmt_closed_items,
+    _format_period_description,
+    # 設定・データ収集（pm_qa_server / pm_argus_agent からも参照）
+    _load_argus_config,
+    _load_channel_ids,
+    _load_minutes_names,
+    _narrate_action_blocks,
+    _narrate_lock,
+    _narrate_sessions,
+    # narrate セッション
+    _NarrateSession,
+    _parse_command_args,
+    _post_argus_video,
+    _post_argus_voice,
+    _post_today_voice,
     # Orchestrator
-    _run_brief, _run_brief_worker,
+    _run_brief,
+    _run_brief_worker,
     _run_draft,
-    _run_risk, _run_risk_worker,
+    _run_narrate,
+    _run_narrate_build,
+    _run_narrate_cancel,
+    _run_risk,
+    _run_risk_worker,
     _run_today_only,
     _run_transcribe,
+    # transcribe ジョブ管理（narrate.py に移動済み）
+    _transcribe_jobs,
+    _transcribe_lock,
+    # プロンプト構築
+    build_brief_prompt,
+    build_draft_prompt,
+    build_risk_prompt,
+    fetch_background_knowledge,
+    fetch_pm_stats,
+    fetch_raw_messages,
+    fetch_recent_minutes,
+    load_pm_db_paths,
+    merge_pm_stats,
+    resolve_index_name,
 )
 
 # CLI モード（--brief-to-canvas / --risk / --dry-run）
@@ -135,8 +145,6 @@ def main() -> None:
                         help="担当者フォーカス（例: --assignee 西澤）")
     parser.add_argument("--topic", default=None, metavar="TEXT",
                         help="話題フォーカス（例: --topic Benchpark）")
-    parser.add_argument("--requester", default=None, metavar="NAME",
-                        help="実行者名（CLI モード用。省略時はシステムユーザー名）")
     parser.add_argument("--db", default=None, metavar="PATH",
                         help="pm.db のパス（デフォルト: data/pm.db）")
     parser.add_argument("--index-name", default=None, metavar="NAME",
@@ -156,7 +164,6 @@ def main() -> None:
         days = args.days if args.days is not None else _DEFAULT_SINCE_DAYS
         since_date = args.since or (date.today() - timedelta(days=days)).isoformat()
     pm_db_paths_cli = [Path(args.db)] if args.db else load_pm_db_paths(args.index_name)
-    requester = args.requester or os.environ.get("USER") or "プロジェクトメンバー"
 
     context = load_claude_md_context()
     print(f"[INFO] since: {since_date} / today: {today} / "

@@ -35,28 +35,29 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from db_utils import open_pm_db
-from argus.retrieval import (  # 検索層（後方互換のため * 相当を個別 import）
-    TOP_K_RETRIEVE, TOP_K_RERANK,
-    _RECENCY_HALF_LIFE_DAYS, _RECENCY_WEIGHT, _VECTOR_SEARCH_WEIGHT, _VECTOR_K,
-    _sudachi_tokenizer, _sudachi_split_mode, _SUDACHI_TARGET_POS,
-    _init_sudachi, sudachi_tokenize_query,
-    sanitize_fts_query, _fts5_search, _fts_tokens_search,
-    retrieve_chunks, retrieve_chunks_vector, retrieve_chunks_hybrid,
-    _rrf_merge, _recency_score, _combined_score,
-    extract_search_keywords, expand_query_hyde, retrieve_chunks_hyde,
-    rerank_chunks,
-)
-from argus.pm_argus import (
-    _run_brief, _run_draft, _run_risk, _run_today_only,
-    _run_transcribe, _transcribe_jobs, _transcribe_lock,
-)
+
 from argus.narrate import (
-    _run_narrate, _run_narrate_build, _run_narrate_cancel,
-    _narrate_sessions, _narrate_lock,
+    _narrate_lock,
+    _narrate_sessions,
+    _run_narrate,
+    _run_narrate_build,
+    _run_narrate_cancel,
 )
-from argus.pm_argus_agent import _run_investigate
 from argus.patrol.confirm import handle_approve_close, handle_reject_close
 from argus.patrol.state import PatrolState
+from argus.pm_argus import (
+    _run_brief,
+    _run_draft,
+    _run_risk,
+    _run_today_only,
+    _run_transcribe,
+    _transcribe_jobs,
+    _transcribe_lock,
+)
+from argus.pm_argus_agent import _run_investigate
+from argus.retrieval import (  # 検索層（後方互換のため * 相当を個別 import）
+    _init_sudachi,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -620,12 +621,19 @@ def build_app():
     def _run_mention_investigate_impl(client, channel_id, thread_ts, question, user_id, event):
         try:
             from datetime import date, timedelta
-            from argus.pm_argus_agent import (
-                _resolve_index_and_channels, _expand_id_references,
-                AgentContext, build_seed_data, run_agent,
-                _DEFAULT_SINCE_DAYS, _DATA_DIR, _MINUTES_DIR,
-            )
+
             from utils.slack_post import _to_slack_mrkdwn
+
+            from argus.pm_argus_agent import (
+                _DATA_DIR,
+                _DEFAULT_SINCE_DAYS,
+                _MINUTES_DIR,
+                AgentContext,
+                _expand_id_references,
+                _resolve_index_and_channels,
+                build_seed_data,
+                run_agent,
+            )
 
             today = date.today().isoformat()
             since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
@@ -821,7 +829,7 @@ def _init_common() -> None:
             n = counts.get(name, 0)
             logger.info(f"  [{name}] qa_index.db: {n} チャンク")
     else:
-        logger.warning(f"  data/qa_index.db: 未構築（pm_embed.py を実行してください）")
+        logger.warning("  data/qa_index.db: 未構築（pm_embed.py を実行してください）")
 
 
 def main() -> None:

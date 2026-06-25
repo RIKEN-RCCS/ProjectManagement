@@ -19,7 +19,7 @@ import shutil
 import sys
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import field
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -27,34 +27,47 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import concurrent.futures
-import argparse
-import yaml
-from dataclasses import dataclass, field  # already imported above, kept for clarity
 from datetime import date, timedelta
-from typing import Any
 
+import yaml
 from cli_utils import call_argus_llm, load_claude_md_context
 from db_utils import (
-    open_db, open_pm_db,
-    fetch_milestone_progress, fetch_assignee_workload,
-    fetch_overdue_items, fetch_unacknowledged_decisions,
-    fetch_unlinked_items_count, fetch_no_assignee_count,
-    fetch_weekly_trends, fetch_summary_stats,
+    fetch_assignee_workload,
+    fetch_milestone_progress,
+    fetch_no_assignee_count,
+    fetch_overdue_items,
+    fetch_summary_stats,
+    fetch_unacknowledged_decisions,
+    fetch_unlinked_items_count,
+    fetch_weekly_trends,
+    open_db,
+    open_pm_db,
 )
 from format_utils import (
-    format_milestone_table, format_overdue_list, format_assignee_table,
-    format_weekly_trends as format_trends_table, format_decisions_list,
+    format_assignee_table,
+    format_decisions_list,
+    format_milestone_table,
+    format_overdue_list,
 )
-from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks
+from format_utils import (
+    format_weekly_trends as format_trends_table,
+)
+from utils.slack_post import _split_mrkdwn_to_blocks, _to_slack_mrkdwn
+
 from argus.prompts import (
-    _BRIEF_PROMPT, _DAILY_SUMMARY_PROMPT,
-    _DRAFT_AGENDA_PROMPT, _DRAFT_REPORT_PROMPT, _DRAFT_REQUEST_PROMPT,
+    _BRIEF_PROMPT,
+    _BRIEF_WORKER_CONVERSATION_PROMPT,
+    _BRIEF_WORKER_MINUTES_PROMPT,
+    _BRIEF_WORKER_PM_PROMPT,
+    _DAILY_SUMMARY_PROMPT,
+    _DRAFT_AGENDA_PROMPT,
+    _DRAFT_REPORT_PROMPT,
+    _DRAFT_REQUEST_PROMPT,
     _RISK_PROMPT,
-    _RISK_WORKER_PM_PROMPT, _RISK_WORKER_CONVERSATION_PROMPT,
-    _RISK_WORKER_MINUTES_PROMPT, _RISK_WORKER_KNOWLEDGE_PROMPT,
-    _RISK_ORCHESTRATOR_PROMPT,
-    _BRIEF_WORKER_PM_PROMPT, _BRIEF_WORKER_CONVERSATION_PROMPT,
-    _BRIEF_WORKER_MINUTES_PROMPT, _BRIEF_ORCHESTRATOR_PROMPT,
+    _RISK_WORKER_CONVERSATION_PROMPT,
+    _RISK_WORKER_KNOWLEDGE_PROMPT,
+    _RISK_WORKER_MINUTES_PROMPT,
+    _RISK_WORKER_PM_PROMPT,
 )
 
 logger = logging.getLogger("pm_argus")
@@ -90,7 +103,6 @@ _narrate_sessions: dict[str, _NarrateSession] = {}     # thread_ts → session
 _narrate_lock = threading.Lock()
 
 from recording.transcribe_pipeline import run_pipeline as _run_transcribe_pipeline
-
 
 # --------------------------------------------------------------------------- #
 # データ収集
@@ -1534,6 +1546,7 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
                 # 3. ユーザーIDマップを構築（テキスト内のID展開用）
         # 優先順位: argus_config.yaml の user_names: > slack.db の messages.user_name
         import re
+
         from cli_utils import resolve_user_names
         user_id_map: dict[str, str] = dict(resolve_user_names())
         try:
@@ -1936,7 +1949,7 @@ def _run_narrate(respond, command):
         try:
             from build_slide_video import prepare_slides, summarize_all_slides
         except ImportError as exc:
-            raise RuntimeError(f"build_slide_video の import 失敗: {exc}")
+            raise RuntimeError(f"build_slide_video の import 失敗: {exc}") from exc
 
         logger.info(f"[argus-narrate] Phase1 開始: {filename}")
         slides = prepare_slides(src_path, work_dir)

@@ -44,17 +44,18 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from db_utils import open_pm_db
-from argus.patrol.state import PatrolState
-from argus.patrol.users import UserResolver
+
 from argus.patrol.detect import (
-    detect_completion_signals,
-    detect_overdue_items,
     detect_approaching_deadlines,
-    detect_unacknowledged_decisions,
-    detect_stale_items,
+    detect_completion_signals,
     detect_milestone_health,
+    detect_overdue_items,
+    detect_stale_items,
+    detect_unacknowledged_decisions,
     detect_weekly_trend_alert,
 )
+from argus.patrol.state import PatrolState
+from argus.patrol.users import UserResolver
 
 logger = logging.getLogger("argus_patrol")
 

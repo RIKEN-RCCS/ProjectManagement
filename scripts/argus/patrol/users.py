@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from slack_sdk import WebClient
+
     from .state import PatrolState
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ class UserResolver:
                     continue
                 body = line[2:]
                 # email / ":" より前を取り出し、空白（タブ含む）で分割
-                head = re.split(r"[:：]", body, 1)[0]
+                head = re.split(r"[:：]", body, maxsplit=1)[0]
                 parts = re.split(r"\s+", head.strip())
                 if len(parts) < 3:
                     continue

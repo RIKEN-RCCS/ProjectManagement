@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import re
-import sqlite3
 from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
@@ -40,6 +39,7 @@ def detect_completion_signals(ctx) -> int:
     Returns: 検出件数
     """
     from pm_sync_canvas import CLOSE_KEYWORDS
+
     from .actions import send_completion_confirm
 
     cfg = ctx.config.get("patrol", {}).get("completion_detection", {})
@@ -110,6 +110,7 @@ def detect_completion_signals(ctx) -> int:
 def detect_overdue_items(ctx) -> int:
     """期限超過の open AI を検出し、担当者にリマインダーを送信する。"""
     from db_utils import fetch_overdue_items
+
     from .actions import send_reminder
 
     cfg = ctx.config.get("patrol", {}).get("overdue_reminder", {})
@@ -185,6 +186,7 @@ def detect_approaching_deadlines(ctx) -> int:
 def detect_unacknowledged_decisions(ctx) -> int:
     """7日以上未確認の決定事項をリーダー会議チャンネルに通知する。"""
     from db_utils import fetch_unacknowledged_decisions
+
     from .actions import send_channel_alert
 
     cfg = ctx.config.get("patrol", {}).get("decision_followup", {})
@@ -239,7 +241,7 @@ def detect_unacknowledged_decisions(ctx) -> int:
 # --------------------------------------------------------------------------- #
 def detect_stale_items(ctx) -> int:
     """14日以上変化のない open AI を検出してアラートする。"""
-    from .actions import send_reminder, send_channel_alert
+    from .actions import send_channel_alert, send_reminder
 
     cfg = ctx.config.get("patrol", {}).get("stale_detection", {})
     if not cfg.get("enabled", True):
@@ -300,6 +302,7 @@ def detect_stale_items(ctx) -> int:
 def detect_milestone_health(ctx) -> int:
     """マイルストーンの達成率が期限に対して低い場合にアラートする。"""
     from db_utils import fetch_milestone_progress
+
     from .actions import send_channel_alert
 
     cfg = ctx.config.get("patrol", {}).get("milestone_health", {})
@@ -360,8 +363,8 @@ def detect_milestone_health(ctx) -> int:
 
     leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
     text = (
-        f":chart_with_downwards_trend: *マイルストーン健全性アラート*\n"
-        f"以下のマイルストーンの進捗が期待を下回っています:\n"
+        ":chart_with_downwards_trend: *マイルストーン健全性アラート*\n"
+        "以下のマイルストーンの進捗が期待を下回っています:\n"
         + "\n".join(alerts)
     )
     send_channel_alert(ctx, leader_ch, text)
@@ -376,6 +379,7 @@ def detect_milestone_health(ctx) -> int:
 def detect_weekly_trend_alert(ctx) -> int:
     """直近2週の完了数が前2週より50%以上減少した場合にアラートする。"""
     from db_utils import fetch_weekly_trends
+
     from .actions import send_channel_alert
 
     cfg = ctx.config.get("patrol", {}).get("weekly_trend", {})

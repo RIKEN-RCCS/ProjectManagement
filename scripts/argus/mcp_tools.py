@@ -155,8 +155,8 @@ def search_text(query: str, index_name: str = "pm", since: str | None = None) ->
     """議事録・Slackメッセージを全文検索する。FTS5 + LLM re-ranking を使用"""
     if not _QA_INDEX.exists():
         return "qa_index.db が見つかりません。pm_embed.py でインデックスを構築してください。"
-    from argus.retrieval import retrieve_chunks_hyde, rerank_chunks
     from argus.pm_qa_server import _format_source_label
+    from argus.retrieval import rerank_chunks, retrieve_chunks_hyde
     merged = retrieve_chunks_hyde(query, _QA_INDEX, index_name=index_name, max_merged=50, since_date=since)
     if not merged:
         return f"「{query}」に一致する情報は見つかりませんでした。"
@@ -174,8 +174,8 @@ def search_text_hybrid(query: str, index_name: str = "pm", since: str | None = N
     """FTS5 + ベクトル類似度のハイブリッド検索"""
     if not _QA_INDEX.exists():
         return "qa_index.db が見つかりません。"
-    from argus.retrieval import retrieve_chunks_hybrid
     from argus.pm_qa_server import _format_source_label
+    from argus.retrieval import retrieve_chunks_hybrid
     chunks = retrieve_chunks_hybrid(query, _QA_INDEX, k=50, index_name=index_name, since_date=since)
     if not chunks:
         return f"「{query}」に一致する情報は見つかりませんでした。"
@@ -229,7 +229,7 @@ def synthesize_answers(question: str, answers: list[str]) -> str:
 
 def check_health() -> str:
     """MCP Server と各 DB の状態を確認する"""
-    lines = ["## MCP Server ヘルスチェック", f"- MCP Server: 稼働中（ポート 8002）"]
+    lines = ["## MCP Server ヘルスチェック", "- MCP Server: 稼働中（ポート 8002）"]
     for name, path in [
         ("pm.db", _DATA_DIR / "pm.db"),
         ("qa_index.db", _QA_INDEX),

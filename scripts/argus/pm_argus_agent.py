@@ -24,18 +24,17 @@ import logging
 import re
 import sys
 import time
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Callable
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
+import yaml
 from cli_utils import call_argus_llm, load_codesign_context
 from db_utils import open_pm_db
-
-import yaml
 
 logger = logging.getLogger("pm_argus_agent")
 
@@ -83,7 +82,10 @@ def _resolve_index_and_channels(
 
 
 from argus.agent_tools import (  # noqa: F401 — 後方互換のため再 export
-    AgentContext, ToolDef, TOOLS, _TOOL_MAP,
+    _TOOL_MAP,
+    TOOLS,
+    AgentContext,
+    ToolDef,
     _build_tool_descriptions,
     # 従来の _tool_* 関数は agent_tools.py 内で mcp_tools 委譲となったため
     # 個別 export は不要（必要なのは AgentContext / TOOLS / _TOOL_MAP のみ）
@@ -700,8 +702,9 @@ def _fetch_slack_references_for_box(box_file_id: str, limit: int = 2) -> list[st
     if box_file_id in _SLACK_REF_CACHE:
         return _SLACK_REF_CACHE[box_file_id]
     try:
-        from db_utils import open_db
         from pathlib import Path
+
+        from db_utils import open_db
         path = Path(__file__).resolve().parent.parent.parent / "data" / "box_docs.db"
         if not path.exists():
             _SLACK_REF_CACHE[box_file_id] = []
@@ -866,6 +869,7 @@ def _strip_output_flags(text: str) -> str:
 def _output_to_box(result: str, today: str) -> str:
     """調査結果を一時ファイルに書き出して Box にアップロードする。"""
     import tempfile
+
     from argus.output_tools import box_upload_file
 
     result_md = f"# Argus 調査結果 ({today})\n\n{result}"
@@ -893,8 +897,9 @@ def _output_to_slack(result: str, today: str, channel_id: str) -> str:
 
 def _output_to_canvas(result: str, today: str) -> str:
     """調査結果を Canvas に投稿する（要: SLACK_USER_TOKEN）。"""
-    from argus.output_tools import canvas_post_content
     from cli_utils import resolve_report_canvas_id
+
+    from argus.output_tools import canvas_post_content
 
     canvas_id = resolve_report_canvas_id()
     if not canvas_id:
@@ -972,7 +977,7 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             output_footer = "\n\n" + "\n".join(_output_result_lines)
         body_raw = header + result + output_footer
 
-        from utils.slack_post import _to_slack_mrkdwn, _split_mrkdwn_to_blocks
+        from utils.slack_post import _split_mrkdwn_to_blocks, _to_slack_mrkdwn
 
         # Section block の制限内に分割
         body = _to_slack_mrkdwn(body_raw)

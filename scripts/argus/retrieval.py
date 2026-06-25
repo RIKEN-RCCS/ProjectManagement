@@ -93,8 +93,9 @@ def sanitize_fts_query(q: str) -> str:
 
 
 def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
-                 date_filter: str = "1=1", date_params: list = [],
+                 date_filter: str = "1=1", date_params: list | None = None,
                  index_name: str | None = None) -> list[dict]:
+    date_params = date_params or []
     try:
         if index_name:
             sql = (
@@ -125,9 +126,10 @@ def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
 
 
 def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
-                       date_filter: str = "1=1", date_params: list = [],
+                       date_filter: str = "1=1", date_params: list | None = None,
                        index_name: str | None = None) -> list[dict]:
     """fts_tokens（SudachiPy形態素解析）テーブルで段階的AND検索を行う。"""
+    date_params = date_params or []
     token_sets = [tokens]
     if len(tokens) > 3:
         token_sets.append(tokens[:3])
@@ -405,7 +407,7 @@ def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTO
                            index_name: str | None = None) -> list[dict]:
     """chunk_embeddings を使って cosine similarity 検索を行う。"""
     try:
-        from embed_utils import embed_one, blob_to_vector, cosine_similarity_matrix
+        from embed_utils import blob_to_vector, cosine_similarity_matrix, embed_one
     except ImportError:
         logger.warning("embed_utils が利用できません — vector 検索をスキップ")
         return []

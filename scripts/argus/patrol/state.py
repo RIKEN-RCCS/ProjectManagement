@@ -7,9 +7,8 @@ patrol_state.db（平文 sqlite3）を管理する。機密情報は含まない
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS notifications (
@@ -62,7 +61,7 @@ class PatrolState:
     ) -> bool:
         """cooldown_days 以内に同一 event_type × target_key の通知があれば True。"""
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=cooldown_days)
+            datetime.now(UTC) - timedelta(days=cooldown_days)
         ).isoformat()
         row = self._conn.execute(
             "SELECT 1 FROM notifications"
@@ -79,7 +78,7 @@ class PatrolState:
         message_ts: str = "",
     ) -> None:
         """通知を記録する。同一 event_type × target_key は UPSERT。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self._conn.execute(
             "INSERT INTO notifications (event_type, target_key, sent_at, channel_id, message_ts)"
             " VALUES (?, ?, ?, ?, ?)"
@@ -96,7 +95,7 @@ class PatrolState:
         self, action_type: str, target_id: int, evidence: str
     ) -> int:
         """承認待ちエントリを作成し、ID を返す。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
             "INSERT INTO pending_confirmations"
             " (action_type, target_id, proposed_by, evidence, created_at, status)"
@@ -110,7 +109,7 @@ class PatrolState:
         self, pending_id: int, status: str, resolved_by: str
     ) -> bool:
         """承認待ちを approved/rejected に更新。対象が見つかれば True。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
             "UPDATE pending_confirmations"
             " SET status = ?, resolved_at = ?, resolved_by = ?"
@@ -142,7 +141,7 @@ class PatrolState:
     def get_cached_user(self, display_name: str) -> str | None:
         """24時間以内のキャッシュがあれば user_id を返す。"""
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(hours=24)
+            datetime.now(UTC) - timedelta(hours=24)
         ).isoformat()
         row = self._conn.execute(
             "SELECT user_id FROM user_cache"
@@ -153,7 +152,7 @@ class PatrolState:
 
     def cache_user(self, display_name: str, user_id: str) -> None:
         """ユーザーキャッシュを更新。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self._conn.execute(
             "INSERT INTO user_cache (display_name, user_id, cached_at)"
             " VALUES (?, ?, ?)"
@@ -169,7 +168,7 @@ class PatrolState:
     def _prune_old_records(self) -> None:
         """_PRUNE_DAYS 以上前のレコードを自動削除。"""
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=_PRUNE_DAYS)
+            datetime.now(UTC) - timedelta(days=_PRUNE_DAYS)
         ).isoformat()
         self._conn.execute(
             "DELETE FROM notifications WHERE sent_at < ?", (cutoff,)

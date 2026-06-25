@@ -17,28 +17,15 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from db_utils import (
-    fetch_milestone_progress,
-    fetch_assignee_workload,
-    fetch_overdue_items,
-    fetch_weekly_trends,
-    fetch_unacknowledged_decisions,
-)
-from format_utils import (
-    format_milestone_table,
-    format_overdue_list,
-    format_assignee_table,
-    format_weekly_trends as format_trends_table,
-    format_decisions_list,
-)
 
 logger = logging.getLogger("pm_argus_agent")
 
@@ -204,9 +191,10 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
     resolved_display = None
     if name and not user_id:
         try:
+            from slack_sdk import WebClient
+
             from argus.patrol.state import PatrolState
             from argus.patrol.users import UserResolver
-            from slack_sdk import WebClient
             state = PatrolState(ctx.data_dir / "patrol_state.db")
             bot_token = os.environ.get("SLACK_BOT_TOKEN")
             slack = WebClient(token=bot_token) if bot_token else None
@@ -259,7 +247,7 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
     all_rows = []
     db_path = ctx.data_dir / "slack.db"
     if not db_path.exists():
-        return f"（data/slack.db が見つかりません）"
+        return "（data/slack.db が見つかりません）"
 
     ph = ",".join("?" * len(channels))
     sql = (
@@ -295,7 +283,7 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
     if resolved_uid:
         header_bits.append(f"name=\"{name}\" → user_id={resolved_uid}"
                            + (f" (display_name={resolved_display})" if resolved_display else ""))
-    lines = [f"# 検索結果: " + "、".join(header_bits)]
+    lines = ["# 検索結果: " + "、".join(header_bits)]
     lines.append("")
     lines.append(
         "（注: 以下は生メッセージ。要約や省略せず、そのままユーザーに提示すること。）"
@@ -307,7 +295,7 @@ def _tool_search_mentions(args: dict, ctx: AgentContext) -> str:
         body = text or ""
         link = f"\n  {permalink}" if permalink else ""
         lines.append("")
-        lines.append(f"---")
+        lines.append("---")
         lines.append(f"[{ts_short}] #{ch_name} ({tag}) {user}:")
         lines.append(body)
         if link:
