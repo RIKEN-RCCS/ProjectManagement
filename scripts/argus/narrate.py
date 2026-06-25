@@ -716,12 +716,11 @@ def _collect_all_data(
     pm_db_paths: list[Path] | None = None,
     index_name: str | None = None,
     qa_index_path: Path | None = None,
-) -> tuple[str, str, dict, list, str, str]:
+) -> tuple[str, str, dict, str, str]:
     """messages/minutes/stats/knowledge を一括収集し
-    (messages, minutes, stats, conns, knowledge_summary, web_articles) を返す。
-    conns は呼び出し元で全てクローズすること。
-    knowledge_summary は data/knowledge.db から取得した蒸留サマリ（プロジェクト全体共通、
-    index_name の影響を受けない）。
+    (messages, minutes, stats, knowledge_summary, web_articles) を返す。
+    knowledge_summary は pm.db.decisions の rationale 付きから取得した背景知識
+    （プロジェクト全体共通、index_name の影響を受けない）。
 
     index_name: argus_config.yaml の indices.{name} を選択する。指定すると
                 その index の channels / minutes / pm_db を絞り込み対象にする。
@@ -988,7 +987,19 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
             today, since_date, no_encrypt=no_encrypt, index_name=index_name,
         )
 
-        prompt = build_draft_prompt(purpose, subject, messages, stats, context, conns=conns, today=today)
+        # report 用途では build_draft_prompt が pm.db への接続を必要とする
+        # (完了アイテム取得)。他の用途では None で良い。
+        conns = None
+        if purpose == "report":
+            conns = [open_pm_db(p, no_encrypt=no_encrypt)
+                     for p in load_pm_db_paths(index_name)]
+        try:
+            prompt = build_draft_prompt(purpose, subject, messages, stats, context,
+                                        conns=conns, today=today)
+        finally:
+            if conns:
+                for c in conns:
+                    c.close()
         logger.info("[argus-draft] LLM 呼び出し中...")
         result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         full_text = _to_slack_mrkdwn(f"*Argus 草案 ({purpose}: {subject})*\n\n{result}")

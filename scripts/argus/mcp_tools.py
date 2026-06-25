@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -103,7 +104,7 @@ def get_milestone_progress() -> str:
         rows = fetch_milestone_progress(conn)
         if not rows:
             return "マイルストーンが登録されていません。"
-        today = __builtins__["__import__"]("datetime").date.today().isoformat()
+        today = date.today().isoformat()
         return format_milestone_table(rows, today)
     finally:
         conn.close()
@@ -117,7 +118,7 @@ def get_overdue_items(assignee: str | None = None, limit: int = 50, since: str |
     from format_utils import format_overdue_list
     conn = _get_pm_conn()
     try:
-        today = __builtins__["__import__"]("datetime").date.today().isoformat()
+        today = date.today().isoformat()
         rows = fetch_overdue_items(conn, today, since or "2000-01-01")
         if assignee:
             rows = [r for r in rows if assignee in (r.get("assignee") or "")]
@@ -137,7 +138,7 @@ def get_assignee_workload() -> str:
     from format_utils import format_assignee_table
     conn = _get_pm_conn()
     try:
-        today = __builtins__["__import__"]("datetime").date.today().isoformat()
+        today = date.today().isoformat()
         rows = fetch_assignee_workload(conn, today)
         if not rows:
             return "担当者データはありません。"
