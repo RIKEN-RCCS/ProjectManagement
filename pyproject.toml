@@ -5,3 +5,44 @@ addopts = "-v --tb=short"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+
+# --------------------------------------------------------------------------- #
+# vulture: dead code detection
+#   実行: ~/.venv_aarch64/bin/vulture
+#   90% 以上の検出は CI で fail させる候補。60-89% は手動レビュー。
+# --------------------------------------------------------------------------- #
+[tool.vulture]
+paths = ["scripts/argus", "scripts/utils", "scripts/ingest", "scripts/enrich"]
+# python-pptx の属性 setter パターン (paragraph.alignment = ... 等) が
+# vulture では使われない attribute として大量に誤検知されるため除外
+exclude = [
+    "scripts/archive/",
+    "scripts/utils/pptx_theme.py",
+    "**/__pycache__/",
+]
+min_confidence = 70
+sort_by_size = true
+# Slack Bolt のハンドラ・signal ハンドラ等、動的に呼ばれる関数を黙らせる
+ignore_decorators = [
+    "@app.command", "@app.event", "@app.action", "@app.message",
+    "@app.shortcut", "@app.view", "@app.options",
+]
+ignore_names = [
+    "signum", "frame",       # signal.signal ハンドラの引数
+    "row_factory",            # sqlite3 conn.row_factory への代入
+]
+
+# --------------------------------------------------------------------------- #
+# mypy: 静的型チェック
+#   実行: ~/.venv_aarch64/bin/mypy scripts/argus
+#   方針: 新規コードで型エラーゼロを保つ。既存の low-priority ファイルは除外。
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "scripts"
+ignore_missing_imports = true
+follow_imports = "silent"
+exclude = [
+    "^scripts/archive/",
+    "^scripts/build_slide_video\\.py$",
+]
