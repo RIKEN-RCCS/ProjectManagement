@@ -117,6 +117,33 @@ def box_upload_file(
         return f"エラー: Box アップロードに失敗しました — {e}"
 
 
+def translate_markdown_jp_to_en(jp_text: str, timeout: int = 300) -> str:
+    """Translate Japanese Markdown to English using the project's LLM.
+
+    Preserves all Markdown formatting and technical terms.
+    Raises RuntimeError if the LLM call fails or returns empty.
+    """
+    from utils.llm import call_argus_llm
+
+    system = (
+        "You are a professional translator. Translate the following Japanese "
+        "Markdown report into natural, fluent English. Preserve all Markdown "
+        "formatting (headings, lists, code blocks, links). Keep technical "
+        "terms, application names, and proper nouns in their original form."
+    )
+    result = call_argus_llm(
+        f"Translate the following Japanese Markdown into English.\n"
+        f"Preserve formatting and technical terms.\n\n---\n\n{jp_text}",
+        system=system,
+        timeout=timeout,
+        max_tokens=8192,
+        temperature=0.3,
+    )
+    if not result or not result.strip():
+        raise RuntimeError("Translation returned empty content")
+    return result
+
+
 # =========================================================================== #
 #  Slack: メッセージ投稿
 # =========================================================================== #
