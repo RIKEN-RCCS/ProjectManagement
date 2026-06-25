@@ -548,6 +548,7 @@ def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=3):
     audio_path = None
     transcript_path = None
     vtt_path = None
+    reconciled_path = None
     try:
         audio_path = download_audio(client, channel_id, filename)
         file_size_mb = audio_path.stat().st_size / (1024 * 1024)
@@ -578,7 +579,32 @@ def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=3):
               f"文字起こし完了: `{transcript_path.name}`\n"
               f"要約を開始します（数十分かかる場合があります）...")
 
-        minutes_path = run_minutes(transcript_path, client, channel_id, thread_ts,
+        # Stage 2.5: VTT があれば Whisper と突合修正してから議事録生成へ渡す
+        reconciled_path = None
+        if vtt_path:
+            _post(client, channel_id, thread_ts,
+                  "VTT × Whisper 突合修正中（誤認識・話者帰属を修正します）...")
+            try:
+                from recording.reconcile_transcript import reconcile_transcript
+                slide_ctx = ""
+                if slide_context_path and slide_context_path.exists():
+                    slide_ctx = slide_context_path.read_text(encoding="utf-8")
+                reconciled_path = reconcile_transcript(
+                    transcript_path=transcript_path,
+                    vtt_path=vtt_path,
+                    slide_context=slide_ctx,
+                )
+                _post(client, channel_id, thread_ts,
+                      f"突合修正完了: `{reconciled_path.name}`")
+            except Exception as e:
+                logger.warning(f"reconcile_transcript 失敗（スキップ）: {e}", exc_info=True)
+                _post(client, channel_id, thread_ts,
+                      f":warning: VTT 突合修正をスキップしました（{e}）。元の文字起こしを使用します。")
+                reconciled_path = None
+
+        minutes_input_path = reconciled_path if reconciled_path else transcript_path
+
+        minutes_path = run_minutes(minutes_input_path, client, channel_id, thread_ts,
                                    vtt_path=vtt_path,
                                    slide_context_path=slide_context_path,
                                    consensus_n=consensus_n)
@@ -612,5 +638,7 @@ def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=3):
             audio_path.unlink(missing_ok=True)
         if transcript_path:
             transcript_path.unlink(missing_ok=True)
+        if reconciled_path and reconciled_path.exists():
+            reconciled_path.unlink(missing_ok=True)
         if vtt_path:
             vtt_path.unlink(missing_ok=True)

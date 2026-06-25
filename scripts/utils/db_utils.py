@@ -198,6 +198,16 @@ CREATE TABLE IF NOT EXISTS decisions (
     source_ref   TEXT,
     extracted_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS terminology (
+    term         TEXT PRIMARY KEY,
+    category     TEXT,
+    aliases      TEXT,
+    source       TEXT,
+    last_seen    TEXT,
+    frequency    INTEGER DEFAULT 1,
+    meeting_kinds TEXT
+);
 """
 
 
@@ -304,6 +314,12 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
             # 2026-05-18: Slack チャンネル ID をフィルタ・集計のキーとして正規化
             "ALTER TABLE action_items ADD COLUMN channel_id TEXT",
             "ALTER TABLE decisions ADD COLUMN channel_id TEXT",
+            # 2026-06-25: 用語辞書テーブル（Whisper prompt 動的拡張・reconcile 用）
+            (
+                "CREATE TABLE IF NOT EXISTS terminology ("
+                "term TEXT PRIMARY KEY, category TEXT, aliases TEXT, source TEXT, "
+                "last_seen TEXT, frequency INTEGER DEFAULT 1, meeting_kinds TEXT)"
+            ),
         ],
     )
 

@@ -226,6 +226,21 @@ def main():
             initial_prompt = INITIAL_PROMPT + extra_str
             print(f"[INFO] initial_prompt に {len(extra_terms)} 語を追加しました（{len(extra_str)} 字）")
 
+    # pm.db の terminology テーブルから動的に固有名詞を追加（残り token budget 内）
+    try:
+        import sys as _sys
+        _scripts_dir = os.path.join(os.path.dirname(__file__), "..")
+        if _scripts_dir not in _sys.path:
+            _sys.path.insert(0, _scripts_dir)
+        from utils.terminology import build_whisper_extra_prompt
+        initial_prompt = build_whisper_extra_prompt(
+            base_prompt=initial_prompt,
+            token_budget=224,
+        )
+        print(f"[INFO] terminology 動的追加後の initial_prompt: {len(initial_prompt)} 字")
+    except Exception as _e:
+        print(f"[INFO] terminology 動的追加スキップ: {_e}")
+
     if torch.cuda.is_available():
         device = torch.device("cuda")
         print(f"[INFO] GPU: {torch.cuda.get_device_name(0)}")

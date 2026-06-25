@@ -48,7 +48,13 @@ if [[ "${ARGUS_PREFER_RIVAULT:-0}" != "1" ]]; then
   export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# scripts/bin/ から直接実行された場合は scripts/ を SCRIPT_DIR とする
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_ROOT/data"
 WHISPER_VAD="$SCRIPT_DIR/recording/whisper_vad.py"
@@ -350,6 +356,31 @@ EOF
   fi
 
   # --------------------------------------------------------------------------- #
+  # Step 0.5: VTT × Whisper 突合修正（reconcile_transcript.py）
+  #   VTT がある場合のみ実行。失敗しても元の文字起こしで続行する。
+  # --------------------------------------------------------------------------- #
+  if [[ -n "$VTT_FILE" ]]; then
+    echo "[INFO] VTT × Whisper 突合修正中: $VTT_FILE"
+    RECONCILED_MD="${BASENAME}_reconciled.md"
+    SLIDE_CTX_OPT=""
+    if [[ -n "$SLIDE_CONTEXT_FILE" && -s "$SLIDE_CONTEXT_FILE" ]]; then
+      SLIDE_CTX_OPT="--slide-context $SLIDE_CONTEXT_FILE"
+    fi
+    if PYTHONPATH="$SCRIPT_DIR" "$PYTHON3" \
+        "$SCRIPT_DIR/recording/reconcile_transcript.py" \
+        "$BASENAME.md" \
+        --vtt "$VTT_FILE" \
+        --output "$RECONCILED_MD" \
+        $SLIDE_CTX_OPT; then
+      mv "$RECONCILED_MD" "$BASENAME.md"
+      echo "[INFO] reconcile 完了: $BASENAME.md を更新しました"
+    else
+      echo "[WARN] reconcile 失敗（元の文字起こしをそのまま使用します）"
+      rm -f "$RECONCILED_MD"
+    fi
+  fi
+
+  # --------------------------------------------------------------------------- #
   # Step 1: generate_minutes_local.py で高品質議事録を生成
   # --------------------------------------------------------------------------- #
   echo "[INFO] generate_minutes_local.py で議事録を生成中: $MEETING_NAME ($DATE_TO_USE)"
@@ -405,6 +436,22 @@ EOF
   if [[ $? -eq 0 ]]; then
     rm -f "$BASENAME.md" "$MINUTES_MD"
     echo "[INFO] 文字起こし・議事録ファイルを議事録DB・pm.db に保存し削除しました"
+
+    # -------------------------------------------------------------------- #
+    # Step 3.5: terminology テーブルを更新
+    #   - slide_ocr の terminology.txt があればそれを ground truth として優先
+    #   - pm.db の decisions/actions から正規表現で追加抽出
+    #   - 失敗しても後続処理は継続する
+    # -------------------------------------------------------------------- #
+    echo "[INFO] terminology テーブル更新中..."
+    TERMINOLOGY_OPTS="--meeting-kind ${MEETING_NAME} --db ${DB_PATH:-data/pm.db}"
+    if [[ -n "$TERMINOLOGY_FILE" && -s "$TERMINOLOGY_FILE" ]]; then
+      TERMINOLOGY_OPTS="$TERMINOLOGY_OPTS --slide-terms $TERMINOLOGY_FILE"
+    fi
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON3" \
+      "$SCRIPT_DIR/data-pipeline/pm_terminology_update.py" \
+      $TERMINOLOGY_OPTS \
+      || echo "[WARN] terminology 更新失敗（後続処理は継続）"
 
     # -------------------------------------------------------------------- #
     # Step 4: Box 議事録アップロード + Canvas 目録更新（設定ありの場合のみ）

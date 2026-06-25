@@ -189,26 +189,53 @@ def load_local_llm_endpoint() -> tuple[str, str]:
 # 文字起こし解析（generate_minutes.py と同一）
 # --------------------------------------------------------------------------- #
 def parse_transcript(file_path: str) -> list[dict]:
-    """文字起こしファイルを解析して発言セグメントのリストを返す"""
+    """文字起こしファイルを解析して発言セグメントのリストを返す。
+
+    Whisper VAD 形式 (#### [HH:MM:SS - HH:MM:SS] SPEAKER_XX) と
+    reconcile_transcript.py 出力形式 ([HH:MM:SS] 話者名: text) の両方に対応する。
+    """
     content = Path(file_path).read_text(encoding="utf-8")
 
-    pattern = re.compile(
-        r"####\s*\[([0-9:]+)\s*-\s*([0-9:]+)\]\s+(SPEAKER_\d+)\n(.*?)(?=\n####|\Z)",
+    # --- Whisper VAD 形式 ---
+    whisper_pattern = re.compile(
+        r"####\s*\[([0-9:]+)\s*-\s*([0-9:]+)\]\s+(\S[^\n]*)\n(.*?)(?=\n####|\Z)",
         re.DOTALL,
     )
-
     segments = []
-    for m in pattern.finditer(content):
+    for m in whisper_pattern.finditer(content):
         start_str, end_str, speaker, text = m.groups()
         text = text.strip()
         if not text or text in ("...", "…"):
             continue
         segments.append({
-            "speaker": speaker,
+            "speaker": speaker.strip(),
             "start": _parse_timestamp(start_str.strip()),
             "end": _parse_timestamp(end_str.strip()),
             "text": text,
         })
+    if segments:
+        return segments
+
+    # --- reconcile_transcript.py 出力形式: [HH:MM:SS] 話者名: text ---
+    reconcile_pattern = re.compile(
+        r"\[([0-9:]+)\]\s+(.+?):\s+(.*?)(?=\n\[[0-9]|\Z)",
+        re.DOTALL,
+    )
+    raw = []
+    for m in reconcile_pattern.finditer(content):
+        ts_str, speaker, text = m.groups()
+        text = text.strip()
+        if not text or text in ("...", "…"):
+            continue
+        raw.append({
+            "speaker": speaker.strip(),
+            "start": _parse_timestamp(ts_str.strip()),
+            "text": text,
+        })
+    # end は次セグメントの start から算出（最終セグメントは start+30秒）
+    for i, seg in enumerate(raw):
+        seg["end"] = raw[i + 1]["start"] if i + 1 < len(raw) else seg["start"] + 30
+        segments.append(seg)
     return segments
 
 
@@ -896,6 +923,16 @@ def generate_minutes(
     print(f"[INFO] {len(segments)} セグメントを検出")
 
     claude_md_context = load_claude_md_context()
+
+    # pm.db terminology テーブルから動的用語辞書を追記
+    try:
+        from utils.terminology import build_terminology_reference
+        dyn_terms = build_terminology_reference()
+        if dyn_terms:
+            claude_md_context = claude_md_context + dyn_terms
+            print(f"[INFO] terminology 動的用語辞書を追記: {len(dyn_terms)} 字")
+    except Exception as _e:
+        print(f"[INFO] terminology 動的追加スキップ: {_e}")
 
     # スライドOCRから得た文脈をプロンプトに同梱するブロック
     if slide_context:
