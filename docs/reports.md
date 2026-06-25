@@ -114,8 +114,8 @@ python3 scripts/pm_insight.py --db data/pm.db --since 2026-04-21 --dry-run --out
 
 ## 3. canvas_report.sh — Canvas 同期 + 進捗レポート
 
-`pm_sync_canvas.py`（Canvas → pm.db 同期）→ `pm_report.py`（pm.db → Canvas 投稿）を順次実行する。
-**Canvas 上の編集を pm.db に取り込んでから上書き投稿**するため、会議中の編集を失わない。
+`pm_xlsx_sync.py`（Box XLSX → pm.db 同期）→ `pm_xlsx_report.py`（pm.db → Box XLSX 生成・アップロード）を順次実行する。
+**XLSX 上の編集を pm.db に取り込んでから Box へバージョン更新**するため、会議中の編集を失わない。
 
 ```sh
 # 通常運用
