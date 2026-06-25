@@ -261,21 +261,20 @@ for i in "${!BATCH_FILES[@]}"; do
     if [[ -n "$CONSENSUS_N" ]]; then
         CONSENSUS_OPT=(--consensus "$CONSENSUS_N")
     fi
-    bash "$SCRIPT_DIR/pm_from_recording.sh" \
-        "${BATCH_FILES[$i]}" \
-        --held-at "${BATCH_HELD_AT[$i]}" \
-        --meeting-name "${BATCH_NAMES[$i]}" \
-        --db "${BATCH_DBS[$i]}" \
-        "${CONSENSUS_OPT[@]}" \
-        2>&1 | tee -a "$LOG_FILE"
-    if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+    if bash "$SCRIPT_DIR/pm_from_recording.sh" \
+            "${BATCH_FILES[$i]}" \
+            --held-at "${BATCH_HELD_AT[$i]}" \
+            --meeting-name "${BATCH_NAMES[$i]}" \
+            --db "${BATCH_DBS[$i]}" \
+            "${CONSENSUS_OPT[@]}" \
+            2>&1 | tee -a "$LOG_FILE"; then
         processed=$((processed + 1))
         SUCCEEDED_MEETINGS["${BATCH_NAMES[$i]}"]=1
         if [[ -n "$SLACK_CHANNEL" ]]; then
             bash "$SCRIPT_DIR/slack_post_minutes.sh" \
                 --meeting-name "${BATCH_NAMES[$i]}" \
                 --held-at "${BATCH_HELD_AT[$i]}" \
-                -c "$SLACK_CHANNEL" 2>&1 | tee -a "$LOG_FILE"
+                -c "$SLACK_CHANNEL" 2>&1 | tee -a "$LOG_FILE" || true
         fi
     else
         log "[ERROR] 処理失敗: ${BATCH_FILES[$i]}"
