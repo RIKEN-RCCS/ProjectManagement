@@ -23,7 +23,12 @@ set -euo pipefail
 # RiVault トークン（Self-consistency の embedding 取得に必要）
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
 REPO_ROOT=/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement
 MEETINGS_DIR="$REPO_ROOT/data"
 PROCESSING_DIR="$MEETINGS_DIR/processing"

@@ -44,10 +44,13 @@ fi
 # cron 実行時に box CLI (Node 製) が見つかるよう PATH を補う
 export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
 PYTHON3="${HOME}/.venv_$(uname -m)/bin/python3"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # --------------------------------------------------------------------------- #
