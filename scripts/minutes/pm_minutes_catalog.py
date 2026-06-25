@@ -74,7 +74,6 @@ def load_meetings_config(config_path: Path) -> dict[str, dict]:
 
 
 from box_cli import (
-    box_find_file as box_find_file_in_folder,
     box_upload_or_version,
     box_get_or_create_shared_link,
 )
