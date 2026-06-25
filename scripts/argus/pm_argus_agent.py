@@ -33,7 +33,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_argus_llm, load_claude_md_context
+from cli_utils import call_argus_llm, load_claude_md_context, load_codesign_context
 from db_utils import (
     open_pm_db,
     fetch_milestone_progress,
@@ -180,6 +180,34 @@ _AGENT_SYSTEM_PROMPT = """\
 ユーザーの質問に対し、利用可能なツールを駆使して徹底的に調査し、
 根拠に基づく詳細な回答を生成してください。
 
+## プロジェクト文脈（最重要 — 全回答の判断軸）
+
+富岳NEXTは富岳の後継となる次世代スーパーコンピュータの研究開発プロジェクトであり、
+**理研・富士通・NVIDIA の三者によるコデザイン（co-design）** で進行している。
+本プロジェクトの最終目標は **次世代スパコンのシステム仕様の決定** であり、
+以下のコデザイン項目（ハードウェア設計選択肢）を絞り込むための材料収集と評価が行われている。
+
+### コデザイン項目（システム仕様選択肢）
+
+{codesign_items}
+
+**アプリケーション評価の位置づけ**: EEA (Early Evaluation Application) と
+ベンチマーク WG で対象となる代表アプリの GPU 化と性能評価は、
+**それ自体が目的ではなく、上記コデザイン項目を決定するための定量的根拠** を得る活動。
+従って各アプリの調査では、単なる進捗報告に留まらず以下を必ず引き出すこと:
+
+1. **コデザインへの含意** — そのアプリの結果が上記コデザイン項目の
+   どの選択肢に影響するか
+2. **ボトルネック特性** — 何が律速か（演算・帯域・レイテンシ・容量・同期 等）
+3. **評価フェーズ** — Benchkit 対応状況、ベンチマーク再現性、評価成熟度
+4. **ベンダー協業状況** — NVIDIA / 富士通 との議論・合意・未決事項
+5. **仕様決定に向けて不足している情報** — 追加で必要な測定・議論・データ
+
+**注意**: `pm-multi-agent` および `Argus` はあなた自身（プロジェクト管理 AI ツール）
+の名称です。富岳NEXTのアプリケーションやコデザインの対象ではないため、
+回答セクションの論点として扱ったり「pm-multi-agent との連携」のような節を作ったり
+してはいけません。
+
 ## ツール呼び出し形式
 
 <tool_call>
@@ -199,23 +227,73 @@ _AGENT_SYSTEM_PROMPT = """\
   `search_decisions` で決定事項検索、
   `search_entity` で異なる視点（conservative/aggressive/objective/future_oriented）
   とデータ種別（pm_data/minutes/slack/box_docs）の組み合わせで多角的に分析すること
+- **アプリ評価系の質問では search_entity を最低3組合せ並列実行すべき**:
+  例: (objective × pm_data) + (objective × minutes) + (conservative × slack)
+- **コデザイン論点を意識した検索クエリを組み立てる**: 単に「アプリ名 進捗」ではなく、
+  「アプリ名 メモリ ボトルネック」「アプリ名 NVL4 NVL72」「アプリ名 アトミック L2」
+  「アプリ名 EEA Level」「アプリ名 富士通 NVIDIA 議論」等で複数回検索する
 - 複数の視点とデータ種別を掛け合わせて検索すると、より深い洞察が得られる
 - 同じツールを異なる引数で呼ぶことは有用。遠慮せずに必要なだけツールを使うこと
 - 得られた結果に対して `synthesize_answers` を使って複数 Explorer の分析を統合することも検討する
 - 質問が意思決定や制約に関する場合は `search_decisions` と `search_text` を併用する
 - 特定ユーザーのメンション状況は `search_mentions` を使う
-- `search_entity` を複数の perspective × data_type の組み合わせで並列実行し、
-  多角的な分析結果を得ることが推奨される
 - 調査結果を Box/Slack/Canvas に出力する必要がある場合は出力ツールを使うこと
   （出力前にユーザーに確認を取ること）
 
-## 最終回答
+## 最終回答（深掘り必須）
 
-- 収集したすべての情報を総合し、根拠を明示した回答を生成すること
+回答は単なる事実の羅列ではなく、**プロジェクト文脈** で示した5つの観点を
+可能な限り含む構造化された分析にすること。具体的には:
+
+1. **結論サマリ** — 1〜2 文で現状の本質的な評価（順調/遅延/障害/重要転換点 等）
+2. **詳細状況** — 表形式で「項目 / 状況 / 根拠（出典付き）」を提示
+3. **コデザインへの含意** — このアプリ/論点がシステム仕様（ノード/メモリ/NW/GPU 世代）の
+   どの選択肢にどう影響するかを必ず一段落で論じる
+4. **ボトルネック/リスク** — 技術的・組織的・スケジュール的な阻害要因を箇条書き
+5. **仕様決定に向けて不足している情報** — 追加で必要な測定・議論・データ、
+   ステークホルダー（理研/富士通/NVIDIA）に確認すべき事項
+
+その他の必須事項:
+
 - 数値・日付・人名・会議名・決定事項IDなど具体的根拠を引用すること
-- 推測ではなくツール結果に基づいて答えること
+- 推測ではなくツール結果に基づいて答えること。推測する場合は「（推測）」と明記
 - 回答の長さに制限はない。必要なだけ詳しく説明すること
 - 必ず `<final_answer>` タグで終わること
+
+## 調査期間
+
+- 本日: {today}
+- 対象期間: {since} 〜 {today}
+- この期間外のデータはツール結果に含まれません。期間を限定したい場合は適切なキーワードで検索してください。
+"""
+
+
+_FORCED_SYNTHESIS_PROMPT = """\
+あなたは富岳NEXTプロジェクトのAI「Argus」です。
+富岳NEXTは理研・富士通・NVIDIA のコデザインで進む次世代スーパーコンピュータ研究開発で、
+アプリケーション評価は **以下のコデザイン項目を決定するための材料収集** が目的。
+
+### コデザイン項目（システム仕様選択肢）
+
+{codesign_items}
+
+以下のツール実行結果のみを根拠として、ユーザー質問への最終回答を生成してください。
+
+## 回答構成（深掘り必須）
+アプリ/論点に関する質問の場合は以下を含む構造化された分析にすること:
+1. **結論サマリ** — 1〜2 文で本質評価
+2. **詳細状況** — 表形式「項目 / 状況 / 根拠（出典付き）」
+3. **コデザインへの含意** — 上記コデザイン項目のどの選択肢にどう影響するかを一段落
+4. **ボトルネック/リスク** — 律速要因（演算/帯域/レイテンシ/容量/同期 等）
+5. **仕様決定に向けて不足している情報** — 追加測定・議論・確認事項
+
+## 厳守事項
+- 新しいツール呼び出し (`<tool_call>`) は禁止。出力に含めてはならない。
+- 必ず `<final_answer>...</final_answer>` タグで回答を囲む。
+- ツール結果に含まれない情報は推測しない。「情報なし」と明記してよい。
+- 数値・日付・人名・ID 等の根拠を明示する。
+
+本日: {today} / 対象期間: {since} 〜 {today}
 """
 
 
@@ -224,46 +302,19 @@ _AGENT_SYSTEM_PROMPT = """\
 # =========================================================================== #
 
 def build_seed_data(ctx: AgentContext) -> str:
-    all_stats = [fetch_summary_stats(c, since=ctx.since, today=ctx.today) for c in ctx.conns]
-    stats: dict = {}
-    for s in all_stats:
-        for k, v in s.items():
-            stats[k] = stats.get(k, 0) + v
-    milestones = _query_all(ctx, fetch_milestone_progress)
-    all_wl: list = []
-    for c in ctx.conns:
-        all_wl.extend(fetch_assignee_workload(c, ctx.today))
-    wl_map: dict[str, dict] = {}
-    for w in all_wl:
-        name = w["assignee"]
-        if name in wl_map:
-            wl_map[name]["total_open"] += w["total_open"]
-            wl_map[name]["overdue"] += w["overdue"]
-            wl_map[name]["no_due_date"] += w.get("no_due_date", 0)
-        else:
-            wl_map[name] = {**w}
-    workload = sorted(wl_map.values(), key=lambda x: (-x["overdue"], -x["total_open"]))
+    """シードデータを生成する。
 
+    マイルストーン・アクションアイテム関連（期限超過件数・未確認決定事項件数・
+    担当者別負荷）はメンテ状況が不安定なため LLM への参考材料から除外する。
+    必要な場合は search_action_items / get_milestone_progress 等のツールで
+    LLM が明示的に取得する。
+    """
     parts = [
         "## プロジェクト概況\n",
-        f"- オープンAI: {stats.get('total_open', 0)} 件",
-        f"- クローズ済みAI: {stats.get('total_closed', 0)} 件",
-        f"- 期限超過: {stats.get('overdue_count', 0)} 件",
-        f"- 未確認決定事項: {stats.get('unacknowledged_decisions', 0)} 件",
         f"- 本日: {ctx.today}",
+        f"- 調査対象期間: {ctx.since} 〜 {ctx.today}",
         "",
     ]
-
-    if milestones:
-        parts.append("## マイルストーン進捗\n")
-        parts.append(format_milestone_table(milestones, ctx.today))
-        parts.append("")
-
-    if workload:
-        parts.append("## 担当者別負荷\n")
-        parts.append(format_assignee_table(workload))
-        parts.append("")
-
     return "\n".join(parts)
 
 
@@ -411,6 +462,92 @@ def _format_rewrite_for_seed(rewrite: dict) -> str:
     return "\n".join(parts)
 
 
+# =========================================================================== #
+#  Agent Loop Helpers
+# =========================================================================== #
+
+def _summarize_args(args: dict) -> str:
+    """Tool args を 1 行 ≤80 文字に圧縮（dedupe key / 履歴表示用）"""
+    try:
+        s = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        s = str(args)
+    return s if len(s) <= 80 else s[:77] + "..."
+
+
+def _dedupe_key(name: str, args: dict) -> str:
+    try:
+        return f"{name}::{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+    except Exception:
+        return f"{name}::{args}"
+
+
+def _format_tool_history(history: list[dict], keep_recent: int = 8) -> str:
+    """履歴を <tool_result> ブロック列に整形。古いものは 1 行に圧縮。"""
+    if not history:
+        return ""
+    parts: list[str] = []
+    cutoff = max(0, len(history) - keep_recent)
+    for i, h in enumerate(history):
+        name = h["name"]
+        step = h["step"]
+        args_sum = _summarize_args(h.get("args", {}))
+        if i < cutoff:
+            body = h.get("result") or h.get("error") or ""
+            parts.append(
+                f"<tool_result name=\"{name}\" step=\"{step}\">\n"
+                f"[Tool Result: {name}({args_sum})] （{len(body)}文字、圧縮済み）\n"
+                f"</tool_result>"
+            )
+        elif "error" in h:
+            parts.append(
+                f"<tool_result name=\"{name}\" step=\"{step}\" error=\"true\">\n"
+                f"[Tool Error: {name}({args_sum})]\n{h['error']}\n"
+                f"</tool_result>"
+            )
+        else:
+            parts.append(
+                f"<tool_result name=\"{name}\" step=\"{step}\">\n"
+                f"[Tool Result: {name}({args_sum})]\n{h['result']}\n"
+                f"</tool_result>"
+            )
+    return "\n\n".join(parts)
+
+
+def _execute_calls_parallel(
+    calls: list[dict], ctx: AgentContext, step: int, timeout_s: int = 120
+) -> list[dict]:
+    """ツール呼び出しを並列実行して history エントリのリストを返す。"""
+    out: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        fut_map = {
+            pool.submit(execute_tool, tc["name"], tc["args"], ctx): tc
+            for tc in calls
+        }
+        try:
+            for future in concurrent.futures.as_completed(fut_map, timeout=timeout_s):
+                tc = fut_map[future]
+                try:
+                    result = future.result()
+                    out.append({
+                        "step": step, "name": tc["name"], "args": tc["args"],
+                        "result": result,
+                    })
+                except Exception as e:
+                    out.append({
+                        "step": step, "name": tc["name"], "args": tc["args"],
+                        "error": f"{type(e).__name__}: {e}",
+                    })
+        except concurrent.futures.TimeoutError:
+            for fut, tc in fut_map.items():
+                if not fut.done():
+                    out.append({
+                        "step": step, "name": tc["name"], "args": tc["args"],
+                        "error": "tool execution timeout",
+                    })
+    return out
+
+
 def run_agent(
     question: str,
     seed_data: str,
@@ -420,17 +557,26 @@ def run_agent(
     max_steps: int = _DEFAULT_MAX_STEPS,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> str:
-    """質問を1回のLLM呼び出しで処理する。
+    """質問を bounded multi-step agent loop で処理する。
 
-    マルチステップのツール実行ループは行わない。
-    LLM は内部 reasoning でツール呼び出しを判断するか、直接回答を生成する。
-    Orchestrator（Claude Code + pm-multi-agent）に任せられないタスクは
-    DeepSeek-V4-Flash などのモデルが single-shot で処理する。
+    最大 max_steps 回まで LLM 呼び出し→ツール実行を繰り返し、
+    `<final_answer>` が得られた時点で終了。重複ツール呼び出しは自動スキップ。
+    ループ終了後も final_answer がない場合は強制 synthesis を 1 回追加実行する。
+
+    max_steps=0 の場合はツールなしモードで seed_data のみから回答を生成する。
+    timeout は LLM 呼び出しの総予算（wall-clock）として消費される。
     """
     tool_desc = _build_tool_descriptions()
+    codesign_items = load_codesign_context() or "(コデザイン項目情報なし)"
     system_prompt = _AGENT_SYSTEM_PROMPT.format(
         tool_descriptions=tool_desc,
         max_steps=max_steps,
+        today=ctx.today,
+        since=ctx.since,
+        codesign_items=codesign_items,
+    )
+    forced_system = _FORCED_SYNTHESIS_PROMPT.format(
+        today=ctx.today, since=ctx.since, codesign_items=codesign_items,
     )
 
     progress = _make_progress_updater(None)
@@ -450,82 +596,146 @@ def run_agent(
     if rewrite and rewrite.get("intent"):
         intent_header = f"> **ご質問の解釈**: {rewrite['intent']}\n\n"
 
-    user_prompt = (
+    base_prompt = (
         f"## 調査依頼\n\n{question}\n\n"
         f"{rewrite_block}"
         f"{seed_data}\n\n"
-        f"上記のプロジェクトデータとツールを活用して調査し、"
-        f"`<final_answer>` タグで回答してください。"
-        f"ツールを使う場合は `<tool_call>` 形式で呼び出し、"
-        f"その結果を受け取ったら続けて回答を生成してください。"
     )
 
-    progress("LLM に問い合わせ中...")
-    start_time = time.monotonic()
-    try:
-        response = call_argus_llm(
-            user_prompt,
-            system=system_prompt,
-            max_tokens=32768,
-            timeout=int(timeout),
-            think=True,
-        )
-    except Exception as e:
-        logger.exception(f"[investigate] LLM呼び出しエラー: {e}")
-        return f"調査中にエラーが発生しました: {e}"
+    deadline = time.monotonic() + timeout
 
-    elapsed = time.monotonic() - start_time
-    logger.info(f"[investigate] 完了 {len(response)} chars, {elapsed:.1f}s")
+    def remaining_s() -> int:
+        return max(10, int(deadline - time.monotonic()))
 
-    final = parse_final_answer(response)
-    if final:
-        return intent_header + _append_sources_section(final, ctx)
-
-    # tool_call が含まれていれば実行して再帰
-    tool_calls = parse_tool_calls(response)
-    if tool_calls:
-        progress(f"ツール{len(tool_calls)}件を実行中...")
-        result_parts = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            fut_map = {pool.submit(execute_tool, tc["name"], tc["args"], ctx): tc for tc in tool_calls}
-            for future in concurrent.futures.as_completed(fut_map, timeout=120):
-                tc = fut_map[future]
-                try:
-                    result = future.result()
-                    result_parts.append(f"[Tool Result: {tc['name']}]\n{result}")
-                except Exception as e:
-                    result_parts.append(f"[Tool Error: {tc['name']}]\n{type(e).__name__}: {e}")
-        tool_results = "\n\n".join(result_parts)
-        # ツール結果を加えて2回目呼び出し
-        final_prompt = (
-            f"{user_prompt}\n\n"
-            f"上記のツールを実行した結果:\n\n{tool_results}\n\n"
-            f"これらの結果を踏まえて `<final_answer>` で回答してください。"
+    # --- max_steps == 0: ツールなしで seed_data のみから単発生成
+    if max_steps <= 0:
+        progress("max_steps=0: ツールなしで seed_data から直接回答生成")
+        no_tools_prompt = (
+            base_prompt
+            + "上記の seed_data のみを根拠に `<final_answer>` で回答してください。"
+            + "ツールは使用しないでください。"
         )
         try:
-            response2 = call_argus_llm(
-                final_prompt,
-                system=system_prompt,
-                max_tokens=32768,
-                timeout=int(timeout),
-                think=True,
+            resp = call_argus_llm(
+                no_tools_prompt, system=forced_system,
+                max_tokens=8192, timeout=remaining_s(), think=False,
             )
         except Exception as e:
-            logger.exception(f"[investigate] 2回目LLMエラー: {e}")
+            logger.exception(f"[investigate][step 0] LLM error: {e}")
             return intent_header + _append_sources_section(
-                f"ツール実行結果:\n{tool_results}\n（回答生成中にエラー: {e}）", ctx)
-
-        final = parse_final_answer(response2)
+                f"調査中にエラーが発生しました: {e}", ctx)
+        final = parse_final_answer(resp)
         if final:
             return intent_header + _append_sources_section(final, ctx)
-        # 最終回答タグがなければ生テキストを返す
-        clean = re.sub(r"<[^>]+>", "", response2).strip()
-        return intent_header + _append_sources_section(clean if clean else response2, ctx)
+        clean = re.sub(r"<[^>]+>", "", resp).strip()
+        return intent_header + _append_sources_section(clean or resp, ctx)
 
-    # tool_call も final_answer もない場合
-    clean = re.sub(r"<[^>]+>", "", response).strip()
-    logger.warning(f"[investigate] final_answer なし。生テキストを返却 ({len(clean)} chars)")
-    return intent_header + _append_sources_section(clean if clean else response, ctx)
+    # --- Multi-step loop
+    history: list[dict] = []
+    executed_keys: set[str] = set()
+    last_response = ""
+
+    for step in range(1, max_steps + 1):
+        if time.monotonic() >= deadline:
+            logger.warning(f"[STEP {step}/{max_steps}] タイムアウト到達、ループ中断")
+            break
+
+        prompt = base_prompt
+        if history:
+            prompt += "## これまでのツール実行結果\n\n" + _format_tool_history(history) + "\n\n"
+        prompt += (
+            f"残りステップ: {max_steps - step + 1}/{max_steps}。"
+            f"追加調査が必要なら `<tool_call>`、回答可能なら `<final_answer>` で出力してください。"
+        )
+
+        progress(f"[STEP {step}/{max_steps}] LLM 呼び出し中...")
+        t0 = time.monotonic()
+        try:
+            response = call_argus_llm(
+                prompt, system=system_prompt,
+                max_tokens=32768, timeout=remaining_s(), think=True,
+            )
+        except Exception as e:
+            logger.exception(f"[STEP {step}/{max_steps}] LLM error: {e}")
+            break
+        last_response = response
+        elapsed = time.monotonic() - t0
+
+        final = parse_final_answer(response)
+        tool_calls = [] if final else parse_tool_calls(response)
+        valid_calls = [tc for tc in tool_calls if "name" in tc]
+        logger.info(
+            f"[STEP {step}/{max_steps}] LLM 応答 {len(response)} chars, "
+            f"{len(valid_calls)}件のツール呼び出し ({elapsed:.1f}s)"
+        )
+
+        if final:
+            return intent_header + _append_sources_section(final, ctx)
+
+        if not valid_calls:
+            logger.info(f"[STEP {step}/{max_steps}] tool_call も final_answer もなし — break")
+            break
+
+        # 重複検出
+        fresh: list[dict] = []
+        skipped = 0
+        for tc in valid_calls:
+            key = _dedupe_key(tc["name"], tc.get("args", {}))
+            if key in executed_keys:
+                skipped += 1
+                continue
+            executed_keys.add(key)
+            fresh.append(tc)
+        if skipped:
+            logger.info(f"[STEP {step}/{max_steps}] 重複ツール {skipped}件をスキップ")
+
+        if not fresh:
+            logger.info(f"[STEP {step}/{max_steps}] 新規ツール0件 — 強制 synthesis へ")
+            break
+
+        progress(f"[STEP {step}/{max_steps}] ツール{len(fresh)}件実行中...")
+        logger.info(f"[STEP {step}/{max_steps}] ツール{len(fresh)}件を実行中...")
+        new_entries = _execute_calls_parallel(
+            fresh, ctx, step=step, timeout_s=min(120, remaining_s())
+        )
+        history.extend(new_entries)
+
+    # --- 強制 synthesis fallback
+    if history:
+        progress("最終回答を強制生成中...")
+        logger.info(f"[forced-synthesis] {len(history)}件のツール結果から最終回答生成")
+        synth_prompt = (
+            base_prompt
+            + "## ツール実行結果（全件）\n\n"
+            + _format_tool_history(history, keep_recent=8)
+            + "\n\n以下のツール結果のみを根拠に `<final_answer>` で回答してください。"
+            + "追加ツール呼び出しは禁止です。"
+        )
+        try:
+            resp = call_argus_llm(
+                synth_prompt, system=forced_system,
+                max_tokens=8192, timeout=remaining_s(), think=False,
+            )
+        except Exception as e:
+            logger.exception(f"[forced-synthesis] LLM error: {e}")
+            dump = _format_tool_history(history, keep_recent=999)
+            return intent_header + _append_sources_section(
+                f"回答生成に失敗しました ({e})。\n\n## 収集データ\n\n{dump}", ctx)
+
+        final = parse_final_answer(resp)
+        if final:
+            return intent_header + _append_sources_section(final, ctx)
+        clean = re.sub(r"<[^>]+>", "", resp).strip()
+        logger.warning("[forced-synthesis] final_answer タグなし、生応答を返却")
+        return intent_header + _append_sources_section(clean or resp, ctx)
+
+    # --- ツール実行も synthesis も発動しなかった場合
+    if last_response:
+        clean = re.sub(r"<[^>]+>", "", last_response).strip()
+        return intent_header + _append_sources_section(
+            clean or "調査できませんでした（最終回答を得られず）", ctx)
+    return intent_header + _append_sources_section(
+        "調査できませんでした（LLM 呼び出しに失敗しました）", ctx)
 
 
 _SLACK_REF_CACHE: dict[str, list[str]] = {}
@@ -860,7 +1070,8 @@ def main():
     parser.add_argument("--investigate", required=True, help="調査内容")
     parser.add_argument("--max-steps", type=int, default=_DEFAULT_MAX_STEPS, help="最大ステップ数")
     parser.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT, help="タイムアウト（秒）")
-    parser.add_argument("--days", type=int, default=_DEFAULT_SINCE_DAYS, help="直近何日分を対象にするか")
+    parser.add_argument("--days", type=int, default=_DEFAULT_SINCE_DAYS, help="直近何日分を対象にするか（--since 未指定時のみ有効）")
+    parser.add_argument("--since", type=str, default="", help="調査対象期間の開始日（YYYY-MM-DD）。指定時は --days より優先")
     parser.add_argument("--db", default=str(_PM_DB), help="pm.db のパス")
     parser.add_argument("--no-encrypt", action="store_true", help="平文モード")
     parser.add_argument("--dry-run", action="store_true", help="LLM呼び出しなし（シードデータ確認用）")
@@ -870,7 +1081,14 @@ def main():
     args = parser.parse_args()
 
     today = date.today().isoformat()
-    since_date = (date.today() - timedelta(days=args.days)).isoformat()
+    if args.since:
+        try:
+            date.fromisoformat(args.since)
+        except ValueError:
+            parser.error(f"--since の日付形式が不正です（YYYY-MM-DD）: {args.since}")
+        since_date = args.since
+    else:
+        since_date = (date.today() - timedelta(days=args.days)).isoformat()
 
     index_db, channels, pm_db_paths, index_name = _resolve_index_and_channels()
     if args.db != str(_PM_DB):
@@ -908,6 +1126,9 @@ def main():
         max_steps=args.max_steps,
         timeout=args.timeout,
     )
+
+    # ID 参照 (a:670 / d:42 / AI:670 / 決定:42 / ID:670) を content[:60] で展開
+    result = _expand_id_references(result, conns)
 
     for c in conns:
         c.close()

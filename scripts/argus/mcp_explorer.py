@@ -84,7 +84,7 @@ _DATA_TYPE_NAMES = {
 # データ種別検索
 # --------------------------------------------------------------------------- #
 
-def _search_pm_data(query: str) -> str:
+def _search_pm_data(query: str, since: str | None = None) -> str:
     """pm.db のアクションアイテム・決定事項を検索"""
     from argus.qa_engine import _query_action_items, _query_decisions
     from db_utils import open_pm_db
@@ -93,13 +93,13 @@ def _search_pm_data(query: str) -> str:
     conn = open_pm_db(_DATA_DIR / "pm.db")
     try:
         parts = []
-        items = _query_action_items(conn, keyword=query, limit=10)
+        items = _query_action_items(conn, keyword=query, limit=10, since=since)
         if items:
             lines = ["### アクションアイテム"]
             for r in items:
                 lines.append(f"- ID:{r['id']} [{r['status']}] 担当:{r.get('assignee','?')} {r['content'][:100]}")
             parts.append("\n".join(lines))
-        decisions = _query_decisions(conn, keyword=query, limit=10)
+        decisions = _query_decisions(conn, keyword=query, limit=10, since=since)
         if decisions:
             lines = ["### 決定事項"]
             for r in decisions:
@@ -110,11 +110,11 @@ def _search_pm_data(query: str) -> str:
         conn.close()
 
 
-def _search_text_index(query: str, index_db: Path, index_name: str = "pm") -> str:
+def _search_text_index(query: str, index_db: Path, index_name: str = "pm", since: str | None = None) -> str:
     """qa_index.db を全文検索して Markdown で返す"""
     from argus.retrieval import retrieve_chunks_hyde
     from argus.pm_qa_server import _format_source_label
-    merged = retrieve_chunks_hyde(query, index_db, index_name=index_name, max_merged=15)
+    merged = retrieve_chunks_hyde(query, index_db, index_name=index_name, max_merged=30, since_date=since)
     if not merged:
         return "該当する情報は見つかりませんでした。"
     lines = [f"### 検索結果（{len(merged)}件）"]
@@ -125,13 +125,13 @@ def _search_text_index(query: str, index_db: Path, index_name: str = "pm") -> st
     return "\n".join(lines)
 
 
-def _search_slack(query: str, index_db: Path) -> str:
+def _search_slack(query: str, index_db: Path, since: str | None = None) -> str:
     """Slack 生メッセージを検索"""
     from argus.retrieval import retrieve_chunks
     from argus.pm_qa_server import _format_source_label
     # source_type=slack_raw を絞り込むため index_name ではなく、retrieve_chunks の
     # 検索結果をあとでフィルタ。ここでは一旦全 index で検索
-    chunks = retrieve_chunks(query, index_db, k=20, index_name=None)
+    chunks = retrieve_chunks(query, index_db, k=40, index_name=None, since_date=since)
     slack_chunks = [c for c in chunks if c.get("source_type") == "slack_raw"][:10]
     if not slack_chunks:
         return "Slack メッセージに関連情報は見つかりませんでした。"
@@ -190,6 +190,7 @@ def run_explorer(
     data_type: str,
     emotion: str,
     index_db: Path | None = None,
+    since: str | None = None,
 ) -> str:
     """データ種別×エモーションの組み合わせで調査を実行する。
 
@@ -198,6 +199,7 @@ def run_explorer(
         data_type: データ種別 (pm_data | minutes | slack | box_docs)
         emotion: エモーション (conservative | aggressive | objective | future_oriented)
         index_db: qa_index.db のパス（None の場合は自動解決）
+        since: 対象期間の開始日 (YYYY-MM-DD、None の場合は全期間)
 
     Returns:
         Markdown 形式の分析結果
@@ -211,13 +213,13 @@ def run_explorer(
     # データ種別に応じた検索
     try:
         if data_type == "pm_data":
-            search_result = _search_pm_data(query)
+            search_result = _search_pm_data(query, since=since)
         elif data_type == "minutes":
-            search_result = _search_text_index(query, index_db, index_name="pm")
+            search_result = _search_text_index(query, index_db, index_name="pm", since=since)
         elif data_type == "slack":
-            search_result = _search_slack(query, index_db)
+            search_result = _search_slack(query, index_db, since=since)
         elif data_type == "box_docs":
-            search_result = _search_text_index(query, index_db, index_name="pm")
+            search_result = _search_text_index(query, index_db, index_name="pm", since=since)
         else:
             return f"不明なデータ種別: {data_type}"
     except Exception as e:

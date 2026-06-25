@@ -276,6 +276,40 @@ def load_claude_md_context() -> str:
     return "\n".join(sections) if sections else content[:3000]
 
 
+def load_codesign_context() -> str:
+    """docs/project.md の `### コデザイン項目` セクション本文を返す。
+
+    富岳NEXT のシステム仕様選択肢（ノード構成・メモリ階層・スケールアウト NW・
+    GPU 世代等）はコデザイン項目セクションに記載されており、機密情報のため
+    Claude が直接読めない。Argus Agent などローカル LLM が文脈として利用するため、
+    スクリプトから直接ファイルを読んでプロンプトに埋め込む。
+
+    セクションが存在しない / ファイルが存在しない場合は空文字列を返す。
+    """
+    # _REPO_ROOT は scripts/ を指してしまっているので、リポジトリルートを独自計算
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    project_md = repo_root / "docs" / "project.md"
+    if not project_md.exists():
+        return ""
+    content = project_md.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    out: list[str] = []
+    capture = False
+    for line in lines:
+        if re.match(r"^###\s+コデザイン項目\s*$", line):
+            capture = True
+            continue
+        if capture and re.match(r"^##?\s+", line):
+            break
+        if capture:
+            out.append(line)
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out)
+
+
 def load_claude_md(claude_md_path: Path) -> str:
     """
     CLAUDE.md を読み込み、`@path` 参照を再帰的に展開して返す。

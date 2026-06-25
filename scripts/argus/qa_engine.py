@@ -100,7 +100,7 @@ def classify_intent(question: str) -> dict:
     return {"intent": "text", "entities": {}}
 
 
-def _query_action_items(conn, *, assignee=None, status=None, milestone=None, keyword=None, limit=20) -> list[dict]:
+def _query_action_items(conn, *, assignee=None, status=None, milestone=None, keyword=None, limit=20, since=None) -> list[dict]:
     clauses = ["COALESCE(deleted,0)=0"]
     params: list = []
     if assignee:
@@ -115,6 +115,9 @@ def _query_action_items(conn, *, assignee=None, status=None, milestone=None, key
     if keyword:
         clauses.append("content LIKE ?")
         params.append(f"%{keyword}%")
+    if since:
+        clauses.append("extracted_at >= ?")
+        params.append(since)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"""SELECT id, content, assignee, due_date, status, milestone_id, source_ref,
@@ -127,12 +130,15 @@ def _query_action_items(conn, *, assignee=None, status=None, milestone=None, key
     return [dict(r) for r in rows]
 
 
-def _query_decisions(conn, *, keyword=None, limit=20) -> list[dict]:
+def _query_decisions(conn, *, keyword=None, limit=20, since=None) -> list[dict]:
     clauses = ["COALESCE(deleted,0)=0"]
     params: list = []
     if keyword:
         clauses.append("content LIKE ?")
         params.append(f"%{keyword}%")
+    if since:
+        clauses.append("decided_at >= ?")
+        params.append(since)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"""SELECT id, content, decided_at, source, source_ref,

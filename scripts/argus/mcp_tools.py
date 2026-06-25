@@ -46,14 +46,14 @@ def _has_pm_db() -> bool:
 #  構造化データ検索
 # =========================================================================== #
 
-def search_decisions(keyword: str, limit: int = 20) -> str:
+def search_decisions(keyword: str, limit: int = 50, since: str | None = None) -> str:
     """pm.db の決定事項をキーワード検索する"""
     if not _has_pm_db():
         return "pm.db が見つかりません。"
     from argus.qa_engine import _query_decisions
     conn = _get_pm_conn()
     try:
-        rows = _query_decisions(conn, keyword=keyword, limit=limit)
+        rows = _query_decisions(conn, keyword=keyword, limit=limit, since=since)
         if not rows:
             return f"該当する決定事項は見つかりませんでした（キーワード: {keyword}）。"
         lines = [f"## 決定事項検索結果（{len(rows)}件）"]
@@ -73,7 +73,8 @@ def search_action_items(
     keyword: str | None = None,
     assignee: str | None = None,
     status: str | None = None,
-    limit: int = 20,
+    limit: int = 50,
+    since: str | None = None,
 ) -> str:
     """pm.db のアクションアイテムを検索する（担当者・ステータス・キーワードで絞り込み）"""
     if not _has_pm_db():
@@ -82,7 +83,7 @@ def search_action_items(
     conn = _get_pm_conn()
     try:
         rows = _query_action_items(conn, assignee=assignee, status=status,
-                                    keyword=keyword, limit=limit)
+                                    keyword=keyword, limit=limit, since=since)
         if not rows:
             return "該当するアクションアイテムは見つかりませんでした。"
         lines = [f"## アクションアイテム検索結果（{len(rows)}件）"]
@@ -117,7 +118,7 @@ def get_milestone_progress() -> str:
         conn.close()
 
 
-def get_overdue_items(assignee: str | None = None, limit: int = 20) -> str:
+def get_overdue_items(assignee: str | None = None, limit: int = 50, since: str | None = None) -> str:
     """期限超過しているアクションアイテムを取得する"""
     if not _has_pm_db():
         return "pm.db が見つかりません。"
@@ -126,7 +127,7 @@ def get_overdue_items(assignee: str | None = None, limit: int = 20) -> str:
     conn = _get_pm_conn()
     try:
         today = __builtins__["__import__"]("datetime").date.today().isoformat()
-        rows = fetch_overdue_items(conn, today, "2000-01-01")
+        rows = fetch_overdue_items(conn, today, since or "2000-01-01")
         if assignee:
             rows = [r for r in rows if assignee in (r.get("assignee") or "")]
         rows = rows[:limit]
@@ -158,13 +159,13 @@ def get_assignee_workload() -> str:
 #  全文検索
 # =========================================================================== #
 
-def search_text(query: str, index_name: str = "pm") -> str:
+def search_text(query: str, index_name: str = "pm", since: str | None = None) -> str:
     """議事録・Slackメッセージを全文検索する。FTS5 + LLM re-ranking を使用"""
     if not _QA_INDEX.exists():
         return "qa_index.db が見つかりません。pm_embed.py でインデックスを構築してください。"
     from argus.retrieval import retrieve_chunks_hyde, rerank_chunks
     from argus.pm_qa_server import _format_source_label
-    merged = retrieve_chunks_hyde(query, _QA_INDEX, index_name=index_name, max_merged=30)
+    merged = retrieve_chunks_hyde(query, _QA_INDEX, index_name=index_name, max_merged=50, since_date=since)
     if not merged:
         return f"「{query}」に一致する情報は見つかりませんでした。"
     reranked = rerank_chunks(query, merged, format_source_label=_format_source_label)
@@ -177,13 +178,13 @@ def search_text(query: str, index_name: str = "pm") -> str:
     return "\n".join(lines)
 
 
-def search_text_hybrid(query: str, index_name: str = "pm") -> str:
+def search_text_hybrid(query: str, index_name: str = "pm", since: str | None = None) -> str:
     """FTS5 + ベクトル類似度のハイブリッド検索"""
     if not _QA_INDEX.exists():
         return "qa_index.db が見つかりません。"
     from argus.retrieval import retrieve_chunks_hybrid
     from argus.pm_qa_server import _format_source_label
-    chunks = retrieve_chunks_hybrid(query, _QA_INDEX, index_name=index_name)
+    chunks = retrieve_chunks_hybrid(query, _QA_INDEX, k=50, index_name=index_name, since_date=since)
     if not chunks:
         return f"「{query}」に一致する情報は見つかりませんでした。"
     lines = [f"## ハイブリッド検索結果（{len(chunks)}件）"]
@@ -199,11 +200,11 @@ def search_text_hybrid(query: str, index_name: str = "pm") -> str:
 #  Explorer Agent
 # =========================================================================== #
 
-def search_entity(query: str, perspective: str, data_type: str = "pm_data") -> str:
+def search_entity(query: str, perspective: str, data_type: str = "pm_data", since: str | None = None) -> str:
     """特定の視点（conservative/aggressive/objective/future_oriented）と
     データ種別（pm_data/minutes/slack/box_docs）で分析する。"""
     from argus.mcp_explorer import run_explorer
-    return run_explorer(query, data_type, perspective, _QA_INDEX)
+    return run_explorer(query, data_type, perspective, _QA_INDEX, since=since)
 
 
 def synthesize_answers(question: str, answers: list[str]) -> str:

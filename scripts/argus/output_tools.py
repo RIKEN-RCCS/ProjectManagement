@@ -31,16 +31,25 @@ def _load_argus_config() -> dict:
 def resolve_box_folder_id() -> str:
     """Box アップロード先 folder_id を解決する。
 
-    優先順位: 環境変数 PM_BOX_FOLDER_ID > argus_config.yaml の box.upload_folder_id
+    優先順位:
+      1. 環境変数 PM_BOX_FOLDER_ID
+      2. argus_config.yaml の box.upload_folder_id
+      3. argus_config.yaml の report.box_folder_id（議事録/XLSX と同じ設定を共有）
     """
     env_val = os.environ.get("PM_BOX_FOLDER_ID")
     if env_val:
         return env_val
     cfg = _load_argus_config()
+    # box.upload_folder_id
     box_cfg = cfg.get("box") or {}
     fid = box_cfg.get("upload_folder_id") or ""
     if isinstance(fid, str) and fid.strip():
         return fid.strip()
+    # report.box_folder_id（フォールバック）
+    report_cfg = cfg.get("report") or {}
+    fid2 = report_cfg.get("box_folder_id") or ""
+    if isinstance(fid2, str) and fid2.strip():
+        return fid2.strip()
     return ""
 
 

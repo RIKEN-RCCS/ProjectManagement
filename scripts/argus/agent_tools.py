@@ -100,6 +100,10 @@ def _call_mcp(fn_name: str) -> Callable[[dict, AgentContext], str]:
         raise RuntimeError(f"mcp_tools に {fn_name} が見つかりません")
 
     def wrapper(args: dict, ctx: AgentContext) -> str:
+        # ctx.since を注入して期間フィルタを効かせる
+        # (today は mcp_tools 関数の引数に存在しないため注入しない)
+        args = dict(args)
+        args.setdefault("since", ctx.since)
         return fn(**args)
     return wrapper
 
@@ -114,7 +118,7 @@ def _tool_search_text(args: dict, ctx: AgentContext) -> str:
     if not query:
         return "（検索クエリが空です）"
     # ctx.index_db を使って cited_chunks を蓄積するためラップ
-    result = _mcp_search(query, index_name=ctx.index_name)
+    result = _mcp_search(query, index_name=ctx.index_name, since=ctx.since)
     # search_text の内部で _format_source_label を使うが、
     # cited_chunks の蓄積は MCP サーバー側で行うためここではスキップ
     return result
