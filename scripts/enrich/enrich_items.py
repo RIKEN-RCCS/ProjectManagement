@@ -23,7 +23,6 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -31,7 +30,8 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cli_utils import call_claude, load_claude_md_context
-from db_utils import open_pm_db, init_pm_db
+from db_utils import init_pm_db, open_pm_db
+
 from enrich.knowledge_context import (
     extract_topic_keywords,
     fetch_fts_context,

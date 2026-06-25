@@ -18,14 +18,14 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_db, normalize_assignee
 from cli_utils import (
-    load_claude_md,
     call_argus_llm,
+    load_claude_md,
     retrieve_knowledge_for_extraction,
 )
-from ingest.ingest_plugin import IngestContext
+from db_utils import normalize_assignee, open_db
 
+from ingest.ingest_plugin import IngestContext
 
 # --------------------------------------------------------------------------- #
 # 定数
@@ -529,14 +529,16 @@ def _consensus_decisions(drafts: list[dict], min_vote: int, threshold: float) ->
         return []
     keys = [item["content"] for _, item in flat]
     try:
-        from embed_utils import embed_batch, cosine_similarity_matrix
         import numpy as np
+        from embed_utils import cosine_similarity_matrix, embed_batch
         vecs = embed_batch(keys)
         clusters: list[list[int]] = []
         centers = []
         for i, v in enumerate(vecs):
             if not clusters:
-                clusters.append([i]); centers.append(v.copy()); continue
+                clusters.append([i])
+                centers.append(v.copy())
+                continue
             sims = cosine_similarity_matrix(v, np.stack(centers))
             best = int(np.argmax(sims))
             if float(sims[best]) >= threshold:
@@ -544,7 +546,8 @@ def _consensus_decisions(drafts: list[dict], min_vote: int, threshold: float) ->
                 n_old = len(clusters[best]) - 1
                 centers[best] = (centers[best] * n_old + v) / (n_old + 1)
             else:
-                clusters.append([i]); centers.append(v.copy())
+                clusters.append([i])
+                centers.append(v.copy())
     except Exception as e:
         print(f"[ERROR] Slack 決定事項 embedding 失敗、最初のドラフトを採用: {e}", file=sys.stderr)
         return list(drafts[0].get("decisions") or []) if drafts else []
@@ -578,14 +581,16 @@ def _consensus_action_items(drafts: list[dict], min_vote: int, threshold: float)
         for _, item in flat
     ]
     try:
-        from embed_utils import embed_batch, cosine_similarity_matrix
         import numpy as np
+        from embed_utils import cosine_similarity_matrix, embed_batch
         vecs = embed_batch(keys)
         clusters: list[list[int]] = []
         centers = []
         for i, v in enumerate(vecs):
             if not clusters:
-                clusters.append([i]); centers.append(v.copy()); continue
+                clusters.append([i])
+                centers.append(v.copy())
+                continue
             sims = cosine_similarity_matrix(v, np.stack(centers))
             best = int(np.argmax(sims))
             if float(sims[best]) >= threshold:
@@ -593,7 +598,8 @@ def _consensus_action_items(drafts: list[dict], min_vote: int, threshold: float)
                 n_old = len(clusters[best]) - 1
                 centers[best] = (centers[best] * n_old + v) / (n_old + 1)
             else:
-                clusters.append([i]); centers.append(v.copy())
+                clusters.append([i])
+                centers.append(v.copy())
     except Exception as e:
         print(f"[ERROR] Slack AI embedding 失敗、最初のドラフトを採用: {e}", file=sys.stderr)
         return list(drafts[0].get("action_items") or []) if drafts else []

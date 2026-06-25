@@ -65,3 +65,13 @@ ignore = [
     "E501",  # line-too-long: プロジェクトでは長行を許容
     "E402",  # module-import-not-at-top: sys.path.insert() 後の import が定型
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# pptx_theme.py は python-pptx の連続属性設定を ; 区切りで圧縮する意図的な
+# コンパクト記法を多用する (vulture でも同様の理由で除外している)。
+# B008 は python-pptx の RGBColor(...) を引数デフォルトに使う定型パターン。
+# 実ファイル + 旧パスへの symlink 両方を ignore。
+"**/pptx_theme.py" = ["E702", "B008"]
+# FastAPI の Query(...) / File(...) を引数デフォルトに置く DI パターンが
+# B008 の false positive を生む (ライブラリ仕様上の標準形)。
+"**/pm_api.py" = ["B008"]

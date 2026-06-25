@@ -22,10 +22,10 @@ import sqlite3
 import sys
 import time
 import urllib.parse
-import urllib.robotparser
 import urllib.request
+import urllib.robotparser
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS fetch_state (
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def open_articles_db(db_path: Path) -> sqlite3.Connection:

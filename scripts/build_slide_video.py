@@ -100,7 +100,7 @@ def _extract_pdf_text(pdf_path: Path) -> list[str]:
 
 def _prepare_pdf_and_images(src: Path, work_dir: Path) -> tuple[Path, list[Path]]:
     """src を PDF にし、ページ PNG リストと PDF パスを返す。pm_box_crawl の関数を再利用。"""
-    from pm_box_crawl import _to_pdf, _pdf_to_images
+    from pm_box_crawl import _pdf_to_images, _to_pdf
 
     if src.suffix.lower() == ".pdf":
         pdf_path = src
@@ -263,8 +263,8 @@ def _ocr_slide(image: Path) -> str:
     if not base_url:
         return ""
     try:
-        from recording.slide_ocr import MEETING_FRAME_OCR_PROMPT
         from pm_box_crawl import ocr_slide_image
+        from recording.slide_ocr import MEETING_FRAME_OCR_PROMPT
     except ImportError as exc:
         logger.warning(f"OCR モジュールの import に失敗: {exc}")
         return ""
@@ -498,7 +498,7 @@ def render_video(
     ref_id = os.environ.get("FISH_REFERENCE_ID_EN") if lang == "en" else None
     pairs: list[tuple[Path, Path]] = []
     for slide, narration in pm_tts._iter_progress(
-        list(zip(slides, narrations)), total=len(slides), desc="synth", quiet=quiet,
+        list(zip(slides, narrations, strict=True)), total=len(slides), desc="synth", quiet=quiet,
     ):
         wav_path = seg_dir / f"slide_{slide.index:04d}.wav"
         _synth_narration_to_wav(

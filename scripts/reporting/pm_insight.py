@@ -29,20 +29,36 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from canvas_utils import post_to_canvas, sanitize_for_canvas
+from cli_utils import (
+    add_dry_run_arg,
+    add_no_encrypt_arg,
+    add_output_arg,
+    add_since_arg,
+    call_claude,
+    load_claude_md,
+    make_logger,
+)
 from db_utils import (
-    open_pm_db, fetch_milestone_progress, fetch_assignee_workload,
-    fetch_overdue_items, fetch_unlinked_items_count, fetch_no_assignee_count,
-    fetch_weekly_trends, fetch_unacknowledged_decisions, fetch_summary_stats,
+    fetch_assignee_workload,
+    fetch_milestone_progress,
+    fetch_no_assignee_count,
+    fetch_overdue_items,
+    fetch_summary_stats,
+    fetch_unacknowledged_decisions,
+    fetch_unlinked_items_count,
+    fetch_weekly_trends,
+    open_pm_db,
 )
 from format_utils import (
-    format_milestone_table, format_overdue_list, format_assignee_table,
-    format_weekly_trends as format_trends_table, format_decisions_list,
+    format_assignee_table,
+    format_decisions_list,
+    format_milestone_table,
+    format_overdue_list,
 )
-from cli_utils import (
-    add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    make_logger, load_claude_md, call_claude,
+from format_utils import (
+    format_weekly_trends as format_trends_table,
 )
-from canvas_utils import sanitize_for_canvas, post_to_canvas
 
 # --------------------------------------------------------------------------- #
 # パス解決

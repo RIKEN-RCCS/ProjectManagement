@@ -29,15 +29,11 @@ Options:
 """
 
 import argparse
-import json
 import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-
-import requests
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -51,10 +47,10 @@ PROJECT_MD = REPO_ROOT / "docs" / "project.md"
 
 sys.path.insert(0, str(SCRIPT_DIR))
 from cli_utils import (
-    strip_think_blocks, call_argus_llm, load_claude_md_context,
-    enrich_combined_with_vtt, retrieve_knowledge_for_extraction,
+    call_argus_llm,
+    enrich_combined_with_vtt,
+    load_claude_md_context,
 )
-
 
 # --------------------------------------------------------------------------- #
 # プロンプトテンプレート
@@ -297,7 +293,7 @@ def extract_from_chunk(
     timeout: int,
     think: bool = False,
     no_chat_template_kwargs: bool = False,
-    temperature: Optional[float] = None,
+    temperature: float | None = None,
     max_tokens: int = 4096,
     slide_context_block: str = "",
 ) -> str:
@@ -417,7 +413,7 @@ def _sample_n_times(
     think: bool,
     max_tokens: int,
     no_chat_template_kwargs: bool,
-    base_temperature: Optional[float],
+    base_temperature: float | None,
     label: str,
 ) -> list[str]:
     """同一プロンプトを n 回サンプリングし、空でない結果のリストを返す。
@@ -585,7 +581,7 @@ def _greedy_cluster(
     """
     if not items:
         return []
-    from embed_utils import embed_batch, cosine_similarity_matrix
+    from embed_utils import cosine_similarity_matrix, embed_batch
     vecs = embed_batch(items)
 
     import numpy as np
@@ -618,7 +614,7 @@ def _consensus_stage2(
     think: bool,
     max_tokens: int,
     no_chat_template_kwargs: bool,
-    temperature: Optional[float],
+    temperature: float | None,
 ) -> str:
     """Stage 2 のドラフト群を集約して `## 議事内容` 全体の Markdown を返す。"""
     # 各ドラフトをセクションに分解
@@ -705,7 +701,7 @@ def _consensus_stage3(
     think: bool,
     max_tokens: int,
     no_chat_template_kwargs: bool,
-    temperature: Optional[float],
+    temperature: float | None,
 ) -> str:
     """Stage 3 のドラフト群を集約して `## 決定事項` + `## アクションアイテム` を返す。"""
     # 決定事項とアクションアイテムをドラフトごとに分離
@@ -864,13 +860,13 @@ def generate_minutes(
     multi_stage: bool = False,
     chunk_minutes: int = 30,
     no_chat_template_kwargs: bool = False,
-    from_combined: Optional[str] = None,
-    temperature: Optional[float] = None,
-    vtt_path: Optional[str] = None,
-    slide_context: Optional[str] = None,
+    from_combined: str | None = None,
+    temperature: float | None = None,
+    vtt_path: str | None = None,
+    slide_context: str | None = None,
     consensus_n: int = 3,
     consensus_threshold: float = 0.78,
-    consensus_min_vote: Optional[int] = None,
+    consensus_min_vote: int | None = None,
     enable_triage: bool = True,
 ) -> str:
     """文字起こしファイルから議事録を生成してファイルに保存する。
@@ -927,7 +923,7 @@ def generate_minutes(
         print(f"[INFO] combined ファイルを読み込み中: {from_combined}")
         combined = Path(from_combined).read_text(encoding="utf-8")
         print(f"[INFO] combined テキスト: {len(combined)} 字")
-        print(f"[INFO] call_argus_llm で議事録を統合生成中...")
+        print("[INFO] call_argus_llm で議事録を統合生成中...")
         prompt = PROMPT_TEMPLATE.format(
             claude_md_context=claude_md_context,
             transcript=combined,
@@ -1009,7 +1005,7 @@ def generate_minutes(
         combined_path.write_text(combined, encoding="utf-8")
         print(f"[INFO] combined キャッシュを保存しました: {combined_path}")
 
-        print(f"[INFO] call_argus_llm で議事録を統合生成中...")
+        print("[INFO] call_argus_llm で議事録を統合生成中...")
         prompt = PROMPT_TEMPLATE.format(
             claude_md_context=claude_md_context,
             transcript=combined,
@@ -1090,9 +1086,9 @@ def generate_minutes(
             decisions_input = enriched_text
             print(f"[INFO] VTT 統合完了: {len(enriched_text)} 字（元: {len(input_text)} 字）")
         else:
-            print(f"[WARN] VTT セグメントが見つかりません。話者情報なしで続行します")
+            print("[WARN] VTT セグメントが見つかりません。話者情報なしで続行します")
 
-    print(f"[INFO] call_argus_llm で決定事項・アクションアイテムを生成中...")
+    print("[INFO] call_argus_llm で決定事項・アクションアイテムを生成中...")
 
     # ナレッジ検索（Phase 3追加）— いったん停止
     # knowledge_context = retrieve_knowledge_for_extraction(
@@ -1147,8 +1143,8 @@ def generate_minutes(
     # トリアージ（抽出候補の2次審査）
     if enable_triage:
         try:
-            from ingest.slack import triage_items, fetch_milestones
             from db_utils import open_db as _open_db
+            from ingest.slack import fetch_milestones, triage_items
             pm_db_path = Path(__file__).resolve().parent.parent / "data" / "pm.db"
             milestones = []
             if pm_db_path.exists():
@@ -1313,7 +1309,7 @@ def main() -> int:
         os.environ["LOCAL_LLM_TOKEN"] = args.token
     print(f"[INFO] 思考モード  : {'有効' if args.think else '無効'}")
     if args.think and args.no_chat_template_kwargs:
-        print(f"[INFO] chat_template_kwargs: 送信しない（常時 reasoning モデル）")
+        print("[INFO] chat_template_kwargs: 送信しない（常時 reasoning モデル）")
     print(f"[INFO] max_tokens  : {args.max_tokens}")
     print(f"[INFO] マルチステージ: {'有効' if args.multi_stage else '無効'}")
     if args.multi_stage:

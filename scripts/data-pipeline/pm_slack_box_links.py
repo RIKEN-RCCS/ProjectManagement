@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import yaml
 from cli_utils import (
     add_dry_run_arg,
     add_no_encrypt_arg,
@@ -44,8 +45,6 @@ from cli_utils import (
     call_argus_llm,
 )
 from db_utils import open_db
-
-import yaml
 
 # --------------------------------------------------------------------------- #
 # 定数

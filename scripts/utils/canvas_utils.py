@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-
 # --------------------------------------------------------------------------- #
 # Slack クライアント初期化
 # --------------------------------------------------------------------------- #
@@ -187,7 +186,7 @@ def _collect_section_ids(client: WebClient, canvas_id: str) -> list[str]:
     seen: set[str] = set()
     ids: list[str] = []
     for m in _PAT_TAG_WITH_ID.finditer(html):
-        tag, sid = m.group(1).lower(), m.group(2)
+        sid = m.group(2)
         if sid in seen:
             continue
         seen.add(sid)

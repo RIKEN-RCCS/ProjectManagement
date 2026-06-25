@@ -83,12 +83,17 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_db
 from cli_utils import (
-    add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    make_logger, prepare_transcript, call_claude, load_claude_md_context,
+    add_dry_run_arg,
+    add_no_encrypt_arg,
+    add_output_arg,
+    add_since_arg,
+    call_claude,
+    load_claude_md_context,
+    make_logger,
+    prepare_transcript,
 )
-
+from db_utils import open_db
 
 # --------------------------------------------------------------------------- #
 # パス解決
@@ -542,7 +547,7 @@ def show_meeting(minutes_dir: Path, meeting_id: str,
             if inst['slack_file_permalink']:
                 print(f"  ファイルURL: {inst['slack_file_permalink']}")
         else:
-            print(f"  Slack投稿  : 未投稿")
+            print("  Slack投稿  : 未投稿")
         print(f"{'='*70}")
 
         decisions = conn.execute(
@@ -647,7 +652,7 @@ def cmd_export(minutes_dir: Path, meeting_id: str, kind_filter: str | None,
         if output_path:
             Path(output_path).write_text(md, encoding="utf-8")
             print(f"[INFO] エクスポート完了: {output_path}")
-            print(f"[INFO] 修正後に以下のコマンドで再インポートしてください:")
+            print("[INFO] 修正後に以下のコマンドで再インポートしてください:")
             print(f"  python3 scripts/pm_minutes_import.py {output_path} \\")
             print(f"      --meeting-name {kind} --held-at {held_at} --no-llm --force")
         else:
@@ -778,8 +783,8 @@ def process_file(
 
     # トリアージ（抽出候補の2次審査）
     if not no_llm:
-        from ingest.slack import triage_items, fetch_milestones
         from db_utils import open_db as _open_db
+        from ingest.slack import fetch_milestones, triage_items
         pm_db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pm.db"
         milestones = []
         if pm_db_path.exists():

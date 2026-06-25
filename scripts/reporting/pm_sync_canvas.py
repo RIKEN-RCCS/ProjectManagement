@@ -35,16 +35,21 @@ import re
 import sqlite3
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cli_utils import (
+    add_dry_run_arg,
+    add_no_encrypt_arg,
+    add_output_arg,
+    make_logger,
+    resolve_report_canvas_id,
+)
 from db_utils import open_db
-from cli_utils import (add_output_arg, add_no_encrypt_arg, add_dry_run_arg,
-                       resolve_report_canvas_id, make_logger)
 
 # --------------------------------------------------------------------------- #
 # 定数
@@ -437,7 +442,7 @@ def sync_decision_content(
                 "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
                 " VALUES ('decisions', ?, 'content', ?, ?, ?, 'canvas_sync')",
                 (str(d_id), db_content or None, canvas_content,
-                 datetime.now(timezone.utc).isoformat()),
+                 datetime.now(UTC).isoformat()),
             )
             conn.execute("UPDATE decisions SET content = ? WHERE id = ?", (canvas_content, d_id))
             conn.commit()
@@ -461,7 +466,7 @@ def sync_decision_acknowledgements(
     テキスト先頭の [D:id] があれば ID ルックアップを優先する。
     なければテキストマッチ（前方一致）にフォールバックする。
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     rows = conn.execute("SELECT id, content, acknowledged_at FROM decisions WHERE COALESCE(deleted,0)=0").fetchall()
     by_id: dict[int, dict] = {
         d["id"]: {"id": d["id"], "acknowledged_at": d["acknowledged_at"]}
@@ -565,7 +570,7 @@ def write_audit_log(
             field,
             str(old_value) if old_value is not None else None,
             str(new_value) if new_value is not None else None,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
             source,
         ),
     )
@@ -683,7 +688,7 @@ def main() -> None:
 
     # --acknowledge / --unacknowledge: Canvas同期なしで直接更新
     if args.acknowledge or args.unacknowledge:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
         for did in (args.acknowledge or []):
             row = conn.execute("SELECT id, content, acknowledged_at FROM decisions WHERE id=?", (did,)).fetchone()
@@ -817,13 +822,13 @@ def main() -> None:
             not_found_count += 1
 
     # 決定事項チェックボックス状態を同期
-    log(f"\n[INFO] 決定事項チェックボックスを pm.db に同期中...")
+    log("\n[INFO] 決定事項チェックボックスを pm.db に同期中...")
     ack_count, rev_count, ack_not_found = sync_decision_acknowledgements(
         conn, checked_decisions, unchecked_decisions, args.dry_run, log
     )
 
     # 決定事項内容を同期
-    log(f"\n[INFO] 決定事項内容を pm.db に同期中...")
+    log("\n[INFO] 決定事項内容を pm.db に同期中...")
     decision_contents = parse_decision_contents(combined)
     dcontent_count = sync_decision_content(conn, decision_contents, args.dry_run, log)
     if dcontent_count == 0:

@@ -16,7 +16,6 @@ import argparse
 import json
 import re
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -24,21 +23,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import pptx_theme as T  # noqa: E402
 import yaml  # type: ignore
-
+from cli_utils import (  # noqa: E402
+    add_filter_arg,
+    call_argus_llm,
+    resolve_filter_presets,
+    strip_think_blocks,
+)
 from db_utils import (
-    open_pm_db,
+    fetch_milestone_progress,
     open_db,
     open_knowledge_db,
-    fetch_milestone_progress,
+    open_pm_db,
 )
-from cli_utils import (call_argus_llm, strip_think_blocks,  # noqa: E402
-                       add_filter_arg, resolve_filter_presets)
-
-from pptx.util import Inches, Pt  # noqa: E402
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR  # noqa: E402
-
-import pptx_theme as T  # noqa: E402
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN  # noqa: E402
+from pptx.util import Inches  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -128,7 +128,7 @@ _NOISE = {
     "これ", "それ", "あれ", "どれ", "場合", "等", "など", "及び", "または",
     "について", "に対して", "に関する", "における", "として",
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "by", "with",
-    "について", "完了", "確立", "受領", "提出", "整理", "策定", "決定", "実施",
+    "完了", "確立", "受領", "提出", "整理", "策定", "決定", "実施",
     "対応", "確定", "明文化", "運用", "開催", "公開", "確認", "報告",
 }
 
@@ -446,7 +446,7 @@ def _categorize_overdue(content: str) -> str:
     return "その他"
 
 
-def collect_risk_signals(rd: "ReportData", today: str) -> RiskSignals:
+def collect_risk_signals(rd: ReportData, today: str) -> RiskSignals:
     rs = RiskSignals()
     rs.overdue_total = len(rd.overdue_items)
 
@@ -631,7 +631,7 @@ def build_narrative_prompt(m: Milestone, since: str, until: str) -> str:
 
     parts.append("### 機械的に観察された注意事項")
     if is_progress_zero:
-        parts.append(f"  - 紐付き AI が 0/0。進捗バー 0% で『順調』と判定する根拠は無い")
+        parts.append("  - 紐付き AI が 0/0。進捗バー 0% で『順調』と判定する根拠は無い")
     if rem is not None and rem <= 60:
         parts.append(f"  - 期限まで残 {rem} 日（短期）")
     if has_undefined:
@@ -785,7 +785,7 @@ def call_llm_safe(prompt: str, *, system: str = _NARRATIVE_SYSTEM,
 def render_markdown(rd: ReportData) -> str:
     L = []
     L.append(f"# 隔週進捗レポート ({rd.since} 〜 {rd.until})")
-    L.append(f"")
+    L.append("")
     L.append(f"対象 index: `{rd.index_name}`  /  生成日: {date.today().isoformat()}")
     L.append("")
     L.append("## 全体サマリー")
@@ -905,7 +905,6 @@ def render_pptx(rd: ReportData, out_path: Path) -> None:
     # KPI カード (3 列) — 「障害シグナル」を主軸に置く
     rs = rd.risks
     fy_n = len(rs.fy_planning_overdue)
-    ext_n = len(rs.external_dep_signals)
     overdue_n = rs.overdue_total
     unlinked_pct = int(rs.no_milestone_link_ratio * 100)
     kpi = [
@@ -980,7 +979,7 @@ def render_pptx(rd: ReportData, out_path: Path) -> None:
     T.footer(s, sw, sh, f"対象期間 {rd.since} 〜 {rd.until}", page=page_no, total=total_pages)
 
     # ----- Milestone slides (文章中心) -----
-    for idx, m in enumerate(rd.milestones, start=1):
+    for m in rd.milestones:
         page_no += 1
         s = T.blank_slide(prs)
         T.add_bg(s, sw, sh, T.ICE)
@@ -1134,7 +1133,7 @@ def render_pptx(rd: ReportData, out_path: Path) -> None:
     T.add_rect(s, pers_x, mid_y, Inches(0.15), mid_h, border, rounded=True, radius=0.4)
     T.add_text(s, pers_x + Inches(0.25), mid_y + Inches(0.08),
                half_w - Inches(0.4), Inches(0.32),
-               f"属人化リスク（期間内 AI の集中度）",
+               "属人化リスク（期間内 AI の集中度）",
                size=11, bold=True, color=T.GOLD if is_concentrated else T.SUCCESS)
     if top_assignees:
         items = [f"{n}: {c} 件" for n, c in top_assignees]
@@ -1205,7 +1204,7 @@ def render_pptx(rd: ReportData, out_path: Path) -> None:
     prs.save(str(out_path))
 
 
-def _draw_block(s, x, y, w, title: str, items: list[str]) -> "Inches":
+def _draw_block(s, x, y, w, title: str, items: list[str]) -> Inches:
     box_h = Inches(0.35 + max(1, len(items)) * 0.32 + 0.1)
     T.add_rect(s, x, y, w, box_h, T.WHITE, line=T.LINE, rounded=True, radius=0.04)
     T.add_text(s, x + Inches(0.15), y + Inches(0.05), w - Inches(0.3), Inches(0.3),
@@ -1293,7 +1292,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     cfg = load_argus_config(REPO_ROOT / args.config)
-    idx = resolve_index(cfg, args.index_name)
+    resolve_index(cfg, args.index_name)  # 設定の妥当性のみ確認
 
     # filter_presets の解決（--filter が指定された場合）
     filter_channels, filter_meetings = resolve_filter_presets(
@@ -1343,9 +1342,6 @@ def main() -> int:
     box_index_filter = None if args.index_name == "pm-all" else [args.index_name]
     box_files = fetch_period_box_files(REPO_ROOT / args.box_db, args.since, args.until,
                                        index_filter=box_index_filter)
-    slack_threads = fetch_period_slack_threads(REPO_ROOT / args.slack_db,
-                                               args.since, args.until,
-                                               idx["channels"])
 
     # 紐付け
     unlinked_completed, unlinked_created, unlinked_decisions = [], [], []

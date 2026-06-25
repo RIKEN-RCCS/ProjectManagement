@@ -45,7 +45,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -53,7 +52,7 @@ import tempfile
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -101,7 +100,7 @@ _JST = timezone(timedelta(hours=9))
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _to_jst(iso_str: str | None) -> str:

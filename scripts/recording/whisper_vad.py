@@ -1,12 +1,12 @@
-import os
 import argparse
-import torch
-import soundfile as sf
+import os
 from datetime import timedelta
+
+import soundfile as sf
+import torch
 from pyannote.audio import Pipeline
 from silero_vad import collect_chunks, get_speech_timestamps, load_silero_vad
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
-import numpy as np
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 

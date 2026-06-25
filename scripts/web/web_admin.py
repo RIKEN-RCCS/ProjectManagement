@@ -15,11 +15,10 @@ import asyncio
 import json
 import os
 import sqlite3
-import subprocess
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,7 +94,7 @@ class AdminJobQueue:
             "INSERT INTO admin_jobs (id, kind, status, params_json, created_at, log_file)"
             " VALUES (?,?, 'queued',?,?,?)",
             (job_id, kind, json.dumps(params, ensure_ascii=False),
-             datetime.now(timezone.utc).isoformat(), log_file),
+             datetime.now(UTC).isoformat(), log_file),
         )
         conn.commit()
         conn.close()
@@ -286,7 +285,7 @@ class AdminJobQueue:
             return
 
         self._update_job(job_id, status="running",
-                         started_at=datetime.now(timezone.utc).isoformat())
+                         started_at=datetime.now(UTC).isoformat())
 
         exit_code = None
         summary = ""
@@ -320,12 +319,12 @@ class AdminJobQueue:
             self._update_job(
                 job_id,
                 status=status,
-                finished_at=datetime.now(timezone.utc).isoformat(),
+                finished_at=datetime.now(UTC).isoformat(),
                 exit_code=exit_code,
                 summary=summary,
                 progress=100 if status == "success" else 0,
             )
-        except Exception as e:
+        except Exception:
             # If status update itself fails, log to stderr
             import traceback
             traceback.print_exc()
@@ -427,7 +426,7 @@ def tail_log(log_path: str | Path, lines: int = 100) -> dict:
         return {"lines": [], "total_lines": 0, "error": "Log file not found"}
 
     try:
-        with open(p, "r") as f:
+        with open(p) as f:
             all_lines = f.readlines()
         tail = all_lines[-lines:]
         return {
@@ -459,7 +458,7 @@ def scan_recent_errors(max_lines: int = 200) -> list[dict]:
         if not fpath.exists():
             continue
         try:
-            with open(fpath, "r") as f:
+            with open(fpath) as f:
                 all_lines = f.readlines()
             # 末尾から max_lines 行をチェック
             for i, line in enumerate(all_lines[-max_lines:]):

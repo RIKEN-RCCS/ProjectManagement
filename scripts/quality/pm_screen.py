@@ -39,11 +39,15 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from db_utils import open_db
 from cli_utils import (
-    add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-    add_db_arg, add_output_arg, make_logger, resolve_db_path,
+    add_db_arg,
+    add_no_encrypt_arg,
+    add_output_arg,
+    add_since_arg,
+    make_logger,
+    resolve_db_path,
 )
+from db_utils import open_db
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 

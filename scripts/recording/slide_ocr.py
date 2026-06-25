@@ -25,9 +25,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Iterable
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
@@ -207,9 +207,9 @@ def ocr_slides(
         logger.warning("LOCAL_LLM_URL 未設定のため OCR をスキップします")
         return [""] * len(frames)
 
-    from pm_box_crawl import ocr_slide_image
-
     import time as _time
+
+    from pm_box_crawl import ocr_slide_image
     completed_count = 0
     start_ts = _time.time()
 

@@ -11,36 +11,54 @@ Usage:
 """
 
 import argparse
-import asyncio
-import csv
 import io
 import os
+import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent))
-from web_utils import (
-    scan_pm_dbs, get_conn, load_milestones, load_action_items, load_decisions,
-    load_minutes_content, nv, to_bool, audit, do_save_action_items, do_save_decisions,
-    load_filter_presets,
-)
 from db_utils import open_db
 from web_admin import (
-    AdminJobQueue, get_all_services, get_service_status, get_dashboard_stats,
-    get_recent_minutes, list_minutes, get_minutes_content,
-    get_minutes_decisions, get_minutes_action_items,
-    update_minutes_decisions, update_minutes_action_items,
-    delete_minutes_instance, delete_minutes_from_pm,
-    update_minutes_content, get_minutes_held_at,
-    service_action, tail_log, scan_recent_errors,
+    AdminJobQueue,
+    delete_minutes_from_pm,
+    delete_minutes_instance,
+    get_all_services,
+    get_dashboard_stats,
+    get_minutes_action_items,
+    get_minutes_content,
+    get_minutes_decisions,
+    get_minutes_held_at,
+    get_recent_minutes,
+    get_service_status,
+    list_minutes,
+    scan_recent_errors,
+    service_action,
+    tail_log,
+    update_minutes_action_items,
+    update_minutes_content,
+    update_minutes_decisions,
+)
+from web_utils import (
+    audit,
+    do_save_action_items,
+    do_save_decisions,
+    get_conn,
+    load_action_items,
+    load_decisions,
+    load_filter_presets,
+    load_milestones,
+    load_minutes_content,
+    nv,
+    scan_pm_dbs,
 )
 
 # --------------------------------------------------------------------------- #
@@ -184,7 +202,7 @@ def create_action_item(req: NewActionItemRequest):
         " VALUES(?,?,?,?,?,?,'manual',?,?)",
         (req.content.strip(), nv(req.assignee), nv(req.due_date),
          nv(req.milestone_id), req.status, nv(req.note), nv(req.source),
-         datetime.now(timezone.utc).isoformat()),
+         datetime.now(UTC).isoformat()),
     )
     conn.commit()
     return {"ok": True, "id": cur.lastrowid}
@@ -228,7 +246,7 @@ def create_decision(req: NewDecisionRequest):
         "INSERT INTO decisions (content,decided_at,source,source_ref,extracted_at)"
         " VALUES(?,?,'manual',?,?)",
         (req.content.strip(), nv(req.decided_at),
-         nv(req.source), datetime.now(timezone.utc).isoformat()),
+         nv(req.source), datetime.now(UTC).isoformat()),
     )
     conn.commit()
     return {"ok": True, "id": cur.lastrowid}
@@ -237,7 +255,7 @@ def create_decision(req: NewDecisionRequest):
 @app.post("/api/decisions/ack-all")
 def ack_all_decisions():
     conn = _get_conn()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     cur = conn.execute(
         "UPDATE decisions SET acknowledged_at=? WHERE COALESCE(deleted,0)=0"
         " AND (acknowledged_at IS NULL OR acknowledged_at='')",
@@ -306,7 +324,7 @@ def _extract_label(text: str, url: str, url_start: int, url_end: int) -> str:
 
     # パターン3: URLの直前行に拡張子付きファイル名があれば使う
     before = text[max(0, url_start - 500):url_start]
-    lines_before = [l.strip() for l in before.split("\n") if l.strip()]
+    lines_before = [ln.strip() for ln in before.split("\n") if ln.strip()]
     for line in reversed(lines_before):
         if _is_url_like(line):
             continue
@@ -762,7 +780,6 @@ async def admin_recording_upload(files: list[UploadFile] = File(...),
         proc_dir.mkdir(parents=True, exist_ok=True)
         _state["processing_dir"] = proc_dir
 
-    audio_exts = {".mp4", ".m4a", ".wav", ".mp3"}
     audio_path = None
     vtt_path = None
 
@@ -798,7 +815,7 @@ async def admin_recording_upload(files: list[UploadFile] = File(...),
     job_id = queue.enqueue("recording", params)
     queue.start(job_id)
 
-    extra = f" + VTT" if vtt_path else ""
+    extra = " + VTT" if vtt_path else ""
     return {"job_id": job_id, "status": "queued", "file": audio_path + extra}
 
 

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 def box_json(cmd: list[str], timeout: int = 120):

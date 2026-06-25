@@ -12,7 +12,6 @@ import re
 import sys
 from pathlib import Path
 
-
 # --------------------------------------------------------------------------- #
 # argparse ヘルパー
 # --------------------------------------------------------------------------- #
@@ -216,19 +215,17 @@ def make_logger(output_path: str | None):
 # LLM 呼び出し（utils.llm に移動済み — 後方互換のため再 export）
 # --------------------------------------------------------------------------- #
 from utils.llm import (  # noqa: E402, F401
-    strip_think_blocks,
-    detect_vllm_model,
-    _prefer_rivault,
-    prefer_rivault,
-    allow_rivault_fallback,
     _call_local_llm_inner,
-    call_local_llm,
-    call_rivault,
+    _prefer_rivault,
+    allow_rivault_fallback,
     call_argus_llm,
     call_claude,
+    call_local_llm,
+    call_rivault,
+    detect_vllm_model,
+    prefer_rivault,
+    strip_think_blocks,
 )
-
-
 
 # --------------------------------------------------------------------------- #
 # CLAUDE.md ローダー
@@ -388,7 +385,11 @@ def retrieve_knowledge_for_extraction(
         _scripts_dir = str(Path(__file__).resolve().parent.parent)
         if _scripts_dir not in sys.path:
             sys.path.insert(0, _scripts_dir)
-        from argus.pm_qa_server import retrieve_chunks_hyde, rerank_chunks, format_context
+        from argus.pm_qa_server import (
+            format_context,
+            rerank_chunks,
+            retrieve_chunks_hyde,
+        )
         from enrich.knowledge_context import extract_topic_keywords
 
         # トピックキーワード抽出（名詞・固有名詞のみ）
@@ -426,8 +427,11 @@ def retrieve_knowledge_for_extraction(
 # Whisper パーサ（utils.transcript に移動済み — 後方互換のため再 export）
 # --------------------------------------------------------------------------- #
 from utils.transcript import (  # noqa: F401 — 後方互換
-    _WHISPER_SEGMENT_RE, _parse_timestamp,
-    parse_whisper_transcript, format_whisper_transcript, prepare_transcript,
+    _WHISPER_SEGMENT_RE,
+    _parse_timestamp,
+    format_whisper_transcript,
+    parse_whisper_transcript,
+    prepare_transcript,
 )
 
 # --------------------------------------------------------------------------- #
@@ -444,8 +448,11 @@ def resolve_db_path(arg_db: str | None, default: Path) -> Path:
 # VTT ユーティリティ（utils.transcript に移動済み — 後方互換のため再 export）
 # --------------------------------------------------------------------------- #
 from utils.transcript import (  # noqa: F401
-    parse_vtt, _ts_to_sec,
-    get_speaker_timeline, get_speaker_summary,
-    build_speaker_map, enrich_combined_with_vtt,
     _COMBINED_PART_RE,
+    _ts_to_sec,
+    build_speaker_map,
+    enrich_combined_with_vtt,
+    get_speaker_summary,
+    get_speaker_timeline,
+    parse_vtt,
 )

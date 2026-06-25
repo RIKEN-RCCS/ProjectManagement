@@ -21,7 +21,7 @@ file_id を引いて files.delete API を呼ぶために使う。
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _DB_PATH = Path(__file__).resolve().parent.parent / "data" / "voice_uploads.db"
@@ -63,7 +63,7 @@ def record_upload(
     """アップロード履歴を記録する。同一キーでの重複はそのまま上書き。"""
     if not (message_ts and channel_id and file_id):
         return
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _connect() as conn:
         conn.execute(
             """
@@ -102,7 +102,7 @@ def find_by_thread(
                 (channel_id, message_ts),
             )
         cols = [c[0] for c in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
 
 def delete_record(*, channel_id: str, message_ts: str, file_id: str) -> None:

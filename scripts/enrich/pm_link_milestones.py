@@ -22,13 +22,12 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg, call_claude
 from db_utils import open_pm_db
-from cli_utils import call_claude, add_no_encrypt_arg, add_dry_run_arg, add_since_arg
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB = REPO_ROOT / "data" / "pm.db"
@@ -123,7 +122,7 @@ def write_audit(conn, ai_id: int, old: str | None, new: str | None) -> None:
             "milestone_id",
             old,
             new,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
             "auto_link",
         ),
     )
@@ -174,7 +173,7 @@ def format_items_for_prompt(items: list[dict]) -> str:
         if it.get("source") == "meeting" and it.get("meeting_kind"):
             meta_parts.append(f"会議: {it['meeting_kind']} ({it.get('meeting_held_at') or ''})")
         else:
-            meta_parts.append(f"出典: Slack")
+            meta_parts.append("出典: Slack")
         if it.get("assignee"):
             meta_parts.append(f"担当: {it['assignee']}")
         if it.get("due_date"):

@@ -21,12 +21,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
-import tempfile
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -37,13 +35,22 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.worksheet import Worksheet
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_db, open_pm_db, fetch_milestone_progress
-from cli_utils import (add_no_encrypt_arg, add_dry_run_arg,
-                       add_since_arg, add_filter_arg, resolve_filter_presets,
-                       resolve_report_canvas_id, make_logger)
-from canvas_utils import sanitize_for_canvas, post_to_canvas
-from pm_report import (RISK_KEYWORDS, fetch_open_action_items,
-                       fetch_recent_decisions, detect_risk_items)
+from canvas_utils import post_to_canvas, sanitize_for_canvas
+from cli_utils import (
+    add_dry_run_arg,
+    add_filter_arg,
+    add_no_encrypt_arg,
+    add_since_arg,
+    make_logger,
+    resolve_filter_presets,
+    resolve_report_canvas_id,
+)
+from db_utils import fetch_milestone_progress, open_db, open_pm_db
+from pm_report import (
+    detect_risk_items,
+    fetch_open_action_items,
+    fetch_recent_decisions,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_PM_DB = REPO_ROOT / "data" / "pm.db"
@@ -269,7 +276,7 @@ def _build_action_items_sheet(ws: Worksheet, rows: list[dict],
     editable = {label for label, key, ed in AI_COLUMNS if ed}
     _write_header(ws, AI_COLUMNS, editable)
     for r_idx, item in enumerate(rows, start=2):
-        for c_idx, (label, key, ed) in enumerate(AI_COLUMNS, start=1):
+        for c_idx, (_label, key, ed) in enumerate(AI_COLUMNS, start=1):
             cell = ws.cell(row=r_idx, column=c_idx)
             _set_cell_value(cell, key, item, url_map)
             if not ed:
@@ -286,7 +293,7 @@ def _build_decisions_sheet(ws: Worksheet, rows: list[dict],
     editable = {label for label, key, ed in DEC_COLUMNS if ed}
     _write_header(ws, DEC_COLUMNS, editable)
     for r_idx, item in enumerate(rows, start=2):
-        for c_idx, (label, key, ed) in enumerate(DEC_COLUMNS, start=1):
+        for c_idx, (_label, key, ed) in enumerate(DEC_COLUMNS, start=1):
             cell = ws.cell(row=r_idx, column=c_idx)
             _set_cell_value(cell, key, item, url_map)
             if not ed:
@@ -302,7 +309,7 @@ def _build_risk_sheet(ws: Worksheet, rows: list[dict],
                       url_map: dict[str, dict]) -> None:
     _write_header(ws, RISK_COLUMNS, set())
     for r_idx, item in enumerate(rows, start=2):
-        for c_idx, (label, key, ed) in enumerate(RISK_COLUMNS, start=1):
+        for c_idx, (_label, key, _ed) in enumerate(RISK_COLUMNS, start=1):
             cell = ws.cell(row=r_idx, column=c_idx)
             _set_cell_value(cell, key, item, url_map)
             cell.fill = RO_FILL
@@ -394,7 +401,8 @@ def build_workbook(
 # Box CLI
 # --------------------------------------------------------------------------- #
 from box_cli import (
-    box_find_file, box_upload_or_version, box_get_or_create_shared_link,
+    box_get_or_create_shared_link,
+    box_upload_or_version,
 )
 
 

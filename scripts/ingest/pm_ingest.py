@@ -27,16 +27,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from cli_utils import (
+    add_dry_run_arg,
+    add_no_encrypt_arg,
+    add_output_arg,
+    add_since_arg,
+    load_claude_md_context,
+    make_logger,
+)
 from db_utils import init_pm_db
-from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg, add_output_arg, make_logger, load_claude_md_context
+
+from ingest.goals import GoalsIngestPlugin
 from ingest.ingest_plugin import IngestContext
+from ingest.minutes import MinutesIngestPlugin
 
 # --------------------------------------------------------------------------- #
 # プラグイン登録（新ソース追加はここに1行追加するだけ）
 # --------------------------------------------------------------------------- #
-from ingest.slack   import SlackIngestPlugin
-from ingest.minutes import MinutesIngestPlugin
-from ingest.goals   import GoalsIngestPlugin
+from ingest.slack import SlackIngestPlugin
 
 PLUGINS: dict[str, object] = {
     "slack":   SlackIngestPlugin(),
@@ -100,7 +108,7 @@ def main() -> None:
 
     if args.list:
         print("利用可能なソース:")
-        for name, plugin in PLUGINS.items():
+        for name in PLUGINS:
             print(f"  {name}")
         return
 
@@ -144,7 +152,7 @@ def main() -> None:
             if new_d or new_a:
                 log(f"\n[INFO] 自動エンリッチ対象: decisions={len(new_d)}件, action_items={len(new_a)}件")
                 try:
-                    from enrich.enrich_items import enrich_batch, _fetch_target_items
+                    from enrich.enrich_items import _fetch_target_items, enrich_batch
                     ids = [f"d:{d['id']}" for d in new_d] + [f"a:{a['id']}" for a in new_a]
                     decisions, action_items = _fetch_target_items(pm_conn, item_ids=ids)
                     project_context = load_claude_md_context()

@@ -29,7 +29,6 @@ from pathlib import Path
 
 import requests
 
-
 VOICEVOX_HOST = "http://localhost:50021"
 VOICEVOX_TEXT_LIMIT = 200
 QUERY_TIMEOUT = 30
@@ -124,7 +123,7 @@ def check_fish_alive() -> str:
         raise RuntimeError(
             f"fish-speech サーバに接続できません ({FISH_HOST}): {exc}\n"
             "bash scripts/pm_daemon.sh start fish で起動してください。"
-        )
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +267,7 @@ def split_minutes_sections(markdown: str) -> list[tuple[str, str]]:
 
     # level==2 のブロックを切り出す
     h2_only = [(i, x) for i, x in enumerate(h2_matches) if x[3] == 2]
-    for idx, (i, (start, end, title, _level)) in enumerate(h2_only):
+    for idx, (_i, (_start, end, title, _level)) in enumerate(h2_only):
         if idx + 1 < len(h2_only):
             block_end = h2_only[idx + 1][1][0]
         else:
@@ -557,7 +556,7 @@ def check_voicevox_alive() -> str:
     except Exception as exc:
         raise RuntimeError(
             f"VOICEVOX エンジンに接続できません ({VOICEVOX_HOST}): {exc}"
-        )
+        ) from exc
 
 
 _SPEAKER_NAME_CACHE: dict[int, str] = {}

@@ -30,11 +30,23 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_db, open_pm_db, fetch_milestone_progress, fetch_assignee_workload
-from cli_utils import (add_output_arg, add_no_encrypt_arg, add_dry_run_arg, add_since_arg,
-                       add_filter_arg, resolve_filter_presets, resolve_report_canvas_id,
-                       make_logger)
-from canvas_utils import sanitize_for_canvas, post_to_canvas
+from canvas_utils import post_to_canvas, sanitize_for_canvas
+from cli_utils import (
+    add_dry_run_arg,
+    add_filter_arg,
+    add_no_encrypt_arg,
+    add_output_arg,
+    add_since_arg,
+    make_logger,
+    resolve_filter_presets,
+    resolve_report_canvas_id,
+)
+from db_utils import (
+    fetch_assignee_workload,
+    fetch_milestone_progress,
+    open_db,
+    open_pm_db,
+)
 
 # --------------------------------------------------------------------------- #
 # 定数・パス解決

@@ -26,7 +26,8 @@ DATA_TYPES = ["pm_data", "minutes", "slack", "box_docs"]
 
 
 def investigate_app(app_name: str) -> str:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
+
     from argus.mcp_tools import search_entity, synthesize_answers
 
     query = f"{app_name} GPU チューニング 性能 ベンダー 協業 アーキテクチャ 連携"

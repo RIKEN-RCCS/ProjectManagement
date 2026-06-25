@@ -88,7 +88,7 @@ def embed_batch(
             raise RuntimeError(
                 f"埋め込み API の応答件数が不一致: expected={len(chunk_idxs)} got={len(items)}"
             )
-        for idx, item in zip(chunk_idxs, items):
+        for idx, item in zip(chunk_idxs, items, strict=True):
             v = item.get("embedding")
             if not v:
                 raise RuntimeError(f"埋め込みが返ってこない: index={idx}")

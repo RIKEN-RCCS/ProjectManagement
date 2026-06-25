@@ -14,20 +14,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 import tempfile
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 from openpyxl import load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_pm_db
 from cli_utils import add_dry_run_arg, add_no_encrypt_arg, make_logger
+from db_utils import open_pm_db
 from pm_relink import write_audit_log
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -73,7 +72,7 @@ def _parse_delete_flag(raw) -> int:
 # --------------------------------------------------------------------------- #
 # Box CLI
 # --------------------------------------------------------------------------- #
-from box_cli import box_find_file, box_download
+from box_cli import box_download, box_find_file
 
 
 def fetch_xlsx_from_box(folder_id: str, filename: str, dest_dir: Path,
@@ -227,7 +226,7 @@ def _apply_decisions(conn, rows: dict[int, dict], dry_run: bool, log) -> tuple[i
     if not rows:
         return 0, 0
     # acknowledged は特殊扱い: ✓/y/yes/true → acknowledged_at = today、空 → NULL
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     by_item: dict[int, list] = defaultdict(list)
     db_fields = ["content", "decided_at", "acknowledged_at", "deleted"]
     placeholders = ",".join("?" * len(rows))

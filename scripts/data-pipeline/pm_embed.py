@@ -16,7 +16,7 @@ import logging
 import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -99,7 +99,7 @@ CHUNK_OVERLAP_CHARS = 100
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # --- SudachiPy 形態素解析 ---
@@ -663,7 +663,7 @@ def build_index(
         logger.info(f"  channels: {channel_ids or '(なし)'}")
 
         if not minutes_kinds and not channel_ids:
-            logger.warning(f"  ソースが未設定です。argus_config.yaml を編集してください。")
+            logger.warning("  ソースが未設定です。argus_config.yaml を編集してください。")
             return 0
 
     if full_rebuild and not dry_run and not web_only:
@@ -790,7 +790,7 @@ def main() -> None:
 
     if not args.dry_run:
         index_conn.commit()
-        logger.info(f"FTS5 再構築中...")
+        logger.info("FTS5 再構築中...")
         rebuild_fts(index_conn)
         index_conn.commit()
         db_chunks = index_conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
@@ -806,7 +806,7 @@ def main() -> None:
     if args.dry_run:
         logger.info(f"\n[DRY-RUN] 合計 {total} チャンク（書き込みなし）")
     else:
-        logger.info(f"\n全インデックス更新完了")
+        logger.info("\n全インデックス更新完了")
 
 
 if __name__ == "__main__":

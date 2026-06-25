@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, date
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -21,9 +21,7 @@ except ImportError:
     sys.exit(1)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_db
 from ingest.ingest_plugin import IngestContext
-
 
 # --------------------------------------------------------------------------- #
 # 定数
@@ -204,7 +202,7 @@ def sync_goals(
         log(f"  [削除] マイルストーン {mid}（紐づき action_items の milestone_id を NULL に更新）")
 
     pm_conn.commit()
-    log(f"\n✓ pm.db に同期完了")
+    log("\n✓ pm.db に同期完了")
 
 
 # --------------------------------------------------------------------------- #

@@ -6,10 +6,10 @@ build_argus_outcomes_pptx.py で使われていた色・フォント・基本シ
 from __future__ import annotations
 
 from pptx import Presentation
-from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.util import Inches, Pt
 
 # ---- Ocean Gradient palette ----
 NAVY    = RGBColor(0x0B, 0x2A, 0x4A)

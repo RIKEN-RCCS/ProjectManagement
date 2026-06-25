@@ -54,12 +54,12 @@ import csv
 import io
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg
 from db_utils import open_db
-from cli_utils import add_no_encrypt_arg, add_dry_run_arg, add_since_arg
 
 # アクションアイテムの編集可能フィールド
 AI_EDITABLE_FIELDS = ["assignee", "due_date", "milestone_id", "content", "status", "deleted",
@@ -101,7 +101,7 @@ def write_audit_log(conn, table_name: str, record_id: int, field: str,
             field,
             str(old_value) if old_value is not None else None,
             str(new_value) if new_value is not None else None,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
             source,
         ),
     )
@@ -274,7 +274,7 @@ def cmd_export(conn, all_items: bool, output_path: Path, since: str | None = Non
     del_msg = "（削除済み含む）" if include_deleted else ""
     since_msg = f", since={since}" if since else ""
     print(f"[INFO] アクションアイテム {len(items)} 件 + 決定事項 {len(decisions)} 件をエクスポートしました（{label}{del_msg}{since_msg}）: {output_path}")
-    print(f"[INFO] 各列を編集後、--import で反映してください")
+    print("[INFO] 各列を編集後、--import で反映してください")
 
 
 # --------------------------------------------------------------------------- #
@@ -316,7 +316,7 @@ def _parse_bool_field(raw: str, field: str) -> int | None:
 
 
 def _parse_action_rows(lines: list[str]) -> dict[int, dict[str, str | None]]:
-    data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
+    data_lines = [ln for ln in lines if not ln.startswith("#") and ln.strip()]
     reader = csv.DictReader(data_lines)
     result: dict[int, dict[str, str | None]] = {}
     for row in reader:
@@ -344,7 +344,7 @@ def _parse_action_rows(lines: list[str]) -> dict[int, dict[str, str | None]]:
 
 
 def _parse_decision_rows(lines: list[str]) -> dict[int, dict[str, str]]:
-    data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
+    data_lines = [ln for ln in lines if not ln.startswith("#") and ln.strip()]
     reader = csv.DictReader(data_lines)
     result: dict[int, dict[str, str]] = {}
     for row in reader:
@@ -451,7 +451,7 @@ def cmd_import(conn, csv_path: Path, dry_run: bool):
     total_items  += i
 
     if total_fields == 0:
-        print(f"[INFO] 変更なし（現在値と同一）")
+        print("[INFO] 変更なし（現在値と同一）")
         return
 
     print()

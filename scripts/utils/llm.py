@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import contextvars as _contextvars
 import os
-from pathlib import Path
 import re
 import sys
-
+from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # CoT 除去
@@ -43,8 +42,8 @@ def strip_think_blocks(text: str) -> str:
 
 def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
     """vLLM の /v1/models エンドポイントからモデル名を自動取得する。"""
-    import urllib.request
     import json
+    import urllib.request
     url = base_url.rstrip("/") + "/models"
     if api_key is None:
         api_key = os.environ.get("RIVAULT_TOKEN") or os.environ.get("LOCAL_LLM_TOKEN", "dummy")
@@ -100,8 +99,9 @@ def _call_local_llm_inner(
     no_chat_template_kwargs: bool = False,
     temperature: float | None = None,
 ) -> str:
-    import requests
     import json as _json
+
+    import requests
     print(f"[INFO] LLM call: backend=local model={model} url={base_url} think={think}",
           file=sys.stderr)
     messages = []
@@ -293,8 +293,9 @@ def call_rivault(
     if model is None:
         model = os.environ.get("RIVAULT_MODEL", "zai-org/GLM-4.7-Flash")
     print(f"[INFO] LLM call: backend=rivault model={model} url={base_url}", file=sys.stderr)
-    import requests as _requests
     import json as _json
+
+    import requests as _requests
     messages: list = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -475,7 +476,7 @@ def call_argus_llm(
         try:
             _req.get(local_base.removesuffix("/v1").rstrip("/") + "/health", timeout=3)
         except Exception as exc:
-            raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません: {exc}")
+            raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません: {exc}") from exc
         model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
         return call_local_llm(
             prompt, model=model, base_url=local_base,

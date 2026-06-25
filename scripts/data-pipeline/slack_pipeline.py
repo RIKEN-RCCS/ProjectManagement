@@ -15,13 +15,12 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_db
 from cli_utils import add_no_encrypt_arg
-
+from db_utils import open_db
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -52,8 +51,8 @@ _SKIP_SUBTYPES = {
 def parse_date_arg(date_str: str) -> datetime:
     try:
         return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=JST)
-    except ValueError:
-        raise ValueError(f"日付は YYYY-MM-DD 形式で指定してください: {date_str}")
+    except ValueError as exc:
+        raise ValueError(f"日付は YYYY-MM-DD 形式で指定してください: {date_str}") from exc
 
 
 def parse_args():
@@ -185,7 +184,7 @@ def _make_client() -> WebClient:
 def ts_to_jst(ts: str) -> str:
     """Slack unix タイムスタンプ文字列を JST 日時文字列に変換する"""
     return (
-        datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        datetime.fromtimestamp(float(ts), tz=UTC)
         .astimezone(JST)
         .strftime("%Y-%m-%d %H:%M:%S")
     )
@@ -502,7 +501,7 @@ def main():
         )
         print(f"\n取得・保存: {fetched} スレッド")
     else:
-        print(f"\nスキップ（DB のみ使用）")
+        print("\nスキップ（DB のみ使用）")
 
     total_threads = conn.execute(
         "SELECT COUNT(*) FROM messages WHERE channel_id=?", (channel_id,)

@@ -15,9 +15,9 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db_utils import open_db, normalize_assignee
-from ingest.ingest_plugin import IngestContext
+from db_utils import normalize_assignee, open_db
 
+from ingest.ingest_plugin import IngestContext
 
 # --------------------------------------------------------------------------- #
 # 定数

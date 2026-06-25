@@ -5,12 +5,11 @@ DB操作・フィルタリング・楽観的排他制御ロジックを提供す
 """
 
 import glob as _glob
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
-
-from db_utils import open_pm_db, open_db
+from db_utils import open_db, open_pm_db
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -75,7 +74,7 @@ def audit(conn, table: str, record_id, field: str, old_val, new_val):
         (table, str(record_id), field,
          str(old_val) if old_val is not None else None,
          str(new_val) if new_val is not None else None,
-         datetime.now(timezone.utc).isoformat()),
+         datetime.now(UTC).isoformat()),
     )
 
 
@@ -176,11 +175,14 @@ def load_action_items(
     elif del_f == "削除のみ":
         q += " AND a.deleted=1"
     if status_f and status_f != "すべて":
-        q += " AND a.status=?"; p.append(status_f)
+        q += " AND a.status=?"
+        p.append(status_f)
     if ms_f and ms_f != "すべて":
-        q += " AND a.milestone_id=?"; p.append(ms_f)
+        q += " AND a.milestone_id=?"
+        p.append(ms_f)
     if since:
-        q += " AND a.extracted_at >= ?"; p.append(since)
+        q += " AND a.extracted_at >= ?"
+        p.append(since)
     # channels / meeting_kinds は OR 結合
     or_clauses = []
     if channels:
@@ -242,7 +244,8 @@ def load_decisions(
     elif ack_f == "確認済みのみ":
         q += " AND d.acknowledged_at IS NOT NULL AND d.acknowledged_at!=''"
     if since:
-        q += " AND d.extracted_at >= ?"; p.append(since)
+        q += " AND d.extracted_at >= ?"
+        p.append(since)
     or_clauses = []
     if channels:
         ph = ",".join("?" * len(channels))
