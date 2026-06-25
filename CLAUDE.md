@@ -130,6 +130,7 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_inge
 
 ## 注意事項
 
+- LLMにDeepSeek-V4-Flashを利用する際は、このモデルはマルチモーダル対応では無いため、画像やPDFファイルを入力としない事。
 - `claude -p` はClaude Codeセッション内からは実行不可（ネストセッション制限）。各スクリプトはClaude Codeの外のターミナルから実行すること。ローカルLLM（`OPENAI_API_BASE` 設定時）はこの制限を受けない。
 - `call_claude()` 内で `CLAUDECODE` 環境変数を子プロセスから除外する処理を実装済み。
 - `slack-mcp-server` は不要（`slack_pipeline.py` が Slack SDK に移行済み）。
