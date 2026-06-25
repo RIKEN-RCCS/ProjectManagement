@@ -430,7 +430,6 @@ scripts/
 │
 ├── reporting/                         レポート・エクスポート
 │   ├── pm_report.py                   進捗レポート → Canvas
-│   ├── pm_biweekly_report.py          隔週レポート pptx
 │   ├── pm_insight.py                  LLM 洞察
 │   ├── pm_xlsx_report.py              pm.db → Box XLSX
 │   ├── pm_xlsx_sync.py                Box XLSX → pm.db

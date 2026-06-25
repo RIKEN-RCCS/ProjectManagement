@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-06-25 pm_biweekly_report.py 廃止
+
+**背景**: 隔週 pptx レポート (`reporting/pm_biweekly_report.py`) は現在
+運用されておらず、`db_utils.open_knowledge_db` を import していた箇所が
+knowledge.db 廃止 (2026-06-16) 後の取り残しで実際にクラッシュしていた。
+ruff 導入の smoke test で発覚。
+
+**決定**: 修復ではなく削除を選択。`scripts/reporting/pm_biweekly_report.py` /
+symlink / `scripts/bin/pm_biweekly_report.sh` を削除し、docs/reports.md
+(§2 と運用例)、docs/architecture.md、CLAUDE.md (pm-reports skill 参照)、
+utils/pptx_theme.py の docstring からも除去。pptx 生成は他の用途で残るので
+pptx_theme.py は据え置き。
+
+**影響**: レポート系コマンドは pm_report / pm_insight / canvas_report.sh の
+3 本に縮約。隔週 pptx が必要になった場合は git history から復元可。
+
+---
+
 ## 2026-06-20〜22 pm-multi-agent (MCP) 導入・出力スキル統合・agent ループ全廃
 
 **背景**: Claude Code から pm.db 検索・分析・Box/Slack/Canvas 出力を直接呼び出せる

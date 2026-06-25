@@ -1,7 +1,6 @@
 """Ocean Gradient テーマの共通描画ヘルパー。
 
-build_argus_outcomes_pptx.py で使われていた色・フォント・基本シェイプ関数を切り出し、
-他の pptx 生成スクリプト（pm_biweekly_report.py 等）から再利用できるようにする。
+pptx 生成スクリプトから再利用できる色・フォント・基本シェイプ関数を提供する。
 """
 from __future__ import annotations
 

@@ -161,7 +161,7 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_inge
 - `pm-roadmap` — `docs/roadmap.md`。実装済みフェーズ・未実装課題を確認するとき
 - `pm-ingest-plugin` — `docs/ingest_plugin.md`。`scripts/ingest/` に新ソースを追加するとき
 - `pm-argus-commands` — `docs/argus_outcomes.md`。Argus 5 コマンドの使い方・引数・内部ツール仕様を触るとき
-- `pm-reports` — `docs/reports.md`。pm_report / pm_biweekly_report / pm_insight / canvas_report.sh のオプションを引くとき
+- `pm-reports` — `docs/reports.md`。pm_report / pm_insight / canvas_report.sh のオプションを引くとき
 - `docs/minutes_consensus.md` — Self-Consistency 議事録生成（`--consensus N`）のアルゴリズム・CLI・環境変数分離を触るとき
 - `pm-argus-config-schema` — `data/argus_config.yaml` のキー構造（実値非掲載）。索引・会議目録・フィルタ設定を触るとき
 - `pm-goals-schema` — `goals.yaml` のキー構造（実値非掲載）。`pm_ingest.py goals` / マイルストーン同期周りを触るとき
