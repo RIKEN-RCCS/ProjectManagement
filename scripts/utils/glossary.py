@@ -11,7 +11,7 @@ conn が None の場合は内部で _open_pm() により新規接続する。
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -102,7 +102,7 @@ def add(
         conn = _open_pm(db_path)
     if conn is None:
         return None
-    now_ts = datetime.now(timezone.utc).isoformat()
+    now_ts = datetime.now(UTC).isoformat()
     try:
         if own_conn:
             _ensure_table(conn)
@@ -132,7 +132,7 @@ def update(
         conn = _open_pm(db_path)
     if conn is None:
         return False
-    now_ts = datetime.now(timezone.utc).isoformat()
+    now_ts = datetime.now(UTC).isoformat()
     try:
         if own_conn:
             _ensure_table(conn)

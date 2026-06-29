@@ -1,11 +1,9 @@
 """Tests for LLM wrapper functions (requests.post mocked)."""
 import json
 import sys
-from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # --------------------------------------------------------------------------- #
 # SSE response helper
@@ -421,7 +419,7 @@ class TestGenerateMinutesCore:
         assert len(segs) == 1
 
     def test_chunk_transcript(self, tmp_path):
-        from recording.generate_minutes_local import (parse_transcript, chunk_transcript)
+        from recording.generate_minutes_local import chunk_transcript, parse_transcript
         chunks = chunk_transcript(parse_transcript(self._make_transcript_md(tmp_path)), 3600)
         assert len(chunks) == 1
 

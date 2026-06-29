@@ -1,12 +1,11 @@
 """Pure-function tests for cli_utils (Whisper parsing, CoT removal)."""
+from utils.llm import strip_think_blocks
 from utils.transcript import (
     _parse_timestamp,
     format_whisper_transcript,
     parse_whisper_transcript,
     prepare_transcript,
 )
-from utils.llm import strip_think_blocks
-
 
 # --------------------------------------------------------------------------- #
 # _parse_timestamp

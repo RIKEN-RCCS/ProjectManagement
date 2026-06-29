@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -27,7 +26,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from cli_utils import call_argus_llm, load_claude_md_context
-from utils.transcript import parse_vtt, parse_whisper_transcript, _ts_to_sec
+from utils.transcript import _ts_to_sec, parse_vtt, parse_whisper_transcript
 
 # セグメント突合の許容タイムずれ（秒）— VTT と Whisper のタイムスタンプ誤差を吸収
 _TIME_TOLERANCE_SEC = 10

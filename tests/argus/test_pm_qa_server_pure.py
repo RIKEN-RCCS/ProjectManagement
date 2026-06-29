@@ -2,14 +2,12 @@
 from datetime import date
 
 import pytest
-
 from argus.retrieval import (
     _combined_score,
     _recency_score,
     _rrf_merge,
     sanitize_fts_query,
 )
-
 
 # --------------------------------------------------------------------------- #
 # sanitize_fts_query

@@ -1,9 +1,5 @@
 """Tests for pm_argus_agent tool functions (fixture pm.db)."""
 import sqlite3
-from pathlib import Path
-
-import pytest
-
 
 # --------------------------------------------------------------------------- #
 # Helper: insert test data into pm.db

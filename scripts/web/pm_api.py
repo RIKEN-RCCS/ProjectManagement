@@ -285,7 +285,6 @@ def save_terminology(req: SaveRowsRequest):
 
 @app.post("/api/terminology/add")
 def add_terminology(req: NewActionItemRequest):
-    import json as _json
     conn = _get_conn()
     now_ts = datetime.now(UTC).isoformat()
     term = req.content.strip()
@@ -320,7 +319,7 @@ def get_glossary(category: str = Query("")):
 
 @app.post("/api/glossary/save")
 def save_glossary(req: SaveRowsRequest):
-    from utils.glossary import add, update, delete
+    from utils.glossary import add, delete, update
     conn = _get_conn()
     n = 0
     for row in req.rows:
