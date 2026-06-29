@@ -385,12 +385,8 @@ def retrieve_knowledge_for_extraction(
         _scripts_dir = str(Path(__file__).resolve().parent.parent)
         if _scripts_dir not in sys.path:
             sys.path.insert(0, _scripts_dir)
-        from argus.pm_qa_server import (
-            format_context,
-            rerank_chunks,
-            retrieve_chunks_hyde,
-        )
-        from enrich.knowledge_context import extract_topic_keywords
+        from argus.retrieval import rerank_chunks, retrieve_chunks_hyde
+        from enrich.knowledge_context import extract_topic_keywords, format_context
 
         # トピックキーワード抽出（名詞・固有名詞のみ）
         keywords = extract_topic_keywords(query_text)

@@ -543,3 +543,69 @@ def gather_knowledge(
         "fts_chunks": fts_chunks,
         "participant_patterns": patterns,
     }
+
+
+# ---------------------------------------------------------------------------
+# チャンク → プロンプト注入文字列 整形
+# ---------------------------------------------------------------------------
+
+_SOURCE_TYPE_LABEL = {
+    "minutes_content": "議事録本文",
+    "slack_raw": "Slackメッセージ",
+    "document": "資料",
+    "box_document": "Box資料",
+    "web": "Web記事",
+}
+
+
+def _simple_source_label(chunk: dict) -> str:
+    """簡易ラベル生成。チャンネル名解決なし — LLMプロンプト注入用。
+    pm_qa_server._format_source_label の簡易版。"""
+    label = _SOURCE_TYPE_LABEL.get(chunk.get("source_type", ""), chunk.get("source_type", ""))
+    source_type = chunk.get("source_type", "")
+    source_ref = chunk.get("source_ref") or ""
+    held_at = chunk.get("held_at") or "日付不明"
+
+    if source_type == "web":
+        from urllib.parse import urlparse
+        domain = urlparse(source_ref).netloc.replace("www.", "") if source_ref else "web"
+        return f"{domain} / {label} ({held_at})"
+    if source_type == "box_document":
+        content = chunk.get("content") or ""
+        title = ""
+        if content.startswith("【"):
+            end = content.find("】")
+            if end > 0:
+                title = content[1:end]
+        return f"{title or 'Box資料'} ({held_at})"
+    db_name = chunk.get("source_db", "").replace("minutes/", "").replace(".db", "")
+    return f"{db_name or source_ref or label} / {label} ({held_at})"
+
+
+def format_context(chunks: list[dict]) -> str:
+    """Retrieved chunks を LLM プロンプト注入用の文字列に整形する。
+
+    pm_qa_server.py から移植（cli_utils → argus の循環依存を解消するため）。
+    チャンネル名解決を行わない簡易ラベルを使用する。"""
+    lines = []
+    for i, chunk in enumerate(chunks, 1):
+        label = _simple_source_label(chunk)
+        ref = chunk.get("source_ref") or ""
+        source_type = chunk.get("source_type", "")
+
+        if source_type == "slack_raw" and ref:
+            ref_str = f" | <{ref}|スレッドを開く>"
+        elif source_type == "minutes_content" and ref:
+            held_at = chunk.get("held_at") or ""
+            ref_str = f" | {held_at} {ref}" if held_at else f" | {ref}"
+        elif source_type == "web" and ref:
+            ref_str = f" | <{ref}|リンク>"
+        elif source_type == "box_document" and ref:
+            ref_str = f" | <{ref}|Boxで開く>"
+        else:
+            ref_str = f" | {ref}" if ref else ""
+
+        lines.append(f"[{i}] 出典: {label}{ref_str}")
+        lines.append(f"    {chunk['content'].strip()}")
+        lines.append("")
+    return "\n".join(lines)

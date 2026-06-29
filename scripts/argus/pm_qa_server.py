@@ -125,20 +125,16 @@ def load_qa_config(config_path: Path) -> None:
 
 # --- プロンプト構築 ---
 
-_SOURCE_TYPE_LABEL = {
-    "minutes_content": "議事録本文",
-    "slack_raw": "Slackメッセージ",
-    "document": "資料",
-    "box_document": "Box資料",
-    "web": "Web記事",
-}
-
-# channel_id → 表示名は argus_config.yaml の channel_names から動的に解決する
-# （実値はチャンネル機密のため source 内に持たない）。
-
 
 def _format_source_label(chunk: dict) -> str:
-    label = _SOURCE_TYPE_LABEL.get(chunk["source_type"], chunk["source_type"])
+    _src_label = {
+        "minutes_content": "議事録本文",
+        "slack_raw": "Slackメッセージ",
+        "document": "資料",
+        "box_document": "Box資料",
+        "web": "Web記事",
+    }
+    label = _src_label.get(chunk["source_type"], chunk["source_type"])
     source_type = chunk["source_type"]
     if source_type == "web":
         from urllib.parse import urlparse
@@ -194,29 +190,6 @@ def _ensure_channel_names_loaded() -> None:
         logger.warning("channel_names lazy-load failed: %s", exc)
 
 
-def format_context(chunks: list[dict]) -> str:
-    lines = []
-    for i, chunk in enumerate(chunks, 1):
-        label = _format_source_label(chunk)
-        ref = chunk.get("source_ref") or ""
-        source_type = chunk.get("source_type", "")
-
-        if source_type == "slack_raw" and ref:
-            ref_str = f" | <{ref}|スレッドを開く>"
-        elif source_type == "minutes_content" and ref:
-            held_at = chunk.get("held_at") or ""
-            ref_str = f" | {held_at} {ref}" if held_at else f" | {ref}"
-        elif source_type == "web" and ref:
-            ref_str = f" | <{ref}|リンク>"
-        elif source_type == "box_document" and ref:
-            ref_str = f" | <{ref}|Boxで開く>"
-        else:
-            ref_str = f" | {ref}" if ref else ""
-
-        lines.append(f"[{i}] 出典: {label}{ref_str}")
-        lines.append(f"    {chunk['content'].strip()}")
-        lines.append("")
-    return "\n".join(lines)
 
 
 # --- Hybrid検索: Intent分類 + 構造化クエリ ---
