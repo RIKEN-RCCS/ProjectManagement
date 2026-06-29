@@ -54,7 +54,7 @@ disable_error_code = ["annotation-unchecked"]
 # --------------------------------------------------------------------------- #
 [tool.ruff]
 target-version = "py312"
-extend-exclude = ["scripts/archive"]
+
 
 [tool.ruff.lint]
 # E,F = pycodestyle/pyflakes、I = isort、B = bugbear、UP = pyupgrade
