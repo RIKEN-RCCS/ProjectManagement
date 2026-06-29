@@ -163,86 +163,7 @@ class TestCallRivault:
 # --------------------------------------------------------------------------- #
 
 class TestCallArgusLlm:
-    # -- 後方互換モード（config なし = env-var ベース） --
-
-    def _patch_no_config(self, monkeypatch):
-        """_load_llm_routing_priority を None 返しに差し替え + ANTHROPIC_BASE_URL を無効化。"""
-        from utils import llm as _llm
-        monkeypatch.setattr(_llm, "_load_llm_routing_priority", lambda: None)
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
-
-    def test_uses_local_by_default(self, monkeypatch):
-        """RIVAULT_URL 未設定 → ローカル LLM を使う。"""
-        self._patch_no_config(monkeypatch)
-        monkeypatch.setenv("RIVAULT_URL", "")
-        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
-
-        called = {}
-        def fake_local(*a, **kw):
-            called["local"] = True
-            return "local result"
-
-        from utils import llm as cli_utils
-        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
-        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
-        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
-
-        result = cli_utils.call_argus_llm("test")
-        assert called.get("local")
-        assert result == "local result"
-
-    def test_uses_rivault_when_url_set(self, monkeypatch):
-        """RIVAULT_URL が設定されている → RiVault を優先。"""
-        self._patch_no_config(monkeypatch)
-        monkeypatch.setenv("RIVAULT_TOKEN", "tok")
-
-        called = {}
-        def fake_rivault(*a, **kw):
-            called["rivault"] = True
-            return "rivault result"
-
-        from utils import llm as cli_utils
-        monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
-
-        result = cli_utils.call_argus_llm("test")
-        assert called.get("rivault")
-        assert result == "rivault result"
-
-    def test_fallback_to_local_on_rivault_failure(self, monkeypatch):
-        """RiVault 失敗時は fallback=True なら local にフォールバック。"""
-        self._patch_no_config(monkeypatch)
-        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
-
-        def fake_rivault(*a, **kw):
-            raise RuntimeError("RiVault down")
-
-        def fake_local(*a, **kw):
-            return "local fallback"
-
-        from utils import llm as cli_utils
-        monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
-        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
-        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
-        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
-
-        result = cli_utils.call_argus_llm("test", fallback=True)
-        assert result == "local fallback"
-
-    def test_no_fallback_raises_on_failure(self, monkeypatch):
-        """fallback=False では失敗時に例外を再送出する。"""
-        self._patch_no_config(monkeypatch)
-        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
-
-        def fake_rivault(*a, **kw):
-            raise RuntimeError("RiVault down")
-
-        from utils import llm as cli_utils
-        monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
-
-        with pytest.raises(RuntimeError, match="RiVault down"):
-            cli_utils.call_argus_llm("test", fallback=False)
-
-    # -- Config-driven モード --
+    # -- Config-driven モード（常に routing_priority が必要） --
 
     def _patch_config(self, monkeypatch, priority: list[str]):
         """_load_llm_routing_priority を monkeypatch で差し替え。"""
@@ -273,31 +194,10 @@ class TestCallArgusLlm:
         assert call_order == ["local"]
         assert result == "local result"
 
-    def test_config_priority_skips_unconfigured(self, monkeypatch):
-        """claude_code が優先度にあっても ANTHROPIC_BASE_URL 未設定ならスキップ。"""
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "")  # 未設定
-        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
-        self._patch_config(monkeypatch, ["claude_code", "local"])
-
-        called = {}
-        def fake_local(*a, **kw):
-            called["local"] = True
-            return "local result"
-
-        from utils import llm as cli_utils
-        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
-        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
-        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
-
-        result = cli_utils.call_argus_llm("test")
-        assert called.get("local")
-        assert result == "local result"
-
     def test_config_priority_all_skipped_raises(self, monkeypatch):
         """全ルートスキップ → RuntimeError。"""
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
         monkeypatch.setenv("RIVAULT_URL", "")
-        self._patch_config(monkeypatch, ["claude_code", "rivault"])
+        self._patch_config(monkeypatch, ["rivault"])
 
         from utils import llm as cli_utils
         with pytest.raises(RuntimeError, match="No LLM routes available"):
@@ -337,28 +237,27 @@ class TestCallArgusLlm:
         with pytest.raises(RuntimeError, match="RiVault down"):
             cli_utils.call_argus_llm("test", fallback=False)
 
-    def test_config_priority_prefer_rivault_override(self, monkeypatch):
-        """config priority [local, rivault] + prefer_rivault() → rivault が先頭。"""
+    def test_config_priority_first_available_used(self, monkeypatch):
+        """config priority [rivault, local] で rivault が先に呼ばれる。"""
         monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
         monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
-        self._patch_config(monkeypatch, ["local", "rivault"])
+        self._patch_config(monkeypatch, ["rivault", "local"])
 
         call_order = []
-        def fake_local(*a, **kw):
-            call_order.append("local")
-            return "local result"
         def fake_rivault(*a, **kw):
             call_order.append("rivault")
             return "rivault result"
+        def fake_local(*a, **kw):
+            call_order.append("local")
+            return "local result"
 
         from utils import llm as cli_utils
-        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
         monkeypatch.setattr(cli_utils, "call_rivault", fake_rivault)
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
         monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
         monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
 
-        with cli_utils.prefer_rivault():
-            result = cli_utils.call_argus_llm("test")
+        result = cli_utils.call_argus_llm("test")
         assert call_order == ["rivault"]
         assert result == "rivault result"
 
@@ -453,10 +352,13 @@ class TestGenerateMinutesCore:
     def test_generate_minutes_basic(self, monkeypatch, tmp_path):
         def fake_llm(prompt, **kw):
             return "### テスト\n\n本文"
-        from utils import llm
-        monkeypatch.setattr(llm, "call_argus_llm", fake_llm)
-        monkeypatch.setenv("RIVAULT_URL", "")
-        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        # generate_minutes_local は from cli_utils import call_argus_llm で取り込んでいる。
+        # 先に cli_utils の名前空間を差し替え、generate_minutes_local をリロードする
+        from cli_utils import call_argus_llm as _orig
+        monkeypatch.setattr("cli_utils.call_argus_llm", fake_llm)
+        import importlib
+        import recording.generate_minutes_local
+        importlib.reload(recording.generate_minutes_local)
         from recording.generate_minutes_local import generate_minutes
         out = generate_minutes(self._make_transcript_md(tmp_path), str(tmp_path), 30,
                                multi_stage=False, consensus_n=1,

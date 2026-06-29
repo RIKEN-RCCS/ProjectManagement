@@ -23,15 +23,6 @@ source ~/.secrets/rivault_tokens.sh 2>/dev/null || true
 if [ -z "${PM_DB_KEY:-}" ] && [ -f ~/.secrets/pm_db_key.txt ]; then
   export PM_DB_KEY="$(cat ~/.secrets/pm_db_key.txt)"
 fi
-# claude_code ルートを通すため ANTHROPIC_BASE_URL が必要
-if [ -f ~/.claude/settings.json ]; then
-  export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-$(python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json'))['env']['ANTHROPIC_BASE_URL'])" 2>/dev/null)}"
-  export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$(python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json'))['env']['ANTHROPIC_AUTH_TOKEN'])" 2>/dev/null)}"
-fi
-
-ANTHROPIC_BASE_URL="http://localhost:8001"
-ANTHROPIC_AUTH_TOKEN="dummy"
-
 LOG_FILE="${REPO_ROOT}/logs/app_status_report.log"
 mkdir -p "${REPO_ROOT}/logs"
 

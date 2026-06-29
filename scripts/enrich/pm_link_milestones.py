@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg, call_claude
+from cli_utils import add_dry_run_arg, add_no_encrypt_arg, add_since_arg, call_argus_llm
 from db_utils import open_pm_db
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -212,7 +212,7 @@ def process_batch(
         items=format_items_for_prompt(items),
     )
     try:
-        raw = call_claude(prompt, timeout=180)
+        raw = call_argus_llm(prompt, timeout=180)
     except Exception as e:
         log(f"  [WARN] LLM呼び出し失敗: {e}")
         return []

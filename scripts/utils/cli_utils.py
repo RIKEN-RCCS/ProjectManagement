@@ -216,14 +216,10 @@ def make_logger(output_path: str | None):
 # --------------------------------------------------------------------------- #
 from utils.llm import (  # noqa: E402, F401
     _call_local_llm_inner,
-    _prefer_rivault,
-    allow_rivault_fallback,
     call_argus_llm,
-    call_claude,
     call_local_llm,
     call_rivault,
     detect_vllm_model,
-    prefer_rivault,
     strip_think_blocks,
 )
 

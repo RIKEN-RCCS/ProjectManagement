@@ -29,7 +29,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_claude, load_claude_md_context
+from cli_utils import call_argus_llm, load_claude_md_context
 from db_utils import init_pm_db, open_pm_db
 
 from enrich.knowledge_context import (
@@ -274,7 +274,7 @@ def enrich_decision(
     )
 
     try:
-        raw = call_claude(prompt, timeout=300)
+        raw = call_argus_llm(prompt, timeout=300)
         result = _extract_json(raw)
     except Exception as e:
         return {"error": str(e)}
@@ -321,7 +321,7 @@ def enrich_action_item(
     )
 
     try:
-        raw = call_claude(prompt, timeout=300)
+        raw = call_argus_llm(prompt, timeout=300)
         result = _extract_json(raw)
     except Exception as e:
         return {"error": str(e)}

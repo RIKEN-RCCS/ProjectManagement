@@ -5,7 +5,6 @@ cli_utils.py から移動済み（後方互換のため cli_utils.py は `from u
 """
 from __future__ import annotations
 
-import contextvars as _contextvars
 import os
 import re
 import sys
@@ -63,23 +62,7 @@ def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
 # RiVault コンテキストフラグ
 # --------------------------------------------------------------------------- #
 
-_prefer_rivault: _contextvars.ContextVar[bool] = _contextvars.ContextVar(
-    "prefer_rivault", default=False
-)
-
-
-class prefer_rivault:
-    """with ブロック内の call_argus_llm() で RiVault を最優先で使う。"""
-    def __enter__(self):
-        self._token = _prefer_rivault.set(True)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        _prefer_rivault.reset(self._token)
-        return False
-
-
-allow_rivault_fallback = prefer_rivault  # 後方互換エイリアス
+# RiVault の優先制御は routing_priority の順序で行う（prefer_rivault / allow_rivault_fallback 廃止）
 
 
 # --------------------------------------------------------------------------- #
@@ -359,43 +342,7 @@ def call_rivault(
     return strip_think_blocks(content)
 
 
-# --------------------------------------------------------------------------- #
-# Claude Code 互換 LLM 呼び出し（ANTHROPIC_BASE_URL 向け）
-# --------------------------------------------------------------------------- #
-
-def _call_anthropic_compat(
-    prompt: str,
-    *,
-    timeout: int = 300,
-    max_tokens: int = 4096,
-    system: str = "",
-    think: bool = False,
-    temperature: float | None = None,
-) -> str:
-    """Claude Code 用エンドポイント（OpenAI 互換 API）を呼び出す。
-
-    settings.json の env に書かれた ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
-    ANTHROPIC_DEFAULT_OPUS_MODEL を環境変数から読み取り、OpenAI 互換
-    /chat/completions にリクエストする。
-    """
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
-    if not base_url:
-        raise RuntimeError("ANTHROPIC_BASE_URL が設定されていません")
-    # settings.json の ANTHROPIC_BASE_URL は "http://localhost:8001"（/v1 なし）。
-    # _call_local_llm_inner は base_url + "/chat/completions" で呼ぶので /v1 を補う。
-    if not base_url.endswith("/v1"):
-        base_url = base_url + "/v1"
-    api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "dummy")
-    model = (
-        os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
-        or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
-        or "deepseek-ai/DeepSeek-V4-Flash"
-    )
-    return _call_local_llm_inner(
-        prompt, model=model, base_url=base_url, api_key=api_key,
-        timeout=timeout, max_tokens=max_tokens, system=system,
-        no_stream=True, think=think, temperature=temperature,
-    )
+# _call_anthropic_compat は廃止。claude_code ルートは routing_priority から削除済み。
 
 
 # --------------------------------------------------------------------------- #
@@ -418,7 +365,7 @@ def _load_llm_routing_priority() -> list[str] | None:
     priority = llm_cfg.get("routing_priority")
     if not isinstance(priority, list) or not priority:
         return None
-    valid = {"claude_code", "rivault", "local"}
+    valid = {"rivault", "local"}
     seen: set[str] = set()
     for r in priority:
         if r not in valid:
@@ -432,9 +379,7 @@ def _load_llm_routing_priority() -> list[str] | None:
 
 
 def _is_route_available(route: str) -> bool:
-    if route == "claude_code":
-        return bool(os.environ.get("ANTHROPIC_BASE_URL", "").strip())
-    elif route == "rivault":
+    if route == "rivault":
         return bool(os.environ.get("RIVAULT_URL", "").strip())
     elif route == "local":
         return True
@@ -451,17 +396,11 @@ def call_argus_llm(
     no_chat_template_kwargs: bool = False,
     fallback: bool = True,
 ) -> str:
-    """Argus 用 LLM 呼び出し。ルーティング優先順位:
+    """Argus 用 LLM 呼び出し。
 
-    argus_config.yaml の llm.routing_priority が設定されていればそれを尊重し、
-    未設定の場合は従来の env-var ベースのルーティング（後方互換）。
+    argus_config.yaml の llm.routing_priority に従ってルーティングする。
+    利用可能なルート: rivault, local。claude_code ルートは廃止。
     """
-
-    def _try_claude_code() -> str:
-        return _call_anthropic_compat(
-            prompt, timeout=timeout, max_tokens=max_tokens, system=system,
-            think=think, temperature=temperature,
-        )
 
     def _try_rivault() -> str:
         return call_rivault(
@@ -487,85 +426,34 @@ def call_argus_llm(
         )
 
     _try_functions = {
-        "claude_code": _try_claude_code,
         "rivault": _try_rivault,
         "local": _try_local,
     }
 
-    # --- Config-driven ルーティング ---
+    # --- Config-driven ルーティング（argus_config.yaml の routing_priority のみ） ---
     config_priority = _load_llm_routing_priority()
-    if config_priority is not None:
-        available = [r for r in config_priority if _is_route_available(r)]
-        if _prefer_rivault.get() and "rivault" in available:
-            available.remove("rivault")
-            available.insert(0, "rivault")
-        if not available:
-            raise RuntimeError("No LLM routes available from llm.routing_priority")
-        route_str = ">".join(available)
-        print(f"[INFO] call_argus_llm: route_order={route_str} "
-              f"think={think} fallback={fallback}", file=sys.stderr)
-        last_error: Exception | None = None
-        for route in available:
-            try:
-                return _try_functions[route]()
-            except Exception as exc:
-                last_error = exc
-                if not fallback:
-                    raise
-                print(f"[WARN] call_argus_llm: {route} 失敗 ({type(exc).__name__}: {exc})",
-                      file=sys.stderr)
-                continue
-        raise RuntimeError("全 LLM ルート失敗") from last_error
-
-    # --- 後方互換: env-var ベースのルーティング ---
-    anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-
-    if anthropic_url:
-        _route = "claude_code"
-        _reason = "ANTHROPIC_BASE_URL set"
-    elif _prefer_rivault.get() or os.environ.get("ARGUS_PREFER_RIVAULT") == "1" \
-            or bool(os.environ.get("RIVAULT_URL")):
-        _route = "rivault"
-        _reason = "RIVAULT_URL set" if os.environ.get("RIVAULT_URL") else (
-            "prefer_rivault()" if _prefer_rivault.get() else "ARGUS_PREFER_RIVAULT=1")
-    else:
-        _route = "local"
-        _reason = "default-local"
-    print(f"[INFO] call_argus_llm: route={_route} reason={_reason} "
+    if config_priority is None:
+        raise RuntimeError(
+            "argus_config.yaml に llm.routing_priority が設定されていません。"
+        )
+    available = [r for r in config_priority if _is_route_available(r)]
+    if not available:
+        raise RuntimeError("No LLM routes available from llm.routing_priority")
+    route_str = ">".join(available)
+    print(f"[INFO] call_argus_llm: route_order={route_str} "
           f"think={think} fallback={fallback}", file=sys.stderr)
-
-    # プライマリ・セカンダリの順序を決定
-    if _route == "claude_code":
-        primary, primary_name = _try_claude_code, "claude_code"
-        secondary, secondary_name = _try_local, "local"
-    elif _route == "rivault":
-        primary, primary_name = _try_rivault, "rivault"
-        secondary, secondary_name = _try_local, "local"
-    else:
-        primary, primary_name = _try_local, "local"
-        secondary, secondary_name = _try_rivault, "rivault"
-
-    try:
-        return primary()
-    except Exception as exc:
-        if not fallback:
-            raise
-        print(f"[WARN] call_argus_llm: {primary_name} 失敗 ({type(exc).__name__}: {exc})。"
-              f"{secondary_name} にフォールバック", file=sys.stderr)
-        return secondary()
-
-
-def call_claude(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:
-    """call_argus_llm() の薄いラッパー。既存コードとの互換性を保つ。"""
-    max_tokens = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "4096"))
-    if model:
-        old = os.environ.get("LOCAL_LLM_MODEL")
-        os.environ["LOCAL_LLM_MODEL"] = model
+    last_error: Exception | None = None
+    for route in available:
         try:
-            return call_argus_llm(prompt, timeout=timeout, max_tokens=max_tokens)
-        finally:
-            if old is None:
-                os.environ.pop("LOCAL_LLM_MODEL", None)
-            else:
-                os.environ["LOCAL_LLM_MODEL"] = old
-    return call_argus_llm(prompt, timeout=timeout, max_tokens=max_tokens)
+            return _try_functions[route]()
+        except Exception as exc:
+            last_error = exc
+            if not fallback:
+                raise
+            print(f"[WARN] call_argus_llm: {route} 失敗 ({type(exc).__name__}: {exc})",
+                  file=sys.stderr)
+            continue
+    raise RuntimeError("全 LLM ルート失敗") from last_error
+
+
+# call_claude は廃止。call_argus_llm を直接使用すること。

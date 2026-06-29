@@ -34,11 +34,6 @@ touch $LOGFILE
 # export しておくことで子プロセスでの重複実行をスキップする。
 . ~/.secrets/slack_tokens.sh
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
-# Claude 設定から claude_code ルート向け環境変数を読み出し
-if [ -f ~/.claude/settings.json ]; then
-  export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-$(python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json'))['env']['ANTHROPIC_BASE_URL'])" 2>/dev/null)}"
-  export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$(python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json'))['env']['ANTHROPIC_AUTH_TOKEN'])" 2>/dev/null)}"
-fi
 SCRIPT_DIR_DAILY="${BASEDIR}/scripts"
 PYTHON3="${HOME}/.venv_$(uname -m)/bin/python3"
 SCRIPT_DIR="$SCRIPT_DIR_DAILY" PYTHON3="$PYTHON3" \

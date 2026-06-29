@@ -88,7 +88,7 @@ from cli_utils import (
     add_no_encrypt_arg,
     add_output_arg,
     add_since_arg,
-    call_claude,
+    call_argus_llm,
     load_claude_md_context,
     make_logger,
     prepare_transcript,
@@ -728,7 +728,6 @@ def process_file(
     force: bool,
     dry_run: bool,
     no_encrypt: bool,
-    model: str | None = None,
     no_llm: bool = False,
     log=print,
 ) -> str:
@@ -766,7 +765,7 @@ def process_file(
             log("[INFO] --dry-run のため LLM呼び出し・DB保存をスキップしました")
             return "ok"
 
-        log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
+        log("[INFO] LLMによる議事録作成を開始... (routing_priority に従う)")
         claude_md_context = load_claude_md_context()
         # glossary 構造化テキストを追記
         try:
@@ -782,7 +781,7 @@ def process_file(
             claude_md_context=claude_md_context,
         )
         try:
-            minutes_text = call_claude(prompt, model=model, timeout=600)
+            minutes_text = call_argus_llm(prompt, timeout=600)
         except Exception as e:
             log(f"[ERROR] LLM呼び出し失敗: {e}")
             return "error"
@@ -909,8 +908,6 @@ def main():
     parser.add_argument("--minutes-dir", default=None,
                         help="議事録DBの保存ディレクトリ（デフォルト: data/minutes/）")
     add_since_arg(parser, "（--bulk / --list 時）")
-    parser.add_argument("--model", default=None, metavar="MODEL",
-                        help="使用する LLM モデル名（LOCAL_LLM_MODEL より優先）。省略時は vLLM /v1/models から自動取得")
     parser.add_argument("--no-llm", action="store_true", default=False,
                         help="LLMを呼ばず入力ファイルを構造化Markdownとして直接解析してDBに保存"
                              "（人間が修正した議事録の再インポート用。--force と併用して上書き）")
@@ -1008,7 +1005,7 @@ def main():
             status = process_file(
                 file_path, held_at, kind, minutes_dir,
                 force=args.force, dry_run=args.dry_run,
-                no_encrypt=args.no_encrypt, model=args.model,
+                no_encrypt=args.no_encrypt,
                 no_llm=args.no_llm,
             )
             if status == "ok":
@@ -1040,7 +1037,7 @@ def main():
     status = process_file(
         input_path, held_at, kind, minutes_dir,
         force=args.force, dry_run=args.dry_run,
-        no_encrypt=args.no_encrypt, model=args.model,
+        no_encrypt=args.no_encrypt,
         no_llm=args.no_llm,
         log=log,
     )

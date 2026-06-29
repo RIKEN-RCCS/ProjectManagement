@@ -35,7 +35,7 @@ from cli_utils import (
     add_no_encrypt_arg,
     add_output_arg,
     add_since_arg,
-    call_claude,
+    call_argus_llm,
     load_claude_md,
     make_logger,
 )
@@ -291,7 +291,6 @@ def main() -> None:
                         help="投稿先 Canvas ID（省略時は Canvas 投稿なし）")
     add_since_arg(parser)
     parser.add_argument("--skip-canvas", action="store_true", help="Canvas 投稿をスキップ")
-    parser.add_argument("--model", default=None, help="使用する Claude モデル")
     add_dry_run_arg(parser)
     add_output_arg(parser)
     add_no_encrypt_arg(parser)
@@ -335,7 +334,7 @@ def main() -> None:
     prompt  = build_analysis_prompt(data, context, today, args.since)
     log("[INFO] LLM にインサイト分析を依頼中...")
     try:
-        raw = call_claude(prompt, model=args.model)
+        raw = call_argus_llm(prompt)
     except Exception as e:
         print(f"[ERROR] LLM 呼び出し失敗: {e}", file=sys.stderr)
         sys.exit(1)

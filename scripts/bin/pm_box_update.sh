@@ -29,12 +29,6 @@ export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
 . ~/.secrets/slack_tokens.sh
 [ -f ~/.secrets/localLLM.sh ] && . ~/.secrets/localLLM.sh
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
-# Claude 設定から claude_code ルート向け環境変数を読み出し
-if [ -f ~/.claude/settings.json ]; then
-  export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-$(python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json'))['env']['ANTHROPIC_BASE_URL'])" 2>/dev/null)}"
-  export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$(python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json'))['env']['ANTHROPIC_AUTH_TOKEN'])" 2>/dev/null)}"
-fi
-
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
     PYTHON3="$HOME/.venv_aarch64/bin/python3"
