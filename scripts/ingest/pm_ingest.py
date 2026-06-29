@@ -10,7 +10,6 @@ Usage:
     python3 scripts/pm_ingest.py slack  --slack-channel CHANNEL_ID --dry-run
     python3 scripts/pm_ingest.py minutes --minutes-name Leader_Meeting
     python3 scripts/pm_ingest.py minutes --since 2026-01-01
-    python3 scripts/pm_ingest.py goals  --goals-file goals.yaml
     python3 scripts/pm_ingest.py --list
 
 共通オプション:
@@ -37,7 +36,6 @@ from cli_utils import (
 )
 from db_utils import init_pm_db
 
-from ingest.goals import GoalsIngestPlugin
 from ingest.ingest_plugin import IngestContext
 from ingest.minutes import MinutesIngestPlugin
 
@@ -49,10 +47,6 @@ from ingest.slack import SlackIngestPlugin
 PLUGINS: dict[str, object] = {
     "slack":   SlackIngestPlugin(),
     "minutes": MinutesIngestPlugin(),
-    "goals":   GoalsIngestPlugin(),
-    # 将来の例:
-    # "jira":    JiraIngestPlugin(),
-    # "gcal":    GoogleCalendarIngestPlugin(),
 }
 # --------------------------------------------------------------------------- #
 
@@ -68,12 +62,10 @@ def main() -> None:
 ソース一覧:
   slack    Slack {channel_id}.db → 決定事項・アクションアイテム抽出
   minutes  議事録DB (data/minutes/) → pm.db 転記
-  goals    goals.yaml → goals/milestones テーブル同期
 
 使用例:
   python3 scripts/pm_ingest.py slack --slack-channel CHANNEL_ID
   python3 scripts/pm_ingest.py minutes --since 2026-01-01 --db data/pm.db
-  python3 scripts/pm_ingest.py goals --dry-run
   python3 scripts/pm_ingest.py --list
 """,
     )
@@ -143,7 +135,7 @@ def main() -> None:
         plugin.run(args, ctx)
 
         # Pass 2: 自動エンリッチメント
-        if args.dry_run or args.no_auto_enrich or args.source == "goals":
+        if args.dry_run or args.no_auto_enrich:
             pass
         else:
             post_d, post_a = _max_ids()
