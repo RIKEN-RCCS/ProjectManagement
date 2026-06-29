@@ -243,7 +243,7 @@ def load_claude_md_context() -> str:
     このコンテキストをプロンプトに明示的に埋め込む必要がある。
     """
     _SECTION_PAT = re.compile(
-        r"^###\s+(ステークホルダー|主なプロジェクト参加者|プロジェクト固有の用語|会議の種類)"
+        r"^###\s+(ステークホルダー|主なプロジェクト参加者|会議の種類)"
     )
     project_md = _REPO_ROOT / "docs" / "project.md"
     claude_md  = _REPO_ROOT / "CLAUDE.md"

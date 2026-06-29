@@ -117,6 +117,11 @@ class NewDecisionRequest(BaseModel):
     decided_at: str | None = None
     source: str | None = None
 
+class NewGlossaryItemRequest(BaseModel):
+    title: str
+    content: str = ""
+    category: str = ""
+
 
 # --- DB endpoints --- #
 
@@ -206,6 +211,149 @@ def create_action_item(req: NewActionItemRequest):
     )
     conn.commit()
     return {"ok": True, "id": cur.lastrowid}
+
+
+# --- Terminology endpoints --- #
+
+@app.get("/api/terminology")
+def get_terminology():
+    import json as _json
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT term, category, aliases, source, frequency, last_seen, meeting_kinds"
+        " FROM terminology ORDER BY frequency DESC"
+    ).fetchall()
+    result = []
+    for r in rows:
+        aliases_raw = r["aliases"] or "[]"
+        try:
+            aliases_list = _json.loads(aliases_raw)
+            aliases_str = ", ".join(aliases_list)
+        except Exception:
+            aliases_str = aliases_raw
+        result.append({
+            "term": r["term"],
+            "category": r["category"],
+            "aliases": aliases_str,
+            "source": r["source"],
+            "frequency": r["frequency"],
+            "last_seen": r["last_seen"],
+            "meeting_kinds": r["meeting_kinds"],
+        })
+    return {"rows": result}
+
+
+@app.post("/api/terminology/save")
+def save_terminology(req: SaveRowsRequest):
+    import json as _json
+    conn = _get_conn()
+    now_ts = datetime.now(UTC).isoformat()
+    n = 0
+    for row in req.rows:
+        term = row.get("term", "").strip()
+        if not term:
+            continue
+        if row.get("deleted"):
+            conn.execute("DELETE FROM terminology WHERE term = ?", (term,))
+            n += 1
+        else:
+            aliases = row.get("aliases") or ""
+            aliases_list = [a.strip() for a in aliases.split(",") if a.strip()]
+            aliases_json = _json.dumps(aliases_list, ensure_ascii=False)
+            category = row.get("category", "unknown") or "unknown"
+            source = row.get("source", "manual") or "manual"
+            existing = conn.execute(
+                "SELECT frequency, meeting_kinds FROM terminology WHERE term = ?", (term,)
+            ).fetchone()
+            if existing:
+                freq = (existing["frequency"] or 0) + 1
+                conn.execute(
+                    "UPDATE terminology SET category=?, aliases=?, source=?, frequency=?, last_seen=?"
+                    " WHERE term=?",
+                    (category, aliases_json, source, freq, now_ts, term),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO terminology (term, category, aliases, source, last_seen, frequency, meeting_kinds)"
+                    " VALUES (?, ?, ?, ?, ?, 1, '[]')",
+                    (term, category, aliases_json, source, now_ts),
+                )
+            n += 1
+    conn.commit()
+    return {"updated": n}
+
+
+@app.post("/api/terminology/add")
+def add_terminology(req: NewActionItemRequest):
+    import json as _json
+    conn = _get_conn()
+    now_ts = datetime.now(UTC).isoformat()
+    term = req.content.strip()
+    existing = conn.execute("SELECT 1 FROM terminology WHERE term = ?", (term,)).fetchone()
+    if not existing:
+        conn.execute(
+            "INSERT INTO terminology (term, category, aliases, source, last_seen, frequency, meeting_kinds)"
+            " VALUES (?, 'unknown', '[]', 'manual', ?, 1, '[]')",
+            (term, now_ts),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/terminology/delete")
+def delete_terminology(req: NewActionItemRequest):
+    conn = _get_conn()
+    conn.execute("DELETE FROM terminology WHERE term = ?", (req.content.strip(),))
+    conn.commit()
+    return {"ok": True}
+
+
+# --- Glossary endpoints --- #
+
+@app.get("/api/glossary")
+def get_glossary(category: str = Query("")):
+    from utils.glossary import load_all
+    conn = _get_conn()
+    items = load_all(category=category or None, conn=conn)
+    return {"rows": items}
+
+
+@app.post("/api/glossary/save")
+def save_glossary(req: SaveRowsRequest):
+    from utils.glossary import add, update, delete
+    conn = _get_conn()
+    n = 0
+    for row in req.rows:
+        gid = row.get("id")
+        if row.get("deleted") and gid:
+            delete(gid, conn=conn)
+            n += 1
+        elif gid:
+            update(gid, row["title"], row["content"], row.get("category", ""), conn=conn)
+            n += 1
+        else:
+            add(row["title"], row["content"], row.get("category", ""), conn=conn)
+            n += 1
+    return {"updated": n}
+
+
+@app.post("/api/glossary/add")
+def add_glossary(req: NewGlossaryItemRequest):
+    from utils.glossary import add
+    conn = _get_conn()
+    gid = add(title=req.title.strip(), content=req.content, category=req.category, conn=conn)
+    return {"ok": True, "id": gid}
+
+
+@app.post("/api/glossary/delete")
+def delete_glossary(req: NewGlossaryItemRequest):
+    from utils.glossary import delete
+    conn = _get_conn()
+    try:
+        delete(int(req.title.strip()), conn=conn)
+    except ValueError:
+        pass
+    return {"ok": True}
 
 
 # --- Decision endpoints --- #
