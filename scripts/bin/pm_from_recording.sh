@@ -117,7 +117,7 @@ echo "処理対象: ${#FILES[@]} ファイル"
 if [[ -n "$MEETING_NAME" ]]; then
     DB_PM_FOR_SYNC="${DB_PATH:-$REPO_ROOT/data/pm.db}"
     # shellcheck source=_lib_sync_canvas.sh
-    source "$SCRIPT_DIR/_lib_sync_canvas.sh"
+    source "$SCRIPT_DIR/bin/_lib_sync_canvas.sh"
     sync_canvas_before_pm_update "$DB_PM_FOR_SYNC"
     echo ""
 fi

@@ -42,7 +42,7 @@ fi
 SCRIPT_DIR_DAILY="${BASEDIR}/scripts"
 PYTHON3="${HOME}/.venv_$(uname -m)/bin/python3"
 SCRIPT_DIR="$SCRIPT_DIR_DAILY" PYTHON3="$PYTHON3" \
-    bash -c '. "$SCRIPT_DIR/_lib_sync_canvas.sh"; sync_canvas_before_pm_update "$1"' \
+    bash -c '. "$SCRIPT_DIR/bin/_lib_sync_canvas.sh"; sync_canvas_before_pm_update "$1"' \
     _ "$DB" >> $LOGFILE 2>&1
 export PM_CANVAS_SYNC_DONE=1
 

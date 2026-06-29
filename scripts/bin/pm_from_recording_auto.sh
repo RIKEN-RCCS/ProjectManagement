@@ -240,7 +240,7 @@ fi
 # 子プロセスの pm_from_recording.sh での重複実行は PM_CANVAS_SYNC_DONE=1 で抑止
 # --------------------------------------------------------------------------- #
 SCRIPT_DIR="$SCRIPT_DIR" PYTHON3="$VENV_PYTHON" \
-    bash -c '. "$SCRIPT_DIR/_lib_sync_canvas.sh"; sync_canvas_before_pm_update "$1"' \
+    bash -c '. "$SCRIPT_DIR/bin/_lib_sync_canvas.sh"; sync_canvas_before_pm_update "$1"' \
     _ "${BATCH_DBS[0]}" 2>&1 | tee -a "$LOG_FILE" || true
 export PM_CANVAS_SYNC_DONE=1
 

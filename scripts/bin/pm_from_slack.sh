@@ -104,7 +104,7 @@ EXTRACTOR_OPTS=("${COMMON_OPTS[@]}")
 # Canvas 上の人手編集を ingest 前に pm.db に取り込む（dry-run 時はスキップ）。
 if [[ -z "$DRY_RUN" ]]; then
     # shellcheck source=_lib_sync_canvas.sh
-    source "$SCRIPT_DIR/_lib_sync_canvas.sh"
+    source "$SCRIPT_DIR/bin/_lib_sync_canvas.sh"
     sync_canvas_before_pm_update "$DB_PM"
     echo ""
 fi
