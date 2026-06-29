@@ -16,7 +16,12 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$REPO_ROOT/logs"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"

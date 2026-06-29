@@ -3,7 +3,12 @@
 # 今日のSlackメッセージと議事録をまとめて投稿
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"

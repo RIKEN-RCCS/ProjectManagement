@@ -1,1 +1,0 @@
-bin/pm_argus_daily_summary.sh

@@ -11,7 +11,7 @@
 #   bash scripts/pm_web_update.sh --full-refetch
 #
 # cron設定例（毎朝03:30 JST）:
-#   30 3 * * * /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/pm_web_update.sh >> /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/logs/pm_web_cron.log 2>&1
+#   30 3 * * * /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/bin/pm_web_update.sh >> /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement/logs/pm_web_cron.log 2>&1
 
 set -euo pipefail
 
@@ -24,7 +24,12 @@ else
     echo "Unknown architecture: $ARCH"; exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 LOG_DIR="$REPO_ROOT/logs"

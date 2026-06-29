@@ -1,1 +1,0 @@
-bin/_lib_sync_canvas.sh

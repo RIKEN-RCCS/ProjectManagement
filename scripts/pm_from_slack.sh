@@ -1,1 +1,0 @@
-bin/pm_from_slack.sh

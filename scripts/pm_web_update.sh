@@ -1,1 +1,0 @@
-bin/pm_web_update.sh

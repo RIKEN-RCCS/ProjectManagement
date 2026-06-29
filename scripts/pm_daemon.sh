@@ -1,1 +1,0 @@
-bin/pm_daemon.sh

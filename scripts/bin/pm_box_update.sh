@@ -44,7 +44,12 @@ else
     echo "Unknown architecture: $ARCH"; exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # LOCAL_LLM_* は ~/.secrets/localLLM.sh で設定（gemma-4 / RiVault 等）
