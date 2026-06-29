@@ -306,7 +306,6 @@ def call_rivault(
         "max_tokens": max_tokens,
         "stream": True,
     }
-    payload["context_management"] = False
     payload["temperature"] = temperature if temperature is not None else 0.3
     model_lower = model.lower()
     if "kimi" not in model_lower:
