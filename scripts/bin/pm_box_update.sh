@@ -113,7 +113,7 @@ echo "ステップ1: BOXリンク抽出 (pm_slack_box_links.py)"
 [[ -n "$FORCE" ]]      && echo "  force        : on"
 echo "================================================================"
 
-"$PYTHON3" "$SCRIPT_DIR/pm_slack_box_links.py" "${EXTRACT_OPTS[@]}"
+"$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_slack_box_links.py" "${EXTRACT_OPTS[@]}"
 
 # --------------------------------------------------------------------------- #
 # ステップ2: BOXドキュメント本文抽出
@@ -133,7 +133,7 @@ else
     [[ -n "$FORCE" ]]   && echo "  force        : on"
     echo "================================================================"
 
-    "$PYTHON3" "$SCRIPT_DIR/pm_box_crawl.py" "${BOX_OPTS[@]}"
+    "$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_box_crawl.py" "${BOX_OPTS[@]}"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +161,7 @@ echo "ステップ3: FTS5インデックス更新 (pm_embed.py)"
 [[ -n "$DRY_RUN" ]]      && echo "  dry-run      : on"
 echo "================================================================"
 
-"$PYTHON3" "$SCRIPT_DIR/pm_embed.py" "${EMBED_OPTS[@]}"
+"$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_embed.py" "${EMBED_OPTS[@]}"
 
 echo ""
 echo "✓ pm_box_update.sh 完了"

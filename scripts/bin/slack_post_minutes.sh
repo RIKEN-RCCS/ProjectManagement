@@ -84,4 +84,4 @@ ARGS=(--post-to-slack --meeting-name "$MEETING_NAME" --held-at "$HELD_AT" -c "$C
 [[ -n "$DRY_RUN" ]]    && ARGS+=("$DRY_RUN")
 [[ -n "$NO_ENCRYPT" ]] && ARGS+=("$NO_ENCRYPT")
 
-"$PYTHON3" "$SCRIPT_DIR/pm_minutes_import.py" "${ARGS[@]}"
+"$PYTHON3" "$SCRIPT_DIR/minutes/pm_minutes_import.py" "${ARGS[@]}"

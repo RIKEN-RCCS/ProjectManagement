@@ -117,7 +117,7 @@ echo "  Slack DB   : $DB_SLACK"
 [[ -n "$DRY_RUN" ]]    && echo "  dry-run    : on"
 echo "================================================================"
 
-"$PYTHON3" "$SCRIPT_DIR/slack_pipeline.py" \
+"$PYTHON3" "$SCRIPT_DIR/data-pipeline/slack_pipeline.py" \
     -c "$CHANNEL" \
     --db "$DB_SLACK" \
     "${PIPELINE_OPTS[@]}"

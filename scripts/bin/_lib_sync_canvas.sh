@@ -57,7 +57,7 @@ sync_canvas_before_pm_update() {
     echo "ステップ0: XLSX → pm.db 同期 (pm_xlsx_sync.py)"
     echo "  db        : $db"
     echo "================================================================"
-    if ! "$PYTHON3" "$SCRIPT_DIR/pm_xlsx_sync.py" --db "$db"; then
+    if ! "$PYTHON3" "$SCRIPT_DIR/reporting/pm_xlsx_sync.py" --db "$db"; then
         echo "[WARN] pm_xlsx_sync.py が失敗しました。Box XLSX 上の編集が pm.db に" \
              "反映されていない可能性がありますが、続行します。" >&2
     fi

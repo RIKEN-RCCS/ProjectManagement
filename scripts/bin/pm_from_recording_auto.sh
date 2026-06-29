@@ -293,7 +293,7 @@ if [[ ${#SUCCEEDED_MEETINGS[@]} -gt 0 ]]; then
     fi
     for meeting_name in "${!SUCCEEDED_MEETINGS[@]}"; do
         log "[CATALOG] Box アップロード + Canvas 目録更新: meeting=${meeting_name}"
-        "$VENV_PYTHON" "$SCRIPT_DIR/pm_minutes_catalog.py" \
+        "$VENV_PYTHON" "$SCRIPT_DIR/minutes/pm_minutes_catalog.py" \
             --upload --catalog \
             --meeting-name "$meeting_name" 2>&1 | tee -a "$LOG_FILE" || \
             log "[WARN] pm_minutes_catalog.py 失敗: meeting=${meeting_name}"

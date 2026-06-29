@@ -58,11 +58,11 @@ fi
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_ROOT/data"
 WHISPER_VAD="$SCRIPT_DIR/recording/whisper_vad.py"
-PM_MINUTES_IMPORT="$SCRIPT_DIR/pm_minutes_import.py"
+PM_MINUTES_IMPORT="$SCRIPT_DIR/minutes/pm_minutes_import.py"
 PM_INGEST="$SCRIPT_DIR/ingest/pm_ingest.py"
 GENERATE_MINUTES_LOCAL="$SCRIPT_DIR/recording/generate_minutes_local.py"
-PM_MINUTES_CATALOG="$SCRIPT_DIR/pm_minutes_catalog.py"
-PM_MINUTES_PUBLISH="$SCRIPT_DIR/pm_minutes_publish.py"
+PM_MINUTES_CATALOG="$SCRIPT_DIR/minutes/pm_minutes_catalog.py"
+PM_MINUTES_PUBLISH="$SCRIPT_DIR/minutes/pm_minutes_publish.py"
 
 # --------------------------------------------------------------------------- #
 # 引数パース

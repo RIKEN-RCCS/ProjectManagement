@@ -39,4 +39,4 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo ""
 echo "======== pm_web_update.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
 
-"$PYTHON3" "$SCRIPT_DIR/pm_web_fetch.py" "$@"
+"$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_web_fetch.py" "$@"

@@ -142,9 +142,9 @@ if ! $SKIP_SYNC; then
     echo "================================================================"
 
     if [[ ${#SYNC_ARGS[@]} -gt 0 ]]; then
-        "$PYTHON3" "$SCRIPT_DIR/pm_xlsx_sync.py" "${SYNC_ARGS[@]}"
+        "$PYTHON3" "$SCRIPT_DIR/reporting/pm_xlsx_sync.py" "${SYNC_ARGS[@]}"
     else
-        "$PYTHON3" "$SCRIPT_DIR/pm_xlsx_sync.py"
+        "$PYTHON3" "$SCRIPT_DIR/reporting/pm_xlsx_sync.py"
     fi
     echo ""
 fi
@@ -160,9 +160,9 @@ echo "ステップ2: XLSX レポート生成・Box アップロード・Canvas �
 echo "================================================================"
 
 if [[ ${#REPORT_ARGS[@]} -gt 0 ]]; then
-    "$PYTHON3" "$SCRIPT_DIR/pm_xlsx_report.py" "${REPORT_ARGS[@]}"
+    "$PYTHON3" "$SCRIPT_DIR/reporting/pm_xlsx_report.py" "${REPORT_ARGS[@]}"
 else
-    "$PYTHON3" "$SCRIPT_DIR/pm_xlsx_report.py"
+    "$PYTHON3" "$SCRIPT_DIR/reporting/pm_xlsx_report.py"
 fi
 
 echo ""
