@@ -24,7 +24,7 @@ export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
 
 BASEDIR="/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement"
 LOGFILE="${BASEDIR}/logs/pm_from_slack_daily_$(date +%Y%m%d_%H%M%S).log"
-RUN="bash ${BASEDIR}/scripts/pm_from_slack.sh"
+RUN="bash ${BASEDIR}/scripts/bin/pm_from_slack.sh"
 DB="${BASEDIR}/data/pm.db"
 
 touch $LOGFILE
@@ -117,4 +117,4 @@ $RUN -c C0AS2JKS200 --db-pm $DB >> $LOGFILE 2>&1   # 92_詳細設計1技術報�
 $RUN -c C09JMEA157E --db-pm $DB >> $LOGFILE 2>&1   # 92_詳細設計調達
 
 # --- FTS5 インデックス再構築 ---
-cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && python3 ${BASEDIR}/scripts/pm_embed.py --data-dir "${BASEDIR}/data" >> $LOGFILE 2>&1
+cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && python3 ${BASEDIR}/scripts/data-pipeline/pm_embed.py --data-dir "${BASEDIR}/data" >> $LOGFILE 2>&1
