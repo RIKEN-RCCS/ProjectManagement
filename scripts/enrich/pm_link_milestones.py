@@ -49,10 +49,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
 # DB ヘルパ
 # --------------------------------------------------------------------------- #
 def fetch_milestones(conn) -> list[dict]:
-    rows = conn.execute(
-        "SELECT milestone_id, name, due_date, area, success_criteria"
-        " FROM milestones WHERE status='active' ORDER BY due_date"
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            """SELECT m.milestone_id, m.name, m.due_date, m.area, m.success_criteria,
+                      g.name AS goal_name, g.description AS goal_description
+               FROM milestones m
+               LEFT JOIN goals g ON m.goal_id = g.goal_id
+               WHERE m.status='active' ORDER BY m.due_date"""
+        ).fetchall()
+    except Exception:
+        rows = conn.execute(
+            "SELECT milestone_id, name, due_date, area, success_criteria"
+            " FROM milestones WHERE status='active' ORDER BY due_date"
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -78,6 +87,12 @@ def format_milestones_for_prompt(milestones: list[dict]) -> str:
         )
         if sc_text:
             lines.append(f"    達成条件: {sc_text}")
+        if m.get("goal_name"):
+            goal_desc = (m.get("goal_description") or "").strip()
+            goal_line = f"    ↳ 親ゴール [{m['goal_name']}]"
+            if goal_desc:
+                goal_line += f": {goal_desc[:80]}"
+            lines.append(goal_line)
     return "\n".join(lines)
 
 
@@ -99,7 +114,7 @@ def fetch_unlinked_items(
     where = "WHERE " + " AND ".join(conds)
     sql = f"""
         SELECT a.id, a.content, a.assignee, a.due_date, a.status,
-               a.source, a.extracted_at, a.source_ref,
+               a.source, a.extracted_at, a.source_ref, a.source_context,
                m.kind AS meeting_kind, m.held_at AS meeting_held_at
         FROM action_items a
         LEFT JOIN meetings m ON a.meeting_id = m.meeting_id
@@ -140,9 +155,9 @@ PROMPT_TEMPLATE = """あなたは富岳NEXT アプリケーション開発エリ
 
 ## 紐づけのルール
 
-1. **明確に該当する場合のみ紐づける**: アクションアイテムの内容が、マイルストーンの名称・エリア・達成条件に対し直接寄与すると判断できる場合のみ milestone_id を記入する
-2. **判断できない / どれにも該当しない場合は null**: 一般的な運営事項、複数MSにまたがる事項、情報不足の場合は null とする
-3. 1つのアクションアイテムは最大1つのマイルストーンに紐づける
+1. **関連が認められたら積極的に紐づける**: アクションアイテムの内容・担当者・期限が、マイルストーンの名称・エリア・達成条件・親ゴールのいずれかと関連すると判断できる場合は milestone_id を記入する。完全一致でなくても「このマイルストーンの推進に直接または間接に貢献する作業」であれば紐づけてよい。
+2. **null は真に無関係な場合のみ**: 複数のマイルストーンに同程度に当てはまり最良の一択が存在しない場合、またはプロジェクト外の一般事務である場合のみ null とする。迷ったときは最も関連の強いマイルストーンを 1 つ選ぶこと。
+3. 1つのアクションアイテムは最大1つのマイルストーンに紐づける（最も関連が強いものを選択）。
 
 ## アクションアイテム
 
@@ -184,6 +199,9 @@ def format_items_for_prompt(items: list[dict]) -> str:
         meta = " | ".join(meta_parts)
         content = (it.get("content") or "").replace("\n", " ").strip()
         lines.append(f"- id={it['id']} [{meta}]\n  {content}")
+        ctx = (it.get("source_context") or it.get("_fts_context") or "").strip()
+        if ctx:
+            lines.append(f"  文脈: {ctx[:200]}")
     return "\n".join(lines)
 
 
@@ -195,6 +213,102 @@ def extract_json(text: str) -> dict:
     if m:
         return json.loads(m.group(0))
     raise ValueError(f"JSON not found in LLM output: {text[:300]}")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: 埋め込みによる候補事前絞り込み
+# --------------------------------------------------------------------------- #
+
+def build_milestone_text(m: dict) -> str:
+    parts = [m.get("name") or ""]
+    if m.get("area"):
+        parts.append(m["area"])
+    if m.get("goal_name"):
+        parts.append(m["goal_name"])
+    if m.get("goal_description"):
+        parts.append(m["goal_description"][:100])
+    sc_raw = m.get("success_criteria") or ""
+    if sc_raw:
+        try:
+            sc = json.loads(sc_raw)
+            if isinstance(sc, list):
+                parts.extend(str(s) for s in sc[:3])
+            else:
+                parts.append(str(sc)[:200])
+        except Exception:
+            parts.append(str(sc_raw)[:200])
+    return " ".join(p for p in parts if p)
+
+
+def build_item_text(item: dict) -> str:
+    parts = [(item.get("content") or "").strip()]
+    ctx = (item.get("source_context") or "").strip()
+    if ctx:
+        parts.append(ctx[:200])
+    return " ".join(p for p in parts if p)
+
+
+def compute_milestone_embeddings(milestones: list[dict], log) -> object | None:
+    try:
+        from embed_utils import embed_batch  # type: ignore
+        texts = [build_milestone_text(m) for m in milestones]
+        mat = embed_batch(texts, timeout=120)
+        return mat
+    except Exception as e:
+        log(f"[WARN] マイルストーム埋め込み失敗: {e}")
+        return None
+
+
+def select_top_k_candidates(
+    item_vec: object,
+    ms_mat: object,
+    milestones: list[dict],
+    top_k: int,
+) -> tuple[list[dict], object]:
+    import numpy as np
+    from embed_utils import cosine_similarity_matrix  # type: ignore
+    sims = cosine_similarity_matrix(item_vec, ms_mat)
+    top_idxs = np.argsort(sims)[::-1][:top_k]
+    return [milestones[i] for i in top_idxs], sims[top_idxs]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: FTS5 コンテキスト補完
+# --------------------------------------------------------------------------- #
+
+def fetch_item_fts_context(
+    item: dict,
+    qa_index_path: Path,
+    max_chars: int = 300,
+) -> str | None:
+    """action_items.content で qa_index.db の FTS5 を検索し周辺コンテキストを返す。"""
+    if not qa_index_path.exists():
+        return None
+    content = (item.get("content") or "").strip()
+    if not content:
+        return None
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(qa_index_path))
+        conn.row_factory = _sqlite3.Row
+        try:
+            fts_q = re.sub(r'["\'\*\^\(\)\[\]]', " ", content[:60]).strip()
+            rows = conn.execute(
+                "SELECT c.content FROM fts"
+                " JOIN chunks c ON fts.rowid = c.id"
+                " WHERE fts MATCH ? ORDER BY rank LIMIT 3",
+                [fts_q],
+            ).fetchall()
+        except Exception:
+            rows = []
+        finally:
+            conn.close()
+        if not rows:
+            return None
+        snippets = [dict(r)["content"][:120].replace("\n", " ") for r in rows]
+        return (" … ".join(snippets))[:max_chars]
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +369,18 @@ def main() -> None:
                         help="特定の action_item id のみ処理（複数指定可）")
     parser.add_argument("--output", type=Path, default=None,
                         help="ログをファイルにも保存")
+    parser.add_argument("--preview", action="store_true",
+                        help="LLM は呼ぶが DB には書き込まない（紐づけ率の A/B 計測用）")
+    parser.add_argument("--no-embed", action="store_true",
+                        help="埋め込み事前フィルタを無効化（全マイルストーンを LLM に提示）")
+    parser.add_argument("--top-k", type=int, default=3, metavar="N",
+                        help="埋め込みで絞り込むマイルストーン候補数（デフォルト: 3）")
+    parser.add_argument("--auto-link-threshold", type=float, default=0.85, metavar="THRESH",
+                        help="自動紐づけのコサイン類似度閾値（デフォルト: 0.85）")
+    parser.add_argument("--with-qa-context", action="store_true",
+                        help="qa_index.db FTS5 で source_context 空のアイテムに文脈を補完")
+    parser.add_argument("--qa-index", type=Path, default=REPO_ROOT / "data" / "qa_index.db",
+                        help="qa_index.db のパス（デフォルト: data/qa_index.db）")
     add_dry_run_arg(parser)
     add_since_arg(parser, " (action_items.extracted_at で絞り込み)")
     add_no_encrypt_arg(parser)
@@ -296,19 +422,85 @@ def main() -> None:
             args.output.write_text("\n".join(output_lines), encoding="utf-8")
         return
 
+    write_to_db = not (args.dry_run or args.preview)
+    if args.preview:
+        log("[INFO] --preview モード: LLM は呼ぶが DB には書き込みません")
+
+    # Phase 3: FTS5 コンテキスト補完
+    if args.with_qa_context:
+        fts_enriched = 0
+        for it in items:
+            if it.get("source_context"):
+                continue
+            ctx = fetch_item_fts_context(it, args.qa_index)
+            if ctx:
+                it["_fts_context"] = ctx
+                fts_enriched += 1
+        log(f"[INFO] qa_index.db コンテキスト補完: {fts_enriched} 件")
+
     total = len(items)
     updated = 0
+    auto_linked = 0
     null_count = 0
     failed = 0
     by_ms: dict[str, int] = {}
 
-    for offset in range(0, total, args.batch_size):
+    # Phase 2: 埋め込みによる候補事前絞り込み
+    item_candidates: dict[int, list[dict]] = {}
+    ms_mat = None
+    if not args.no_embed:
+        ms_mat = compute_milestone_embeddings(milestones, log)
+        if ms_mat is not None:
+            try:
+                from embed_utils import embed_batch  # type: ignore
+                log(f"[INFO] アイテム埋め込み計算中 ({len(items)} 件)…")
+                item_texts = [build_item_text(it) for it in items]
+                item_mat = embed_batch(item_texts, timeout=180)
+                auto_link_ids: set[int] = set()
+                for it, item_vec in zip(items, item_mat, strict=True):
+                    candidates, sims = select_top_k_candidates(
+                        item_vec, ms_mat, milestones, args.top_k
+                    )
+                    item_candidates[it["id"]] = candidates
+                    if float(sims[0]) >= args.auto_link_threshold:
+                        ms_id = candidates[0]["milestone_id"]
+                        if write_to_db:
+                            conn.execute(
+                                "UPDATE action_items SET milestone_id=? WHERE id=?",
+                                (ms_id, it["id"]),
+                            )
+                            write_audit(conn, it["id"], None, ms_id)
+                        by_ms[ms_id] = by_ms.get(ms_id, 0) + 1
+                        auto_linked += 1
+                        auto_link_ids.add(it["id"])
+                        log(f"  id={it['id']} → {ms_id} [自動 sim={float(sims[0]):.3f}]")
+                if write_to_db and auto_link_ids:
+                    conn.commit()
+                items = [it for it in items if it["id"] not in auto_link_ids]
+                log(f"[INFO] 自動紐づけ: {auto_linked} 件, LLM 判定へ: {len(items)} 件")
+            except Exception as e:
+                log(f"[WARN] アイテム埋め込み失敗 ({e}): 全アイテムを LLM 判定します")
+                ms_mat = None
+                item_candidates = {}
+
+    for offset in range(0, len(items), args.batch_size):
         batch = items[offset:offset + args.batch_size]
         batch_no = offset // args.batch_size + 1
-        total_batches = (total + args.batch_size - 1) // args.batch_size
+        total_batches = (len(items) + args.batch_size - 1) // args.batch_size
         log(f"\n[{batch_no}/{total_batches}] バッチ {len(batch)} 件を LLM 判定中…")
 
-        results = process_batch(batch, milestones, valid_ms_ids, log)
+        # 埋め込みで候補を絞った場合はそれだけを LLM に渡す
+        if item_candidates:
+            cand_ids = {
+                m["milestone_id"]
+                for it in batch
+                for m in item_candidates.get(it["id"], milestones)
+            }
+            batch_milestones = [m for m in milestones if m["milestone_id"] in cand_ids] or milestones
+        else:
+            batch_milestones = milestones
+
+        results = process_batch(batch, batch_milestones, valid_ms_ids, log)
         if not results:
             failed += len(batch)
             continue
@@ -325,21 +517,25 @@ def main() -> None:
                 null_count += 1
                 log(f"  id={it['id']}: 紐づけなし ({r['reason'][:60]})")
                 continue
-            # UPDATE
-            conn.execute(
-                "UPDATE action_items SET milestone_id=? WHERE id=?",
-                (ms_id, it["id"]),
-            )
-            write_audit(conn, it["id"], None, ms_id)
+            if write_to_db:
+                conn.execute(
+                    "UPDATE action_items SET milestone_id=? WHERE id=?",
+                    (ms_id, it["id"]),
+                )
+                write_audit(conn, it["id"], None, ms_id)
             by_ms[ms_id] = by_ms.get(ms_id, 0) + 1
             updated += 1
             log(f"  id={it['id']} → {ms_id} ({r['reason'][:60]})")
 
-        conn.commit()
+        if write_to_db:
+            conn.commit()
 
     log("")
     log("=" * 60)
-    log(f"完了: 対象={total} 件, 紐づけ更新={updated} 件, 紐づけなし={null_count} 件, 失敗={failed} 件")
+    link_rate = (updated + auto_linked) / total if total > 0 else 0.0
+    log(f"完了: 対象={total} 件, 紐づけ更新={updated} 件 (自動={auto_linked}), "
+        f"紐づけなし={null_count} 件, 失敗={failed} 件")
+    log(f"紐づけ率: {link_rate:.1%}")
     if by_ms:
         log("マイルストーン別:")
         for ms_id in sorted(by_ms):

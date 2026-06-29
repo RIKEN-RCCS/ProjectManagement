@@ -143,7 +143,6 @@ python3 scripts/pm_minutes_import.py \
 | `--meetings-dir DIR` | `meetings/` | 議事録 .md ファイルの検索ディレクトリ |
 | `--minutes-dir DIR` | `data/minutes/` | 議事録DBの保存ディレクトリ |
 | `--since YYYY-MM-DD` | - | `--bulk` / `--list` 時のフィルタ |
-| `--model MODEL` | CLI デフォルト | 使用する Claude モデル |
 | `--force` | - | 既存レコードを上書き（`--post-to-slack` 時は再アップロードを許可） |
 | `--dry-run` | - | DB保存・Slack API呼び出しなし・結果を標準出力のみ |
 | `--output PATH` | - | 出力をファイルにも保存（単一ファイルモードのみ） |
@@ -470,7 +469,6 @@ python3 scripts/pm_insight.py --db data/pm.db --since 2026-02-01 --dry-run
 | `--dry-run` | - | Canvas 投稿なし・結果を標準出力のみ |
 | `--output PATH` | - | 結果をファイルにも保存 |
 | `--no-encrypt` | - | 平文モード |
-| `--model MODEL` | CLI デフォルト | 使用する Claude モデル |
 
 **生成されるインサイトの構成**:
 1. 総合評価（A/B/C/D ヘルススコア + LLM生成の日本語ナラティブ）
@@ -934,4 +932,72 @@ python3 scripts/pm_screen.py --include-decisions
 1. `pm_screen.py --export` で重複候補をCSV出力
 2. CSVを人間が確認し、削除すべき行に `deleted=1` を立てる
 3. `pm_relink.py --import screen.csv` で一括削除を反映
+
+### 16. マイルストーン遡及紐づけ（pm_link_milestones.py）
+
+`milestone_id IS NULL` の既存アクションアイテムに対し、LLM + 埋め込みでマイルストーンを推定して紐づける。
+`pm_ingest.py` 実行後・`pm_relink.py` での手動補完前に使うことで手作業を削減できる。
+
+**処理の流れ**:
+1. milestones テーブルを goals テーブルと JOIN し、各マイルストーンに親ゴール情報を付与
+2. bge-m3 埋め込みで各アイテムとマイルストーンのコサイン類似度を計算し、上位 top-k 候補に絞り込む
+3. 類似度 ≥ auto-link-threshold のアイテムは LLM 不要で自動紐づけ
+4. 残りのアイテムは top-k 候補のみを LLM（GLM-4.7-Flash / ローカル vLLM）に渡して判定
+
+```sh
+# A/B 計測（DB 変更なし・LLM は呼ぶ）
+python3 scripts/enrich/pm_link_milestones.py --limit 50 --preview
+
+# 埋め込みなし版と比較
+python3 scripts/enrich/pm_link_milestones.py --no-embed --limit 50 --preview
+
+# 本番適用（全未紐づけアイテム）
+python3 scripts/enrich/pm_link_milestones.py
+
+# 日付フィルタ付き
+python3 scripts/enrich/pm_link_milestones.py --since 2026-01-01
+
+# source_context が空のアイテムに qa_index.db の FTS5 で文脈を補完してから実行
+python3 scripts/enrich/pm_link_milestones.py --with-qa-context
+
+# 特定 ID のみ再処理
+python3 scripts/enrich/pm_link_milestones.py --id 42 57 88
+
+# 件数確認のみ（LLM・DB ともスキップ）
+python3 scripts/enrich/pm_link_milestones.py --dry-run --limit 100
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--db PATH` | `data/pm.db` | pm.db のパス |
+| `--since YYYY-MM-DD` | なし | この日付以降のアイテムのみ対象 |
+| `--id ID...` | なし | 特定の action_item id のみ処理（複数指定可） |
+| `--limit N` | なし | 処理対象の最大件数 |
+| `--batch-size N` | `15` | 1回の LLM 呼び出しで処理するアイテム数 |
+| `--preview` | - | LLM は呼ぶが DB には書き込まない（紐づけ率の A/B 計測用） |
+| `--dry-run` | - | LLM・DB ともスキップ（件数確認のみ） |
+| `--no-embed` | - | 埋め込み事前フィルタを無効化（全マイルストーンを LLM に提示） |
+| `--top-k N` | `3` | 埋め込みで絞り込むマイルストーン候補数 |
+| `--auto-link-threshold F` | `0.85` | 自動紐づけのコサイン類似度閾値（下げると自動紐づけが増える） |
+| `--with-qa-context` | - | qa_index.db FTS5 で `source_context` 空のアイテムに文脈を補完 |
+| `--qa-index PATH` | `data/qa_index.db` | qa_index.db のパス |
+| `--output PATH` | - | ログをファイルにも保存 |
+| `--no-encrypt` | - | 平文モード |
+
+**サマリー出力例**:
+```
+完了: 対象=120 件, 紐づけ更新=45 件 (自動=12), 紐づけなし=70 件, 失敗=5 件
+紐づけ率: 47.5%
+```
+
+**紐づけ結果の確認**:
+```sh
+# audit_log で自動紐づけの内訳を確認
+python3 scripts/db_utils.py --audit-log --source auto_link --limit 30
+
+# milestone_id が入ったアイテムを一覧表示
+python3 scripts/pm_relink.py --list --all
+```
+
+**埋め込みサーバが落ちている場合**: `--no-embed` を付けると埋め込みをスキップし、全マイルストーンを LLM に渡す動作にフォールバックする（エラーで止まらない）。
 
