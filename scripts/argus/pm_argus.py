@@ -765,12 +765,12 @@ def _collect_all_data(
         # pm.db stats: 全 pm.db を並列 fetch（channel_ids/minutes_names でフィルタ）
         pm_futs = []
         for p in pm_db_paths:
-            f = pool.submit(_fetch_single_pm_stats, p, today, since_date, no_encrypt,
+            f = pool.submit(_fetch_single_pm_stats, p, today, since_date, no_encrypt,  # type: ignore[arg-type]
                             channel_ids=channel_ids, minutes_names=minutes_names)
             pm_futs.append(f)
 
         # qa_index.db から Web 記事を取得
-        web_fut = pool.submit(fetch_recent_web_articles, qa_index_path, index_name=index_name)
+        web_fut = pool.submit(fetch_recent_web_articles, qa_index_path, index_name=index_name)  # type: ignore[arg-type]
 
         # background knowledge: pm.db.decisions の rationale 付きから取得
         kn_fut = pool.submit(fetch_background_knowledge,
@@ -801,7 +801,7 @@ def _collect_all_data(
                 stats_list.append(f.result())
             except Exception:
                 pass
-        stats = merge_pm_stats(stats_list)
+        stats = merge_pm_stats(stats_list)  # type: ignore[arg-type]
 
         # knowledge 結果
         try:
@@ -1197,7 +1197,7 @@ def _build_channel_name_map() -> dict[str, str]:
     channel_map = dict(resolve_channel_names())
     if not channel_map:
         try:
-            from argus.pm_qa_server import _CHANNEL_NAMES
+            from argus.pm_qa_server import _channel_names as _CHANNEL_NAMES
             channel_map.update(_CHANNEL_NAMES)
         except ImportError:
             pass

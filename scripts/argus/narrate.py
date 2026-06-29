@@ -154,7 +154,7 @@ def _post_argus_voice(
         # アップロード履歴を記録（reaction_added の対象判定に使う）
         try:
             import voice_uploads
-            file_id, message_ts = _extract_share_ts(upload_resp, channel_id)
+            file_id, message_ts = _extract_share_ts(upload_resp, channel_id)  # type: ignore[arg-type]
             if file_id and not message_ts:
                 import time as _time
                 for delay in (0.5, 1.0, 2.0):
@@ -239,7 +239,7 @@ def _post_argus_video(
 
         try:
             import voice_uploads
-            file_id, message_ts = _extract_share_ts(upload_resp, channel_id)
+            file_id, message_ts = _extract_share_ts(upload_resp, channel_id)  # type: ignore[arg-type]
             # files_upload_v2 のレスポンスに shares が入らないことがあるため、
             # file_id だけ取れて message_ts が空なら files_info でフォールバック取得。
             # それでも取れない場合 (shares 反映が遅延) は再試行してから諦める。
@@ -640,7 +640,7 @@ def _run_narrate_build(thread_ts: str, user_id: str) -> None:
         except Exception:
             pass
         candidate_msgs: list[dict] = []
-        for msg in reversed(replies.get("messages", []) or []):
+        for msg in reversed(replies.get("messages", []) or []):  # type: ignore[var-annotated]
             if msg.get("ts") == thread_ts:
                 continue
             if bot_user_id and msg.get("user") == bot_user_id:

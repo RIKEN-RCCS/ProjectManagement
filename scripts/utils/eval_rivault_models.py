@@ -414,7 +414,6 @@ def main() -> int:
     print(f"評価モデル数: {len(models)} / タスク: {', '.join(task_ids)}")
     print(f"実行日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
 
-    all_results: list[dict] = []
     summary_per_model: dict[str, dict] = {}
 
     for model in models:

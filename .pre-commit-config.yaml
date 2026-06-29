@@ -1,0 +1,24 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff lint (scripts/)
+        entry: /home/users/hikaru.inoue/.venv_aarch64/bin/ruff check scripts --fix
+        language: script
+        types: [python]
+        stages: [pre-commit]
+        pass_filenames: false
+      - id: pytest
+        name: pytest (tests/)
+        entry: /home/users/hikaru.inoue/.venv_aarch64/bin/python3 -m pytest tests/ -x --ignore=tests/argus/test_agent_tools.py
+        language: script
+        types: [python]
+        stages: [pre-commit]
+        pass_filenames: false
+      - id: mypy
+        name: mypy (argus/)
+        entry: /home/users/hikaru.inoue/.venv_aarch64/bin/mypy scripts/argus/ --exclude scripts/argus/patrol/
+        language: script
+        types: [python]
+        stages: [manual]
+        pass_filenames: false

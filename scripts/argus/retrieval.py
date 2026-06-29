@@ -195,11 +195,11 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
         if index_name:
             ci_join = " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
             ci_where = "ci.index_name = ? AND "
-            ci_params = [index_name]
+            ci_params: list = [index_name]
         else:
             ci_join = ""
             ci_where = ""
-            ci_params: list = []
+            ci_params = []
 
         idx_label = f"{index_db.name}[{index_name}]" if index_name else index_db.name
 
@@ -442,7 +442,10 @@ def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTO
     for c in chunks:
         dim = c.pop("dim")
         vec = blob_to_vector(c.pop("vector"), dim) if dim else None
-        vecs.append(vec)
+        if vec is not None:
+            vecs.append(vec)
+    if not vecs:
+        return []
     vectors = np.stack(vecs)
     sims = cosine_similarity_matrix(qvec, vectors)
     top_k = np.argsort(-sims)[:k]

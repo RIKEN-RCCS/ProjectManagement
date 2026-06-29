@@ -7,11 +7,9 @@
 from __future__ import annotations
 
 import json
-import os
-import tokenize
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
 
 # Whisper initial_prompt のトークン上限
 WHISPER_PROMPT_TOKEN_LIMIT = 224
@@ -66,7 +64,6 @@ def load_top_k(
         return []
 
     try:
-        now_ts = datetime.now(timezone.utc).isoformat()
         # recency スコア: 30日以内は weight=2, それ以降は weight=1
         sql_parts = ["SELECT term, aliases, frequency, last_seen, meeting_kinds FROM terminology WHERE 1=1"]
         params: list = []
@@ -103,8 +100,8 @@ def load_top_k(
             try:
                 dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                age_days = (datetime.now(timezone.utc) - dt).days
+                    dt = dt.replace(tzinfo=UTC)
+                age_days = (datetime.now(UTC) - dt).days
                 if age_days <= 30:
                     recency_bonus = 1.0
             except Exception:
@@ -184,7 +181,7 @@ def add_term(
     conn = _open_pm(db_path)
     if conn is None:
         return
-    now_ts = datetime.now(timezone.utc).isoformat()
+    now_ts = datetime.now(UTC).isoformat()
     aliases_json = json.dumps(aliases or [], ensure_ascii=False)
     try:
         existing = conn.execute(

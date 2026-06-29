@@ -37,17 +37,15 @@ ignore_names = [
 # --------------------------------------------------------------------------- #
 # mypy: 静的型チェック
 #   実行: ~/.venv_aarch64/bin/mypy scripts/argus
-#   方針: 新規コードで型エラーゼロを保つ。既存の low-priority ファイルは除外。
+#   方針: scripts/ 直下の symlink 30 本が重複モジュール検出を引き起こすため、
+#         argus/ サブディレクトリのみチェックする。新規コードで型エラーゼロを保つ。
 # --------------------------------------------------------------------------- #
 [tool.mypy]
 python_version = "3.12"
 mypy_path = "scripts"
 ignore_missing_imports = true
 follow_imports = "silent"
-exclude = [
-    "^scripts/archive/",
-    "^scripts/build_slide_video\\.py$",
-]
+disable_error_code = ["annotation-unchecked"]
 
 # --------------------------------------------------------------------------- #
 # ruff: 一般的 lint (PEP 8 / 未使用 import / バグ検出 / モダン化)
