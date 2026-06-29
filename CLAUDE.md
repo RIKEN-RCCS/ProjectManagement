@@ -136,6 +136,9 @@ export OPENAI_MAX_TOKENS="8192"                      # Slack 抽出用（pm_inge
 - `call_claude()` 内で `CLAUDECODE` 環境変数を子プロセスから除外する処理を実装済み。
 - `slack-mcp-server` は不要（`slack_pipeline.py` が Slack SDK に移行済み）。
 - Python仮想環境はアーキテクチャに応じて `~/.venv_aarch64`（aarch64）または `~/.venv_x86_64`（x86_64）を使用。`uname -m` で確認し適切なパスを使うこと。
+- **システムの `python3` は使わない。** `sqlcipher3` を必要とするスクリプト（`scripts/utils/` 配下の DB アクセスユーティリティ全般）はシステム python3 では `sqlcipher3` が無いため動作しない。**常に `~/.venv_aarch64/bin/python3`（aarch64）または `~/.venv_x86_64/bin/python3`（x86_64）を使うこと。**
+  - Claude Code から Bash でスクリプトをテストする場合も同様。`python3` のエイリアスに頼らず明示的に venv 内の Python を指定する。
+  - `pm_api.py` は pm_daemon.sh 経由で自動的に正しい venv の Python で起動される。CLI から直接テストする場合のみ注意する。
 
 ---
 

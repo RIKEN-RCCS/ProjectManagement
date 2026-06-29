@@ -934,6 +934,16 @@ def generate_minutes(
     except Exception as _e:
         print(f"[INFO] terminology 動的追加スキップ: {_e}")
 
+    # pm.db glossary テーブルから構造化テキストを追記
+    try:
+        from utils.glossary import build_reference as build_glossary_ref
+        glossary_ref = build_glossary_ref()
+        if glossary_ref:
+            claude_md_context = claude_md_context + glossary_ref
+            print(f"[INFO] glossary 構造化テキストを追記: {len(glossary_ref)} 字")
+    except Exception as _e:
+        print(f"[INFO] glossary 追記スキップ: {_e}")
+
     # スライドOCRから得た文脈をプロンプトに同梱するブロック
     if slide_context:
         slide_context_block = (

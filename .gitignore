@@ -34,6 +34,9 @@ venv/
 # Slurm logs
 slurm-*.out
 
+# RiVault model evaluation outputs
+results_*.json
+
 # Temporary files
 *.tmp
 .work_*/

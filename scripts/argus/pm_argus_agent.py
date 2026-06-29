@@ -525,6 +525,22 @@ def run_agent(
     """
     tool_desc = _build_tool_descriptions()
     codesign_items = load_codesign_context() or "(コデザイン項目情報なし)"
+    # terminology 動的用語辞書を追記
+    try:
+        from utils.terminology import build_terminology_reference
+        dyn_terms = build_terminology_reference()
+        if dyn_terms:
+            codesign_items = codesign_items + "\n" + dyn_terms
+    except Exception:
+        pass
+    # glossary 構造化テキストを追記
+    try:
+        from utils.glossary import build_reference as build_glossary_ref
+        glossary_ref = build_glossary_ref()
+        if glossary_ref:
+            codesign_items = codesign_items + "\n" + glossary_ref
+    except Exception:
+        pass
     system_prompt = _AGENT_SYSTEM_PROMPT.format(
         tool_descriptions=tool_desc,
         max_steps=max_steps,

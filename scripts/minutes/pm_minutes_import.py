@@ -768,6 +768,14 @@ def process_file(
 
         log(f"[INFO] LLMによる議事録作成を開始... (model: {model or 'default'})")
         claude_md_context = load_claude_md_context()
+        # glossary 構造化テキストを追記
+        try:
+            from utils.glossary import build_reference as build_glossary_ref
+            glossary_ref = build_glossary_ref()
+            if glossary_ref:
+                claude_md_context = claude_md_context + glossary_ref
+        except Exception:
+            pass
         prompt = PROMPT_TEMPLATE.format(
             transcript=transcript,
             held_at=held_at,

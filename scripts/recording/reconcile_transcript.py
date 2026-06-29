@@ -239,6 +239,14 @@ def reconcile_transcript(
         return output_path
 
     claude_md_context = load_claude_md_context()
+    # glossary 構造化テキストを追記
+    try:
+        from utils.glossary import build_reference as build_glossary_ref
+        glossary_ref = build_glossary_ref()
+        if glossary_ref:
+            claude_md_context = claude_md_context + glossary_ref
+    except Exception:
+        pass
     terminology_text = _build_terminology_text(meeting_kind)
 
     # 全体の時間範囲
