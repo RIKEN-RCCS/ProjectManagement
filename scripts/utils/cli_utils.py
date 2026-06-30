@@ -233,16 +233,20 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 def load_claude_md_context() -> str:
     """ローカルLLM向けプロジェクト文脈を返す。generate_minutes_local.py より移植。
 
-    docs/project.md から「ステークホルダー・主なプロジェクト参加者・プロジェクト固有の用語・
-    会議の種類」の各セクションを抽出する。docs/project.md が存在しない場合は CLAUDE.md に
-    フォールバックする。Claude CLI は CLAUDE.md を自動ロードするが、ローカルLLMはしないため
-    このコンテキストをプロンプトに明示的に埋め込む必要がある。
+    docs/project.md から「# 主なプロジェクト参加者」「# 会議の種類」セクション（H1）と
+    その配下のサブセクション（## 理化学研究所 / ## 富士通株式会社 / ## NVIDIA 等）を
+    抽出する。別の H1 が現れた時点でキャプチャを終了する。
+    docs/project.md が存在しない場合は CLAUDE.md にフォールバックする。
     """
-    _SECTION_PAT = re.compile(
-        r"^###\s+(ステークホルダー|主なプロジェクト参加者|会議の種類)"
-    )
-    project_md = _REPO_ROOT / "docs" / "project.md"
-    claude_md  = _REPO_ROOT / "CLAUDE.md"
+    # 抽出対象の H1 セクション
+    _SECTION_PAT = re.compile(r"^#\s+(主なプロジェクト参加者|会議の種類)")
+    # 対象外の H1（キャプチャ終了トリガー）
+    _H1_PAT = re.compile(r"^#\s+\S")
+
+    # _REPO_ROOT は scripts/ を指してしまっているので、リポジトリルートを独自計算
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    project_md = repo_root / "docs" / "project.md"
+    claude_md  = repo_root / "CLAUDE.md"
 
     if project_md.exists():
         content = project_md.read_text(encoding="utf-8")
@@ -250,23 +254,35 @@ def load_claude_md_context() -> str:
         for line in content.splitlines():
             if _SECTION_PAT.match(line):
                 capture = True
+            elif _H1_PAT.match(line) and capture:
+                capture = False
             if capture:
                 sections.append(line)
-        return "\n".join(sections) if sections else content
+        if sections:
+            print(f"[INFO] load_claude_md_context: {project_md} から {len(sections)} 行を抽出")
+            return "\n".join(sections)
+        print(f"[WARN] load_claude_md_context: {project_md} に対象セクション（# 主なプロジェクト参加者 / # 会議の種類）が見つかりません。ファイル全体を使用します")
+        return content
 
     # フォールバック: CLAUDE.md から抽出
+    print(f"[WARN] load_claude_md_context: {project_md} が見つかりません。CLAUDE.md にフォールバックします")
     if not claude_md.exists():
+        print(f"[WARN] load_claude_md_context: {claude_md} も見つかりません。空文字列を返します")
         return ""
     content = claude_md.read_text(encoding="utf-8")
     sections, capture = [], False
     for line in content.splitlines():
         if _SECTION_PAT.match(line):
             capture = True
-        elif re.match(r"^---", line) and capture:
+        elif _H1_PAT.match(line) and capture:
             capture = False
         if capture:
             sections.append(line)
-    return "\n".join(sections) if sections else content[:3000]
+    if sections:
+        print(f"[INFO] load_claude_md_context: CLAUDE.md から {len(sections)} 行を抽出")
+        return "\n".join(sections)
+    print("[WARN] load_claude_md_context: CLAUDE.md にも対象セクションが見つかりません。先頭 3000 字を使用します")
+    return content[:3000]
 
 
 def load_codesign_context() -> str:

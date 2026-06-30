@@ -320,6 +320,26 @@ def run_whisper(audio_path, terminology_path: Path | None = None):
     audio_save_dir = _get_audio_save_dir()
     hugging_face_token = _get_hugging_face_token()
     transcript_path = audio_path.with_suffix(".md")
+
+    # pm.db の terminology テーブルから Whisper 用語を事前取得
+    # （コンテナ内 Python は sqlcipher3 非対応のため、コンテナ外で生成する）
+    try:
+        _scripts_dir = str(Path(__file__).resolve().parent.parent)
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        from utils.terminology import load_top_k
+        pm_terms = load_top_k(limit_tokens=224)
+        if pm_terms:
+            if terminology_path and terminology_path.exists():
+                with terminology_path.open("a", encoding="utf-8") as _f:
+                    _f.write("\n" + "\n".join(pm_terms))
+            else:
+                terminology_path = Path(audio_save_dir) / f"pm_terms_{audio_path.stem}.txt"
+                terminology_path.write_text("\n".join(pm_terms), encoding="utf-8")
+            logger.info(f"pm.db terminology: {len(pm_terms)} 語を Whisper 用に追加")
+    except Exception as _e:
+        logger.warning(f"pm.db terminology 取得失敗（スキップ）: {_e}")
+
     extra_opt = f"--initial-prompt-extra '{terminology_path}'" if terminology_path else ""
 
     # FFmpeg 4.x → 6.x の soname マッピング（コンテナ内 FFmpeg 6.x vs torchcodec 要求 4.x）

@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, Query, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -964,6 +964,36 @@ async def admin_recording_upload(files: list[UploadFile] = File(...),
 
     extra = " + VTT" if vtt_path else ""
     return {"job_id": job_id, "status": "queued", "file": audio_path + extra}
+
+
+@app.post("/api/admin/recording/start")
+async def admin_recording_start(request: Request):
+    """サーバー上の既存ファイルパスを指定してパイプラインを開始。"""
+    body = await request.json()
+    file_path = body.get("file_path", "").strip()
+    meeting_name = body.get("meeting_name", "").strip()
+    held_at = body.get("held_at", "").strip()
+    skip_seconds = int(body.get("skip_seconds", 0))
+    vtt_path = (body.get("vtt_path") or "").strip() or None
+
+    queue = _state.get("job_queue")
+    if not queue:
+        return JSONResponse({"error": "Job queue not initialized"}, status_code=500)
+    if not file_path:
+        return JSONResponse({"error": "file_path は必須です"}, status_code=400)
+    if not Path(file_path).exists():
+        return JSONResponse({"error": f"ファイルが見つかりません: {file_path}"}, status_code=400)
+    if vtt_path and not Path(vtt_path).exists():
+        return JSONResponse({"error": f"VTT ファイルが見つかりません: {vtt_path}"}, status_code=400)
+
+    params: dict = {"file_path": file_path, "meeting_name": meeting_name,
+                    "held_at": held_at, "skip_seconds": skip_seconds}
+    if vtt_path:
+        params["vtt_path"] = vtt_path
+
+    job_id = queue.enqueue("recording", params)
+    queue.start(job_id)
+    return {"job_id": job_id, "status": "queued", "file": file_path}
 
 
 # --- Minutes management --- #

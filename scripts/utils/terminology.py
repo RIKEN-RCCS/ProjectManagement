@@ -34,14 +34,19 @@ def _open_pm(db_path: Path | None = None):
     """pm.db を開く（暗号化対応）。terminology テーブルを自動作成する。"""
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from db_utils import open_db
+    from db_utils import SQLCIPHER_AVAILABLE, open_db
     path = db_path or _pm_db_path()
     if not path.exists():
+        print(f"[WARN] terminology: pm.db が見つかりません: {path}")
+        return None
+    if not SQLCIPHER_AVAILABLE:
+        print("[INFO] terminology: sqlcipher3 未インストール（コンテナ環境）— pm.db 用語辞書をスキップします")
         return None
     try:
         conn = open_db(path, encrypt=True, row_factory=True, migrations=[_TERMINOLOGY_DDL])
         return conn
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] terminology: pm.db への接続に失敗しました: {e}")
         return None
 
 
@@ -268,6 +273,7 @@ def build_terminology_reference(
     """
     terms = load_all_terms(db_path=db_path)
     if not terms:
+        print("[INFO] terminology: テーブルにエントリがありません（スキップ）")
         return ""
 
     if meeting_kind:
@@ -292,4 +298,6 @@ def build_terminology_reference(
             except Exception:
                 pass
         lines.append(line)
-    return "\n".join(lines) + "\n"
+    result = "\n".join(lines) + "\n"
+    print(f"[INFO] terminology: {len(terms)} 件の用語を抽出しました")
+    return result

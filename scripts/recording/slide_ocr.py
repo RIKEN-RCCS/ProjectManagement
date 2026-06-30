@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -191,36 +190,37 @@ def ocr_slides(
 
     max_workers 個のスレッドで並列に OCR する。vLLM 側が連続バッチをサポートするため
     I/O 待ち中に次のリクエストを投げることでスループットが向上する。失敗は空文字で埋める。
+    LOCAL_LLM_URL が失敗した場合は RIVAULT_URL（RIVAULT_OCR_MODEL 設定時）へフォールバックする。
     """
     if not frames:
         return []
-    if base_url is None:
-        # OCR は vision 対応モデルが必要。LOCAL_LLM_URL (gemma-4 等のローカル
-        # マルチモーダルモデル) を優先し、未設定時のみ RiVault にフォールバック。
-        base_url = os.environ.get("LOCAL_LLM_URL")
-        if not base_url and os.environ.get("RIVAULT_OCR_MODEL", "").strip() and os.environ.get("RIVAULT_URL"):
-            base_url = os.environ["RIVAULT_URL"].rstrip("/")
-            token = os.environ.get("RIVAULT_TOKEN", "")
-            if token:
-                os.environ["LOCAL_LLM_TOKEN"] = token
-    if not base_url:
+
+    from pm_box_crawl import get_ocr_endpoints, ocr_slide_image
+    if base_url is not None:
+        ocr_endpoints = [base_url.rstrip("/")]
+    else:
+        ocr_endpoints = get_ocr_endpoints()
+    if not ocr_endpoints:
         logger.warning("LOCAL_LLM_URL 未設定のため OCR をスキップします")
         return [""] * len(frames)
 
     import time as _time
-
-    from pm_box_crawl import ocr_slide_image
     completed_count = 0
     start_ts = _time.time()
 
     def _one(idx_frame: tuple[int, Path]) -> tuple[int, str]:
         idx, frame = idx_frame
         t0 = _time.time()
-        try:
-            md = ocr_slide_image(frame, base_url, prompt=MEETING_FRAME_OCR_PROMPT)
-        except Exception as e:
-            logger.warning(f"  OCR 失敗 ({frame.name}): {e}")
-            md = None
+        md = None
+        for ep in ocr_endpoints:
+            try:
+                md = ocr_slide_image(frame, ep, prompt=MEETING_FRAME_OCR_PROMPT)
+                if md:
+                    break
+            except Exception as e:
+                logger.warning(f"  OCR 失敗 ({frame.name}, {ep}): {e}")
+            if not md and ep != ocr_endpoints[-1]:
+                logger.warning(f"  フォールバック: {ocr_endpoints[ocr_endpoints.index(ep) + 1]} を試みます")
         elapsed = _time.time() - t0
         logger.info(
             f"OCR done {idx + 1}/{len(frames)} ({frame.name}, {elapsed:.1f}s, "
@@ -230,7 +230,7 @@ def ocr_slides(
 
     results: list[str] = [""] * len(frames)
     workers = max(1, min(max_workers, len(frames)))
-    logger.info(f"OCR 開始: {len(frames)} 枚 × 並列 {workers}, endpoint={base_url}")
+    logger.info(f"OCR 開始: {len(frames)} 枚 × 並列 {workers}, endpoints={ocr_endpoints}")
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for idx, md in pool.map(_one, enumerate(frames)):
             results[idx] = md

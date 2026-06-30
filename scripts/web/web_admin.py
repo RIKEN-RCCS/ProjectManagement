@@ -224,7 +224,7 @@ class AdminJobQueue:
 
         if kind == "recording":
             file_path = params.get("file_path", "")
-            cmd = ["bash", str(self.scripts_dir / "pm_from_recording.sh"), file_path]
+            cmd = ["bash", str(self.scripts_dir / "bin" / "pm_from_recording.sh"), file_path]
             if params.get("meeting_name"):
                 cmd += ["--meeting-name", params["meeting_name"]]
             if params.get("held_at"):

@@ -182,6 +182,27 @@ for INPUT_FILE in "${FILES[@]}"; do
     echo "[INFO] mp4 以外のためスライドOCRをスキップします (ext=$EXT)"
   fi
 
+  # pm.db の terminology テーブルから Whisper 用語を事前取得
+  # （コンテナ内 Python は sqlcipher3 非対応のため、コンテナ外の venv Python で生成する）
+  PM_DB_TERMS_FILE="$WORKDIR/pm_db_terms.txt"
+  if PYTHONPATH="$SCRIPT_DIR" "$PYTHON3" -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from utils.terminology import load_top_k
+terms = load_top_k(limit_tokens=224)
+print('\n'.join(terms))
+" > "$PM_DB_TERMS_FILE" 2>/dev/null && [[ -s "$PM_DB_TERMS_FILE" ]]; then
+    N_DB_TERMS=$(wc -l < "$PM_DB_TERMS_FILE" | tr -d ' ')
+    echo "[INFO] pm.db terminology から ${N_DB_TERMS} 語を Whisper 用に取得しました"
+    if [[ -n "$TERMINOLOGY_FILE" && -s "$TERMINOLOGY_FILE" ]]; then
+      cat "$PM_DB_TERMS_FILE" >> "$TERMINOLOGY_FILE"
+    else
+      TERMINOLOGY_FILE="$PM_DB_TERMS_FILE"
+    fi
+  else
+    rm -f "$PM_DB_TERMS_FILE"
+  fi
+
   WHISPER_EXTRA_OPT=""
   if [[ -n "$TERMINOLOGY_FILE" ]]; then
     WHISPER_EXTRA_OPT="--initial-prompt-extra $TERMINOLOGY_FILE"

@@ -35,14 +35,19 @@ def _open_pm(db_path: Path | None = None):
     """pm.db を開く（暗号化対応）。glossary テーブルを自動作成する。"""
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from db_utils import open_db
+    from db_utils import SQLCIPHER_AVAILABLE, open_db
     path = db_path or _pm_db_path()
     if not path.exists():
+        print(f"[WARN] glossary: pm.db が見つかりません: {path}")
+        return None
+    if not SQLCIPHER_AVAILABLE:
+        print("[INFO] glossary: sqlcipher3 未インストール（コンテナ環境）— pm.db 用語集をスキップします")
         return None
     try:
         conn = open_db(path, encrypt=True, row_factory=True, migrations=[_GLOSSARY_DDL])
         return conn
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] glossary: pm.db への接続に失敗しました: {e}")
         return None
 
 
@@ -206,8 +211,10 @@ def build_reference(
             conn.close()
 
     if not rows:
+        print("[INFO] glossary: テーブルにエントリがありません（スキップ）")
         return ""
 
+    print(f"[INFO] glossary: {len(rows)} 件のエントリを抽出しました")
     lines = ["\n### プロジェクト用語集 (glossary)"]
     current_cat = None
     for row in rows:

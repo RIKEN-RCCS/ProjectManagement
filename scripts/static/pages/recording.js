@@ -9,10 +9,13 @@ registerAdminPage('recording', async (container) => {
     data() {
       return {
         // Form state
+        inputMode: 'upload',   // 'upload' | 'path'
         meetingName: '',
         heldAt: '',
         skipSeconds: 0,
         selectedFiles: [], // Array<File>
+        serverPath: '',
+        serverVttPath: '',
         submitting: false,
         submittedLabel: '',
         // Meeting names for datalist
@@ -28,7 +31,9 @@ registerAdminPage('recording', async (container) => {
     },
     computed: {
       canSubmit() {
-        return this.selectedFiles.length > 0 && this.meetingName.trim() && this.heldAt && !this.submitting;
+        if (this.submitting || !this.meetingName.trim() || !this.heldAt) return false;
+        if (this.inputMode === 'path') return this.serverPath.trim().length > 0;
+        return this.selectedFiles.length > 0;
       },
       fileSummary() {
         const files = this.selectedFiles;
@@ -88,8 +93,43 @@ registerAdminPage('recording', async (container) => {
       async submitForm() {
         if (!this.canSubmit) return;
         this.submitting = true;
-        this.submittedLabel = 'Uploading...';
 
+        if (this.inputMode === 'path') {
+          this.submittedLabel = 'Starting...';
+          try {
+            const res = await fetch('/api/admin/recording/start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                file_path: this.serverPath.trim(),
+                meeting_name: this.meetingName.trim(),
+                held_at: this.heldAt,
+                skip_seconds: this.skipSeconds,
+                vtt_path: this.serverVttPath.trim() || null,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              toast(data.error || 'Start failed', 'negative');
+              this.submitting = false;
+              this.submittedLabel = '';
+              return;
+            }
+            toast('Pipeline started! Job: ' + data.job_id, 'positive');
+            this.submittedLabel = 'Submitted';
+            this.serverPath = '';
+            this.serverVttPath = '';
+            this.loadHistory();
+            setTimeout(() => { this.submitting = false; this.submittedLabel = ''; }, 3000);
+          } catch (e) {
+            toast('Error: ' + e.message, 'negative');
+            this.submitting = false;
+            this.submittedLabel = '';
+          }
+          return;
+        }
+
+        this.submittedLabel = 'Uploading...';
         const formData = new FormData();
         for (const f of this.selectedFiles) {
           formData.append('files', f);
@@ -170,23 +210,57 @@ registerAdminPage('recording', async (container) => {
 
         <!-- Upload Form -->
         <div class="admin-card mb-6">
-          <h3 class="text-sm font-bold text-gray-300 mb-3">Upload Recording File</h3>
+          <h3 class="text-sm font-bold text-gray-300 mb-3">Recording Pipeline</h3>
 
-          <div ref="uploadZone"
-               class="upload-zone mb-4"
-               :class="{ 'has-files': hasFiles }"
-               @click="$refs.fileInput.click()"
-               @dragover.prevent="$refs.uploadZone.classList.add('dragging')"
-               @dragleave.prevent="$refs.uploadZone.classList.remove('dragging')"
-               @drop.prevent="onDrop">
-            <div class="text-center">
-              <div class="text-3xl mb-2 text-gray-500">📁</div>
-              <p class="text-gray-400">Drag & drop files here or click to select</p>
-              <p class="text-xs text-gray-600 mt-1">MP4, M4A, WAV, MP3 + VTT (optional)</p>
+          <!-- Mode tabs -->
+          <div class="flex gap-2 mb-4">
+            <button @click="inputMode='upload'"
+                    class="px-3 py-1.5 rounded text-xs font-medium transition-colors"
+                    :class="inputMode==='upload' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'">
+              📁 ファイルをアップロード
+            </button>
+            <button @click="inputMode='path'"
+                    class="px-3 py-1.5 rounded text-xs font-medium transition-colors"
+                    :class="inputMode==='path' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'">
+              🖥 サーバー上のパスを指定
+            </button>
+          </div>
+
+          <!-- Upload zone -->
+          <div v-if="inputMode==='upload'">
+            <div ref="uploadZone"
+                 class="upload-zone mb-4"
+                 :class="{ 'has-files': hasFiles }"
+                 @click="$refs.fileInput.click()"
+                 @dragover.prevent="$refs.uploadZone.classList.add('dragging')"
+                 @dragleave.prevent="$refs.uploadZone.classList.remove('dragging')"
+                 @drop.prevent="onDrop">
+              <div class="text-center">
+                <div class="text-3xl mb-2 text-gray-500">📁</div>
+                <p class="text-gray-400">Drag & drop files here or click to select</p>
+                <p class="text-xs text-gray-600 mt-1">MP4, M4A, WAV, MP3 + VTT (optional)</p>
+              </div>
+              <input ref="fileInput" type="file"
+                     accept=".mp4,.m4a,.wav,.mp3,.vtt" multiple class="hidden"
+                     @change="onFileSelected">
             </div>
-            <input ref="fileInput" type="file"
-                   accept=".mp4,.m4a,.wav,.mp3,.vtt" multiple class="hidden"
-                   @change="onFileSelected">
+          </div>
+
+          <!-- Server path zone -->
+          <div v-else class="mb-4 space-y-2">
+            <div>
+              <label class="text-xs text-gray-400 block mb-1">音声ファイルのパス (サーバー上) *</label>
+              <input type="text" v-model="serverPath"
+                     placeholder="/lvs0/.../data/processing/2026-06-30_Meeting.mp4"
+                     class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-xs w-full text-gray-200 font-mono">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400 block mb-1">VTT ファイルのパス（省略可）</label>
+              <input type="text" v-model="serverVttPath"
+                     placeholder="/lvs0/.../data/processing/2026-06-30_Meeting.vtt"
+                     class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-xs w-full text-gray-200 font-mono">
+            </div>
+            <p class="text-xs text-gray-600">ファイルを SCP 等でサーバーに配置した後、フルパスを入力してください。</p>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
@@ -218,11 +292,11 @@ registerAdminPage('recording', async (container) => {
                     :class="{ 'opacity-50 cursor-not-allowed': !canSubmit }">
               {{ submittedLabel || 'Submit Pipeline' }}
             </button>
-            <button v-if="hasFiles" @click="clearFiles"
+            <button v-if="inputMode==='upload' && hasFiles" @click="clearFiles"
                     class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-2 text-sm font-medium">
               Clear
             </button>
-            <div v-if="hasFiles" class="text-xs text-gray-500 self-center" :title="fileDetails">
+            <div v-if="inputMode==='upload' && hasFiles" class="text-xs text-gray-500 self-center" :title="fileDetails">
               <span class="text-green-400 font-medium">{{ selectedFiles.length }} files selected</span>
               {{ fileSummary.slice(fileSummary.indexOf('(')) }}
             </div>
