@@ -1,255 +1,269 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1008 752" font-family="monospace" font-size="10">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1090 580" font-family="monospace" font-size="10">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#888"/></marker></defs>
-<rect width="1008" height="752" fill="white"/>
-<style>.edge-arrow{stroke:#888;stroke-width:1;fill:none;marker-end:url(#arrow)}.node-rect{fill:white;stroke:#666;stroke-width:1;rx:4}.node-text{fill:#333;text-anchor:middle;font-size:10px}.group-label{font-size:11px;font-weight:bold;fill:#444}</style>
-<rect x="14" y="54" width="162" height="138" fill="#ffd0d0" rx="6" stroke="#ccc" stroke-width="1"/>
-<text x="22" y="50" class="group-label">argus (Slack Bot)</text>
-<rect x="14" y="234" width="952" height="450" fill="#f5f5f5" rx="6" stroke="#ccc" stroke-width="1"/>
-<text x="22" y="236" class="group-label">(ルート symlink)</text>
-<rect x="336" y="266" width="150" height="22" class="node-rect"/>
-<text x="411" y="281" class="node-text">build_slide_video</text>
-<rect x="494" y="370" width="150" height="22" class="node-rect"/>
-<text x="569" y="385" class="node-text">pm_argus</text>
-<rect x="178" y="578" width="150" height="22" class="node-rect"/>
-<text x="253" y="593" class="node-text">prompts</text>
-<rect x="652" y="292" width="150" height="22" class="node-rect"/>
-<text x="727" y="307" class="node-text">embed_utils</text>
-<rect x="810" y="422" width="150" height="22" class="node-rect"/>
-<text x="885" y="437" class="node-text">pm_link_milestones</text>
-<rect x="652" y="318" width="150" height="22" class="node-rect"/>
-<text x="727" y="333" class="node-text">glossary</text>
-<rect x="20" y="578" width="150" height="22" class="node-rect"/>
-<text x="95" y="593" class="node-text">pptx_theme</text>
-<rect x="810" y="396" width="150" height="22" class="node-rect"/>
-<text x="885" y="411" class="node-text">pm_embed</text>
-<rect x="20" y="474" width="150" height="22" class="node-rect"/>
-<text x="95" y="489" class="node-text">pm_minutes_publish</text>
-<rect x="494" y="604" width="150" height="22" class="node-rect"/>
-<text x="569" y="619" class="node-text">slide_ocr</text>
-<rect x="494" y="500" width="150" height="22" class="node-rect"/>
-<text x="569" y="515" class="node-text">pm_slack_box_links</text>
-<rect x="20" y="526" width="161" height="22" class="node-rect"/>
-<text x="100" y="541" class="node-text">pm_terminology_update</text>
-<rect x="810" y="292" width="150" height="22" class="node-rect"/>
-<text x="885" y="307" class="node-text">enrich_items</text>
-<rect x="336" y="344" width="150" height="22" class="node-rect"/>
-<text x="411" y="359" class="node-text">mcp_explorer</text>
-<rect x="810" y="604" width="150" height="22" class="node-rect"/>
-<text x="885" y="619" class="node-text">transcribe_pipeline</text>
-<rect x="20" y="138" width="150" height="22" class="node-rect"/>
-<text x="95" y="153" class="node-text">state</text>
-<rect x="178" y="500" width="150" height="22" class="node-rect"/>
-<text x="253" y="515" class="node-text">pm_screen</text>
-<rect x="20" y="656" width="150" height="22" class="node-rect"/>
-<text x="95" y="671" class="node-text">web_utils</text>
-<rect x="810" y="318" width="150" height="22" class="node-rect"/>
-<text x="885" y="333" class="node-text">ingest_plugin</text>
-<rect x="336" y="318" width="150" height="22" class="node-rect"/>
-<text x="411" y="333" class="node-text">format_utils</text>
-<rect x="336" y="526" width="150" height="22" class="node-rect"/>
-<text x="411" y="541" class="node-text">pm_tts</text>
-<rect x="652" y="448" width="150" height="22" class="node-rect"/>
-<text x="727" y="463" class="node-text">pm_minutes_import</text>
-<rect x="336" y="292" width="150" height="22" class="node-rect"/>
-<text x="411" y="307" class="node-text">db_utils</text>
-<rect x="494" y="396" width="150" height="22" class="node-rect"/>
-<text x="569" y="411" class="node-text">pm_box_relevance</text>
-<rect x="810" y="370" width="150" height="22" class="node-rect"/>
-<text x="885" y="385" class="node-text">pm_argus_patrol</text>
-<rect x="652" y="266" width="150" height="22" class="node-rect"/>
-<text x="727" y="281" class="node-text">canvas_utils</text>
-<rect x="652" y="344" width="150" height="22" class="node-rect"/>
-<text x="727" y="359" class="node-text">minutes</text>
-<rect x="494" y="578" width="154" height="22" class="node-rect"/>
-<text x="571" y="593" class="node-text">reconcile_transcript</text>
-<rect x="178" y="344" width="150" height="22" class="node-rect"/>
-<text x="253" y="359" class="node-text">llm</text>
-<rect x="810" y="500" width="150" height="22" class="node-rect"/>
-<text x="885" y="515" class="node-text">pm_sync_canvas</text>
-<rect x="20" y="112" width="150" height="22" class="node-rect"/>
-<text x="95" y="127" class="node-text">detect</text>
-<rect x="336" y="604" width="150" height="22" class="node-rect"/>
-<text x="411" y="619" class="node-text">slack_post</text>
-<rect x="652" y="240" width="150" height="22" class="node-rect"/>
-<text x="727" y="255" class="node-text">agent_tools</text>
-<rect x="494" y="422" width="150" height="22" class="node-rect"/>
-<text x="569" y="437" class="node-text">pm_investigate_app</text>
-<rect x="810" y="474" width="150" height="22" class="node-rect"/>
-<text x="885" y="489" class="node-text">pm_report</text>
-<rect x="20" y="60" width="150" height="22" class="node-rect"/>
-<text x="95" y="75" class="node-text">actions</text>
-<rect x="652" y="578" width="150" height="22" class="node-rect"/>
-<text x="727" y="593" class="node-text">retrieval</text>
-<rect x="178" y="266" width="150" height="22" class="node-rect"/>
-<text x="253" y="281" class="node-text">box_cli</text>
-<rect x="178" y="656" width="150" height="22" class="node-rect"/>
-<text x="253" y="671" class="node-text">whisper_vad</text>
-<rect x="494" y="240" width="150" height="22" class="node-rect"/>
-<text x="569" y="255" class="node-text">__init__</text>
-<rect x="652" y="370" width="150" height="22" class="node-rect"/>
-<text x="727" y="385" class="node-text">pm_argus_agent</text>
-<rect x="20" y="344" width="150" height="22" class="node-rect"/>
-<text x="95" y="359" class="node-text">knowledge_context</text>
-<rect x="20" y="292" width="150" height="22" class="node-rect"/>
-<text x="95" y="307" class="node-text">cli_utils</text>
-<rect x="20" y="422" width="150" height="22" class="node-rect"/>
-<text x="95" y="437" class="node-text">pm_ingest</text>
-<rect x="652" y="630" width="150" height="22" class="node-rect"/>
-<text x="727" y="645" class="node-text">web_admin</text>
-<rect x="178" y="396" width="150" height="22" class="node-rect"/>
-<text x="253" y="411" class="node-text">pm_box_crawl</text>
-<rect x="494" y="318" width="168" height="22" class="node-rect"/>
-<text x="578" y="333" class="node-text">generate_minutes_local</text>
-<rect x="178" y="474" width="150" height="22" class="node-rect"/>
-<text x="253" y="489" class="node-text">pm_qa_server</text>
-<rect x="652" y="526" width="150" height="22" class="node-rect"/>
-<text x="727" y="541" class="node-text">pm_users_sync</text>
-<rect x="336" y="422" width="150" height="22" class="node-rect"/>
-<text x="411" y="437" class="node-text">pm_insight</text>
-<rect x="336" y="578" width="150" height="22" class="node-rect"/>
-<text x="411" y="593" class="node-text">qa_engine</text>
-<rect x="336" y="552" width="150" height="22" class="node-rect"/>
-<text x="411" y="567" class="node-text">pm_xlsx_report</text>
-<rect x="20" y="630" width="150" height="22" class="node-rect"/>
-<text x="95" y="645" class="node-text">transcript</text>
-<rect x="20" y="318" width="150" height="22" class="node-rect"/>
-<text x="95" y="333" class="node-text">eval_rivault_models</text>
-<rect x="178" y="604" width="150" height="22" class="node-rect"/>
-<text x="253" y="619" class="node-text">slack_pipeline</text>
-<rect x="20" y="164" width="150" height="22" class="node-rect"/>
-<text x="95" y="179" class="node-text">users</text>
-<rect x="20" y="448" width="150" height="22" class="node-rect"/>
-<text x="95" y="463" class="node-text">pm_mcp_server</text>
-<rect x="494" y="474" width="150" height="22" class="node-rect"/>
-<text x="569" y="489" class="node-text">pm_relink</text>
-<rect x="20" y="370" width="150" height="22" class="node-rect"/>
-<text x="95" y="385" class="node-text">output_tools</text>
-<rect x="810" y="578" width="150" height="22" class="node-rect"/>
-<text x="885" y="593" class="node-text">slack</text>
-<rect x="652" y="604" width="150" height="22" class="node-rect"/>
-<text x="727" y="619" class="node-text">terminology</text>
-<rect x="336" y="630" width="150" height="22" class="node-rect"/>
-<text x="411" y="645" class="node-text">voice_uploads</text>
-<rect x="336" y="370" width="150" height="22" class="node-rect"/>
-<text x="411" y="385" class="node-text">pm_api</text>
-<rect x="20" y="86" width="150" height="22" class="node-rect"/>
-<text x="95" y="101" class="node-text">confirm</text>
-<rect x="810" y="240" width="150" height="22" class="node-rect"/>
-<text x="885" y="255" class="node-text">argus</text>
-<rect x="810" y="344" width="150" height="22" class="node-rect"/>
-<text x="885" y="359" class="node-text">narrate</text>
-<rect x="336" y="448" width="150" height="22" class="node-rect"/>
-<text x="411" y="463" class="node-text">pm_minutes_catalog</text>
-<rect x="652" y="552" width="150" height="22" class="node-rect"/>
-<text x="727" y="567" class="node-text">pm_xlsx_sync</text>
-<rect x="20" y="552" width="150" height="22" class="node-rect"/>
-<text x="95" y="567" class="node-text">pm_web_fetch</text>
-<rect x="494" y="344" width="150" height="22" class="node-rect"/>
-<text x="569" y="359" class="node-text">mcp_tools</text>
-<path d="M 170 71 C 490.0 71, 490.0 511, 810 511" class="edge-arrow"/>
-<path d="M 170 97 C 490.0 97, 490.0 511, 810 511" class="edge-arrow"/>
-<path d="M 170 123 C 253.0 123, 253.0 303, 336 303" class="edge-arrow"/>
-<path d="M 170 123 C 95.0 123, 95.0 303, 20 303" class="edge-arrow"/>
-<path d="M 170 123 C 490.0 123, 490.0 511, 810 511" class="edge-arrow"/>
-<path d="M 170 175 C 253.0 175, 253.0 303, 336 303" class="edge-arrow"/>
-<path d="M 802 251 C 806.0 251, 806.0 251, 810 251" class="edge-arrow"/>
-<path d="M 802 251 C 569.0 251, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 802 251 C 648.0 251, 648.0 381, 494 381" class="edge-arrow"/>
-<path d="M 802 251 C 490.0 251, 490.0 485, 178 485" class="edge-arrow"/>
-<path d="M 486 277 C 253.0 277, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 486 277 C 332.0 277, 332.0 407, 178 407" class="edge-arrow"/>
-<path d="M 486 277 C 411.0 277, 411.0 537, 336 537" class="edge-arrow"/>
-<path d="M 486 303 C 253.0 303, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 960 303 C 490.0 303, 490.0 303, 20 303" class="edge-arrow"/>
-<path d="M 960 303 C 648.0 303, 648.0 303, 336 303" class="edge-arrow"/>
-<path d="M 486 329 C 411.0 329, 411.0 303, 336 303" class="edge-arrow"/>
-<path d="M 662 329 C 341.0 329, 341.0 303, 20 303" class="edge-arrow"/>
-<path d="M 662 329 C 499.0 329, 499.0 303, 336 303" class="edge-arrow"/>
-<path d="M 662 329 C 657.0 329, 657.0 303, 652 303" class="edge-arrow"/>
-<path d="M 802 329 C 569.0 329, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 355 C 648.0 355, 648.0 277, 336 277" class="edge-arrow"/>
-<path d="M 486 355 C 253.0 355, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 486 355 C 411.0 355, 411.0 303, 336 303" class="edge-arrow"/>
-<path d="M 644 355 C 490.0 355, 490.0 303, 336 303" class="edge-arrow"/>
-<path d="M 802 355 C 569.0 355, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 644 355 C 490.0 355, 490.0 329, 336 329" class="edge-arrow"/>
-<path d="M 802 355 C 727.0 355, 727.0 459, 652 459" class="edge-arrow"/>
-<path d="M 960 355 C 648.0 355, 648.0 537, 336 537" class="edge-arrow"/>
-<path d="M 960 355 C 648.0 355, 648.0 641, 336 641" class="edge-arrow"/>
-<path d="M 644 381 C 648.0 381, 648.0 277, 652 277" class="edge-arrow"/>
-<path d="M 486 381 C 411.0 381, 411.0 303, 336 303" class="edge-arrow"/>
-<path d="M 644 381 C 332.0 381, 332.0 303, 20 303" class="edge-arrow"/>
-<path d="M 644 381 C 490.0 381, 490.0 303, 336 303" class="edge-arrow"/>
-<path d="M 802 381 C 411.0 381, 411.0 303, 20 303" class="edge-arrow"/>
-<path d="M 802 381 C 569.0 381, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 381 C 648.0 381, 648.0 303, 336 303" class="edge-arrow"/>
-<path d="M 644 381 C 490.0 381, 490.0 329, 336 329" class="edge-arrow"/>
-<path d="M 486 381 C 332.0 381, 332.0 511, 178 511" class="edge-arrow"/>
-<path d="M 486 381 C 569.0 381, 569.0 641, 652 641" class="edge-arrow"/>
-<path d="M 486 381 C 253.0 381, 253.0 667, 20 667" class="edge-arrow"/>
-<path d="M 328 407 C 174.0 407, 174.0 303, 20 303" class="edge-arrow"/>
-<path d="M 328 407 C 332.0 407, 332.0 303, 336 303" class="edge-arrow"/>
-<path d="M 644 407 C 332.0 407, 332.0 303, 20 303" class="edge-arrow"/>
-<path d="M 644 407 C 490.0 407, 490.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 407 C 648.0 407, 648.0 303, 336 303" class="edge-arrow"/>
-<path d="M 486 433 C 569.0 433, 569.0 277, 652 277" class="edge-arrow"/>
-<path d="M 170 433 C 253.0 433, 253.0 303, 336 303" class="edge-arrow"/>
-<path d="M 170 433 C 95.0 433, 95.0 303, 20 303" class="edge-arrow"/>
-<path d="M 486 433 C 253.0 433, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 486 433 C 411.0 433, 411.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 433 C 490.0 433, 490.0 303, 20 303" class="edge-arrow"/>
-<path d="M 960 433 C 648.0 433, 648.0 303, 336 303" class="edge-arrow"/>
-<path d="M 486 433 C 411.0 433, 411.0 329, 336 329" class="edge-arrow"/>
-<path d="M 486 459 C 332.0 459, 332.0 277, 178 277" class="edge-arrow"/>
-<path d="M 486 459 C 569.0 459, 569.0 277, 652 277" class="edge-arrow"/>
-<path d="M 486 459 C 253.0 459, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 802 459 C 411.0 459, 411.0 303, 20 303" class="edge-arrow"/>
-<path d="M 802 459 C 569.0 459, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 486 459 C 569.0 459, 569.0 459, 652 459" class="edge-arrow"/>
-<path d="M 170 485 C 174.0 485, 174.0 277, 178 277" class="edge-arrow"/>
-<path d="M 960 485 C 806.0 485, 806.0 277, 652 277" class="edge-arrow"/>
-<path d="M 170 485 C 253.0 485, 253.0 303, 336 303" class="edge-arrow"/>
-<path d="M 328 485 C 174.0 485, 174.0 303, 20 303" class="edge-arrow"/>
-<path d="M 328 485 C 332.0 485, 332.0 303, 336 303" class="edge-arrow"/>
-<path d="M 644 485 C 332.0 485, 332.0 303, 20 303" class="edge-arrow"/>
-<path d="M 644 485 C 490.0 485, 490.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 485 C 490.0 485, 490.0 303, 20 303" class="edge-arrow"/>
-<path d="M 960 485 C 648.0 485, 648.0 303, 336 303" class="edge-arrow"/>
-<path d="M 170 485 C 411.0 485, 411.0 459, 652 459" class="edge-arrow"/>
-<path d="M 170 485 C 490.0 485, 490.0 485, 810 485" class="edge-arrow"/>
-<path d="M 170 485 C 253.0 485, 253.0 563, 336 563" class="edge-arrow"/>
-<path d="M 328 485 C 332.0 485, 332.0 641, 336 641" class="edge-arrow"/>
-<path d="M 328 511 C 174.0 511, 174.0 303, 20 303" class="edge-arrow"/>
-<path d="M 328 511 C 332.0 511, 332.0 303, 336 303" class="edge-arrow"/>
-<path d="M 644 511 C 332.0 511, 332.0 303, 20 303" class="edge-arrow"/>
-<path d="M 644 511 C 490.0 511, 490.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 511 C 490.0 511, 490.0 303, 20 303" class="edge-arrow"/>
-<path d="M 960 511 C 648.0 511, 648.0 303, 336 303" class="edge-arrow"/>
-<path d="M 181 537 C 258.5 537, 258.5 303, 336 303" class="edge-arrow"/>
-<path d="M 486 537 C 253.0 537, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 802 537 C 569.0 537, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 486 563 C 332.0 563, 332.0 277, 178 277" class="edge-arrow"/>
-<path d="M 486 563 C 569.0 563, 569.0 277, 652 277" class="edge-arrow"/>
-<path d="M 802 563 C 490.0 563, 490.0 277, 178 277" class="edge-arrow"/>
-<path d="M 486 563 C 253.0 563, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 486 563 C 411.0 563, 411.0 303, 336 303" class="edge-arrow"/>
-<path d="M 802 563 C 411.0 563, 411.0 303, 20 303" class="edge-arrow"/>
-<path d="M 802 563 C 569.0 563, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 486 563 C 648.0 563, 648.0 485, 810 485" class="edge-arrow"/>
-<path d="M 802 563 C 648.0 563, 648.0 485, 494 485" class="edge-arrow"/>
-<path d="M 486 589 C 253.0 589, 253.0 303, 20 303" class="edge-arrow"/>
-<path d="M 648 589 C 334.0 589, 334.0 303, 20 303" class="edge-arrow"/>
-<path d="M 802 589 C 411.0 589, 411.0 303, 20 303" class="edge-arrow"/>
-<path d="M 802 589 C 727.0 589, 727.0 303, 652 303" class="edge-arrow"/>
-<path d="M 960 589 C 490.0 589, 490.0 303, 20 303" class="edge-arrow"/>
-<path d="M 960 589 C 648.0 589, 648.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 589 C 806.0 589, 806.0 303, 652 303" class="edge-arrow"/>
-<path d="M 328 615 C 174.0 615, 174.0 303, 20 303" class="edge-arrow"/>
-<path d="M 328 615 C 332.0 615, 332.0 303, 336 303" class="edge-arrow"/>
-<path d="M 802 615 C 569.0 615, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 960 615 C 490.0 615, 490.0 303, 20 303" class="edge-arrow"/>
-<path d="M 644 615 C 411.0 615, 411.0 407, 178 407" class="edge-arrow"/>
-<path d="M 960 615 C 648.0 615, 648.0 537, 336 537" class="edge-arrow"/>
-<path d="M 802 641 C 569.0 641, 569.0 303, 336 303" class="edge-arrow"/>
-<path d="M 170 667 C 253.0 667, 253.0 303, 336 303" class="edge-arrow"/>
+<rect width="1090" height="580" fill="white"/>
+<style>.ea{stroke:#bbb;stroke-width:0.8;fill:none;marker-end:url(#arrow)}.nr{fill:white;stroke:#999;stroke-width:1}.nt{fill:#333;text-anchor:middle;font-size:9px}.gl{font-size:9px;font-weight:bold;fill:#555}</style>
+<rect x="8" y="16" width="164" height="186" fill="#ffb0b0" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="12" y="26" class="gl">argus/patrol</text>
+<rect x="8" y="216" width="164" height="368" fill="#ffd0d0" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="12" y="226" class="gl">argus (Slack Bot)</text>
+<rect x="190" y="16" width="164" height="160" fill="#d0e8ff" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="194" y="26" class="gl">ingest</text>
+<rect x="190" y="190" width="164" height="238" fill="#d0ffe8" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="194" y="200" class="gl">data-pipeline</text>
+<rect x="372" y="16" width="164" height="134" fill="#e8d0ff" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="376" y="26" class="gl">enrich</text>
+<rect x="372" y="164" width="164" height="108" fill="#fff0d0" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="376" y="174" class="gl">minutes</text>
+<rect x="372" y="286" width="164" height="186" fill="#d0f0ff" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="376" y="296" class="gl">recording</text>
+<rect x="554" y="16" width="164" height="82" fill="#ffe8d0" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="558" y="26" class="gl">quality</text>
+<rect x="554" y="112" width="164" height="186" fill="#f0ffd0" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="558" y="122" class="gl">reporting</text>
+<rect x="736" y="16" width="164" height="108" fill="#f5d0ff" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="740" y="26" class="gl">web (FastAPI)</text>
+<rect x="736" y="138" width="164" height="56" fill="#e0e0e0" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="740" y="148" class="gl">bin</text>
+<rect x="736" y="208" width="164" height="82" fill="#f5f5f5" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="740" y="218" class="gl">root (symlinks)</text>
+<rect x="918" y="16" width="164" height="394" fill="#f0f0f0" rx="4" stroke="#ccc" stroke-width="1"/>
+<text x="922" y="26" class="gl">utils</text>
+<rect x="16" y="32" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="46" class="nt">actions</text>
+<rect x="16" y="232" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="246" class="nt">agent_tools</text>
+<rect x="16" y="258" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="272" class="nt">argus</text>
+<rect x="16" y="58" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="72" class="nt">argus.patrol</text>
+<rect x="926" y="32" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="46" class="nt">box_cli</text>
+<rect x="744" y="224" width="148" height="20" class="nr" rx="3"/>
+<text x="818" y="238" class="nt">build_slide_video</text>
+<rect x="926" y="58" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="72" class="nt">canvas_utils</text>
+<rect x="926" y="84" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="98" class="nt">cli_utils</text>
+<rect x="16" y="84" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="98" class="nt">confirm</text>
+<rect x="926" y="110" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="124" class="nt">db_utils</text>
+<rect x="16" y="110" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="124" class="nt">detect</text>
+<rect x="926" y="136" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="150" class="nt">embed_utils</text>
+<rect x="380" y="32" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="46" class="nt">enrich</text>
+<rect x="380" y="58" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="72" class="nt">enrich_items</text>
+<rect x="926" y="162" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="176" class="nt">eval_rivault_models</text>
+<rect x="926" y="188" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="202" class="nt">format_utils</text>
+<rect x="380" y="302" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="316" class="nt">generate_minutes_local</text>
+<rect x="926" y="214" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="228" class="nt">glossary</text>
+<rect x="562" y="128" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="142" class="nt">goals_print</text>
+<rect x="198" y="32" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="46" class="nt">ingest</text>
+<rect x="198" y="58" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="72" class="nt">ingest_plugin</text>
+<rect x="380" y="84" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="98" class="nt">knowledge_context</text>
+<rect x="926" y="240" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="254" class="nt">llm</text>
+<rect x="16" y="284" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="298" class="nt">mcp_explorer</text>
+<rect x="16" y="310" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="324" class="nt">mcp_tools</text>
+<rect x="198" y="84" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="98" class="nt">minutes</text>
+<rect x="16" y="336" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="350" class="nt">narrate</text>
+<rect x="16" y="362" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="376" class="nt">output_tools</text>
+<rect x="744" y="32" width="148" height="20" class="nr" rx="3"/>
+<text x="818" y="46" class="nt">pm_api</text>
+<rect x="16" y="388" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="402" class="nt">pm_argus</text>
+<rect x="16" y="414" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="428" class="nt">pm_argus_agent</text>
+<rect x="16" y="440" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="454" class="nt">pm_argus_patrol</text>
+<rect x="198" y="206" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="220" class="nt">pm_box_crawl</text>
+<rect x="198" y="232" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="246" class="nt">pm_box_relevance</text>
+<rect x="198" y="258" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="272" class="nt">pm_embed</text>
+<rect x="198" y="110" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="124" class="nt">pm_ingest</text>
+<rect x="562" y="154" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="168" class="nt">pm_insight</text>
+<rect x="744" y="154" width="148" height="20" class="nr" rx="3"/>
+<text x="818" y="168" class="nt">pm_investigate_app</text>
+<rect x="380" y="110" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="124" class="nt">pm_link_milestones</text>
+<rect x="744" y="250" width="148" height="20" class="nr" rx="3"/>
+<text x="818" y="264" class="nt">pm_mcp_server</text>
+<rect x="380" y="180" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="194" class="nt">pm_minutes_catalog</text>
+<rect x="380" y="206" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="220" class="nt">pm_minutes_import</text>
+<rect x="380" y="232" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="246" class="nt">pm_minutes_publish</text>
+<rect x="16" y="466" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="480" class="nt">pm_qa_server</text>
+<rect x="562" y="32" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="46" class="nt">pm_relink</text>
+<rect x="562" y="180" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="194" class="nt">pm_report</text>
+<rect x="562" y="58" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="72" class="nt">pm_screen</text>
+<rect x="198" y="284" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="298" class="nt">pm_slack_box_links</text>
+<rect x="562" y="206" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="220" class="nt">pm_sync_canvas</text>
+<rect x="198" y="310" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="324" class="nt">pm_terminology_update</text>
+<rect x="198" y="336" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="350" class="nt">pm_users_sync</text>
+<rect x="198" y="362" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="376" class="nt">pm_web_fetch</text>
+<rect x="562" y="232" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="246" class="nt">pm_xlsx_report</text>
+<rect x="562" y="258" width="148" height="20" class="nr" rx="3"/>
+<text x="636" y="272" class="nt">pm_xlsx_sync</text>
+<rect x="926" y="266" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="280" class="nt">pptx_theme</text>
+<rect x="16" y="492" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="506" class="nt">prompts</text>
+<rect x="16" y="518" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="532" class="nt">qa_engine</text>
+<rect x="380" y="328" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="342" class="nt">reconcile_transcript</text>
+<rect x="380" y="354" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="368" class="nt">recording</text>
+<rect x="16" y="544" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="558" class="nt">retrieval</text>
+<rect x="198" y="136" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="150" class="nt">slack</text>
+<rect x="198" y="388" width="148" height="20" class="nr" rx="3"/>
+<text x="272" y="402" class="nt">slack_pipeline</text>
+<rect x="926" y="292" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="306" class="nt">slack_post</text>
+<rect x="380" y="380" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="394" class="nt">slide_ocr</text>
+<rect x="16" y="136" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="150" class="nt">state</text>
+<rect x="926" y="318" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="332" class="nt">terminology</text>
+<rect x="380" y="406" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="420" class="nt">transcribe_pipeline</text>
+<rect x="926" y="344" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="358" class="nt">transcript</text>
+<rect x="16" y="162" width="148" height="20" class="nr" rx="3"/>
+<text x="90" y="176" class="nt">users</text>
+<rect x="926" y="370" width="148" height="20" class="nr" rx="3"/>
+<text x="1000" y="384" class="nt">voice_uploads</text>
+<rect x="744" y="58" width="148" height="20" class="nr" rx="3"/>
+<text x="818" y="72" class="nt">web_admin</text>
+<rect x="744" y="84" width="148" height="20" class="nr" rx="3"/>
+<text x="818" y="98" class="nt">web_utils</text>
+<rect x="380" y="432" width="148" height="20" class="nr" rx="3"/>
+<text x="454" y="446" class="nt">whisper_vad</text>
+<path d="M 926 94 C 1000.0 94,1000.0 250,1074 250" class="ea"/>
+<path d="M 926 94 C 1000.0 94,1000.0 354,1074 354" class="ea"/>
+<path d="M 16 94 C 90.0 94,90.0 146,164 146" class="ea"/>
+<path d="M 926 120 C 1000.0 120,1000.0 94,1074 94" class="ea"/>
+<path d="M 528 68 C 727.0 68,727.0 94,926 94" class="ea"/>
+<path d="M 528 68 C 727.0 68,727.0 120,926 120" class="ea"/>
+<path d="M 380 68 C 454.0 68,454.0 94,528 94" class="ea"/>
+<path d="M 926 198 C 1000.0 198,1000.0 120,1074 120" class="ea"/>
+<path d="M 528 312 C 727.0 312,727.0 94,926 94" class="ea"/>
+<path d="M 346 94 C 636.0 94,636.0 120,926 120" class="ea"/>
+<path d="M 198 94 C 272.0 94,272.0 68,346 68" class="ea"/>
+<path d="M 892 42 C 909.0 42,909.0 120,926 120" class="ea"/>
+<path d="M 744 42 C 818.0 42,818.0 68,892 68" class="ea"/>
+<path d="M 744 42 C 818.0 42,818.0 94,892 94" class="ea"/>
+<path d="M 164 398 C 545.0 398,545.0 94,926 94" class="ea"/>
+<path d="M 164 398 C 545.0 398,545.0 120,926 120" class="ea"/>
+<path d="M 164 398 C 545.0 398,545.0 198,926 198" class="ea"/>
+<path d="M 16 398 C 90.0 398,90.0 502,164 502" class="ea"/>
+<path d="M 164 398 C 545.0 398,545.0 302,926 302" class="ea"/>
+<path d="M 16 424 C 90.0 424,90.0 242,164 242" class="ea"/>
+<path d="M 164 424 C 545.0 424,545.0 94,926 94" class="ea"/>
+<path d="M 164 424 C 545.0 424,545.0 120,926 120" class="ea"/>
+<path d="M 164 450 C 545.0 450,545.0 120,926 120" class="ea"/>
+<path d="M 16 450 C 90.0 450,90.0 120,164 120" class="ea"/>
+<path d="M 16 450 C 90.0 450,90.0 146,164 146" class="ea"/>
+<path d="M 16 450 C 90.0 450,90.0 172,164 172" class="ea"/>
+<path d="M 346 216 C 636.0 216,636.0 120,926 120" class="ea"/>
+<path d="M 346 242 C 636.0 242,636.0 94,926 94" class="ea"/>
+<path d="M 346 242 C 636.0 242,636.0 120,926 120" class="ea"/>
+<path d="M 346 268 C 636.0 268,636.0 120,926 120" class="ea"/>
+<path d="M 346 120 C 636.0 120,636.0 94,926 94" class="ea"/>
+<path d="M 346 120 C 636.0 120,636.0 120,926 120" class="ea"/>
+<path d="M 198 120 C 272.0 120,272.0 68,346 68" class="ea"/>
+<path d="M 198 120 C 272.0 120,272.0 94,346 94" class="ea"/>
+<path d="M 198 120 C 272.0 120,272.0 146,346 146" class="ea"/>
+<path d="M 710 164 C 818.0 164,818.0 68,926 68" class="ea"/>
+<path d="M 710 164 C 818.0 164,818.0 94,926 94" class="ea"/>
+<path d="M 710 164 C 818.0 164,818.0 120,926 120" class="ea"/>
+<path d="M 710 164 C 818.0 164,818.0 198,926 198" class="ea"/>
+<path d="M 528 120 C 727.0 120,727.0 94,926 94" class="ea"/>
+<path d="M 528 120 C 727.0 120,727.0 120,926 120" class="ea"/>
+<path d="M 528 190 C 727.0 190,727.0 42,926 42" class="ea"/>
+<path d="M 528 190 C 727.0 190,727.0 94,926 94" class="ea"/>
+<path d="M 380 190 C 454.0 190,454.0 216,528 216" class="ea"/>
+<path d="M 528 216 C 727.0 216,727.0 94,926 94" class="ea"/>
+<path d="M 528 216 C 727.0 216,727.0 120,926 120" class="ea"/>
+<path d="M 528 242 C 727.0 242,727.0 42,926 42" class="ea"/>
+<path d="M 528 242 C 727.0 242,727.0 120,926 120" class="ea"/>
+<path d="M 380 242 C 363.0 242,363.0 94,346 94" class="ea"/>
+<path d="M 380 242 C 454.0 242,454.0 216,528 216" class="ea"/>
+<path d="M 528 242 C 545.0 242,545.0 190,562 190" class="ea"/>
+<path d="M 528 242 C 545.0 242,545.0 242,562 242" class="ea"/>
+<path d="M 164 476 C 545.0 476,545.0 94,926 94" class="ea"/>
+<path d="M 16 476 C 90.0 476,90.0 94,164 94" class="ea"/>
+<path d="M 164 476 C 545.0 476,545.0 120,926 120" class="ea"/>
+<path d="M 16 476 C 90.0 476,90.0 346,164 346" class="ea"/>
+<path d="M 16 476 C 90.0 476,90.0 398,164 398" class="ea"/>
+<path d="M 16 476 C 90.0 476,90.0 424,164 424" class="ea"/>
+<path d="M 16 476 C 90.0 476,90.0 554,164 554" class="ea"/>
+<path d="M 16 476 C 90.0 476,90.0 146,164 146" class="ea"/>
+<path d="M 710 42 C 818.0 42,818.0 94,926 94" class="ea"/>
+<path d="M 710 42 C 818.0 42,818.0 120,926 120" class="ea"/>
+<path d="M 710 190 C 818.0 190,818.0 68,926 68" class="ea"/>
+<path d="M 710 190 C 818.0 190,818.0 94,926 94" class="ea"/>
+<path d="M 710 190 C 818.0 190,818.0 120,926 120" class="ea"/>
+<path d="M 710 68 C 818.0 68,818.0 94,926 94" class="ea"/>
+<path d="M 710 68 C 818.0 68,818.0 120,926 120" class="ea"/>
+<path d="M 346 294 C 636.0 294,636.0 94,926 94" class="ea"/>
+<path d="M 346 294 C 636.0 294,636.0 120,926 120" class="ea"/>
+<path d="M 710 216 C 818.0 216,818.0 94,926 94" class="ea"/>
+<path d="M 710 216 C 818.0 216,818.0 120,926 120" class="ea"/>
+<path d="M 346 320 C 636.0 320,636.0 328,926 328" class="ea"/>
+<path d="M 710 242 C 818.0 242,818.0 42,926 42" class="ea"/>
+<path d="M 710 242 C 818.0 242,818.0 68,926 68" class="ea"/>
+<path d="M 710 242 C 818.0 242,818.0 94,926 94" class="ea"/>
+<path d="M 710 242 C 818.0 242,818.0 120,926 120" class="ea"/>
+<path d="M 562 242 C 636.0 242,636.0 190,710 190" class="ea"/>
+<path d="M 710 268 C 818.0 268,818.0 42,926 42" class="ea"/>
+<path d="M 710 268 C 818.0 268,818.0 94,926 94" class="ea"/>
+<path d="M 710 268 C 818.0 268,818.0 120,926 120" class="ea"/>
+<path d="M 562 268 C 636.0 268,636.0 42,710 42" class="ea"/>
+<path d="M 164 528 C 545.0 528,545.0 94,926 94" class="ea"/>
+<path d="M 528 338 C 727.0 338,727.0 94,926 94" class="ea"/>
+<path d="M 528 338 C 727.0 338,727.0 354,926 354" class="ea"/>
+<path d="M 346 146 C 636.0 146,636.0 94,926 94" class="ea"/>
+<path d="M 346 146 C 636.0 146,636.0 120,926 120" class="ea"/>
+<path d="M 198 146 C 272.0 146,272.0 68,346 68" class="ea"/>
+<path d="M 346 398 C 636.0 398,636.0 94,926 94" class="ea"/>
+<path d="M 346 398 C 636.0 398,636.0 120,926 120" class="ea"/>
+<path d="M 16 172 C 90.0 172,90.0 146,164 146" class="ea"/>
+<path d="M 892 68 C 909.0 68,909.0 120,926 120" class="ea"/>
+<path d="M 892 94 C 909.0 94,909.0 120,926 120" class="ea"/>
 </svg>
