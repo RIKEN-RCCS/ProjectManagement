@@ -30,7 +30,7 @@ from db_utils import open_db
 _REPO = Path(__file__).resolve().parent.parent.parent
 _LOG_DIR = _REPO / "logs"
 _ADMIN_JOBS_DB = _REPO / "data" / "admin_jobs.db"
-_DAEMON_SCRIPT = _REPO / "scripts" / "pm_daemon.sh"
+_DAEMON_SCRIPT = _REPO / "scripts" / "bin" / "pm_daemon.sh"
 _SCRIPTS_DIR = _REPO / "scripts"
 
 # Service log files (according to pm_daemon.sh conventions)
