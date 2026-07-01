@@ -208,6 +208,65 @@ CREATE TABLE IF NOT EXISTS terminology (
     frequency    INTEGER DEFAULT 1,
     meeting_kinds TEXT
 );
+
+-- Argus 垂直軸: 前提・意思決定台帳（有向グラフ）。詳細は docs/FugakuNEXT_Argus_designsheet 参照。
+-- 目標・制約: 意図された方向の3層（最上位/識別要件/前提条件）を表現する。
+CREATE TABLE IF NOT EXISTS ledger_goals (
+    goal_id       TEXT PRIMARY KEY,
+    kind          TEXT,
+    layer         TEXT,
+    is_top_goal   INTEGER DEFAULT 0,
+    name          TEXT,
+    identification_test TEXT,
+    weight        TEXT,
+    weight_status TEXT,
+    source        TEXT,
+    source_status TEXT,
+    state         TEXT DEFAULT 'active',
+    created_at    TEXT,
+    last_reviewed_at TEXT
+);
+
+-- 前提: 確信度・根拠・監視対象（機能1の取り込み口）を保持する。
+CREATE TABLE IF NOT EXISTS ledger_assumptions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    content       TEXT,
+    confidence    TEXT,
+    evidence      TEXT,
+    monitor_target TEXT,
+    source        TEXT,
+    state         TEXT DEFAULT 'active',
+    created_at    TEXT,
+    last_reviewed_at TEXT
+);
+
+-- 論点: 未解決事項。責任者・期限を持ち、決定をブロックする。
+CREATE TABLE IF NOT EXISTS ledger_issues (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id      TEXT UNIQUE,
+    content       TEXT,
+    owner         TEXT,
+    due_date      TEXT,
+    state         TEXT DEFAULT 'open',
+    created_at    TEXT
+);
+
+-- 型付き辺: 有向グラフ本体。方向に関する情報は辺が保持する。
+-- edge_type: contributes(貢献) / depends_on(依拠) / monitors(監視) / blocks(ブロック)
+CREATE TABLE IF NOT EXISTS ledger_edges (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    edge_type     TEXT,
+    from_kind     TEXT,
+    from_id       TEXT,
+    to_kind       TEXT,
+    to_id         TEXT,
+    weight        REAL,
+    source        TEXT,
+    rationale     TEXT,
+    state         TEXT DEFAULT 'active',
+    created_at    TEXT,
+    UNIQUE(edge_type, from_kind, from_id, to_kind, to_id)
+);
 """
 
 
@@ -237,6 +296,9 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
             # 2026-05-18: Slack チャンネル ID をフィルタ・集計のキーとして正規化
             "ALTER TABLE action_items ADD COLUMN channel_id TEXT",
             "ALTER TABLE decisions ADD COLUMN channel_id TEXT",
+            # 2026-07-01: Argus 垂直軸 — 前提・意思決定台帳（有向グラフ）
+            "ALTER TABLE decisions ADD COLUMN trade_off TEXT",
+            "ALTER TABLE decisions ADD COLUMN reversal_condition TEXT",
         ],
     )
 
@@ -319,6 +381,34 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
                 "CREATE TABLE IF NOT EXISTS terminology ("
                 "term TEXT PRIMARY KEY, category TEXT, aliases TEXT, source TEXT, "
                 "last_seen TEXT, frequency INTEGER DEFAULT 1, meeting_kinds TEXT)"
+            ),
+            # 2026-07-01: Argus 垂直軸 — 前提・意思決定台帳（有向グラフ）
+            "ALTER TABLE decisions ADD COLUMN trade_off TEXT",
+            "ALTER TABLE decisions ADD COLUMN reversal_condition TEXT",
+            (
+                "CREATE TABLE IF NOT EXISTS ledger_goals ("
+                "goal_id TEXT PRIMARY KEY, kind TEXT, layer TEXT, is_top_goal INTEGER DEFAULT 0, "
+                "name TEXT, identification_test TEXT, weight TEXT, weight_status TEXT, "
+                "source TEXT, source_status TEXT, state TEXT DEFAULT 'active', "
+                "created_at TEXT, last_reviewed_at TEXT)"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS ledger_assumptions ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, confidence TEXT, "
+                "evidence TEXT, monitor_target TEXT, source TEXT, state TEXT DEFAULT 'active', "
+                "created_at TEXT, last_reviewed_at TEXT)"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS ledger_issues ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT UNIQUE, content TEXT, "
+                "owner TEXT, due_date TEXT, state TEXT DEFAULT 'open', created_at TEXT)"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS ledger_edges ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, edge_type TEXT, from_kind TEXT, from_id TEXT, "
+                "to_kind TEXT, to_id TEXT, weight REAL, source TEXT, rationale TEXT, "
+                "state TEXT DEFAULT 'active', created_at TEXT, "
+                "UNIQUE(edge_type, from_kind, from_id, to_kind, to_id))"
             ),
         ],
     )

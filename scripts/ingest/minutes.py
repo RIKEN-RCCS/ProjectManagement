@@ -63,7 +63,8 @@ def transfer_meeting(
     summary = (mc_row["content"][:500] if mc_row else "") or ""
 
     decisions = minutes_conn.execute(
-        "SELECT content, source_context FROM decisions WHERE meeting_id = ?", (meeting_id,)
+        "SELECT content, source_context, rationale, trade_off, reversal_condition"
+        " FROM decisions WHERE meeting_id = ?", (meeting_id,)
     ).fetchall()
 
     action_items = minutes_conn.execute(
@@ -73,8 +74,16 @@ def transfer_meeting(
 
     log(f"  decisions   : {len(decisions)} 件")
     for d in decisions:
-        ctx = f" [出典: {d['source_context']}]" if d["source_context"] else ""
-        log(f"    - {d['content']}{ctx}")
+        tags = ""
+        if d["source_context"]:
+            tags += f" [出典: {d['source_context']}]"
+        if d["rationale"]:
+            tags += f" [根拠: {d['rationale']}]"
+        if d["trade_off"]:
+            tags += f" [捨てた案: {d['trade_off']}]"
+        if d["reversal_condition"]:
+            tags += f" [覆す条件: {d['reversal_condition']}]"
+        log(f"    - {d['content']}{tags}")
     log(f"  action_items: {len(action_items)} 件")
     for a in action_items:
         assignee = a["assignee"] or "未定"
@@ -124,9 +133,11 @@ def transfer_meeting(
             continue
         pm_conn.execute(
             "INSERT INTO decisions"
-            " (meeting_id, content, decided_at, source, source_ref, source_context, extracted_at)"
-            " VALUES (?, ?, ?, 'meeting', ?, ?, ?)",
-            (meeting_id, d["content"], held_at, source_ref, d["source_context"], held_at),
+            " (meeting_id, content, decided_at, source, source_ref, source_context, extracted_at,"
+            " rationale, trade_off, reversal_condition)"
+            " VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?, ?)",
+            (meeting_id, d["content"], held_at, source_ref, d["source_context"], held_at,
+             d["rationale"], d["trade_off"], d["reversal_condition"]),
         )
 
     for a in action_items:

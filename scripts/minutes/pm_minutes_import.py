@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     content        TEXT NOT NULL,
     source_context TEXT
 );
+-- rationale/trade_off/reversal_condition: Argus 垂直軸「流入」で追加
+-- （設計書 §4: 決定がまだ理由を伴う時点で捕捉する付帯情報）
 
 CREATE TABLE IF NOT EXISTS action_items (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +148,10 @@ _MINUTES_MIGRATIONS = [
     "ALTER TABLE instances ADD COLUMN slack_channel_id TEXT",
     "ALTER TABLE instances ADD COLUMN slack_decisions_thread_ts TEXT",
     "ALTER TABLE instances ADD COLUMN slack_file_permalink TEXT",
+    # 2026-07-01: Argus 垂直軸 — 流入拡張（決定の付帯情報）
+    "ALTER TABLE decisions ADD COLUMN rationale TEXT",
+    "ALTER TABLE decisions ADD COLUMN trade_off TEXT",
+    "ALTER TABLE decisions ADD COLUMN reversal_condition TEXT",
 ]
 
 
@@ -237,8 +243,15 @@ def _parse_bullets(section_text: str) -> list[str]:
     return items
 
 
-# 決定事項: 内容 [出典: 出典テキスト]
-_DECISION_RE = re.compile(r"^(.+?)\s+\[出典:\s*(.+?)\]$")
+# 決定事項の付帯情報タグ: [出典: ...] [根拠: ...] [捨てた案: ...] [覆す条件: ...]
+# 順序不問・0個以上。Argus 垂直軸「流入」（設計書 §4）で 出典 以外の3タグを追加。
+_DECISION_TAG_RE = re.compile(r"\[(出典|根拠|捨てた案|覆す条件):\s*(.+?)\]")
+_TAG_KEY_TO_FIELD = {
+    "出典": "source_context",
+    "根拠": "rationale",
+    "捨てた案": "trade_off",
+    "覆す条件": "reversal_condition",
+}
 
 # [担当者] 内容 (期限: YYYY-MM-DD) または [担当者] 内容 (期限: なし)
 _AI_RE = re.compile(
@@ -249,8 +262,9 @@ _AI_RE = re.compile(
 def _parse_decisions(section_text: str) -> list[dict]:
     """
     決定事項箇条書きを構造化して返す。
-    各要素: {"content": str, "source_context": str|None}
-    フォーマット: - 内容 [出典: 出典テキスト]
+    各要素: {"content": str, "source_context": str|None, "rationale": str|None,
+             "trade_off": str|None, "reversal_condition": str|None}
+    フォーマット: - 内容 [出典: ...] [根拠: ...] [捨てた案: ...] [覆す条件: ...]（タグは任意・順序不問）
     """
     items = []
     for line in section_text.splitlines():
@@ -260,14 +274,13 @@ def _parse_decisions(section_text: str) -> list[dict]:
         text = re.sub(r"^[-*]\s+", "", line).strip()
         if not text or text in ("（なし）", "(なし)"):
             continue
-        m = _DECISION_RE.match(text)
-        if m:
-            content = m.group(1).strip()
-            raw_ctx = m.group(2).strip()
-            source_context = None if raw_ctx in ("なし", "") else raw_ctx
-            items.append({"content": content, "source_context": source_context})
-        else:
-            items.append({"content": text, "source_context": None})
+        fields = {f: None for f in _TAG_KEY_TO_FIELD.values()}
+        for m in _DECISION_TAG_RE.finditer(text):
+            key, raw_val = m.group(1), m.group(2).strip()
+            if raw_val and raw_val not in ("なし", "不明"):
+                fields[_TAG_KEY_TO_FIELD[key]] = raw_val
+        content = _DECISION_TAG_RE.sub("", text).strip()
+        items.append({"content": content, **fields})
     return items
 
 
@@ -422,8 +435,11 @@ def save_to_minutes_db(conn, meeting_id: str, held_at: str, kind: str,
         if not d.get("content"):
             continue
         conn.execute(
-            "INSERT INTO decisions (meeting_id, content, source_context) VALUES (?, ?, ?)",
-            (meeting_id, d["content"], d.get("source_context")),
+            "INSERT INTO decisions"
+            " (meeting_id, content, source_context, rationale, trade_off, reversal_condition)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (meeting_id, d["content"], d.get("source_context"),
+             d.get("rationale"), d.get("trade_off"), d.get("reversal_condition")),
         )
 
     for a in parsed["action_items"]:
@@ -636,7 +652,8 @@ def cmd_export(minutes_dir: Path, meeting_id: str, kind_filter: str | None,
         ).fetchone()
         data = {
             "decisions": [dict(r) for r in conn.execute(
-                "SELECT content, source_context FROM decisions WHERE meeting_id = ? ORDER BY id",
+                "SELECT content, source_context, rationale, trade_off, reversal_condition"
+                " FROM decisions WHERE meeting_id = ? ORDER BY id",
                 (meeting_id,),
             ).fetchall()],
             "action_items": [dict(r) for r in conn.execute(
@@ -1074,8 +1091,16 @@ def reconstruct_minutes_md(held_at: str, kind: str, data: dict) -> str:
     lines.append("")
     if data["decisions"]:
         for d in data["decisions"]:
-            ctx = f" [出典: {d['source_context']}]" if d.get("source_context") else ""
-            lines.append(f"- {d['content']}{ctx}")
+            tags = ""
+            if d.get("source_context"):
+                tags += f" [出典: {d['source_context']}]"
+            if d.get("rationale"):
+                tags += f" [根拠: {d['rationale']}]"
+            if d.get("trade_off"):
+                tags += f" [捨てた案: {d['trade_off']}]"
+            if d.get("reversal_condition"):
+                tags += f" [覆す条件: {d['reversal_condition']}]"
+            lines.append(f"- {d['content']}{tags}")
     else:
         lines.append("（なし）")
     lines.append("")

@@ -264,6 +264,24 @@ EXTRACT_PROMPT = """
 - 「次回ミーティングを5/18に開催する。」
   → 会議運営事項
 
+## 決定事項の分類ゲート（判断に迷う場合の最終確認）
+
+上記の基準を満たすか迷う場合は、以下の3問のいずれかに該当するかで最終判定する。
+いずれにも該当しなければ決定事項ではなく作業（アクションアイテム）または対象外として扱う。
+
+1. この記録を覆すと、他の作業のやり直しが生じるか
+2. 選択肢を排除するか（他の案を採らないと確定したか）
+3. 資源（予算・人員・計算資源）や方向（技術選定・スケジュール）を確定させるか
+
+## 決定事項の付帯情報（理由が失われる前に固定する）
+
+決定事項は、時間の経過とともに失われる「なぜ選んだか」を可能な限り併せて抽出する。
+**スレッドに明示されている場合のみ**記入し、推測で補完しない（不明なら null）。
+
+- `rationale`: なぜこの選択をしたか（他の理由より優先した根拠）
+- `trade_off`: 検討したが採用しなかった代替案・捨てた選択肢
+- `reversal_condition`: 何が起きたらこの決定を見直すか（覆す条件）
+
 ## その他の指示
 
 1. **明示されたものだけ抽出**: メッセージに明示されていない内容を推測・補完しないこと
@@ -299,7 +317,10 @@ EXTRACT_PROMPT = """
   "decisions": [
     {{
       "content": "決定事項の内容（意思決定の結論とその理由・影響を1〜2文で）",
-      "decided_at": "YYYY-MM-DD または null"
+      "decided_at": "YYYY-MM-DD または null",
+      "rationale": "なぜこの選択をしたか（スレッドに明示されている場合のみ、無ければ null）",
+      "trade_off": "採用しなかった代替案（スレッドに明示されている場合のみ、無ければ null）",
+      "reversal_condition": "何が来たら見直すか（スレッドに明示されている場合のみ、無ければ null）"
     }}
   ],
   "action_items": [
@@ -716,9 +737,10 @@ def save_slack_items(
         decided_at = d.get("decided_at") or post_date
         pm_conn.execute(
             "INSERT INTO decisions (meeting_id, content, decided_at, source, source_ref,"
-            " extracted_at, channel_id)"
-            " VALUES (?, ?, ?, 'slack', ?, ?, ?)",
-            (None, d["content"], decided_at, source_ref, post_date, channel_id),
+            " extracted_at, channel_id, rationale, trade_off, reversal_condition)"
+            " VALUES (?, ?, ?, 'slack', ?, ?, ?, ?, ?, ?)",
+            (None, d["content"], decided_at, source_ref, post_date, channel_id,
+             d.get("rationale"), d.get("trade_off"), d.get("reversal_condition")),
         )
         d_count += 1
 

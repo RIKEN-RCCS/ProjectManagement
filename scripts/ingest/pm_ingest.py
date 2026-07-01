@@ -37,6 +37,7 @@ from cli_utils import (
 from db_utils import init_pm_db
 
 from ingest.ingest_plugin import IngestContext
+from ingest.ledger import LedgerIngestPlugin
 from ingest.minutes import MinutesIngestPlugin
 
 # --------------------------------------------------------------------------- #
@@ -47,6 +48,7 @@ from ingest.slack import SlackIngestPlugin
 PLUGINS: dict[str, object] = {
     "slack":   SlackIngestPlugin(),
     "minutes": MinutesIngestPlugin(),
+    "ledger":  LedgerIngestPlugin(),
 }
 # --------------------------------------------------------------------------- #
 
@@ -62,10 +64,12 @@ def main() -> None:
 ソース一覧:
   slack    Slack {channel_id}.db → 決定事項・アクションアイテム抽出
   minutes  議事録DB (data/minutes/) → pm.db 転記
+  ledger   台帳シード JSON (data/ledger_seed.json) → 前提・意思決定台帳（有向グラフ）投入
 
 使用例:
   python3 scripts/pm_ingest.py slack --slack-channel CHANNEL_ID
   python3 scripts/pm_ingest.py minutes --since 2026-01-01 --db data/pm.db
+  python3 scripts/pm_ingest.py ledger --dry-run
   python3 scripts/pm_ingest.py --list
 """,
     )

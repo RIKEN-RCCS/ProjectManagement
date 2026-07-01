@@ -23,6 +23,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -148,6 +149,13 @@ ID: d:{id}
 
 4. **推測不能なら null**。無理に埋めない。正確さが最優先。
 
+5. **貢献先の目標 (contributes_to_goals)**: この決定が下記「台帳目標一覧」のどの目標・識別要件に
+   資するか。明らかに貢献すると判断できるものだけを選ぶ（迷ったら空配列 `[]`）。
+   一覧に無い goal_id を生成しないこと。
+
+## 台帳目標一覧（貢献先の候補）
+{ledger_goals}
+
 ## 出力（JSON のみ、説明不要）
 
 ```json
@@ -156,6 +164,7 @@ ID: d:{id}
   "decided_by_confidence": "explicit or inferred or null",
   "rationale": "根拠2-3文 or null",
   "related_ids": ["d:42", "a:15"],
+  "contributes_to_goals": ["G-PHYS"],
   "evidence": "推測の根拠説明（inferred時のみ、それ以外はnull）"
 }}
 ```
@@ -244,6 +253,49 @@ def _validate_related_ids(ids: list, pm_conn) -> list[str]:
     return valid
 
 
+def _fetch_ledger_goals_for_prompt(pm_conn) -> str:
+    """ledger_goals をプロンプト向けに整形する（貢献先辺 contributes の候補一覧）。"""
+    try:
+        rows = pm_conn.execute(
+            "SELECT goal_id, kind, name FROM ledger_goals WHERE COALESCE(state,'active')='active'"
+            " ORDER BY goal_id"
+        ).fetchall()
+    except Exception:
+        return "（台帳未投入）"
+    if not rows:
+        return "（台帳未投入）"
+    return "\n".join(f"- {r['goal_id']} ({r['kind']}): {r['name']}" for r in rows)
+
+
+def _validate_ledger_goal_ids(ids: list, pm_conn) -> list[str]:
+    """contributes_to_goals が ledger_goals に実在するか検証し、有効なもののみ返す。"""
+    valid = []
+    for ref in ids or []:
+        if not isinstance(ref, str):
+            continue
+        row = pm_conn.execute(
+            "SELECT goal_id FROM ledger_goals WHERE goal_id = ?", (ref,)
+        ).fetchone()
+        if row:
+            valid.append(ref)
+    return valid
+
+
+def _write_decision_goal_edges(pm_conn, decision_id: int, goal_ids: list[str]) -> None:
+    """決定 → 目標 の contributes 辺を ledger_edges に UPSERT する。"""
+    now = datetime.now().isoformat()
+    for goal_id in goal_ids:
+        pm_conn.execute(
+            """
+            INSERT INTO ledger_edges
+                (edge_type, from_kind, from_id, to_kind, to_id, source, state, created_at)
+            VALUES ('contributes', 'decision', ?, 'goal', ?, 'enrich', 'active', ?)
+            ON CONFLICT(edge_type, from_kind, from_id, to_kind, to_id) DO NOTHING
+            """,
+            (str(decision_id), goal_id, now),
+        )
+
+
 def _is_trivial_rationale(rationale: str | None, content: str) -> bool:
     """rationale が content の実質コピーかどうかを簡易判定する。"""
     if not rationale:
@@ -271,6 +323,7 @@ def enrich_decision(
         source_ref=item.get("source_ref") or "なし",
         knowledge=knowledge_text,
         project_context=project_context,
+        ledger_goals=_fetch_ledger_goals_for_prompt(pm_conn),
     )
 
     try:
@@ -289,6 +342,7 @@ def enrich_decision(
             result["evidence"] = None
 
     related_ids = _validate_related_ids(result.get("related_ids") or [], pm_conn)
+    contributes_to_goals = _validate_ledger_goal_ids(result.get("contributes_to_goals") or [], pm_conn)
 
     rationale = result.get("rationale")
     if _is_trivial_rationale(rationale, item["content"]):
@@ -299,6 +353,7 @@ def enrich_decision(
         "decided_by_confidence": confidence,
         "rationale": rationale,
         "related_ids": related_ids,
+        "contributes_to_goals": contributes_to_goals,
         "evidence": result.get("evidence"),
     }
 
@@ -422,6 +477,8 @@ def enrich_batch(
 
         if not dry_run:
             _save_decision_enrichment(pm_conn, d["id"], result)
+            if result.get("contributes_to_goals"):
+                _write_decision_goal_edges(pm_conn, d["id"], result["contributes_to_goals"])
 
     enriched_ais: list[dict] = []
     for i, a in enumerate(action_items, 1):
@@ -465,14 +522,22 @@ def _print_enrichment(result: dict, item_type: str, log=print):
         log(f"  context     : {result['source_context']}")
     if result.get("related_ids"):
         log(f"  related_ids : {result['related_ids']}")
+    if result.get("contributes_to_goals"):
+        log(f"  ledger貢献先: {result['contributes_to_goals']}")
 
 
 def _save_decision_enrichment(pm_conn, decision_id: int, result: dict):
+    # rationale は流入（モードA: 決定確定時の直接捕捉、鮮度が高い）が既に埋めている場合がある。
+    # エンリッチ（モードB相当: 遡及的再構成、確度が低い）は、既存値が空のときだけ補完する。
+    # 新しい推測値が存在するからといって、既に確定済みの値を上書きしてはならない。
     pm_conn.execute(
         """UPDATE decisions SET
                decided_by = ?,
                decided_by_confidence = ?,
-               rationale = ?,
+               rationale = CASE
+                   WHEN rationale IS NULL OR TRIM(rationale) = '' THEN ?
+                   ELSE rationale
+               END,
                related_ids = ?
            WHERE id = ?""",
         (
