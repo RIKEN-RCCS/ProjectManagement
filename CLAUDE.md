@@ -4,6 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+## 応答言語
+
+ユーザーへの応答は常に**日本語**で行うこと。コード・コマンド・識別子・ファイルパスはそのまま使ってよい。
+
+---
+
 ## ドキュメント運用ルール（最重要）
 
 このリポジトリでは、Claude が参照・更新する 3 つのドキュメントを **時間軸で分離** して運用する。
