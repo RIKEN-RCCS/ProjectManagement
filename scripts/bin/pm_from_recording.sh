@@ -43,6 +43,9 @@ fi
 
 export SINGULARITY_BIND=/lvs0
 
+if [[ -f ~/.secrets/localLLM.sh ]]; then
+  source ~/.secrets/localLLM.sh
+fi
 export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
 export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
 

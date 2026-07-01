@@ -72,7 +72,7 @@ def resolve_filter_presets(
 
     cfg_path = Path(config_path)
     if not cfg_path.is_absolute():
-        cfg_path = Path(__file__).resolve().parent.parent / cfg_path
+        cfg_path = _REPO_ROOT / cfg_path
     if not cfg_path.exists():
         print(f"[WARN] argus_config.yaml が見つかりません: {cfg_path}", file=sys.stderr)
         return [], []
@@ -117,7 +117,7 @@ def _resolve_name_section(
         return {}
     cfg_path = Path(config_path)
     if not cfg_path.is_absolute():
-        cfg_path = Path(__file__).resolve().parent.parent / cfg_path
+        cfg_path = _REPO_ROOT / cfg_path
     if not cfg_path.exists():
         return {}
     try:
@@ -162,7 +162,7 @@ def resolve_report_canvas_id(
         return fallback
     cfg_path = Path(config_path)
     if not cfg_path.is_absolute():
-        cfg_path = Path(__file__).resolve().parent.parent / cfg_path
+        cfg_path = _REPO_ROOT / cfg_path
     if not cfg_path.exists():
         return fallback
     try:
@@ -227,7 +227,7 @@ from utils.llm import (  # noqa: E402, F401
 # CLAUDE.md ローダー
 # --------------------------------------------------------------------------- #
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def load_claude_md_context() -> str:
@@ -243,10 +243,8 @@ def load_claude_md_context() -> str:
     # 対象外の H1（キャプチャ終了トリガー）
     _H1_PAT = re.compile(r"^#\s+\S")
 
-    # _REPO_ROOT は scripts/ を指してしまっているので、リポジトリルートを独自計算
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    project_md = repo_root / "docs" / "project.md"
-    claude_md  = repo_root / "CLAUDE.md"
+    project_md = _REPO_ROOT / "docs" / "project.md"
+    claude_md  = _REPO_ROOT / "CLAUDE.md"
 
     if project_md.exists():
         content = project_md.read_text(encoding="utf-8")
@@ -295,9 +293,7 @@ def load_codesign_context() -> str:
 
     セクションが存在しない / ファイルが存在しない場合は空文字列を返す。
     """
-    # _REPO_ROOT は scripts/ を指してしまっているので、リポジトリルートを独自計算
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    project_md = repo_root / "docs" / "project.md"
+    project_md = _REPO_ROOT / "docs" / "project.md"
     if not project_md.exists():
         return ""
     content = project_md.read_text(encoding="utf-8")
@@ -384,8 +380,7 @@ def retrieve_knowledge_for_extraction(
 
     # デフォルトDB: data/qa_index.db
     if qa_db_path is None:
-        repo_root = Path(__file__).resolve().parent.parent
-        qa_db_path = repo_root / "data" / "qa_index.db"
+        qa_db_path = _REPO_ROOT / "data" / "qa_index.db"
 
     # FTS5インデックス未構築時はスキップ
     if not qa_db_path.exists():

@@ -22,6 +22,9 @@ if [[ -f ~/.secrets/rivault_tokens.sh ]]; then
 fi
 
 # デフォルトでローカルLLMを優先
+if [[ -f ~/.secrets/localLLM.sh ]]; then
+    source ~/.secrets/localLLM.sh
+fi
 export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
 
 _arch="$(uname -m)"

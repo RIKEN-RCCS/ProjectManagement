@@ -15,6 +15,7 @@ touch $LOGFILE
 
 source "$HOME/.secrets/slack_tokens.sh"
 source "$HOME/.secrets/rivault_tokens.sh"
+source "$HOME/.secrets/localLLM.sh"
 
 BASEDIR="/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement"
 python3 "$BASEDIR/scripts/argus/pm_argus.py" --brief-to-canvas --canvas-id F0ATCN7E2D9 >> $LOGFILE 2>&1
