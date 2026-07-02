@@ -275,6 +275,14 @@ python3 scripts/ingest/pm_ingest.py goals --goals-list
 | `--minutes-force` | - | 既存レコードを上書き |
 | `--minutes-list` | - | 転記済み会議の一覧表示 |
 | `--minutes-delete MEETING_ID` | - | 指定 meeting_id を pm.db から削除 |
+| `--minutes-meeting-id MEETING_ID` | - | 特定の meeting_id のみ転記（再生成後の個別修復等に使用） |
+
+**重複判定は `meeting_id` 単位**（`held_at`/`kind` 単位ではない）。同じ日付・種別の
+会議を再生成し新しい `meeting_id` で minutes.db に追加した場合、`--force` なしでも
+自動的に転記される（2026-07-03 に `(held_at, kind)` 単位の判定が原因で無言スキップが
+発生したため修正。経緯は LOG.md 参照）。転記時、同一日付・種別の別 `meeting_id` が
+残っていて内容が空（decisions/action_items 共に0件）なら自動削除、内容があれば
+`[WARN]` ログを出して手動確認を促す（実データを誤って自動削除しないため）。
 
 **goals ソース固有オプション**:
 

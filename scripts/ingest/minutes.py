@@ -48,14 +48,48 @@ def transfer_meeting(
     dry_run: bool,
     log=print,
 ) -> str:
-    """Returns: "ok" | "skipped" """
+    """Returns: "ok" | "skipped"
+
+    重複判定は meeting_id 単位で行う（held_at/kind 単位ではない）。再生成等で
+    同じ日付・種別の会議が新しい meeting_id で minutes.db に追加された場合、
+    (held_at, kind) 単位で判定すると「既にある」と誤ってスキップしてしまい、
+    しかもスキップは正常終了扱いのため気付きにくい（2026-07-03 に実際に発生し、
+    65件中6件が無言でスキップされていた。LOG.md 参照）。
+    """
     existing = pm_conn.execute(
-        "SELECT meeting_id FROM meetings WHERE held_at = ? AND kind = ?", (held_at, kind)
+        "SELECT meeting_id FROM meetings WHERE meeting_id = ?", (meeting_id,)
     ).fetchone()
 
     if existing and not force:
-        log(f"  [SKIP] {held_at}/{kind} は既に pm.db に存在します（--force で上書き可能）")
+        log(f"  [SKIP] {meeting_id} は既に pm.db に存在します（--force で上書き可能）")
         return "skipped"
+
+    # 同一 (held_at, kind) の別 meeting_id が残っている場合の後始末。
+    # 内容が空（decisions/action_items 共に0件）なら失敗インポートの残骸とみなし
+    # 自動削除する。内容がある場合は誤って実データを消さないよう警告のみに留める
+    # （人手での判断・pm_relink.py 等での整理を促す）。
+    if not dry_run:
+        stale_rows = pm_conn.execute(
+            "SELECT meeting_id FROM meetings WHERE held_at = ? AND kind = ? AND meeting_id != ?",
+            (held_at, kind, meeting_id),
+        ).fetchall()
+        for stale in stale_rows:
+            stale_id = stale["meeting_id"]
+            d_count = pm_conn.execute(
+                "SELECT COUNT(*) c FROM decisions WHERE meeting_id = ?", (stale_id,)
+            ).fetchone()["c"]
+            a_count = pm_conn.execute(
+                "SELECT COUNT(*) c FROM action_items WHERE meeting_id = ?", (stale_id,)
+            ).fetchone()["c"]
+            if d_count == 0 and a_count == 0:
+                pm_conn.execute("DELETE FROM meetings WHERE meeting_id = ?", (stale_id,))
+                log(f"  [CLEANUP] 同一日付・種別の空の旧レコードを削除: {stale_id}")
+            else:
+                log(
+                    f"  [WARN] 同一日付・種別の別レコードが内容を保持したまま残っています: "
+                    f"{stale_id}（decisions={d_count}, action_items={a_count}）。"
+                    "重複の可能性があるため手動確認を推奨します"
+                )
 
     mc_row = minutes_conn.execute(
         "SELECT content FROM minutes_content WHERE meeting_id = ? LIMIT 1", (meeting_id,)
