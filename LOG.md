@@ -7,6 +7,23 @@
 
 ---
 
+## 2026-07-02 アプリ評価エグゼクティブサマリー PPTX 生成を追加
+
+**背景**: `pm_nvidia_collab_update.sh` はアプリ単位の Markdown レポートを生成するが、
+全アプリを俯瞰する1枚物が無かった。全情報の網羅は不可能なため
+「完了したこと/これからやること/ベンダー連携」の3カテゴリへの凝縮が要点。
+
+**決定**: `scripts/reporting/pm_exec_summary.py` を新規作成。LLM で各アプリのレポートから
+3カテゴリJSONを抽出（証拠のない「完了」は next へ回すゲート付き）→ `pptx_theme.py`
+（2026-06-25 に旧 pm_biweekly_report.py 削除後、初の利用者）でアプリ×3カテゴリの
+グリッド1枚に作図 → 日英2版を `box_upload_file` でアップロード。
+`pm_nvidia_collab_update.sh` の末尾に統合、失敗しても個別レポート本体には影響しない。
+
+**影響**: 実データ（GENESIS/SALMON）での動作確認済み。分類ゲートが証拠なき「完了」を
+正しく除外することを確認。マルチカラムのpptx生成パターンが今後の同種レポートに再利用可能。
+
+---
+
 ## 2026-06-25 pm_biweekly_report.py 廃止
 
 **背景**: 隔週 pptx レポート (`reporting/pm_biweekly_report.py`) は現在
