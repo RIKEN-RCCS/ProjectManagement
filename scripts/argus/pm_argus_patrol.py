@@ -48,6 +48,7 @@ from db_utils import open_pm_db
 from argus.patrol.detect import (
     detect_approaching_deadlines,
     detect_completion_signals,
+    detect_external_signals,
     detect_milestone_health,
     detect_overdue_items,
     detect_stale_items,
@@ -114,6 +115,7 @@ DETECTORS: dict[str, Any] = {
     "stale": detect_stale_items,
     "milestone": detect_milestone_health,
     "trend": detect_weekly_trend_alert,
+    "external_signal": detect_external_signals,
 }
 
 

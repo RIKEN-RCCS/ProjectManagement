@@ -169,8 +169,10 @@ Slack API の latest_reply  vs  MAX(replies.msg_ts)
 
 ##### ledger_assumptions（前提）
 
-確信度・根拠と、機能1（外界取り込み）の監視対象を保持する。Phase 1時点では投入経路が未実装
-（機能1着手時に設計、PLAN.md参照）。
+確信度・根拠と、機能1（外界取り込み）の監視対象を保持する。投入経路は
+`scripts/ingest/ledger.py::upsert_assumptions()`（`content` の完全一致で重複判定、
+自然キーが無いため）。読み取り側は Patrol `detect_external_signals`
+（`docs/argus_system.md`「検出ルール詳細 8」参照）。
 
 | カラム | 型 | 説明 |
 |---|---|---|

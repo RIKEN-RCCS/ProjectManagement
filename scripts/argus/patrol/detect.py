@@ -2,7 +2,7 @@
 """
 patrol_detect.py — Patrol Agent の検出ルール
 
-7つの検出関数を提供する。各関数は PatrolContext を受け取り、
+8つの検出関数を提供する。各関数は PatrolContext を受け取り、
 検出結果に基づいて patrol_actions の関数を呼ぶ。
 
 完了シグナル検出は LLM 判定を併用（キーワードマッチ + 自然言語分析の二段構え）。
@@ -421,6 +421,108 @@ def detect_weekly_trend_alert(ctx) -> int:
 
     logger.info("週次トレンド悪化: %.0f%% 減少", decline * 100)
     return 1
+
+
+# --------------------------------------------------------------------------- #
+# カテゴリ8: 外部シグナル検出（Argus 垂直軸 機能1: 上位意思・外界取り込み）
+# --------------------------------------------------------------------------- #
+def detect_external_signals(ctx) -> int:
+    """ledger_assumptions.monitor_target に関連する外部Web記事を検出し、
+    リーダー会議チャンネルへ「確認してください」の通知を送る。
+
+    ルールベースのキーワードマッチのみ（LLM 不使用）。前提が今も妥当かどうかの
+    自動判定（confirm/contradict）は行わない — あくまで人間への気付き提供。
+    """
+    from .actions import send_channel_alert
+
+    cfg = ctx.config.get("patrol", {}).get("external_signal", {})
+    if not cfg.get("enabled", True):
+        return 0
+
+    lookback_days = cfg.get("lookback_days", 14)
+    cooldown = cfg.get("cooldown_days", 14)
+    max_per_run = cfg.get("max_per_run", 5)
+    cutoff = (date.fromisoformat(ctx.today) - timedelta(days=lookback_days)).isoformat()
+
+    assumptions = ctx.conn.execute(
+        "SELECT id, content, monitor_target FROM ledger_assumptions"
+        " WHERE monitor_target IS NOT NULL AND TRIM(monitor_target) != ''"
+        "   AND state = 'active'"
+    ).fetchall()
+    if not assumptions:
+        return 0
+
+    articles = _get_recent_articles(ctx.data_dir, cutoff)
+    if not articles:
+        return 0
+
+    matches: list[tuple] = []
+    for a in assumptions:
+        terms = _split_monitor_terms(a["monitor_target"])
+        if not terms:
+            continue
+        for art in articles:
+            haystack = f"{art.get('title') or ''} {art.get('summary') or ''} {art.get('content') or ''}".lower()
+            if any(term.lower() in haystack for term in terms):
+                matches.append((a, art))
+
+    if not matches:
+        return 0
+
+    leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
+    sent = 0
+    for a, art in matches:
+        if sent >= max_per_run:
+            break
+        target_key = f"assumption:{a['id']}:article:{art['id']}"
+        if ctx.state.already_notified("external_signal", target_key, cooldown):
+            continue
+
+        label = art.get("title") or art.get("url") or "(タイトルなし)"
+        when = art.get("published_at") or art.get("fetched_at") or "?"
+        text = (
+            f":mag: *前提の監視対象に関連する外部記事を検出（要確認）*\n"
+            f"前提 #{a['id']}: {a['content']}\n"
+            f"監視対象: {a['monitor_target']}\n"
+            f"該当記事: <{art.get('url', '')}|{label}>"
+            f"（{art.get('source_name', '?')}, {when}）\n"
+            "この前提が今も妥当か確認してください（自動判定は行っていません）。"
+        )
+        if send_channel_alert(ctx, leader_ch, text) and not ctx.dry_run:
+            ctx.state.record_notification("external_signal", target_key, leader_ch)
+        sent += 1
+
+    if sent:
+        logger.info("外部シグナル検出: %d 件", sent)
+    return sent
+
+
+def _split_monitor_terms(monitor_target: str) -> list[str]:
+    """monitor_target を検索語に分割する（2文字未満のトークンは除外）。"""
+    terms = re.split(r"[,、・/\s]+", monitor_target.strip())
+    return [t for t in terms if len(t) >= 2]
+
+
+def _get_recent_articles(data_dir: Path, cutoff_date: str) -> list[dict]:
+    """data/web_articles.db（平文 sqlite3、暗号化なし）から
+    cutoff_date 以降に取得された記事を返す。
+    """
+    from db_utils import open_db_plain
+
+    db_path = data_dir / "web_articles.db"
+    if not db_path.exists():
+        return []
+    try:
+        conn = open_db_plain(db_path)
+        rows = conn.execute(
+            "SELECT id, source_name, url, title, published_at, fetched_at, content, summary"
+            " FROM articles WHERE fetched_at >= ? ORDER BY fetched_at DESC",
+            (cutoff_date,),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
 
 
 # --------------------------------------------------------------------------- #

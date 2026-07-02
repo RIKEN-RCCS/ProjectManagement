@@ -108,6 +108,51 @@ def upsert_issues(pm_conn, issues: list[dict], *, force: bool, dry_run: bool, lo
     return count
 
 
+def upsert_assumptions(
+    pm_conn, assumptions: list[dict], *, force: bool, dry_run: bool, log=print
+) -> int:
+    """ledger_assumptions へ投入する。goal_id/issue_id のような自然キーが無いため、
+    content の完全一致を既存判定キーとして使う（--ledger-force で上書き）。
+    """
+    now = datetime.now().isoformat()
+    count = 0
+    for a in assumptions:
+        content = a.get("content")
+        existing = pm_conn.execute(
+            "SELECT id FROM ledger_assumptions WHERE content = ?", (content,)
+        ).fetchone()
+        if existing and not force:
+            log(f"  [SKIP] 前提（内容一致）は既に台帳に存在します（--ledger-force で上書き可能）: {content}")
+            continue
+        log(f"  [{'DRY' if dry_run else 'OK'}] assumption: {content}")
+        if dry_run:
+            continue
+        if existing:
+            pm_conn.execute(
+                """
+                UPDATE ledger_assumptions SET
+                    confidence=?, evidence=?, monitor_target=?, source=?,
+                    last_reviewed_at=?
+                WHERE id=?
+                """,
+                (a.get("confidence"), a.get("evidence"), a.get("monitor_target"),
+                 a.get("source"), now, existing["id"]),
+            )
+        else:
+            pm_conn.execute(
+                """
+                INSERT INTO ledger_assumptions
+                    (content, confidence, evidence, monitor_target, source, state,
+                     created_at, last_reviewed_at)
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (content, a.get("confidence"), a.get("evidence"), a.get("monitor_target"),
+                 a.get("source"), now, now),
+            )
+        count += 1
+    return count
+
+
 def upsert_edges(pm_conn, edges: list[dict], *, dry_run: bool, log=print) -> int:
     """ledger_edges へ INSERT OR REPLACE。UNIQUE(edge_type,from_kind,from_id,to_kind,to_id) で冪等。"""
     now = datetime.now().isoformat()
@@ -147,6 +192,12 @@ def list_ledger(pm_conn, log=print) -> None:
     log("== ledger_issues ==")
     for row in pm_conn.execute("SELECT issue_id, content, state FROM ledger_issues ORDER BY issue_id"):
         log(f"  {row['issue_id']:12} [{row['state']}] {row['content']}")
+    log("== ledger_assumptions ==")
+    for row in pm_conn.execute(
+        "SELECT id, content, confidence, monitor_target, state FROM ledger_assumptions ORDER BY id"
+    ):
+        log(f"  #{row['id']:<4} [{row['state']}] confidence={row['confidence'] or '-'} "
+            f"monitor_target={row['monitor_target'] or '-'}: {row['content']}")
     log("== ledger_edges ==")
     for row in pm_conn.execute(
         "SELECT edge_type, from_kind, from_id, to_kind, to_id FROM ledger_edges ORDER BY edge_type, from_id"
@@ -195,12 +246,16 @@ class LedgerIngestPlugin:
 
         n_goals = upsert_goals(ctx.pm_conn, seed.get("goals", []), force=force, dry_run=ctx.dry_run, log=ctx.log)
         n_issues = upsert_issues(ctx.pm_conn, seed.get("issues", []), force=force, dry_run=ctx.dry_run, log=ctx.log)
+        n_assumptions = upsert_assumptions(
+            ctx.pm_conn, seed.get("assumptions", []), force=force, dry_run=ctx.dry_run, log=ctx.log
+        )
         n_edges = upsert_edges(ctx.pm_conn, seed.get("edges", []), dry_run=ctx.dry_run, log=ctx.log)
 
         if not ctx.dry_run:
             ctx.pm_conn.commit()
 
         ctx.log(
-            f"[INFO] 完了: goals={n_goals}件, issues={n_issues}件, edges={n_edges}件 投入"
+            f"[INFO] 完了: goals={n_goals}件, issues={n_issues}件, "
+            f"assumptions={n_assumptions}件, edges={n_edges}件 投入"
             f"{'（dry-run のため未保存）' if ctx.dry_run else ''}"
         )
