@@ -476,6 +476,7 @@ scripts/
 │   ├── pm_from_recording.sh           録音 → 議事録
 │   ├── pm_from_slack_daily.sh         CRON Slack走査
 │   └── …                              (16 本)
-│
-└── archive/                           廃止スクリプト退避先（test/unused/eval）
 ```
+
+`scripts/archive/` は 2026-06-16 の knowledge.db 全廃時点で全ファイルがデッドコード化し、
+その後のクリーンアップで削除済み（ディレクトリ自体が存在しない）。

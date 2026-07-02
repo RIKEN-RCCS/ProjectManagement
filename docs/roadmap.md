@@ -104,16 +104,16 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
 - `pm_web_fetch.py` を cron（毎朝03:30 JST）で定期実行。FTS5 組み込みは `pm_box_update.sh`（`pm_embed.py`）が自動で行う
 - 出典は `top500.org / Web記事 (2025-11-15)` 形式で表示される
 
-#### 5.8 ナレッジ蒸留レイヤ（pm_box_distill.py、実装済み 2026-05-18）
+#### 5.8 ナレッジ蒸留レイヤ（pm_box_distill.py、実装済み 2026-05-18 → 2026-06-16 全廃）
 
-- BOX 本文 / 議事録 / `pm.db.decisions` を入力として、LLM (gemma4) で「意思決定 / 制約 / 立場 / 用語」の単位に蒸留して `data/knowledge.db` に格納する
+- BOX 本文 / 議事録 / `pm.db.decisions` を入力として、LLM (gemma4) で「意思決定 / 制約 / 立場 / 用語」の単位に蒸留して `data/knowledge.db` に格納していた
 - 二段ゲート: Stage 1 (gemma4 抽出) → Stage 2 (bge-m3 で類似度判定 + Kimi で keep/drop/merge_with)
-- bge-m3 は RiVault が提供 (`bge-m3:567m`)。`/v1/embeddings` 経由でローカル GPU 不要
-- brief / risk / today のプロンプトに常時同梱（プロジェクト全体共通、`index_name` 分割なし）
-- investigate に `search_knowledge` / `get_knowledge` ツールを追加。回答末尾に「## 引用したナレッジ」+ 修正導線
-- 人手介入: `pm_knowledge_edit.py` (CLI) / `/argus-knowledge` (Slack)。物理削除なし、`deleted=1` の論理削除のみ
-- 矛盾検知: Patrol Agent `detect_knowledge_conflicts` がリーダー会議チャンネルへ通知
-- 詳細: `docs/distill_policy.md` / `docs/schema.md`「data/knowledge.db」/ `docs/architecture.md`「Pass 3」
+- brief / risk / today のプロンプトに常時同梱、investigate に `search_knowledge` / `get_knowledge` ツール、
+  `/argus-knowledge` Slack コマンドによる人手介入を提供していた
+- **2026-06-16 に全廃**: `pm.db.decisions` との二重管理・低い実消費率を理由に生成側スクリプト
+  （`pm_box_distill.py` / `pm_knowledge_*.py`）ごと削除。背景知識は `pm.db.decisions`（rationale付き）に
+  一本化。埋め込み類似度judgeの技術自体は `qa_index.db` のハイブリッド検索として存続
+  （`docs/argus_system.md`「P1: セマンティック検索の導入」参照）。経緯は LOG.md「knowledge.db 全廃」参照
 
 #### 5.9 マルチモーダル動画解析による議事録品質向上（実装済み 2026-05）
 
@@ -200,5 +200,5 @@ PMBOKの観点から現システムを評価した結果、以下の領域が未
 | 会議録が平文でディスクに残る | ✅ --meeting-name オプションで解決（2026-03） |
 | 議事録での話者特定 | ✅ Zoom 同梱 VTT を自動取り込み（2026-04、5.9 参照） |
 | 議事録の固有名詞・数値の誤変換 | ✅ スライド OCR で terminology / slide_context を生成（2026-05、5.9 参照） |
-| 蒸留ナレッジへのノイズ混入 | ✅ Stage 2 の embedding 類似度 + LLM 品質審査で抑制（2026-05、5.8 参照） |
+| 蒸留ナレッジへのノイズ混入 | ➖ knowledge.db 全廃（2026-06、5.8 参照）により本項目自体が非該当に |
 | LLM抽出品質の保証 | ⚠️ バリデーションサブエージェント未実装（P4以降で検討） |
