@@ -296,8 +296,6 @@ def convert_to_markdown(file_path: Path, fmt: str) -> tuple[str, str]:
     """ファイルを Markdown に変換する。(content_md, convert_method) を返す。"""
     if fmt in ("pptx", "docx", "xlsx") and _is_encrypted_office(file_path):
         return "[ENCRYPTED — password-protected file, cannot extract content]", "encrypted"
-    if fmt == "pdf" and _is_encrypted_pdf(file_path):
-        return "[ENCRYPTED — password-protected PDF, cannot extract content]", "encrypted"
 
     converters = {
         "md": _convert_md,
@@ -311,7 +309,15 @@ def convert_to_markdown(file_path: Path, fmt: str) -> tuple[str, str]:
     converter = converters.get(fmt)
     if not converter:
         return "", "unsupported"
-    return converter(file_path)
+
+    content, method = converter(file_path)
+    # PDF の /Encrypt は権限制限（コピー・印刷禁止等）のみでオープンパスワード無し、
+    # というケースが多く（政府系公開PDFに頻出）、pdftotext は空パスワードで
+    # 自動復号し普通に本文を取れる。実際に抽出できたかで判定し、事前に
+    # ブロックしない（本文が空だった場合のみ暗号化を理由として明示する）。
+    if fmt == "pdf" and not content.strip() and _is_encrypted_pdf(file_path):
+        return "[ENCRYPTED — password-protected PDF, cannot extract content]", "encrypted"
+    return content, method
 
 
 def _convert_md(path: Path) -> tuple[str, str]:
@@ -623,6 +629,12 @@ def _convert_via_multimodal(path: Path) -> str | None:
         if failed_pages:
             logger.warning(f"    OCR失敗ページ: {failed_pages} ({len(failed_pages)}/{len(images)}ページ)")
 
+        if len(failed_pages) == len(images):
+            # 全ページ失敗時は "[OCR失敗]" プレースホルダのみの文字列を「成功」として
+            # 返さない。呼び出し元（_convert_pptx/_convert_pdf）はこれを非Noneとみなすと
+            # libreoffice等の代替経路へフォールバックせず、失敗プレースホルダのみが
+            # box_docs.db に保存されてしまう。
+            return None
         return "\n\n---\n\n".join(pages) if pages else None
 
 

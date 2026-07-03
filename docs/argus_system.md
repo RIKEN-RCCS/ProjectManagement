@@ -174,24 +174,46 @@ tail -f logs/pm_qa_server.log
 ```
 （引数なし。フォーカス指定は無い）
 
-**処理**（`scripts/argus/direction.py`、LLM不使用の集合化 + 命名のみLLM）:
+**処理**（`scripts/argus/direction.py`、LLM不使用の集合化 + 命名・論点整理はLLM）:
 1. 集合化（グラフ、LLM不使用）: `decisions →contributes→ goal` /
    `decisions →depends_on→ assumption` の辺から、同一目標に貢献し同じ前提集合に
    依拠する決定同士をクラスタとして機械的に集合化する（`compute_decision_clusters()`）
-2. 命名（LLM+承認）: 各クラスタに短い名称を1つ提案する。**LLMの裁量はここに限定**
-   （設計書§6「存在しない一貫性の付与を防ぐ」）。人が承認するまでは提案の域を出ない
+2. 命名（LLM+承認）: 各クラスタに、単なる話題ラベルではなく「何を選んだか」が
+   伝わる短い名称を1つ提案する。人が承認するまでは提案の域を出ない
 3. 投入量集計（SQL）: `ledger_edges.weight` の合計（未設定時は決定1件=1として近似）
 4. 照合Δ: `ledger_goals.weight`（意図された優先度）と実態投入量を比較し、
    「重みは高いが投入がほぼ無い」目標を**投入不足領域**として列挙する。
    単一の達成度スコアには集約しない（設計書§7）
-5. 未着手検出: 貢献する決定が0件の目標（入次数ゼロ）を列挙
-6. 非収束検出: 同一目標に複数の異なる前提集合のクラスタが併存する場合、
-   「両立しない複数方向に投入している。選択が必要」として提示する
-   （`decisions.trade_off` を根拠として提示するのみ、内容面の矛盾は自動判定しない）
+5. 未着手検出: 貢献する決定が0件の目標（入次数ゼロ）を列挙。全layerが対象
+6. 非収束検出: **重み承認済みの識別要件（`layer='identifying'`）のみ**を対象に、
+   同一目標に複数の異なる前提集合のクラスタが併存する場合「両立しない複数方向に
+   投入している。選択が必要」として提示する（`decisions.trade_off` を根拠として
+   提示するのみ、内容面の矛盾は自動判定しない）。最上位目標（top）・制約
+   （constraint）・前提条件（tablestakes）は対象外 — 傘概念やバイナリの充足有無
+   であり、クラスタ併存＝方向の対立というシグナルにならないため（2026-07-03、
+   G-NS等でノイズになっていた反省を踏まえ限定）
+7. エグゼクティブサマリー（LLM+承認、2026-07-03追加）: 4〜6の所見を材料に、
+   PMが確認すべき論点を3〜5個の問いかけ形式で整理しレポート冒頭に置く
+   （「〜すべき」という断定は禁止、是正判断はPMが行うという原則は維持）
+8. サマリー根拠（機械算出、LLM不使用、2026-07-03追加）: エグゼクティブサマリーの
+   直後に、サマリーが言及した各目標の decision_id 一覧を `_format_summary_evidence()`
+   で機械的に列挙する。サマリー文のプローズだけでは「具体的にどの決定を指しているか」
+   が分からないという指摘への対応。要約文の正しさに依存せず、SQL集計から
+   直接算出するため常に正確（出所主義）
+
+**目標の表示**: 全ての目標参照は `ledger_goals.layer` に基づき
+「G-UQ［識別要件］不確実性定量化（UQ）」のように種別を明示する（`_goal_label()`）。
+layer は `top`（最上位目標）/`identifying`（識別要件）/`constraint`（制約）/
+`tablestakes`（前提条件）の4種。
 
 **前提条件**: `ledger_edges` に decision起点の `contributes`/`depends_on` 辺が
-無ければ「集約対象がありません」と表示するのみ（2026-07時点、`enrich_items.py` の
-本番実行が別途必要。PLAN.md参照）。
+無ければ「集約対象がありません」と表示するのみ。2026-07-03に本番全decisionsへの
+`enrich_items.py` 遡及実行を完了済み（LOG.md参照）。以後は `pm_ingest.py minutes`/`slack`
+のPass2自動エンリッチにより、新規decisionsは追加操作なしで辺が生成される。
+
+**未対応（既知の課題）**: レポート全体（決定クラスタ一覧の全文）はSlackに
+そのまま流すには大きくなりがち（本番332件のdecisionsで9万字超）。要約はSlack、
+全文はCanvasへ、という分離は2026-07-03時点で未実装（対応時期はPM判断待ち）。
 
 **CLI モード**:
 ```bash
@@ -975,7 +997,7 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 - `/argus-brief` — Short Description: 今日の状況サマリーと優先アクション
 - `/argus-draft` — Short Description: 草案生成（`agenda`/`report`/`request`）
 - `/argus-risk` — Short Description: リスク一覧と対応提案
-- `/argus-direction` — Short Description: 決定クラスタ集約・方向Δレポート
+- `/argus-direction` — Short Description: 決定クラスタ集約・方向Δレポート / Usage Hint: (引数なし)
 - `/argus-transcribe` — Short Description: 会議録音の文字起こし・議事録生成
 - `/argus-investigate` — Short Description: マルチステップ調査（Agent）
 
