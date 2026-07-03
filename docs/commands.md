@@ -245,6 +245,12 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list
 python3 scripts/ingest/pm_ingest.py goals
 python3 scripts/ingest/pm_ingest.py goals --dry-run
 python3 scripts/ingest/pm_ingest.py goals --goals-list
+
+# Argus 垂直軸: 前提・意思決定台帳（ledger_goals/assumptions/issues/edges）
+python3 scripts/ingest/pm_ingest.py ledger --ledger-list
+python3 scripts/ingest/pm_ingest.py ledger --ledger-seed data/ledger_seed.json
+python3 scripts/ingest/pm_ingest.py ledger --ledger-seed data/ledger_seed.json --ledger-force
+python3 scripts/ingest/pm_ingest.py ledger --ledger-suggest-assumptions
 ```
 
 **共通オプション**（全ソース共通）:
@@ -292,6 +298,23 @@ python3 scripts/ingest/pm_ingest.py goals --goals-list
 | `--goals-list` | - | 登録済みゴール・マイルストーン一覧と達成状況を表示 |
 
 **minutes 転記の注意**: 担当者・期限は議事録DBから直接コピーされる。`milestone_id` のみ Canvas または `pm_relink.py` で補完する。
+
+**ledger ソース固有オプション**（Argus 垂直軸: 前提・意思決定台帳）:
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--ledger-seed PATH` | `data/ledger_seed.json` | 台帳シード JSON のパス（`goals`/`issues`/`assumptions`/`edges` の4配列） |
+| `--ledger-force` | - | 既存の台帳エントリを上書き（辺は常に冪等 UPSERT） |
+| `--ledger-list` | - | pm.db の台帳エントリ一覧（goals/issues/assumptions/edges）を表示して終了 |
+| `--ledger-suggest-assumptions` | - | `decisions`（rationale付き）・`ledger_goals` を LLM に読ませ、前提候補を
+  下書き JSON に出力して終了（**pm.db へは書き込まない**） |
+| `--ledger-suggest-output PATH` | `data/ledger_assumptions_draft.json` | 前提候補の出力先 |
+
+`--ledger-suggest-assumptions` は設計書の「付帯情報はLLMが提案し、人が承認する」原則に
+従う。出力された下書き JSON を確認・編集（承認したものだけ残す）した上で、
+`--ledger-seed <下書きファイル>` で通常のシード投入として取り込む。
+`ledger_assumptions` は `goal_id`/`issue_id` のような自然キーを持たないため、
+重複判定は `content` の完全一致で行う（`--ledger-force` で上書き可能）。
 
 ### 5. PMレポート生成・Canvas投稿（pm_report.py）
 

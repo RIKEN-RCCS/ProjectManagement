@@ -61,8 +61,24 @@ Q-FP64 の責任者/期限割当は `weight_status: provisional` / `source_statu
       `decision`→`decisions` 表記ゆれも修正
 - [x] スクラッチ環境（本番 `data/pm.db`・`data/web_articles.db` 非接触）で
       upsert冪等性・キーワードマッチ・cooldown・dry-run（LLM/embedding呼び出しなし）を検証
-- 未着手: `monitor_target` の実データ投入（設計書からの前提抽出）、LLMによる
-  confirm/contradict 自動判定（バッチ完了後、資源が空いてから）
+- [x] バッチ完了後（2026-07-03）、`detect_external_signals()` に LLM 判定
+      （confirms/contradicts/neutral）を追加。`neutral` は通知抑制、`confirms`/`contradicts`
+      で `ledger_assumptions.confidence`/`state` を更新（設計書§5 着地処理の3作用のうち
+      確信度更新・監視継続を実装。既存決定への警告は `depends_on` 辺の生成経路が無いため
+      コードは用意したが実際には未発火）。`patrol_config.yaml` に `use_llm` 追加、
+      実LLM呼び出しでスクラッチ検証済み（confirm/contradict/neutralの3記事で判定精度確認）
+- [x] `monitor_target` 実データ: 設計書 §8 に前提の具体例が無いことを確認（goals/issues/edges
+      のみ記載）。「LLMが提案し人が承認する」原則に従い、`scripts/ingest/ledger.py` に
+      `suggest_assumptions()` + `--ledger-suggest-assumptions` を追加。本番 `data/pm.db` の
+      `decisions`（rationale付き30件）を入力に5件の前提候補を生成、ユーザー承認の上
+      `--ledger-seed` で本番投入完了（`ledger_assumptions` #1〜#5、全て `confidence`/
+      `monitor_target` 付き）
+- [x] `docs/commands.md` に未記載だった ledger ソースのオプション一覧を新規追加
+
+**Phase 2 の残課題**（機能1着地処理の完全化。着手判断は都度）:
+- `decisions →依拠→ 前提`（`depends_on` 辺）の生成経路が無い。`enrich_items.py` の
+  `enrich_decision()` 拡張が必要（`contributes`→goal と同様のパターンで実装可能）。
+  生成されれば「既存決定への警告」（設計書§5 作用3）が実際に発火するようになる
 
 **Phase 3（機能2: 決定クラスタ集約・方向Δ、骨子のみ・未着手）**:
 - `/argus-direction` 新設、brief/risk の Orchestrator-Worker と

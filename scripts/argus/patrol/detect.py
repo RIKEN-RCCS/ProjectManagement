@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -428,10 +428,14 @@ def detect_weekly_trend_alert(ctx) -> int:
 # --------------------------------------------------------------------------- #
 def detect_external_signals(ctx) -> int:
     """ledger_assumptions.monitor_target に関連する外部Web記事を検出し、
-    リーダー会議チャンネルへ「確認してください」の通知を送る。
+    設計書§5の着地処理（前提の確信度更新／既存決定への警告／監視継続）を行う。
 
-    ルールベースのキーワードマッチのみ（LLM 不使用）。前提が今も妥当かどうかの
-    自動判定（confirm/contradict）は行わない — あくまで人間への気付き提供。
+    キーワードマッチ（ルールベース）で候補を絞った後、LLM で
+    confirms/contradicts/neutral を判定する（`use_llm` で無効化可）。
+    neutral はキーワード一致のみのノイズとみなし通知を抑制する
+    （設計書§5「通知過多の抑制」）。confirms/contradicts のみ通知し、
+    前提の confidence/last_reviewed_at を更新する。LLM 失敗時・無効時は
+    従来通りキーワード一致のみで通知する（自動判定なしの安全側にフォールバック）。
     """
     from .actions import send_channel_alert
 
@@ -442,6 +446,7 @@ def detect_external_signals(ctx) -> int:
     lookback_days = cfg.get("lookback_days", 14)
     cooldown = cfg.get("cooldown_days", 14)
     max_per_run = cfg.get("max_per_run", 5)
+    use_llm = cfg.get("use_llm", True)
     cutoff = (date.fromisoformat(ctx.today) - timedelta(days=lookback_days)).isoformat()
 
     assumptions = ctx.conn.execute(
@@ -478,23 +483,140 @@ def detect_external_signals(ctx) -> int:
         if ctx.state.already_notified("external_signal", target_key, cooldown):
             continue
 
+        judgment = None
+        if use_llm:
+            judgment = _llm_judge_external_signal(
+                a["content"], a["monitor_target"],
+                art.get("title") or "", art.get("summary") or art.get("content") or "",
+            )
+
+        # neutral 判定はノイズとみなし、通知せず cooldown も消費しない
+        if judgment and judgment["verdict"] == "neutral":
+            continue
+
         label = art.get("title") or art.get("url") or "(タイトルなし)"
         when = art.get("published_at") or art.get("fetched_at") or "?"
+
+        if judgment:
+            verdict_label = {"confirms": "裏付け", "contradicts": "否定"}[judgment["verdict"]]
+            judgment_line = f"\nLLM判定: *{verdict_label}* — {judgment['reason']}"
+        else:
+            judgment_line = "\n（自動判定なし。手動で確認してください）"
+
+        # 依拠する決定への警告（設計書§5 作用3。depends_on 辺が無ければ該当なし）
+        dependents = ctx.conn.execute(
+            "SELECT from_id FROM ledger_edges"
+            " WHERE edge_type = 'depends_on' AND to_kind = 'assumption' AND to_id = ?"
+            "   AND state = 'active'",
+            (str(a["id"]),),
+        ).fetchall()
+        dependents_line = ""
+        if dependents and judgment and judgment["verdict"] == "contradicts":
+            ids = "、".join(f"d:{d['from_id']}" for d in dependents)
+            dependents_line = f"\n:warning: この前提に依拠する決定に影響の可能性: {ids}"
+
         text = (
-            f":mag: *前提の監視対象に関連する外部記事を検出（要確認）*\n"
+            f":mag: *前提の監視対象に関連する外部記事を検出*\n"
             f"前提 #{a['id']}: {a['content']}\n"
             f"監視対象: {a['monitor_target']}\n"
             f"該当記事: <{art.get('url', '')}|{label}>"
-            f"（{art.get('source_name', '?')}, {when}）\n"
-            "この前提が今も妥当か確認してください（自動判定は行っていません）。"
+            f"（{art.get('source_name', '?')}, {when}）"
+            f"{judgment_line}{dependents_line}\n"
+            "この前提が今も妥当か確認してください。"
         )
         if send_channel_alert(ctx, leader_ch, text) and not ctx.dry_run:
             ctx.state.record_notification("external_signal", target_key, leader_ch)
+            if judgment and judgment["verdict"] in ("confirms", "contradicts"):
+                _update_assumption_confidence(ctx.conn, a["id"], judgment["verdict"])
         sent += 1
 
     if sent:
         logger.info("外部シグナル検出: %d 件", sent)
     return sent
+
+
+_LLM_EXTERNAL_SIGNAL_PROMPT = """\
+あなたはプロジェクト管理アシスタントです。以下の「前提」と、それに関連しそうな
+外部記事を読んで、記事がこの前提を裏付けるか、否定するか、それとも
+キーワードが一致しただけで実質的な関連性が薄いかを判定してください。
+
+## 前提
+{assumption_content}
+（監視対象: {monitor_target}）
+
+## 外部記事
+タイトル: {article_title}
+本文/要約: {article_summary}
+
+## 判定基準
+- 記事が前提の内容を積極的に裏付ける具体的な情報を含む → CONFIRMS
+- 記事が前提と矛盾する、または前提を覆しうる情報を含む → CONTRADICTS
+- キーワードが一致しただけで、前提の真偽に関する実質的な情報がない → NEUTRAL
+
+## 出力
+以下のいずれか1つを先頭に出力し、コロンの後に根拠を1文で述べてください。
+CONFIRMS: （根拠）
+CONTRADICTS: （根拠）
+NEUTRAL: （根拠）
+"""
+
+
+def _llm_judge_external_signal(
+    assumption_content: str, monitor_target: str, article_title: str, article_summary: str
+) -> dict | None:
+    """LLM に前提と外部記事を比較させ、confirms/contradicts/neutral を判定する。
+
+    Returns: {"verdict": "confirms"|"contradicts"|"neutral", "reason": str} 、
+    LLM 利用不可・パース失敗時は None（呼び出し側は自動判定なしにフォールバックする）。
+    """
+    try:
+        from cli_utils import call_argus_llm
+    except ImportError:
+        logger.debug("cli_utils が利用不可。外部シグナルのLLM判定をスキップ。")
+        return None
+
+    prompt = _LLM_EXTERNAL_SIGNAL_PROMPT.format(
+        assumption_content=assumption_content[:500],
+        monitor_target=monitor_target[:200],
+        article_title=article_title[:200],
+        article_summary=article_summary[:800],
+    )
+
+    try:
+        result = call_argus_llm(prompt, timeout=30, max_tokens=200).strip()
+        for verdict in ("CONFIRMS", "CONTRADICTS", "NEUTRAL"):
+            if result.upper().startswith(verdict):
+                reason = result[len(verdict):].strip(": 　").strip() or "(根拠なし)"
+                return {"verdict": verdict.lower(), "reason": reason}
+        logger.warning("外部シグナル LLM 判定: 期待した形式で応答が得られず: %s", result[:100])
+    except Exception as e:
+        logger.warning("外部シグナル LLM 判定エラー: %s", e)
+
+    return None
+
+
+def _update_assumption_confidence(conn, assumption_id: int, verdict: str) -> None:
+    """LLM判定結果に基づき ledger_assumptions を更新する（設計書§5 作用2）。
+
+    confirms: 鮮度を更新するのみ（confidence が未設定なら medium とする）。
+    contradicts: confidence を low に下げ、state を review にして次回以降の
+    自動監視対象から外す（人による再確認・状態リセットを促す）。
+    """
+    now = datetime.now().isoformat()
+    if verdict == "confirms":
+        conn.execute(
+            "UPDATE ledger_assumptions SET last_reviewed_at = ?,"
+            " confidence = COALESCE(NULLIF(TRIM(confidence), ''), 'medium')"
+            " WHERE id = ?",
+            (now, assumption_id),
+        )
+    elif verdict == "contradicts":
+        conn.execute(
+            "UPDATE ledger_assumptions SET last_reviewed_at = ?, confidence = 'low',"
+            " state = 'review' WHERE id = ?",
+            (now, assumption_id),
+        )
+    conn.commit()
 
 
 def _split_monitor_terms(monitor_target: str) -> list[str]:
