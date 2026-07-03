@@ -7,6 +7,26 @@
 
 ---
 
+## 2026-07-03 Argus 垂直軸 Phase 1 完了（前提・意思決定台帳、本番投入まで）
+
+**背景**: 2026-07-01に設計書（v0.1・要批准）を読解し、台帳スキーマ
+（ledger_goals/assumptions/issues/edges）・シード・流入拡張（rationale/trade_off/
+reversal_condition のブラケットタグ）を実装。本番投入は重み・出所が「要批准」のため保留していた。
+
+**決定**: end-to-end動作確認は議事録一括再生成バッチ（65件）とSlack抽出の実運用で完了
+（meeting経由decisions 165件中rationale99%、slack経由145件中98%）。goals/issues/edges の
+本番投入は、識別要件5件の重み（高/高/高/中/中）をPM承認により確定（provisional→ratified）、
+一方でG-NS/G-REPRO等の一次出所とQ-FP64の責任者・期限は情報が無いため
+`needs_source`/未定のまま先行投入する判断とした（出所主義：無い情報は無いまま記録し、
+判明次第 `--ledger-force` で更新する）。`ledger_assumptions` は別途「LLM提案→人承認」の
+新機構（`--ledger-suggest-assumptions`）で5件を承認・投入。
+
+**影響**: 本番pm.dbに台帳（goals 10・issues 1・assumptions 5・edges 5）が揃い、
+Patrol検出器8（機能1・外部シグナル検出）が実際に監視対象を持つ状態になった。
+Phase 2の残課題（depends_on辺の生成経路）とPhase 3（機能2）は引き続きPLAN.md参照。
+
+---
+
 ## 2026-07-03 議事録一括再生成65件の pm.db 転記漏れ6件を発見・修復、重複判定を恒久修正
 
 **背景**: バッチ完了後、65件全てが本当に pm.db に反映されたか確認するため、
