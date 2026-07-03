@@ -619,10 +619,39 @@ def _update_assumption_confidence(conn, assumption_id: int, verdict: str) -> Non
     conn.commit()
 
 
+_MONITOR_TERM_STOPWORDS = {"する", "こと", "ため", "もの", "よる", "おく", "れる", "いる", "ある"}
+
+
 def _split_monitor_terms(monitor_target: str) -> list[str]:
-    """monitor_target を検索語に分割する（2文字未満のトークンは除外）。"""
-    terms = re.split(r"[,、・/\s]+", monitor_target.strip())
-    return [t for t in terms if len(t) >= 2]
+    """monitor_target を検索語に分割する。
+
+    区切り文字（, 、 ・ / 空白）での単純分割だと、日本語の自由文（例:
+    「KDDIによるGB200 NVL72サービスの正式な提供開始時期」）はほぼ分割されず
+    1つの長い文字列になってしまい、記事本文と一致しなくなる（2026-07-03に
+    depends_on 辺検証中に発覚。経緯はLOG.md参照）。
+    英数字の固有名詞（製品名・企業名等）は正規表現でそのまま抽出し、
+    日本語部分は `retrieval.sudachi_tokenize_query()`（既存のFTS5検索と同じ
+    形態素解析）で名詞・動詞等を抽出して補う。SudachiPy利用不可時は
+    区切り文字分割のみにフォールバックする。
+    """
+    alnum_terms = re.findall(r"[A-Za-zＡ-Ｚａ-ｚ0-9]{2,}", monitor_target)
+
+    try:
+        from argus.retrieval import _init_sudachi, sudachi_tokenize_query
+
+        _init_sudachi()
+        noun_terms = sudachi_tokenize_query(monitor_target)
+    except Exception:
+        noun_terms = re.split(r"[,、・/\s]+", monitor_target.strip())
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for t in alnum_terms + noun_terms:
+        key = t.lower()
+        if len(t) >= 2 and key not in seen and t not in _MONITOR_TERM_STOPWORDS:
+            seen.add(key)
+            terms.append(t)
+    return terms
 
 
 def _get_recent_articles(data_dir: Path, cutoff_date: str) -> list[dict]:

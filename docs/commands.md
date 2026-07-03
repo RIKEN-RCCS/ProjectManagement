@@ -916,6 +916,17 @@ python3 scripts/enrich/enrich_items.py --since 2026-03-01
 - **decisions**: `decided_by` / `decided_by_confidence` / `rationale` / `related_ids`
 - **action_items**: `requested_by` / `requested_by_confidence` / `rationale` / `source_context` / `related_ids`
 
+**Argus 垂直軸: 台帳への辺生成**（decisions のみ、`ledger_edges` へ副次的に UPSERT）:
+- **貢献先の目標**: LLM が `ledger_goals` 一覧から選んだ `contributes_to_goals` を
+  `decision →contributes→ goal` 辺として書き込む
+- **依拠する前提**: LLM が `ledger_assumptions` 一覧から選んだ `depends_on_assumptions` を
+  `decision →depends_on→ assumption` 辺として書き込む。Patrol の外部シグナル検出器
+  （`detect_external_signals`）がこの辺を辿り、前提が否定された際に依拠する決定へ警告する
+
+いずれも一覧に無いIDをLLMが生成した場合は無視する（`_validate_ledger_goal_ids`/
+`_validate_ledger_assumption_ids` で実在確認）。台帳未投入（`ledger_goals`/
+`ledger_assumptions` が空）の場合は候補が「（台帳未投入）」となり生成されない。
+
 **ナレッジソース**（`knowledge_context.py` が取得）:
 - pm.db 構造化データ（直近の decisions / action_items）
 - FTS5 全文検索（議事録・Slack・ドキュメント・Web記事）

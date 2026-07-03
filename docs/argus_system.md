@@ -392,15 +392,23 @@ contradicts（否定）/ neutral（キーワード一致のみで実質無関係
    （`state='active'` のみが対象のため。人が確認して `active` に戻すまで再検出しない）
 2. **既存決定への警告**: `contradicts` の場合、`ledger_edges` の
    `depends_on`（決定→前提）でこの前提に依拠する決定があれば通知文に含める
-   （2026-07時点では `depends_on` 辺の生成経路が未実装のため実際には該当なし。
-   `enrich_items.py` 拡張で決定→前提の依拠関係を生成すれば機能する）
+   （`decision d:1 → assumption #1` のように）。`depends_on` 辺は
+   `enrich_items.py::enrich_decision()` が `contributes_to_goals` と同じパターンで
+   `depends_on_assumptions` を生成する（2026-07-03実装、実LLM呼び出しで
+   確認済み。プロンプトに `ledger_assumptions` 一覧を候補として提示し、
+   実在するIDのみ採用）
 3. **監視継続**: `confirms`/`neutral` では前提は `active` のまま、次回以降も
    同じ `monitor_target` で監視を継続する
 
 - 対象: `state='active'` かつ `monitor_target` が非空の前提
 - 記事の絞り込み: `lookback_days`（デフォルト14日）以内に `fetched_at` された記事
-- キーワードマッチ判定: `monitor_target` を区切り文字（`, 、 ・ /` 空白）で分割した
-  2文字以上の語が、記事の `title`/`summary`/`content` のいずれかに部分一致するか
+- キーワードマッチ判定: `monitor_target` から抽出した語が、記事の
+  `title`/`summary`/`content` のいずれかに部分一致するか。語の抽出は
+  英数字の固有名詞（正規表現 `[A-Za-z0-9]{2,}`、製品名・企業名等をそのまま保持）+
+  `retrieval.sudachi_tokenize_query()`（既存FTS5検索と同じSudachiPy形態素解析）
+  の併用。単純な区切り文字分割は日本語の自由文（例:「KDDIによるGB200 NVL72
+  サービスの正式な提供開始時期」）がほぼ分割されず記事とマッチしない不具合が
+  あったため2026-07-03に修正（経緯はLOG.md参照）
 - LLM判定: `cli_utils.call_argus_llm()`（`timeout=30, max_tokens=200`）。
   完了シグナル検出の `_llm_judge_completion` と同じフェイルセーフ方針
   （`cli_utils` 未導入・応答パース失敗時は `None` を返し通知のみにフォールバック）

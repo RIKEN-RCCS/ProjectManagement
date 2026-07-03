@@ -153,8 +153,15 @@ ID: d:{id}
    資するか。明らかに貢献すると判断できるものだけを選ぶ（迷ったら空配列 `[]`）。
    一覧に無い goal_id を生成しないこと。
 
+6. **依拠する前提 (depends_on_assumptions)**: この決定が下記「台帳前提一覧」のどの前提の上に
+   成り立っているか。前提が誤りだった場合にこの決定が見直しを要するような、明確な依存関係が
+   あるものだけを選ぶ（迷ったら空配列 `[]`）。一覧に無い ID を生成しないこと。
+
 ## 台帳目標一覧（貢献先の候補）
 {ledger_goals}
+
+## 台帳前提一覧（依拠先の候補）
+{ledger_assumptions}
 
 ## 出力（JSON のみ、説明不要）
 
@@ -165,6 +172,7 @@ ID: d:{id}
   "rationale": "根拠2-3文 or null",
   "related_ids": ["d:42", "a:15"],
   "contributes_to_goals": ["G-PHYS"],
+  "depends_on_assumptions": [1, 3],
   "evidence": "推測の根拠説明（inferred時のみ、それ以外はnull）"
 }}
 ```
@@ -296,6 +304,55 @@ def _write_decision_goal_edges(pm_conn, decision_id: int, goal_ids: list[str]) -
         )
 
 
+def _fetch_ledger_assumptions_for_prompt(pm_conn) -> str:
+    """ledger_assumptions をプロンプト向けに整形する（依拠先辺 depends_on の候補一覧）。"""
+    try:
+        rows = pm_conn.execute(
+            "SELECT id, content, monitor_target FROM ledger_assumptions"
+            " WHERE COALESCE(state,'active')='active' ORDER BY id"
+        ).fetchall()
+    except Exception:
+        return "（台帳未投入）"
+    if not rows:
+        return "（台帳未投入）"
+    return "\n".join(
+        f"- {r['id']}: {r['content']}"
+        + (f"（監視対象: {r['monitor_target']}）" if r["monitor_target"] else "")
+        for r in rows
+    )
+
+
+def _validate_ledger_assumption_ids(ids: list, pm_conn) -> list[int]:
+    """depends_on_assumptions が ledger_assumptions に実在するか検証し、有効なもののみ返す。"""
+    valid = []
+    for ref in ids or []:
+        try:
+            aid = int(ref)
+        except (TypeError, ValueError):
+            continue
+        row = pm_conn.execute(
+            "SELECT id FROM ledger_assumptions WHERE id = ?", (aid,)
+        ).fetchone()
+        if row:
+            valid.append(aid)
+    return valid
+
+
+def _write_decision_assumption_edges(pm_conn, decision_id: int, assumption_ids: list[int]) -> None:
+    """決定 → 前提 の depends_on 辺を ledger_edges に UPSERT する。"""
+    now = datetime.now().isoformat()
+    for assumption_id in assumption_ids:
+        pm_conn.execute(
+            """
+            INSERT INTO ledger_edges
+                (edge_type, from_kind, from_id, to_kind, to_id, source, state, created_at)
+            VALUES ('depends_on', 'decision', ?, 'assumption', ?, 'enrich', 'active', ?)
+            ON CONFLICT(edge_type, from_kind, from_id, to_kind, to_id) DO NOTHING
+            """,
+            (str(decision_id), str(assumption_id), now),
+        )
+
+
 def _is_trivial_rationale(rationale: str | None, content: str) -> bool:
     """rationale が content の実質コピーかどうかを簡易判定する。"""
     if not rationale:
@@ -324,6 +381,7 @@ def enrich_decision(
         knowledge=knowledge_text,
         project_context=project_context,
         ledger_goals=_fetch_ledger_goals_for_prompt(pm_conn),
+        ledger_assumptions=_fetch_ledger_assumptions_for_prompt(pm_conn),
     )
 
     try:
@@ -343,6 +401,9 @@ def enrich_decision(
 
     related_ids = _validate_related_ids(result.get("related_ids") or [], pm_conn)
     contributes_to_goals = _validate_ledger_goal_ids(result.get("contributes_to_goals") or [], pm_conn)
+    depends_on_assumptions = _validate_ledger_assumption_ids(
+        result.get("depends_on_assumptions") or [], pm_conn
+    )
 
     rationale = result.get("rationale")
     if _is_trivial_rationale(rationale, item["content"]):
@@ -354,6 +415,7 @@ def enrich_decision(
         "rationale": rationale,
         "related_ids": related_ids,
         "contributes_to_goals": contributes_to_goals,
+        "depends_on_assumptions": depends_on_assumptions,
         "evidence": result.get("evidence"),
     }
 
@@ -479,6 +541,8 @@ def enrich_batch(
             _save_decision_enrichment(pm_conn, d["id"], result)
             if result.get("contributes_to_goals"):
                 _write_decision_goal_edges(pm_conn, d["id"], result["contributes_to_goals"])
+            if result.get("depends_on_assumptions"):
+                _write_decision_assumption_edges(pm_conn, d["id"], result["depends_on_assumptions"])
 
     enriched_ais: list[dict] = []
     for i, a in enumerate(action_items, 1):
@@ -524,6 +588,8 @@ def _print_enrichment(result: dict, item_type: str, log=print):
         log(f"  related_ids : {result['related_ids']}")
     if result.get("contributes_to_goals"):
         log(f"  ledger貢献先: {result['contributes_to_goals']}")
+    if result.get("depends_on_assumptions"):
+        log(f"  ledger依拠先: {result['depends_on_assumptions']}")
 
 
 def _save_decision_enrichment(pm_conn, decision_id: int, result: dict):
