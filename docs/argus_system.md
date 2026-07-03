@@ -164,6 +164,43 @@ tail -f logs/pm_qa_server.log
 
 ---
 
+### `/argus-direction` — 方向Δレポート（Argus 垂直軸 機能2）
+
+決定クラスタ集約・方向Δ（設計書§6）。brief/risk と異なり Slack 会話・議事録データは
+使わず、pm.db の `ledger_edges`/`ledger_goals`/`decisions`（台帳グラフ）のみを参照する。
+
+```
+/argus-direction
+```
+（引数なし。フォーカス指定は無い）
+
+**処理**（`scripts/argus/direction.py`、LLM不使用の集合化 + 命名のみLLM）:
+1. 集合化（グラフ、LLM不使用）: `decisions →contributes→ goal` /
+   `decisions →depends_on→ assumption` の辺から、同一目標に貢献し同じ前提集合に
+   依拠する決定同士をクラスタとして機械的に集合化する（`compute_decision_clusters()`）
+2. 命名（LLM+承認）: 各クラスタに短い名称を1つ提案する。**LLMの裁量はここに限定**
+   （設計書§6「存在しない一貫性の付与を防ぐ」）。人が承認するまでは提案の域を出ない
+3. 投入量集計（SQL）: `ledger_edges.weight` の合計（未設定時は決定1件=1として近似）
+4. 照合Δ: `ledger_goals.weight`（意図された優先度）と実態投入量を比較し、
+   「重みは高いが投入がほぼ無い」目標を**投入不足領域**として列挙する。
+   単一の達成度スコアには集約しない（設計書§7）
+5. 未着手検出: 貢献する決定が0件の目標（入次数ゼロ）を列挙
+6. 非収束検出: 同一目標に複数の異なる前提集合のクラスタが併存する場合、
+   「両立しない複数方向に投入している。選択が必要」として提示する
+   （`decisions.trade_off` を根拠として提示するのみ、内容面の矛盾は自動判定しない）
+
+**前提条件**: `ledger_edges` に decision起点の `contributes`/`depends_on` 辺が
+無ければ「集約対象がありません」と表示するのみ（2026-07時点、`enrich_items.py` の
+本番実行が別途必要。PLAN.md参照）。
+
+**CLI モード**:
+```bash
+python3 scripts/argus/pm_argus.py --direction --dry-run
+python3 scripts/argus/pm_argus.py --direction --canvas-id F0XXXXXX
+```
+
+---
+
 ### `/argus-today` — 今日の活動サマリー（個人向け）
 
 本日のSlack・議事録を収集し、4観点（議論・決定・AI・進捗）でサマライズする。
@@ -938,6 +975,7 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 - `/argus-brief` — Short Description: 今日の状況サマリーと優先アクション
 - `/argus-draft` — Short Description: 草案生成（`agenda`/`report`/`request`）
 - `/argus-risk` — Short Description: リスク一覧と対応提案
+- `/argus-direction` — Short Description: 決定クラスタ集約・方向Δレポート
 - `/argus-transcribe` — Short Description: 会議録音の文字起こし・議事録生成
 - `/argus-investigate` — Short Description: マルチステップ調査（Agent）
 

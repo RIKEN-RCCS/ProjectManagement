@@ -1168,6 +1168,48 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         )
 
 
+def _run_direction(respond, command, *, no_encrypt: bool = False):
+    """Slack /argus-direction のバックグラウンド処理 — 機能2: 決定クラスタ集約・方向Δ
+
+    brief/risk と異なり Slack 会話・議事録データは使わない。pm.db の
+    ledger_edges/ledger_goals/decisions のみを参照する台帳グラフ計算
+    （集合化・投入量集計・Δ照合はLLM不使用）+ クラスタ命名のみLLMを使う
+    （設計書§6：LLMの裁量を命名に限定し、存在しない一貫性の付与を防ぐ）。
+    """
+    import logging
+    logger = logging.getLogger("pm_argus")
+    try:
+        from argus.direction import build_direction_report
+
+        index_name = resolve_index_name(command.get("channel_id") or None)
+        pm_db_paths = load_pm_db_paths(index_name)
+        pm_conn = open_pm_db(pm_db_paths[0], no_encrypt=no_encrypt)
+
+        logger.info("[argus-direction] レポート生成中")
+        result = build_direction_report(pm_conn, use_llm_naming=True)
+
+        today = date.today().isoformat()
+        header = f"*Argus 方向Δレポート ({today})*"
+        full_text = _to_slack_mrkdwn(f"{header}\n\n{result}")
+        blocks = _split_mrkdwn_to_blocks(full_text)
+        logger.info(f"[argus-direction] respond text={len(full_text)} chars, blocks={len(blocks)}")
+        respond(blocks=blocks)
+        logger.info("[argus-direction] 完了")
+    except Exception as e:
+        logger.exception("[argus-direction] エラー")
+        respond(
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f":warning: Argus 方向Δ分析エラー: {e}",
+                    },
+                }
+            ],
+        )
+
+
 def _run_risk_worker(worker_type: str, data: str) -> str:
     """リスク Worker を実行する（ThreadPoolExecutor 用）。
     worker_type: 'pm' / 'conversation' / 'minutes' / 'knowledge'
@@ -1526,6 +1568,9 @@ def main() -> None:
                         help="ブリーフィングを生成して Canvas に投稿")
     parser.add_argument("--risk", action="store_true",
                         help="リスク分析を生成して Canvas に投稿（--dry-run で投稿なし）")
+    parser.add_argument("--direction", action="store_true",
+                        help="Argus 垂直軸 機能2: 決定クラスタ集約・方向Δレポートを生成して"
+                             " Canvas に投稿（--dry-run で投稿なし）")
     parser.add_argument("--canvas-id", default=None, metavar="ID",
                         help="投稿先 Canvas ID（必須）")
     parser.add_argument("--dry-run", action="store_true",
@@ -1561,6 +1606,34 @@ def main() -> None:
         days = args.days if args.days is not None else _DEFAULT_SINCE_DAYS
         since_date = args.since or (date.today() - timedelta(days=days)).isoformat()
     pm_db_paths_cli = [Path(args.db)] if args.db else load_pm_db_paths(args.index_name)
+
+    if args.direction:
+        # brief/risk と異なり Slack/議事録データは不要（pm.dbのledger構造のみ参照）。
+        # _collect_all_data() の重い並列収集をスキップして直接処理する。
+        from argus.direction import build_direction_report
+
+        pm_conn = open_pm_db(pm_db_paths_cli[0], no_encrypt=args.no_encrypt)
+        print("[INFO] 決定クラスタ集約・方向Δ計算中...", file=sys.stderr)
+        result = build_direction_report(pm_conn, use_llm_naming=True)
+        canvas_content = f"# Argus 方向Δレポート ({today})\n\n{result}\n\n_生成: {today} JST_"
+        print("\n" + "=" * 60)
+        print(canvas_content)
+        print("=" * 60)
+
+        if args.dry_run:
+            print("[INFO] --dry-run: Canvas 投稿をスキップ", file=sys.stderr)
+            return
+
+        canvas_id = args.canvas_id
+        if not canvas_id:
+            print("[ERROR] Canvas ID が不明。--canvas-id を指定してください",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        from canvas_utils import post_to_canvas, sanitize_for_canvas
+        post_to_canvas(canvas_id, sanitize_for_canvas(canvas_content))
+        print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
+        return
 
     context = load_claude_md_context()
     # terminology 動的用語辞書を追記

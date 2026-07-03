@@ -47,6 +47,7 @@ from argus.patrol.confirm import handle_approve_close, handle_reject_close
 from argus.patrol.state import PatrolState
 from argus.pm_argus import (
     _run_brief,
+    _run_direction,
     _run_draft,
     _run_risk,
     _run_today_only,
@@ -242,6 +243,12 @@ def build_app():
         ack()
         respond(text=":hourglass_flowing_sand: Argus リスク分析中...", response_type="ephemeral")
         executor.submit(_run_risk, respond, command)
+
+    @app.command("/argus-direction")
+    def handle_argus_direction(ack, respond, command):
+        ack()
+        respond(text=":hourglass_flowing_sand: Argus 方向Δ分析中...", response_type="ephemeral")
+        executor.submit(_run_direction, respond, command)
 
     @app.command("/argus-investigate")
     def handle_argus_investigate(ack, respond, command):
