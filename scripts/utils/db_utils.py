@@ -299,6 +299,9 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
             # 2026-07-01: Argus 垂直軸 — 前提・意思決定台帳（有向グラフ）
             "ALTER TABLE decisions ADD COLUMN trade_off TEXT",
             "ALTER TABLE decisions ADD COLUMN reversal_condition TEXT",
+            # 2026-07-05: 選別ゲート（設計書§4: 荷重を持つ決定だけを台帳へ取り込む）
+            "ALTER TABLE decisions ADD COLUMN ledger_gate TEXT",
+            "ALTER TABLE decisions ADD COLUMN ledger_gate_reason TEXT",
         ],
     )
 
@@ -410,6 +413,9 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
                 "state TEXT DEFAULT 'active', created_at TEXT, "
                 "UNIQUE(edge_type, from_kind, from_id, to_kind, to_id))"
             ),
+            # 2026-07-05: 選別ゲート（設計書§4: 荷重を持つ決定だけを台帳へ取り込む）
+            "ALTER TABLE decisions ADD COLUMN ledger_gate TEXT",
+            "ALTER TABLE decisions ADD COLUMN ledger_gate_reason TEXT",
         ],
     )
 

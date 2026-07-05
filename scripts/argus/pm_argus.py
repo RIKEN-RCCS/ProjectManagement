@@ -1177,6 +1177,7 @@ def _run_direction(respond, command, *, no_encrypt: bool = False):
     （設計書§6：LLMの裁量を命名に限定し、存在しない一貫性の付与を防ぐ）。
     """
     import logging
+    import os
     logger = logging.getLogger("pm_argus")
     try:
         from argus.direction import build_direction_report
@@ -1186,7 +1187,7 @@ def _run_direction(respond, command, *, no_encrypt: bool = False):
         pm_conn = open_pm_db(pm_db_paths[0], no_encrypt=no_encrypt)
 
         logger.info("[argus-direction] レポート生成中")
-        result = build_direction_report(pm_conn, use_llm_naming=True)
+        result, graph_path = build_direction_report(pm_conn, use_llm_naming=True, include_graph=True)
 
         today = date.today().isoformat()
         header = f"*Argus 方向Δレポート ({today})*"
@@ -1195,6 +1196,36 @@ def _run_direction(respond, command, *, no_encrypt: bool = False):
         logger.info(f"[argus-direction] respond text={len(full_text)} chars, blocks={len(blocks)}")
         respond(blocks=blocks)
         logger.info("[argus-direction] 完了")
+
+        if graph_path:
+            bot_token = os.environ.get("SLACK_BOT_TOKEN")
+            channel_id = command.get("channel_id")
+            if bot_token and channel_id:
+                try:
+                    from slack_sdk import WebClient
+                    WebClient(token=bot_token).files_upload_v2(
+                        channel=channel_id,
+                        file=str(graph_path),
+                        filename="argus_direction_graph.png",
+                        title="Argus 方向Δ 台帳グラフ",
+                        initial_comment=(
+                            ":bar_chart: 目標→決定クラスタの構造図です。"
+                            "テキストレポートと異なりチャンネル全員に表示されます。"
+                        ),
+                    )
+                    logger.info("[argus-direction] グラフ画像アップロード完了")
+                except Exception:
+                    logger.exception(
+                        "[argus-direction] グラフ画像アップロード失敗（レポート本体は送信済み）"
+                    )
+            else:
+                logger.warning(
+                    "[argus-direction] SLACK_BOT_TOKEN/channel_id 不明のためグラフ画像アップロードをスキップ"
+                )
+            try:
+                graph_path.unlink(missing_ok=True)
+            except Exception:
+                pass
     except Exception as e:
         logger.exception("[argus-direction] エラー")
         respond(
@@ -1614,11 +1645,13 @@ def main() -> None:
 
         pm_conn = open_pm_db(pm_db_paths_cli[0], no_encrypt=args.no_encrypt)
         print("[INFO] 決定クラスタ集約・方向Δ計算中...", file=sys.stderr)
-        result = build_direction_report(pm_conn, use_llm_naming=True)
+        result, graph_path = build_direction_report(pm_conn, use_llm_naming=True, include_graph=True)
         canvas_content = f"# Argus 方向Δレポート ({today})\n\n{result}\n\n_生成: {today} JST_"
         print("\n" + "=" * 60)
         print(canvas_content)
         print("=" * 60)
+        if graph_path:
+            print(f"[INFO] グラフ画像: {graph_path}", file=sys.stderr)
 
         if args.dry_run:
             print("[INFO] --dry-run: Canvas 投稿をスキップ", file=sys.stderr)

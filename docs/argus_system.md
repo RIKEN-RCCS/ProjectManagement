@@ -164,56 +164,75 @@ tail -f logs/pm_qa_server.log
 
 ---
 
-### `/argus-direction` — 方向Δレポート（Argus 垂直軸 機能2）
+### `/argus-direction` — 方向Δレポート（Argus 垂直軸 機能2、所見型）
 
-決定クラスタ集約・方向Δ（設計書§6）。brief/risk と異なり Slack 会話・議事録データは
-使わず、pm.db の `ledger_edges`/`ledger_goals`/`decisions`（台帳グラフ）のみを参照する。
+方向Δの**所見（finding）検出**。brief/risk と異なり Slack 会話・議事録データは
+使わず、pm.db の `ledger_edges`/`ledger_goals`/`ledger_issues`/`ledger_assumptions`/
+`decisions`（台帳グラフ）のみを参照する。
+
+2026-07-05 の抜本見直しで「クラスタの構造表示」から「所見の検出」へ出力の主役を
+転換した（経緯・診断数値は LOG.md「Argus 垂直軸の抜本見直し」）。旧実装の
+「投入量Δ」（貢献辺数と重みランクの比較）と「前提集合キーによる非収束検出」は廃止。
 
 ```
 /argus-direction
 ```
 （引数なし。フォーカス指定は無い）
 
-**処理**（`scripts/argus/direction.py`、LLM不使用の集合化 + 命名・論点整理はLLM）:
-1. 集合化（グラフ、LLM不使用）: `decisions →contributes→ goal` /
-   `decisions →depends_on→ assumption` の辺から、同一目標に貢献し同じ前提集合に
-   依拠する決定同士をクラスタとして機械的に集合化する（`compute_decision_clusters()`）
-2. 命名（LLM+承認）: 各クラスタに、単なる話題ラベルではなく「何を選んだか」が
-   伝わる短い名称を1つ提案する。人が承認するまでは提案の域を出ない
-3. 投入量集計（SQL）: `ledger_edges.weight` の合計（未設定時は決定1件=1として近似）
-4. 照合Δ: `ledger_goals.weight`（意図された優先度）と実態投入量を比較し、
-   「重みは高いが投入がほぼ無い」目標を**投入不足領域**として列挙する。
-   単一の達成度スコアには集約しない（設計書§7）
-5. 未着手検出: 貢献する決定が0件の目標（入次数ゼロ）を列挙。全layerが対象
-6. 非収束検出: **重み承認済みの識別要件（`layer='identifying'`）のみ**を対象に、
-   同一目標に複数の異なる前提集合のクラスタが併存する場合「両立しない複数方向に
-   投入している。選択が必要」として提示する（`decisions.trade_off` を根拠として
-   提示するのみ、内容面の矛盾は自動判定しない）。最上位目標（top）・制約
-   （constraint）・前提条件（tablestakes）は対象外 — 傘概念やバイナリの充足有無
-   であり、クラスタ併存＝方向の対立というシグナルにならないため（2026-07-03、
-   G-NS等でノイズになっていた反省を踏まえ限定）
-7. エグゼクティブサマリー（LLM+承認、2026-07-03追加）: 4〜6の所見を材料に、
-   PMが確認すべき論点を3〜5個の問いかけ形式で整理しレポート冒頭に置く
-   （「〜すべき」という断定は禁止、是正判断はPMが行うという原則は維持）
-8. サマリー根拠（機械算出、LLM不使用、2026-07-03追加）: エグゼクティブサマリーの
-   直後に、サマリーが言及した各目標の decision_id 一覧を `_format_summary_evidence()`
-   で機械的に列挙する。サマリー文のプローズだけでは「具体的にどの決定を指しているか」
-   が分からないという指摘への対応。要約文の正しさに依存せず、SQL集計から
-   直接算出するため常に正確（出所主義）
+**入力の品質を担保する選別ゲート（設計書§4）**: enrich（`enrich_items.py`）が
+全決定を LLM で「台帳対象（decision）/ 作業の痕跡（trace）」に仕分けし
+（`decisions.ledger_gate` 列、3問 — 覆すとやり直しが生じるか/選択肢を排除するか/
+資源や方向を確定させるか）、**台帳対象の決定にしか辺を張らない**。貢献先候補は
+識別要件5件+前提条件2件に限定（最上位目標G-NSへの直接貢献は禁止、制約C-*は貢献先
+ではなく違反検査の対象）。遡及一括再判定は `enrich_items.py --ledger-regrade`
+（1件ごとにコミット、中断後は同コマンドで続きから再開）。
+
+**5種の所見検出器**（`scripts/argus/direction.py`）:
+
+| 所見 | 検出器 | 方式 |
+|---|---|---|
+| 停滞・未着手 | `detect_stagnation` | SQLのみ。識別要件ごとの直接貢献決定の流量。全期間0件=未着手、重み高かつ直近90日0件=停滞 |
+| 制約違反疑い | `detect_constraint_violations` | SQLのみ。enrich時に張られた `may_violate` 辺（決定→C-*、疑い根拠付き）を列挙。PM棄却は state='rejected' |
+| 論点ブロック | `detect_issue_blocks` | SQLのみ。open論点の `blocks` 辺 —「論点未解決のままブロック対象領域で決定が進行」 |
+| トレードオフ衝突 | `detect_tradeoff_conflicts` | 候補絞り込みはSQL、衝突判定はLLM1呼び出し。「Aが捨てた案をBが採用」の組のみ。**非収束の新定義** |
+| 前提健全性 | `assumption_health` | SQLのみ。確信度・最終確認日・依拠決定数。confidence=low は要レビュー警告（機能1の着地処理と接続） |
+
+**レポート構成**: ①所見（無ければ「所見なし」と明言 — 存在しない一貫性を付与しない、
+設計書§9）→ ②目標別エグゼクティブサマリー（LLM、現状の言い換え+提案アクション、
+「〜してはどうか」の提案形式限定・断定禁止）→ ③前提の健全性 → ④識別要件への
+直接貢献決定一覧（クラスタ名・要約付き）→ ⑤グラフ画像。冒頭に選別ゲートの
+通過状況（台帳対象/痕跡/未判定の件数）を表示する。
+
+**グラフ画像**（`render_direction_graph()`、LLM不使用）: 最上位目標→識別要件→
+決定クラスタの階層PNG。ノード色は所見ベース（未着手=赤/停滞=橙/衝突=紫/健全=緑）、
+クラスタノードのサイズは決定件数。`nx.multipartite_layout` は親子関係を無視して
+ノードが密集するため不採用、各目標を子クラスタ群の重心の真上に置く手動レイアウト。
+
+**画像生成の環境依存**: `networkx`/`matplotlib`/日本語フォント（Noto Sans CJK JP）が
+無い環境では `render_direction_graph()` が `None` を返し、テキストレポートのみの
+従来動作に自然に縮退する（コマンド全体は失敗しない）。動作確認は aarch64 venv
+（`~/.venv_aarch64`、matplotlib 3.10.9 + networkx 3.6.1 + Noto Sans CJK JP 導入済み）
+のみ。`pm_daemon.sh` が `uname -m` でこのvenvを自動選択するため本番経路は問題ない。
+
+**Slackへの画像投稿**: `_run_direction()` はテキストレポート送信後、グラフ画像を
+`files_upload_v2` でコマンド実行チャンネルにアップロードする（`narrate.py` の
+TTS音声アップロードと同じパターン・同じトレードオフ）。**テキスト本文は実行者のみの
+ephemeralだが、グラフ画像はチャンネル全員に見える点に注意**（Slackはファイルの
+ephemeral投稿に対応しないため、DM (`conversations_open`) にすると"App"セクションに
+隔離され視認性が悪いという `narrate.py` の既存の知見を踏襲し、DMではなくチャンネルへの
+投稿を選んだ）。アップロード失敗時はログのみでコマンド全体は失敗させない
+（テキストレポートは既に送信済みのため）。CLIモード（`--dry-run`）は画像パスを
+stderrに出力するのみで、Canvas/Boxへの画像埋め込みは未対応（スコープ外）。
 
 **目標の表示**: 全ての目標参照は `ledger_goals.layer` に基づき
 「G-UQ［識別要件］不確実性定量化（UQ）」のように種別を明示する（`_goal_label()`）。
 layer は `top`（最上位目標）/`identifying`（識別要件）/`constraint`（制約）/
 `tablestakes`（前提条件）の4種。
 
-**前提条件**: `ledger_edges` に decision起点の `contributes`/`depends_on` 辺が
-無ければ「集約対象がありません」と表示するのみ。2026-07-03に本番全decisionsへの
-`enrich_items.py` 遡及実行を完了済み（LOG.md参照）。以後は `pm_ingest.py minutes`/`slack`
-のPass2自動エンリッチにより、新規decisionsは追加操作なしで辺が生成される。
-
-**未対応（既知の課題）**: レポート全体（決定クラスタ一覧の全文）はSlackに
-そのまま流すには大きくなりがち（本番332件のdecisionsで9万字超）。要約はSlack、
-全文はCanvasへ、という分離は2026-07-03時点で未実装（対応時期はPM判断待ち）。
+**運用**: 新規decisionsは `pm_ingest.py minutes`/`slack` のPass2自動エンリッチで
+選別ゲート判定と辺生成が自動適用される（追加操作なし）。2026-07-05に本番全decisionsへの
+`--ledger-regrade` 遡及実行を完了済み（LOG.md参照）。制約C-*の検査句・論点の
+ブロック対象は `data/ledger_seed.json` → `pm_ingest.py ledger` で管理する。
 
 **CLI モード**:
 ```bash
