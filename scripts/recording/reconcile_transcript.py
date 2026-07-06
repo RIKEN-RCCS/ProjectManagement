@@ -156,7 +156,7 @@ def reconcile_chunk(
     claude_md_context: str,
     terminology_text: str,
     slide_context: str,
-    timeout: int = 180,
+    timeout: int = 480,
 ) -> str:
     """1 チャンクを LLM で突合修正し、修正済みテキストを返す。"""
     time_range = f"{_sec_to_hms(start_sec)}〜{_sec_to_hms(end_sec)}"
@@ -195,7 +195,7 @@ def reconcile_transcript(
     slide_context: str = "",
     meeting_kind: str | None = None,
     chunk_sec: int = _CHUNK_SEC,
-    timeout: int = 180,
+    timeout: int = 480,
     verbose: bool = True,
 ) -> Path:
     """Whisper トランスクリプト全体を VTT と突合修正して保存する。
@@ -298,7 +298,7 @@ if __name__ == "__main__":
     parser.add_argument("--slide-context", help="スライドOCR テキストファイルパス")
     parser.add_argument("--meeting-kind", help="会議種別（用語辞書フィルタ用）")
     parser.add_argument("--chunk-sec", type=int, default=_CHUNK_SEC, help=f"チャンク秒数（デフォルト: {_CHUNK_SEC}）")
-    parser.add_argument("--timeout", type=int, default=180, help="LLM タイムアウト秒数")
+    parser.add_argument("--timeout", type=int, default=480, help="LLM タイムアウト秒数")
     args = parser.parse_args()
 
     slide_ctx = ""

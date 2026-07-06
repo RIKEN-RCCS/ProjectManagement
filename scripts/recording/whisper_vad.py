@@ -1,12 +1,10 @@
 import argparse
 import os
+import sys
+import time
 from datetime import timedelta
 
-import soundfile as sf
 import torch
-from pyannote.audio import Pipeline
-from silero_vad import collect_chunks, get_speech_timestamps, load_silero_vad
-from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -35,6 +33,8 @@ INITIAL_PROMPT = (
 
 
 def remove_silence(audio_file, sampling_rate, device=None):
+    import soundfile as sf
+    from silero_vad import collect_chunks, get_speech_timestamps, load_silero_vad
     print("[INFO] Detecting silent segments (Silero VAD)...")
     model = load_silero_vad(onnx=False)
     if device is not None:
@@ -100,6 +100,7 @@ def chunk_audio(audio, sample_rate, speech_timestamps, chunk_length_sec=30):
 
 
 def load_model(use_local, hf_token, device):
+    from transformers import WhisperForConditionalGeneration, WhisperProcessor
     if use_local:
         print(f"[INFO] Loading Whisper model from local directory: {MODEL_LOCAL}")
         processor = WhisperProcessor.from_pretrained(MODEL_LOCAL, language="Japanese", task="transcribe")
@@ -206,10 +207,109 @@ def write_output(output_path, labeled_segments):
             f.write(f"#### [{s} - {e}] {prev_speaker}\n{buffer.strip()}\n\n")
 
 
+def run_transformers(args, initial_prompt, device, hf_token):
+    import soundfile as sf
+
+    # Silero VAD はCPUで実行する（vLLMがGPUメモリを大量確保しているため）
+    processed_waveform, sample_rate, speech_timestamps = remove_silence(args.input_audio, sampling_rate=16000, device=None)
+    chunks = chunk_audio(processed_waveform, sample_rate, speech_timestamps, chunk_length_sec=CHUNK_LENGTH)
+
+    # Whisper を先に GPU 実行し、完了後にモデルを解放してから PyAnnote をロードする。
+    # 両モデルを同時に GPU に載せると OOM になるため（GB10 Unified Memory + vLLM 共存時）。
+    t0 = time.perf_counter()
+    processor, model = load_model(args.local, hf_token, device)
+    print(f"[INFO] Whisper model load: {time.perf_counter() - t0:.1f}s")
+    t0 = time.perf_counter()
+    segments = transcribe_chunks(chunks, processor, model, device, initial_prompt=initial_prompt)
+    print(f"[INFO] Transcribe: {time.perf_counter() - t0:.1f}s")
+    del processor, model
+    torch.cuda.empty_cache()
+
+    from pyannote.audio import Pipeline
+    print("[INFO] Running speaker diarization (PyAnnote)...")
+    t0 = time.perf_counter()
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1",
+                                        token=hf_token).to(device)
+    audio_np, sr = sf.read(args.input_audio, dtype="float32", always_2d=True)
+    original_waveform = torch.from_numpy(audio_np.T)  # (channels, samples)
+    diarization = pipeline({"waveform": original_waveform, "sample_rate": sr})
+    if not hasattr(diarization, "itertracks"):
+        diarization = diarization.speaker_diarization
+    print(f"[INFO] Diarize (PyAnnote): {time.perf_counter() - t0:.1f}s")
+    del pipeline
+    torch.cuda.empty_cache()
+
+    labeled = assign_speaker_labels(segments, diarization)
+    write_output(args.output_text, labeled)
+
+
+def run_whisperx(args, initial_prompt, device, hf_token):
+    import whisperx
+
+    if args.local:
+        print("[WARNING] --local は --engine whisperx では未対応です。無視して large-v3 で続行します")
+
+    device_str = "cuda" if device.type == "cuda" else "cpu"
+
+    print("[INFO] Loading whisperx model (large-v3)...")
+    t0 = time.perf_counter()
+    model = whisperx.load_model(
+        "large-v3",
+        device=device_str,
+        # int8_float16 は GB10 (Blackwell) + ctranslate2 4.4.0 で
+        # CUBLAS_STATUS_NOT_SUPPORTED になるため float16 を使う
+        compute_type="float16",
+        asr_options={"initial_prompt": initial_prompt, "temperatures": [0.2]},
+    )
+    audio = whisperx.load_audio(args.input_audio)
+    print(f"[INFO] Model load: {time.perf_counter() - t0:.1f}s")
+
+    print("[INFO] Transcribing (whisperx)...")
+    t0 = time.perf_counter()
+    result = model.transcribe(audio, batch_size=8, language="ja")
+    print(f"[INFO] Transcribe: {time.perf_counter() - t0:.1f}s")
+    del model
+    torch.cuda.empty_cache()
+
+    print("[INFO] Aligning (whisperx)...")
+    t0 = time.perf_counter()
+    align_model, metadata = whisperx.load_align_model(language_code="ja", device=device_str)
+    result = whisperx.align(result["segments"], align_model, metadata, audio, device_str, return_char_alignments=False)
+    print(f"[INFO] Align: {time.perf_counter() - t0:.1f}s")
+    del align_model
+    torch.cuda.empty_cache()
+
+    print("[INFO] Running speaker diarization (whisperx)...")
+    t0 = time.perf_counter()
+    diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device_str)
+    diarize_segments = diarize_model(audio)
+    result = whisperx.assign_word_speakers(diarize_segments, result)
+    print(f"[INFO] Diarize: {time.perf_counter() - t0:.1f}s")
+    del diarize_model
+    torch.cuda.empty_cache()
+
+    t0 = time.perf_counter()
+    labeled_segments = []
+    for seg in result.get("segments", []):
+        text = (seg.get("text") or "").strip()
+        if not text or text in ["...", "…"]:
+            continue
+        labeled_segments.append({
+            "start": seg.get("start", 0.0),
+            "end": seg.get("end", 0.0),
+            "speaker": seg.get("speaker", "UNKNOWN"),
+            "text": text,
+        })
+    write_output(args.output_text, labeled_segments)
+    print(f"[INFO] Write: {time.perf_counter() - t0:.1f}s")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Transcription with Whisper + PyAnnote + Silero VAD")
     parser.add_argument("input_audio", help="Input audio file path (e.g., meeting.wav)")
     parser.add_argument("output_text", help="Output text file path (e.g., result.txt)")
+    parser.add_argument("--engine", choices=["transformers", "whisperx"], default="transformers",
+                        help="文字起こしエンジン (default: transformers)")
     parser.add_argument("--local", action="store_true", help=f"Use local fine-tuned model ({MODEL_LOCAL})")
     parser.add_argument("--initial-prompt-extra", default=None,
                         help="固有名詞リストファイル（1行1語）。INITIAL_PROMPT の末尾に連結する。Whisper prompt は 224 token 上限のため超過分は切り詰め")
@@ -248,31 +348,14 @@ def main():
         print("[WARNING] CUDA not available, falling back to CPU (this will be very slow)")
         device = torch.device("cpu")
     hf_token = os.getenv("HUGGING_FACE_TOKEN")
+    if not hf_token:
+        print("[ERROR] 環境変数 HUGGING_FACE_TOKEN が未設定です（話者分離に必須）。source ~/.secrets/hf_tokens.sh を実行してください")
+        sys.exit(1)
 
-    # Silero VAD はCPUで実行する（vLLMがGPUメモリを大量確保しているため）
-    processed_waveform, sample_rate, speech_timestamps = remove_silence(args.input_audio, sampling_rate=16000, device=None)
-    chunks = chunk_audio(processed_waveform, sample_rate, speech_timestamps, chunk_length_sec=CHUNK_LENGTH)
-
-    # Whisper を先に GPU 実行し、完了後にモデルを解放してから PyAnnote をロードする。
-    # 両モデルを同時に GPU に載せると OOM になるため（GB10 Unified Memory + vLLM 共存時）。
-    processor, model = load_model(args.local, hf_token, device)
-    segments = transcribe_chunks(chunks, processor, model, device, initial_prompt=initial_prompt)
-    del processor, model
-    torch.cuda.empty_cache()
-
-    print("[INFO] Running speaker diarization (PyAnnote)...")
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1",
-                                        token=hf_token).to(device)
-    audio_np, sr = sf.read(args.input_audio, dtype="float32", always_2d=True)
-    original_waveform = torch.from_numpy(audio_np.T)  # (channels, samples)
-    diarization = pipeline({"waveform": original_waveform, "sample_rate": sr})
-    if not hasattr(diarization, "itertracks"):
-        diarization = diarization.speaker_diarization
-    del pipeline
-    torch.cuda.empty_cache()
-
-    labeled = assign_speaker_labels(segments, diarization)
-    write_output(args.output_text, labeled)
+    if args.engine == "whisperx":
+        run_whisperx(args, initial_prompt, device, hf_token)
+    else:
+        run_transformers(args, initial_prompt, device, hf_token)
 
     print("[INFO] Finished")
 

@@ -7,6 +7,65 @@
 
 ---
 
+## 2026-07-06 WhisperX/GB10テスト完了 — 品質は優位・速度はctranslate2のBlackwell未対応がボトルネック、vLLMスケジューラ停滞も発見
+
+**背景**: Whisper文字起こし+話者分離の高速化のため、ユーザーが用意した
+whisperx-blackwell.sif（docker://mekopa/whisperx-blackwell）への対応をテスト。
+SIFはアップストリームの時点で3箇所破損しており（numpy混在・torch2.6のweights_only・
+NGC torchのSemVer非準拠バージョン文字列）、修復レイヤ `whisperx_pyfix/`
+（PYTHONPATH shadow + sitecustomize + 環境変数）に集約して修復。SIF本体は無改変。
+
+**決定**: whisper_vad.py に `--engine {transformers,whisperx}` を追加（デフォルト
+transformers、既定動作・出力契約は完全無変更。Sonnet実装+Opusレビュー）。ベンチ
+（5分音声、GPU非競合）: 旧110秒（ロード56/転写21/話者分離15）vs 新347〜397秒
+（転写168-178/整列46-48/話者分離102-106）。**話者分離品質は新が明確に優位**（話者数
+正解、旧は30秒チャンク境界で同一人物を誤分割。句読点付きで誤認識も少）。遅さの真因は
+ctranslate2のBlackwell(GB10)カーネル未対応 — 参考記事（note.com/nob75note）方式で
+ct2 v4.8.1 をcompute_90 PTXソースビルド（8分で完了、whisperx_pyfixに組込）しても
+転写168秒と改善せず、**PTX JITでは埋まらないアーキテクチャ最適化の差**と結論。
+公式pipのaarch64ホイールはCUDA非対応（実測）である点も記録。
+
+**影響**: 既定エンジンは transformers を維持（この構成ではGB10で最速）。whisperx は
+品質重視の会議向けopt-in（`--engine whisperx` 手動指定）として利用可能。wrapper への
+配線は ctranslate2 が Blackwell 対応した時点で再ベンチして判断（PLAN.md に保留構想）。
+副産物2件: (1) reconcile のタイムアウト480秒化が argparse 側 default=180 の見落としで
+効いていなかったのを修正（関数デフォルトとCLIデフォルトの二重管理に注意）。
+(2) **vLLM v0.19.0 のスケジューラ停滞を発見** — エンジンがアイドル（Running:0、
+KV 0%）なのに Waiting のリクエストを永遠にスケジュールしない状態。生成途中の
+クライアント切断・kill の繰り返しが引き金の疑い。vLLM再起動で解消し、5回目の
+議事録再生成で reconcile 含む全工程が初めて完走（本文1+決定3+アクション6件）。
+恒久対策はvLLMのバージョンアップ推奨（停滞シグネチャの機械検出も可能、未実装）。
+
+---
+
+## 2026-07-06 LLM接続設定を secrets ファイル一元化 — べた書きデフォルト全廃、議事録生成の二重障害から
+
+**背景**: Argus Console からの議事録生成が全LLMルート失敗で空議事録を保存（admin_job_58805315）。
+診断: (1) localLLM.sh の定義（8001/DeepSeek）は正しく参照されていたが 8001 の vLLM が
+未起動（起動中は gemma4@8000 のみ）、(2) RiVault フォールバックも DeepSeek-V4-Flash
+モデルグループがサーバー側 500（litellm が `context_management` kwarg を hosted_vllm へ
+透過。クライアントは送っておらず RiVault 側問題 — 報告文 docs/decisions/
+rivault_deepseek_500_report.md）。棚卸しで `http://localhost:8000/v1` のべた書き
+デフォルトが Python 11箇所+シェル5ファイルに散在し、「secrets 未設定時に黙って
+意図しないエンドポイントへ接続する」構造問題を確認（過去のgemma4誤接続事故と同根）。
+
+**決定**: `llm.py` に `load_llm_secrets()` を新設し、**LLM呼び出し直前に毎回**
+~/.secrets/{localLLM.sh,rivault_tokens.sh} を bash source して環境変数へ反映
+（ファイルが正、mtimeキャッシュ付き、ARGUS_SKIP_LLM_SECRETS=1 でテスト用バイパス）。
+べた書きデフォルトは全廃し未設定は明示エラー（→ルートフォールバックが拾う）。
+`_is_route_available("local")` が常に True を返すバグも修正。デーモン起動時の
+環境変数に依存しなくなったため、**secrets 更新はデーモン再起動なしで即反映**される。
+CLI --url/--token の明示上書きは「上書き後に再sourceを無効化」で保護（Opusレビュー指摘）。
+
+**影響**: 実装Sonnet/レビューOpusの委譲体制で実施（モデル運用ポリシー初適用）。
+pytest 118件パス。空議事録（misc.db instances + pm.db meetings 各1行）と汚染キャッシュ
+combined.txt を削除、元mp4+VTTは data/processing/ に残置し再生成待ち。
+**再生成の前提**: localLLM.sh と実起動サーバー（現状 gemma4@8000 のみ）の不整合解消が必要
+（ユーザー対応: localLLM.sh 更新 or 8001 で DeepSeek 起動）。RiVault DeepSeek 500 は
+管理者報告待ち。
+
+---
+
 ## 2026-07-05 Argus 垂直軸の抜本見直し — クラスタ表示から所見検出へ（R1+R2）
 
 **背景**: PMから「実行結果は決定事項のクラスタリングにとどまり、知見を引き出すのが難しい」
