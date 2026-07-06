@@ -1,9 +1,9 @@
 """
 embed_utils.py — Embedding API 呼び出し + ベクトル類似度ユーティリティ
 
-OpenAI 互換の `/v1/embeddings` を呼ぶ。RiVault が `bge-m3:567m` を
-提供しているのでデフォルトはそちらを使う。`EMBED_API_BASE` / `EMBED_MODEL`
-で他のプロバイダにも差し替え可能。
+OpenAI 互換の `/v1/embeddings` を呼ぶ。エンドポイントは `EMBED_API_BASE` を優先し、
+未設定なら `RIVAULT_URL`（定義は ~/.secrets/rivault_tokens.sh）を使う。両方未設定
+はエラー。`EMBED_MODEL` でモデル名を差し替え可能（デフォルト: `bge-m3:567m`）。
 
 Usage:
     from embed_utils import embed_one, embed_batch, cosine_similarity
@@ -21,8 +21,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# デフォルトは RiVault の bge-m3。EMBED_API_BASE / EMBED_MODEL で上書き可能。
-_DEFAULT_BASE = "http://llm.ai.r-ccs.riken.jp:11434/v1"
+# EMBED_MODEL 未設定時はこのモデル名を使う（URLではなくモデル名の既定値）。
 _DEFAULT_MODEL = "bge-m3:567m"
 
 # bge-m3 のサーバ側上限を超えないようにテキストを切る
@@ -31,7 +30,13 @@ _MAX_INPUT_CHARS = 4000
 
 def _resolve_endpoint() -> tuple[str, str, str]:
     """(base_url, api_key, model) を返す。"""
-    base = os.environ.get("EMBED_API_BASE") or os.environ.get("RIVAULT_URL") or _DEFAULT_BASE
+    from utils.llm import load_llm_secrets
+    load_llm_secrets()
+    base = os.environ.get("EMBED_API_BASE") or os.environ.get("RIVAULT_URL")
+    if not base:
+        raise RuntimeError(
+            "EMBED_API_BASE / RIVAULT_URL がいずれも未設定（~/.secrets/rivault_tokens.sh を確認）"
+        )
     api_key = (
         os.environ.get("EMBED_API_KEY")
         or os.environ.get("RIVAULT_TOKEN")

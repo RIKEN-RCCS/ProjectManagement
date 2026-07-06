@@ -259,6 +259,8 @@ def _summarize_slide(
 # --------------------------------------------------------------------------- #
 
 def _ocr_slide(image: Path) -> str:
+    from cli_utils import load_llm_secrets
+    load_llm_secrets()
     base_url = os.environ.get("LOCAL_LLM_URL")
     if not base_url:
         return ""

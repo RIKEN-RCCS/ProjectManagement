@@ -16,11 +16,9 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
-from cli_utils import call_argus_llm
+from cli_utils import call_argus_llm, load_llm_secrets
 
 logger = logging.getLogger("pm_qa_server")
-
-_OPENAI_BASE = os.environ.get("LOCAL_LLM_URL", "")
 
 _CLASSIFY_PROMPT = """\
 あなたはクエリ分類器です。質問がどの種類のデータを必要としているか判定してください。
@@ -52,7 +50,8 @@ JSONのみ出力:
 
 def classify_intent(question: str) -> dict:
     """質問の意図を分類し、エンティティを抽出する。失敗時はFTSフォールバック。"""
-    if not _OPENAI_BASE:
+    load_llm_secrets()
+    if not os.environ.get("LOCAL_LLM_URL", ""):
         return {"intent": "text", "entities": {}}
 
     prompt = _CLASSIFY_PROMPT + question

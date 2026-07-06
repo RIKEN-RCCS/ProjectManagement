@@ -5,6 +5,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _skip_llm_secrets(monkeypatch):
+    """load_llm_secrets() による ~/.secrets の source をスキップし、
+    monkeypatch で設定した環境変数がファイルの実値で上書きされないようにする。"""
+    monkeypatch.setenv("ARGUS_SKIP_LLM_SECRETS", "1")
+
+
 # --------------------------------------------------------------------------- #
 # SSE response helper
 # --------------------------------------------------------------------------- #
@@ -112,9 +120,17 @@ class TestCallLocalLlmInnerStreaming:
 
 class TestCallRivault:
     def test_raises_without_rivault_url(self, monkeypatch):
+        monkeypatch.setenv("ARGUS_SKIP_LLM_SECRETS", "1")
         monkeypatch.setenv("RIVAULT_URL", "")
         from utils.llm import call_rivault
         with pytest.raises(RuntimeError, match="RIVAULT_URL"):
+            call_rivault("test")
+
+    def test_raises_without_rivault_model(self, monkeypatch):
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.delenv("RIVAULT_MODEL", raising=False)
+        from utils.llm import call_rivault
+        with pytest.raises(RuntimeError, match="RIVAULT_MODEL"):
             call_rivault("test")
 
     def test_returns_content(self, monkeypatch):
@@ -129,6 +145,7 @@ class TestCallRivault:
 
     def test_4xx_raises(self, monkeypatch):
         monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("RIVAULT_MODEL", "test-glm")
         mock = MagicMock()
         mock.status_code = 401
         mock.text = "Unauthorized"
@@ -141,6 +158,7 @@ class TestCallRivault:
     def test_reasoning_content_fallback(self, monkeypatch):
         """content が空で reasoning_content のみの場合は reasoning を返す。"""
         monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("RIVAULT_MODEL", "test-glm")
         # reasoning_content のみを含む SSE
         lines = [
             json.dumps({"choices": [{"delta": {"reasoning_content": "thinking"}}]}).encode(),
@@ -335,12 +353,12 @@ class TestGenerateMinutesCore:
         result = extract_from_chunk("テキスト", 1, 2, "00:01:00〜00:02:00", "", 300)
         assert called.get("called") and result == "抽出結果"
 
-    def test_load_local_llm_endpoint_default(self, monkeypatch):
+    def test_load_local_llm_endpoint_unset_raises(self, monkeypatch):
         monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
         monkeypatch.delenv("LOCAL_LLM_TOKEN", raising=False)
         from recording.generate_minutes_local import load_local_llm_endpoint
-        url, token = load_local_llm_endpoint()
-        assert url == "http://localhost:8000/v1" and token == "dummy"
+        with pytest.raises(RuntimeError, match="LOCAL_LLM_URL"):
+            load_local_llm_endpoint()
 
     def test_load_local_llm_endpoint_env(self, monkeypatch):
         monkeypatch.setenv("LOCAL_LLM_URL", "http://my-server:8080/v1")

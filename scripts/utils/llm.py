@@ -11,6 +11,49 @@ import sys
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
+# secrets 読み込み
+# --------------------------------------------------------------------------- #
+
+_LLM_SECRET_FILES = (Path.home() / ".secrets/localLLM.sh", Path.home() / ".secrets/rivault_tokens.sh")
+_LLM_ENV_PREFIXES = ("LOCAL_LLM_", "RIVAULT_", "EMBED_", "ARGUS_PREFER_RIVAULT")
+
+_llm_secrets_mtime_cache: tuple | None = None
+
+
+def load_llm_secrets() -> None:
+    """secrets ファイルを bash で source し、LLM関連環境変数を os.environ へ反映する。
+
+    ファイルに定義がある変数は現在の環境変数を上書きする（source と同じ意味論 = ファイルが正）。
+    ファイル不在は黙ってスキップする。mtime が前回と同じなら subprocess を省略する。
+    テスト等で環境変数を直接制御したい場合は ARGUS_SKIP_LLM_SECRETS=1 を設定すると
+    ファイルの source をスキップする。
+    """
+    if os.environ.get("ARGUS_SKIP_LLM_SECRETS") == "1":
+        return
+    global _llm_secrets_mtime_cache
+    mtimes = tuple(f.stat().st_mtime if f.exists() else None for f in _LLM_SECRET_FILES)
+    if mtimes == _llm_secrets_mtime_cache:
+        return
+
+    import subprocess
+    source_cmds = " ".join(f"source {f} 2>/dev/null;" for f in _LLM_SECRET_FILES)
+    try:
+        result = subprocess.run(
+            ["bash", "-c", f"{source_cmds} env -0"],
+            capture_output=True,
+        )
+    except Exception:
+        return
+    for entry in result.stdout.split(b"\x00"):
+        if not entry:
+            continue
+        key, _, value = entry.decode("utf-8", errors="replace").partition("=")
+        if key.startswith(_LLM_ENV_PREFIXES):
+            os.environ[key] = value
+    _llm_secrets_mtime_cache = mtimes
+
+
+# --------------------------------------------------------------------------- #
 # CoT 除去
 # --------------------------------------------------------------------------- #
 
@@ -238,7 +281,9 @@ def call_local_llm(
     except Exception as exc:
         if not (_fallback_to_local and is_rivault):
             raise
-        local_base = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        local_base = os.environ.get("LOCAL_LLM_URL")
+        if not local_base:
+            raise RuntimeError("LOCAL_LLM_URL 未設定（~/.secrets/localLLM.sh を確認）") from exc
         if local_base.rstrip("/") == rivault_url:
             raise
         print(f"[WARN] call_local_llm: RiVault 失敗 ({type(exc).__name__}: {exc})。"
@@ -267,6 +312,7 @@ def call_rivault(
     system: str = "",
 ) -> str:
     """RiVault (GLM-4.7-Flash, 200k context) を呼び出す。"""
+    load_llm_secrets()
     base_url = os.environ.get("RIVAULT_URL")
     if not base_url:
         raise RuntimeError(
@@ -274,7 +320,11 @@ def call_rivault(
         )
     api_key = os.environ.get("RIVAULT_TOKEN", "dummy")
     if model is None:
-        model = os.environ.get("RIVAULT_MODEL", "zai-org/GLM-4.7-Flash")
+        model = os.environ.get("RIVAULT_MODEL")
+        if not model:
+            raise RuntimeError(
+                "RIVAULT_MODEL が未設定。source ~/.secrets/rivault_tokens.sh を実行してください"
+            )
     print(f"[INFO] LLM call: backend=rivault model={model} url={base_url}", file=sys.stderr)
     import json as _json
 
@@ -382,7 +432,7 @@ def _is_route_available(route: str) -> bool:
     if route == "rivault":
         return bool(os.environ.get("RIVAULT_URL", "").strip())
     elif route == "local":
-        return True
+        return bool(os.environ.get("LOCAL_LLM_URL", "").strip())
     return False
 
 def call_argus_llm(
@@ -401,6 +451,7 @@ def call_argus_llm(
     argus_config.yaml の llm.routing_priority に従ってルーティングする。
     利用可能なルート: rivault, local。claude_code ルートは廃止。
     """
+    load_llm_secrets()
 
     def _try_rivault() -> str:
         return call_rivault(
@@ -409,7 +460,9 @@ def call_argus_llm(
         )
 
     def _try_local() -> str:
-        local_base = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        local_base = os.environ.get("LOCAL_LLM_URL")
+        if not local_base:
+            raise RuntimeError("LOCAL_LLM_URL 未設定（~/.secrets/localLLM.sh を確認）")
         import requests as _req
         try:
             _req.get(local_base.removesuffix("/v1").rstrip("/") + "/health", timeout=3)

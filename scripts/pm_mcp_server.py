@@ -11,7 +11,7 @@ Usage:
     PYTHONPATH=scripts ~/.venv_aarch64/bin/python3 scripts/pm_mcp_server.py
 
 環境変数:
-    LOCAL_LLM_URL    — LLM エンドポイント (デフォルト: http://localhost:8000/v1)
+    LOCAL_LLM_URL    — LLM エンドポイント（定義は ~/.secrets/localLLM.sh。未設定時はエラー）
     LOCAL_LLM_TOKEN  — API トークン (デフォルト: dummy)
     ARGUS_CONFIG     — argus_config.yaml のパス
 """

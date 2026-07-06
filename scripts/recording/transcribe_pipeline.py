@@ -6,7 +6,7 @@ config.py への依存を除去し、PM側の環境変数体系（LOCAL_LLM_URL 
 
 環境変数:
     AUDIO_SAVE_DIR      ダウンロード・中間ファイルの保存先（デフォルト: /tmp/whisper_audio）
-    LOCAL_LLM_URL     vLLM エンドポイント（デフォルト: http://localhost:8000/v1）
+    LOCAL_LLM_URL     vLLM エンドポイント（定義は ~/.secrets/localLLM.sh。未設定時はエラー）
     （モデル名は vLLM /v1/models から自動取得）
     SLACK_BOT_TOKEN     ファイルダウンロード用 Bot Token
     HUGGING_FACE_TOKEN  PyAnnote モデルダウンロード用（任意）
@@ -49,12 +49,17 @@ def _get_audio_save_dir() -> str:
 
 
 def _get_vllm_api_base() -> str:
+    from cli_utils import load_llm_secrets
+    load_llm_secrets()
     if os.environ.get("ARGUS_PREFER_RIVAULT") == "1":
         url = os.environ.get("RIVAULT_URL", "").rstrip("/")
         token = os.environ.get("RIVAULT_TOKEN", "")
         if url and token:
             return url
-    return os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
+    url = os.environ.get("LOCAL_LLM_URL")
+    if not url:
+        raise RuntimeError("LOCAL_LLM_URL 未設定（~/.secrets/localLLM.sh を確認）")
+    return url
 
 
 def _get_vllm_model() -> str:

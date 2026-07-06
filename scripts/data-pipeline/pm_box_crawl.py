@@ -752,6 +752,8 @@ def get_ocr_endpoints() -> list[str]:
     LOCAL_LLM_URL → RIVAULT_URL の順。RIVAULT_URL は RIVAULT_OCR_MODEL が
     設定されている場合のみ追加する（テキスト専用モデルへの誤送信を防ぐため）。
     """
+    from cli_utils import load_llm_secrets
+    load_llm_secrets()
     endpoints: list[str] = []
     local_url = os.environ.get("LOCAL_LLM_URL", "").strip().rstrip("/")
     if local_url:
@@ -1335,11 +1337,6 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    if not os.environ.get("LOCAL_LLM_URL"):
-        os.environ["LOCAL_LLM_URL"] = "http://localhost:8000/v1"
-    if not os.environ.get("LOCAL_LLM_TOKEN"):
-        os.environ["LOCAL_LLM_TOKEN"] = "dummy"
 
     db_path = Path(args.db)
     if not db_path.is_absolute():

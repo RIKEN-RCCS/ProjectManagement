@@ -220,6 +220,7 @@ from utils.llm import (  # noqa: E402, F401
     call_local_llm,
     call_rivault,
     detect_vllm_model,
+    load_llm_secrets,
     strip_think_blocks,
 )
 

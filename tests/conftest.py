@@ -31,6 +31,12 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv("RIVAULT_TOKEN", "")
     monkeypatch.setenv("RIVAULT_MODEL", "")
     monkeypatch.setenv("ARGUS_PREFER_RIVAULT", "0")
+    monkeypatch.setenv("ARGUS_SKIP_LLM_SECRETS", "1")
+    try:
+        from utils import llm as _llm
+        monkeypatch.setattr(_llm, "_llm_secrets_mtime_cache", None)
+    except ImportError:
+        pass
     yield
 
 

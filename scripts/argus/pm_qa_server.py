@@ -7,13 +7,13 @@ pm_qa_server.py - Slack Slash Command QA サーバー（Socket Mode）
 
 起動方法:
   source ~/.secrets/slack_tokens.sh
-  export LOCAL_LLM_URL="http://localhost:8000/v1" LOCAL_LLM_TOKEN="dummy"
+  source ~/.secrets/localLLM.sh
   python3 scripts/pm_qa_server.py
 
 環境変数:
   SLACK_BOT_TOKEN   必須: Bot Token (xoxb-)
   SLACK_APP_TOKEN   必須: App-Level Token (xapp-)
-  LOCAL_LLM_URL   必須: vLLM エンドポイント
+  LOCAL_LLM_URL   必須: vLLM エンドポイント（定義は ~/.secrets/localLLM.sh。未設定時はエラー）
   LOCAL_LLM_TOKEN    デフォルト: "dummy"
   （モデル名は vLLM /v1/models から自動取得）
   ARGUS_CONFIG      デフォルト: data/argus_config.yaml（旧 QA_CONFIG / qa_config.yaml にフォールバック）
@@ -72,15 +72,21 @@ logger = logging.getLogger("pm_qa_server")
 # --- 設定 ---
 # TOP_K_RETRIEVE / TOP_K_RERANK は retrieval から import 済み
 
-_OPENAI_BASE = os.environ.get("LOCAL_LLM_URL", "")
-_OPENAI_KEY = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
-_LOCAL_LLM_MODEL = ""
-if _OPENAI_BASE:
+
+def _check_local_llm_startup() -> None:
+    """起動時に LOCAL_LLM_URL の疎通確認ログを出す（診断用。実際のルーティングは
+    call_argus_llm() が呼び出しの都度 load_llm_secrets() 経由で解決する）。"""
+    from cli_utils import detect_vllm_model, load_llm_secrets
+    load_llm_secrets()
+    base = os.environ.get("LOCAL_LLM_URL", "")
+    if not base:
+        logger.warning("LOCAL_LLM_URL が未設定です（QA実行時にエラーになります）")
+        return
     try:
-        from cli_utils import detect_vllm_model
-        _LOCAL_LLM_MODEL = detect_vllm_model(_OPENAI_BASE)
-    except Exception as _e:
-        print(f"[WARN] vLLM モデル自動検出に失敗: {_e}", file=sys.stderr)
+        detect_vllm_model(base)
+    except Exception as e:
+        logger.warning(f"vLLM モデル自動検出に失敗: {e}")
+
 
 # --- 設定ロード ---
 
@@ -819,9 +825,8 @@ def main() -> None:
 
     logger.info("pm_qa_server 起動中...")
     _init_common()
+    _check_local_llm_startup()
 
-    if not _OPENAI_BASE:
-        logger.warning("LOCAL_LLM_URL が未設定です（QA実行時にエラーになります）")
     if not os.environ.get("SLACK_BOT_TOKEN"):
         logger.error("SLACK_BOT_TOKEN が未設定です")
     if not os.environ.get("SLACK_APP_TOKEN"):

@@ -46,8 +46,6 @@ export SINGULARITY_BIND=/lvs0
 if [[ -f ~/.secrets/localLLM.sh ]]; then
   source ~/.secrets/localLLM.sh
 fi
-export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
-export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
 
 _BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # scripts/bin/ から直接実行された場合は scripts/ を SCRIPT_DIR とする

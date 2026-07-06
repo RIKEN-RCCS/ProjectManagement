@@ -34,7 +34,7 @@ CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 #     TARGET_SCRIPT    : scripts/ からの相対パス
 #     LOG_BASENAME     : logs/{name}.log / logs/{name}.pid に使う識別子
 #     SOURCE_RIVAULT   : 1 なら ~/.secrets/rivault_tokens.sh を読み込む
-#     SET_DEFAULT_LLM  : 1 なら LOCAL_LLM_URL/API_KEY のデフォルト値を設定
+#     SET_DEFAULT_LLM  : 1 なら ~/.secrets/localLLM.sh を読み込み LOCAL_LLM_URL/TOKEN を設定
 #     SOURCE_FISH      : 1 なら ~/.secrets/fish_tts.sh を読み込む
 #     EXTRA_ARGS       : Python スクリプトに渡す追加引数（空可）
 # --------------------------------------------------------------------------- #
@@ -126,8 +126,6 @@ cmd_start() {
             # shellcheck disable=SC1091
             source "$HOME/.secrets/localLLM.sh"
         fi
-        export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
-        export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
         export QA_INDEX_DB="${QA_INDEX_DB:-$REPO_ROOT/data/qa_index.db}"
     fi
     if [[ "${SVC_FISH:-0}" == "1" && -f "$HOME/.secrets/fish_tts.sh" ]]; then

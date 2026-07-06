@@ -25,7 +25,6 @@ fi
 if [[ -f ~/.secrets/localLLM.sh ]]; then
     source ~/.secrets/localLLM.sh
 fi
-export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
 
 _arch="$(uname -m)"
 if [[ "$_arch" == "aarch64" ]]; then

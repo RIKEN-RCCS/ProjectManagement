@@ -14,14 +14,15 @@ Options:
   --model MODEL       使用するモデル名（必須）
   --think             思考モードを有効化（デフォルト: 無効）
   --output DIR        議事録の出力ディレクトリ（デフォルト: minutes）
-  --url URL           ローカルLLMのURL（LOCAL_LLM_URL 環境変数でも可）
+  --url URL           ローカルLLMのURL（LOCAL_LLM_URL 環境変数でも可）。
+                      指定時はこのプロセスでは secrets ファイルの再読み込みを行わない
   --token TOKEN       APIトークン（LOCAL_LLM_TOKEN 環境変数でも可）
   --timeout SEC       LLM呼び出しタイムアウト秒数（デフォルト: 600）
 
 認証情報の読み込み順序:
   1. --url / --token 引数
-  2. LOCAL_LLM_URL / LOCAL_LLM_TOKEN 環境変数
-  3. デフォルト: http://localhost:8000/v1 / "dummy"
+  2. LOCAL_LLM_URL / LOCAL_LLM_TOKEN 環境変数（定義は ~/.secrets/localLLM.sh。URL未設定時はエラー）
+  3. LOCAL_LLM_TOKEN のみデフォルト: "dummy"
 
 ローカル LLM (vLLM gemma4) 用と RiVault Embedding (bge-m3) 用は環境変数を分離する:
   - LOCAL_LLM_URL / LOCAL_LLM_TOKEN    — vLLM gemma4（議事録生成）
@@ -50,6 +51,7 @@ from cli_utils import (
     call_argus_llm,
     enrich_combined_with_vtt,
     load_claude_md_context,
+    load_llm_secrets,
 )
 
 # --------------------------------------------------------------------------- #
@@ -188,7 +190,10 @@ def load_local_llm_endpoint() -> tuple[str, str]:
     """互換性のため残す。引数からの env var 上書きのみ行う。
     call_argus_llm() にルーティングを委ねる。
     """
-    url = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1")
+    load_llm_secrets()
+    url = os.environ.get("LOCAL_LLM_URL")
+    if not url:
+        raise RuntimeError("LOCAL_LLM_URL 未設定（~/.secrets/localLLM.sh を確認）")
     token = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
     return url, token
 
@@ -1298,7 +1303,9 @@ def main() -> int:
         dest="no_chat_template_kwargs",
         help="chat_template_kwargs を送信しない（常時 reasoning モデル向け: Qwen3-Swallow 等）",
     )
-    parser.add_argument("--url", default=None, help="ローカルLLMのURL（LOCAL_LLM_URL 環境変数でも可）")
+    parser.add_argument("--url", default=None,
+                        help="ローカルLLMのURL（LOCAL_LLM_URL 環境変数でも可）。"
+                             "指定時はこのプロセスでは secrets ファイルの再読み込みを行わない")
     parser.add_argument("--token", default=None, help="APIトークン（LOCAL_LLM_TOKEN 環境変数でも可）")
     parser.add_argument("--timeout", type=int, default=600, help="LLM呼び出しタイムアウト秒数（デフォルト: 600）")
     parser.add_argument("--max-tokens", type=int, default=8192, help="最大出力トークン数（デフォルト: 8192）")
@@ -1361,10 +1368,15 @@ def main() -> int:
         print(f"[ERROR] ファイルが見つかりません: {args.transcript}", file=sys.stderr)
         return 1
 
-    if args.url:
-        os.environ["LOCAL_LLM_URL"] = args.url
-    if args.token:
-        os.environ["LOCAL_LLM_TOKEN"] = args.token
+    if args.url or args.token:
+        # 明示上書きが常に勝つ: 先にファイル値をロードしてから CLI 値を代入し、
+        # 以降のプロセス内での再 source を無効化する
+        load_llm_secrets()
+        if args.url:
+            os.environ["LOCAL_LLM_URL"] = args.url
+        if args.token:
+            os.environ["LOCAL_LLM_TOKEN"] = args.token
+        os.environ["ARGUS_SKIP_LLM_SECRETS"] = "1"
     print(f"[INFO] 思考モード  : {'有効' if args.think else '無効'}")
     if args.think and args.no_chat_template_kwargs:
         print("[INFO] chat_template_kwargs: 送信しない（常時 reasoning モデル）")

@@ -42,8 +42,6 @@ fi
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 [ -f ~/.secrets/localLLM.sh ] && . ~/.secrets/localLLM.sh
-export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
-export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
 
 # --------------------------------------------------------------------------- #
 # 引数パース

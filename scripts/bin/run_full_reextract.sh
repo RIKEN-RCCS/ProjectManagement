@@ -8,8 +8,9 @@ cd "$(dirname "$0")/.."
 # プロジェクトポリシー: スクリプトは Claude API を呼んではならない。
 # ローカル vLLM (gemma4) を明示指定しておき、call_claude() がフォールバックで
 # Claude CLI を起動する経路を確実に塞ぐ。
-export LOCAL_LLM_URL="${LOCAL_LLM_URL:-http://localhost:8000/v1}"
-export LOCAL_LLM_TOKEN="${LOCAL_LLM_TOKEN:-dummy}"
+if [[ -f ~/.secrets/localLLM.sh ]]; then
+    source ~/.secrets/localLLM.sh
+fi
 
 _arch="$(uname -m)"
 if [[ "$_arch" == "aarch64" ]]; then
