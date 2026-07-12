@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-07-11 RiVault モデルの Argus 適性を再評価 — 用途別ハイブリッド運用を推奨
+
+**背景**: 現行主力 `DeepSeek-V4-Flash`（2026-06-05 切替）が最適か、RiVault の他モデルと
+2段階で再評価。Stage1 軽量ヒューリスティック（`eval_rivault_models.py`）は速度偏重で
+質判定に使えないと判明（DeepSeek が速度減点で6位に沈む）。Stage2 で上位3挑戦モデル+
+DeepSeek を LLM-as-judge 盲検 A/B（Kimi-K2-Thinking judge、既存30サンプル再利用、
+max_tokens は 2048 だと thinking 予算切れで parse_failed 多発のため 4096 で再実行）。
+
+**決定**: 質は DeepSeek がわずかに優勢（vs Qwen3.6-35B-A3B-FP8 で 15-12、overall 4.22 vs
+4.00）だが突出して遅い。**用途でモデルを分ける** — 対話即応（brief/risk）は簡潔・指示遵守・
+10〜20倍速の `Qwen3.6-35B-A3B-FP8`、広範な情報集約・分析の無人バッチ
+（`pm_nvidia_collab_update.sh` 等）は網羅性・構造化で優る `DeepSeek-V4-Flash`。
+Llama-4-Scout / GLM-4.7-FP8 は高速だが質で明確に劣後し除外。
+
+**影響**: 切替はまだ未実施（本エントリは評価と推奨の記録）。DeepSeek の量子化は非量子化の
+可能性が高いが未確定（LiteLLM Proxy 経由では dtype 不可視、運用者確認が必要）。A/B は
+単発生成の評価でマルチステップ investigate ループは未検証。詳細は
+`docs/decisions/rivault_model_eval_2026-07.md`。生データ `data/eval/stage2_ab.db`。
+
 ## 2026-07-06 WhisperX/GB10テスト完了 — 品質は優位・速度はctranslate2のBlackwell未対応がボトルネック、vLLMスケジューラ停滞も発見
 
 **背景**: Whisper文字起こし+話者分離の高速化のため、ユーザーが用意した
