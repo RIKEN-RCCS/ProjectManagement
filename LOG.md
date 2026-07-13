@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-07-13 Argus 本番 LLM を RIKYU glm-5.2 へ切替、議事録の決定/アクション欠落を修正
+
+**背景**: RIKYU（新 OpenAI 互換サービング）の3モデルを A/B 評価（`argus_ab.py` に `--target rikyu` 追加、
+中立ジャッジ DeepSeek-V4-Flash）した結果、glm-5.2 が総合品質最高（4.78/5）で採用。DeepSeek-V4-Flash
+との直接対決（中立ジャッジ Kimi）でも品質・速度とも glm 優位（詳細 `docs/decisions/rikyu_argus_model_eval.md`）。
+**決定**: routing_priority を local 優先に、`LOCAL_LLM_MODEL=glm-5.2` へ。議事録生成で決定事項/アクション
+アイテムが消える不具合を修正 — 根本原因は「reasoning 既定モデルは非think指定でも内部思考し、
+decisions 抽出の max_tokens=1024 を思考で使い切り content が0文字→セクション消失」。max_tokens を full 化、
+空ガード追加、アクションアイテム規約の矛盾（担当不明時の扱い）を解消し（未定）で列挙するよう明確化。
+OCR は非マルチモーダルな glm-5.2 を避けるため `LOCAL_OCR_MODEL`（qwen3.6-35b 等）で分離（`pm_box_crawl.py`）。
+**影響**: brief/risk/investigate は glm が既定 reasoning するため latency 増（品質は良化）。`enable_thinking:false`
+を非think local へ送る一般化は今回見送り（`llm.py` 未変更）。`argus_ab.py` は gitignore 対象でローカルのみ。
+
 ## 2026-07-13 recall 評価ハーネス baseline-v1 記録 — vocab-gap を定量化
 
 **背景**: `scripts/eval/recall_eval.py`（recall 回帰ハーネス）のゴールドを 14 エントリに拡充

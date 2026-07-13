@@ -710,7 +710,10 @@ def _ocr_image(img_path: Path, base_url: str, prompt: str | None = None) -> str 
         model = os.environ.get("RIVAULT_OCR_MODEL", "").strip()
     else:
         api_key = os.environ.get("LOCAL_LLM_TOKEN", "dummy")
-        model = os.environ.get("LOCAL_LLM_MODEL", "").strip()
+        # OCR は専用の LOCAL_OCR_MODEL を優先する（テキスト生成モデル LOCAL_LLM_MODEL が
+        # マルチモーダル非対応な場合に備える。RiVault 側の RIVAULT_OCR_MODEL と対称）。
+        model = (os.environ.get("LOCAL_OCR_MODEL", "").strip()
+                 or os.environ.get("LOCAL_LLM_MODEL", "").strip())
     if not model:
         try:
             model = detect_vllm_model(base_url)

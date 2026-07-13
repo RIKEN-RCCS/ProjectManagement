@@ -132,8 +132,8 @@ CRITICAL: "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in ou
 
 ## アクションアイテム rules:
 - An action item is a task that is **essential to project progress** and produces a **concrete deliverable** (report, design doc, code, estimate, proposal, etc.).
-- List only specific tasks explicitly assigned or delegated to an identifiable person.
-- Do NOT infer tasks that were not explicitly assigned in the summaries.
+- List specific, project-essential tasks that were raised or agreed as needed. A task counts even if no person was explicitly named — in that case write the assignee as （未定）.
+- Do NOT fabricate tasks that were never discussed. But a concrete task clearly discussed as needed IS an action item even without an explicit assignee.
 - Definitely omit: routine check/confirm tasks ("確認する", "チェックする"), recurring tasks ("スケジュールの更新", "TWIの更新"), meeting scheduling ("ミーティングを設定する"), Slack communication ("Slackで共有する", "連絡する"), and one-off administrative tasks ("出席登録", "チャンネル追加", "アカウント削除").
 - タスク内容: Write 2-3 sentences (40-80 chars each) covering (1) what to do, (2) why it matters / background, (3) expected output. Do NOT include deadline expressions (e.g. 「26日までに」「27日までに」) — those belong in the 期限 column only.
 
@@ -1167,8 +1167,10 @@ def generate_minutes(
         vtt_speaker_instructions=vtt_instructions,
         slide_context_block=slide_context_block,
     )
-    # thinking モデルは thinking に多くのトークンを消費するため max_tokens をそのまま使用
-    decisions_max_tokens = max_tokens if (think or no_chat_template_kwargs) else 1024
+    # thinking / reasoning-既定モデルは reasoning に多くのトークンを消費するため
+    # 非think指定でも max_tokens をそのまま使う（1024 に絞ると RIKYU glm-5.2 等が
+    # reasoning で使い切り本文が空になりセクションごと消える不具合を防ぐ）。
+    decisions_max_tokens = max_tokens
     # Stage 3 は入力が大きいため timeout を 2 倍にして余裕を持たせる
     decisions_timeout = timeout * 2
     if consensus_enabled:
@@ -1194,6 +1196,9 @@ def generate_minutes(
             think=think, temperature=temperature,
             no_chat_template_kwargs=no_chat_template_kwargs,
         )
+    if not decisions_text or not decisions_text.strip():
+        print("[WARN] 決定事項抽出が空。（なし）でフォールバック", file=sys.stderr)
+        decisions_text = "## 決定事項\n\n（なし）\n\n## アクションアイテム\n\n（なし）"
     # 決定事項のスクラッチパッド除去
     for marker in ("## 決定事項\n\n", "## 決定事項\n"):
         idx = decisions_text.find(marker)
