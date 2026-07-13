@@ -180,14 +180,6 @@ id=22835[2026-05-15 Yamaura], 22877[2026-06-16], 17624[2026-06-16 Status表「Be
 
 いずれもランキング／取得ロジックに触るため、着手時は before/after の回帰測定が必須。当面は
 安全側のヘッジ（「確認できなかった」）で運用継続。
-
-### 6. investigate 出力への INFO ログ混入（成果物の体裁）
-
-**ステータス**: 保留中（2026-07-13）。分析品質には無影響、Box 版レポートの体裁のみ。
-
-**問題**: `pm_argus_agent.py --investigate` の stdout（＝レポート本文）先頭に
-`[INFO] terminology: N 件…` / `[INFO] glossary: …` のログ行が混入する。
-`pm_nvidia_collab_update.sh` は stdout をそのまま Box レポートに落とすため、公開文書の
-冒頭に log ゴミが載る。対策は該当 INFO を stderr へ回す（または出力前に除去）だけの軽微な修正。
-低コスト・確実だが分析品質は上がらないため優先度は低。
+（回帰測定の土台となる recall 評価ハーネス `scripts/eval/recall_eval.py` を 2026-07-13 に整備。
+以後の recall/precision 改善は本ハーネスの Δ で合否判定する。）
 

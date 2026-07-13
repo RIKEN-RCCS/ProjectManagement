@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-13 investigate 出力への INFO ログ stdout 混入を修正
+
+**背景**: `terminology.py` / `glossary.py` の診断 print が stdout に出ており、investigate の
+stdout をそのまま Box レポートにするバッチ（`pm_nvidia_collab_update.sh`）で公開文書冒頭に
+`[INFO] terminology/glossary` 行が混入していた。**決定**: 両ローダーの print を `file=sys.stderr`
+へ変更（文言・件数は不変、行き先のみ）。**影響**: Box レポートが見出しから始まるようになった。
+反映には qa デーモン再起動が必要。PLAN.md の当該残課題（旧項目6）は解消につき削除。
+
 ## 2026-07-13 LLM re-rank が配線漏れで無効化されていた（デッドパス）と判明 — ドキュメントを実態に修正
 
 **背景**: `retrieval.py` の `rerank_chunks()` は `openai_base` が空だと即座に
