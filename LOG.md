@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-07-13 Argus 主力LLM は全用途 DeepSeek-V4-Flash 単独運用に確定（Qwen 見送り）
+
+**背景**: 2026-07-11 評価では対話系→Qwen3.6-35B-A3B-FP8 / 集約分析→DeepSeek の
+ハイブリッドを推奨としていた。これを詰めるため実際の `pm_argus_agent.py --investigate`
+（マルチステップ tool-call ループ）で SCALE-LETKF を2パス実走し両モデルを比較
+（env `RIVAULT_MODEL`+`ARGUS_SKIP_LLM_SECRETS=1` で切替、コード無改修、本番非破壊）。
+
+**決定**: **全用途 DeepSeek 単独運用**（現行主力を維持、Qwen 採用見送り）。理由: `llm.py`
+の `call_rivault()` が Kimi 系以外で thinking を強制無効化するため、thinking 前提の
+Qwen3.6-35B-A3B-FP8 は investigate の複雑な system prompt+tool-call 形式下で content 0 文字
+となり**ループを駆動できない**（3回再現）。対話の速さより一本化の単純性と investigate での
+確実動作を優先。DeepSeek は2パス完走・構造/証跡遵守良好（Pass1 1m57s / Pass2 2m6s）。
+
+**影響**: ハイブリッド案は破棄。Qwen を investigate 対応させるには thinking ポリシー改修+
+reasoning_content/content の扱い+tool-call 形式検証が必要で投資に見合わずと判断。
+副次的に、investigate 実走で (a) Pass2 が max-steps 15 枠でツール未呼び出しの単発生成に
+なる点（証跡の retrieval 裏打ちは要検証）、(b) INFO ログが stdout に漏れ Box レポート先頭に
+混入し得る点を発見（別途対応候補）。詳細は `docs/decisions/rivault_model_eval_2026-07.md`。
+
 ## 2026-07-11 RiVault モデルの Argus 適性を再評価 — 用途別ハイブリッド運用を推奨
 
 **背景**: 現行主力 `DeepSeek-V4-Flash`（2026-06-05 切替）が最適か、RiVault の他モデルと
