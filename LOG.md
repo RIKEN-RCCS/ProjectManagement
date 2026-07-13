@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-07-13 investigate/メンション応答に初期 retrieval シードを既定追加（検索0件で断定する問題の是正）
+
+**背景**: investigate 実走検証で、Pass2（`--context-file` 注入時）に DeepSeek が STEP1 で
+ツール呼び出し0件のまま単発生成し、検索せずに具体名・数値を断定する挙動を確認。DB 照合では
+今回は幻覚0件だったが「たまたま内部知識が実在と一致した」だけで、検索省略のプロセス欠陥は残存
+（かつ Benchkit 完了・EEA 成熟度など DB にある最新情報を取りこぼしていた）。
+
+**決定**: `run_agent()` のループ開始前に、rewrite が生成した検索クエリ上位3件を既存 `search_text`
+経由で事前実行し history に投入する「初期 retrieval シード」を**既定ON**で追加
+（`ARGUS_DISABLE_INITIAL_SEARCH=1` で opt-out）。opt-in 案も検討したが、接地品質を優先し
+investigate・メンション応答（`run_agent` 共有の全経路）で既定有効化する判断。SCALE-LETKF で
+再走し、出典引用付き・未確認事項の明示・より新しい事実の捕捉へ改善を確認（latency 2m→5m 程度増）。
+
+**影響**: 全 investigate/メンション応答に事前3クエリ検索(HyDE+rerank)が1ラウンド加わる（並列・
+120s上限）。シードは try/except で握りつぶし、失敗時は従来挙動にフォールバック。patrol は
+run_agent 不使用で影響なし。**反映には qa デーモン再起動が必要**。残課題: 強制版でも Benchkit を
+「確認できなかった」と留保する retrieval recall の取りこぼし、INFO ログが stdout に漏れ Box
+レポート先頭に混入する既存バグ（別途）。検証詳細は `docs/decisions/rivault_model_eval_2026-07.md`。
+
 ## 2026-07-13 Argus 主力LLM は全用途 DeepSeek-V4-Flash 単独運用に確定（Qwen 見送り）
 
 **背景**: 2026-07-11 評価では対話系→Qwen3.6-35B-A3B-FP8 / 集約分析→DeepSeek の

@@ -21,6 +21,7 @@ import argparse
 import concurrent.futures
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -609,6 +610,28 @@ def run_agent(
     history: list[dict] = []
     executed_keys: set[str] = set()
     last_response = ""
+
+    # STEP1 でツール呼び出しが0件のまま終わる問題の緩和策。既定で有効。
+    # 無効化する場合のみ ARGUS_DISABLE_INITIAL_SEARCH=1 を設定する。
+    if os.environ.get("ARGUS_DISABLE_INITIAL_SEARCH") != "1" and rewrite and rewrite.get("search_queries"):
+        seed_calls = [
+            {"name": "search_text", "args": {"query": q}}
+            for q in rewrite["search_queries"][:3]
+        ]
+        try:
+            logger.info(f"[initial-search] rewrite クエリ{len(seed_calls)}件を事前検索")
+            t0 = time.monotonic()
+            seed_entries = _execute_calls_parallel(
+                seed_calls, ctx, step=0, timeout_s=min(120, remaining_s())
+            )
+            logger.info(
+                f"[initial-search] 完了 ({time.monotonic() - t0:.1f}s, {len(seed_entries)}件)"
+            )
+            history.extend(seed_entries)
+            for tc in seed_calls:
+                executed_keys.add(_dedupe_key(tc["name"], tc["args"]))
+        except Exception as e:
+            logger.warning(f"[initial-search] 事前検索スキップ: {e}")
 
     for step in range(1, max_steps + 1):
         if time.monotonic() >= deadline:
