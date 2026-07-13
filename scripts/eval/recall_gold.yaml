@@ -1,0 +1,66 @@
+# recall_gold.yaml — Argus retrieval recall 回帰評価のゴールドセット
+#
+# 「エンティティ×既知の在窓事実」を curator（人間）が定義し、scripts/eval/recall_eval.py
+# の resolve サブコマンドで現行 qa_index.db の chunk id 集合へ解決する。
+# 解決した chunk id が run サブコマンドでの gold（正解集合）として使われる。
+#
+# 注意（curator が踏みやすい罠）:
+#   chunks.source_ref は source_type='box_document' の場合、常に Box ファイル URL
+#   （例: https://app.box.com/file/<id>）であり、ファイル名を含まない
+#   （scripts/data-pipeline/pm_embed.py の box_document 取り込み処理を参照）。
+#   ファイル名で絞り込みたい場合は resolve.source_ref_like ではなく、
+#   resolve.must_contain に content 先頭の見出し行
+#   「【…/ファイル名】」の断片を入れること。
+#   source_ref_like フィールド自体は、source_ref が別の意味を持つ source_type
+#   （slack_raw の permalink 等）向けにスキーマとして残してある。
+
+version: 1
+default_index_name: pm
+default_k_list: [5, 10, 30, 60]
+
+entries:
+  - id: benchpark-build-status-2026q2
+    entity: Benchpark
+    fact: "Benchpark のビルド対応状況（富岳/FX700/GH200/Genoa/DGX-Spark）の進捗報告"
+    tags: [benchpark, benchmark-wg]
+    hit_rule: any
+    query_since: null
+    notes: "旧 chunk id 22835/22877 相当"
+    queries:
+      - text: "SCALE-LETKF GPU化 進捗 報告"
+        style: topic
+      - text: "benchpark ビルド 完了状況"
+        style: literal
+    resolve:
+      must_contain: ["benchpark開発対応", "GH200"]
+      regex: null
+      window:
+        since: "2026-05-01"
+        until: "2026-06-30"
+      source_type: box_document
+      source_ref_like: null
+      expect_count:
+        min: 2
+        max: 4
+
+  - id: scale-letkf-status-table-202604
+    entity: SCALE-LETKF
+    fact: "ベンチマークWG進捗報告のステータス表における SCALE-LETKF の達成状況"
+    tags: [scale-letkf, benchmark-wg, status-table]
+    hit_rule: any
+    query_since: null
+    notes: "旧 chunk id 17624 相当"
+    queries:
+      - text: "SCALE-LETKF ベンチマーク 達成状況"
+        style: topic
+    resolve:
+      must_contain: ["Status: SCALE-LETKF"]
+      regex: null
+      window:
+        since: "2026-04-01"
+        until: "2026-06-30"
+      source_type: box_document
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 3

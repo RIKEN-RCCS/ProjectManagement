@@ -26,6 +26,7 @@ venv/
 
 # Claude Code internal files
 .claude/
+.claudelens
 
 # Secrets
 .secrets/
@@ -46,6 +47,8 @@ results_*.json
 # fish-speech (外部サーバーへ移管済み、references/ はローカル不要)
 fish.tar
 scripts/fish_seed_sweep.sh
-scripts/eval/
+scripts/eval/*
+!scripts/eval/recall_eval.py
+!scripts/eval/recall_gold.yaml
 scripts/ingest/*.bak
 scripts/data/voice_uploads.db
