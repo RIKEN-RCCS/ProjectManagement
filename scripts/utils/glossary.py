@@ -11,6 +11,7 @@ conn が None の場合は内部で _open_pm() により新規接続する。
 from __future__ import annotations
 
 import sqlite3
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,16 +39,16 @@ def _open_pm(db_path: Path | None = None):
     from db_utils import SQLCIPHER_AVAILABLE, open_db
     path = db_path or _pm_db_path()
     if not path.exists():
-        print(f"[WARN] glossary: pm.db が見つかりません: {path}")
+        print(f"[WARN] glossary: pm.db が見つかりません: {path}", file=sys.stderr)
         return None
     if not SQLCIPHER_AVAILABLE:
-        print("[INFO] glossary: sqlcipher3 未インストール（コンテナ環境）— pm.db 用語集をスキップします")
+        print("[INFO] glossary: sqlcipher3 未インストール（コンテナ環境）— pm.db 用語集をスキップします", file=sys.stderr)
         return None
     try:
         conn = open_db(path, encrypt=True, row_factory=True, migrations=[_GLOSSARY_DDL])
         return conn
     except Exception as e:
-        print(f"[WARN] glossary: pm.db への接続に失敗しました: {e}")
+        print(f"[WARN] glossary: pm.db への接続に失敗しました: {e}", file=sys.stderr)
         return None
 
 
@@ -211,10 +212,10 @@ def build_reference(
             conn.close()
 
     if not rows:
-        print("[INFO] glossary: テーブルにエントリがありません（スキップ）")
+        print("[INFO] glossary: テーブルにエントリがありません（スキップ）", file=sys.stderr)
         return ""
 
-    print(f"[INFO] glossary: {len(rows)} 件のエントリを抽出しました")
+    print(f"[INFO] glossary: {len(rows)} 件のエントリを抽出しました", file=sys.stderr)
     lines = ["\n### プロジェクト用語集 (glossary)"]
     current_cat = None
     for row in rows:
