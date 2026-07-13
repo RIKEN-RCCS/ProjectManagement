@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-07-13 非think local 呼び出しの reasoning-truncation を根治（reconcile 0字事故の対策）
+
+**背景**: RIKYU glm-5.2 で録音ジョブが失敗（`reconcile_transcript.py` の VTT×Whisper 突合が
+全チャンク0字→transcript を空で上書き→議事録生成が「セグメントが見つかりません」で停止）。
+根本原因は「reasoning 既定モデルは非think指定でも内部思考し、低 max_tokens（reconcile=2048 等）を
+思考で使い切り content=0字を返す」＝決定事項欠落と同一クラスのバグが別スクリプトで顕在化。
+**決定**: 対症療法（各所の max_tokens 増）では地雷が残るため根治。`_call_local_llm_inner` で
+**think=False 時に `enable_thinking:false` を送出**し `think` 引数が実際に reasoning を制御するように
+（`no_chat_template_kwargs=True` のエスケープは維持）。reasoning が分類品質を上げる決定事項抽出
+ステージのみ **think=True** に固定して品質を保持。`reconcile_transcript.py` は出力空時に元の
+Whisper 文字起こしを保持し破壊的上書きを防ぐ防御を追加。
+**影響**: think=False の全 local 呼び出し（brief/risk/investigate/ingest/議事録）が非reasoning化＝
+高速化＋truncation解消（A/B で glm を選んだ非think条件と一致）。`llm.py` はコア共有のため反映には
+qa デーモン再起動が必要。実機で think=False・max_tokens=2048 が非空を返すこと確認済み。
+
 ## 2026-07-13 Argus 本番 LLM を RIKYU glm-5.2 へ切替、議事録の決定/アクション欠落を修正
 
 **背景**: RIKYU（新 OpenAI 互換サービング）の3モデルを A/B 評価（`argus_ab.py` に `--target rikyu` 追加、

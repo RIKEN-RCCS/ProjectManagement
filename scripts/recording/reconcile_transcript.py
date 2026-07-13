@@ -281,6 +281,12 @@ def reconcile_transcript(
         current = chunk_end
 
     final_text = "\n\n".join(chunks_output)
+    if not final_text.strip():
+        if verbose:
+            print("[WARN] reconcile: 全チャンクが空文字を返しました。元のファイルをそのまま使用します。")
+        import shutil
+        shutil.copy(transcript_path, output_path)
+        return output_path
     output_path.write_text(final_text, encoding="utf-8")
     if verbose:
         print(f"[INFO] reconcile 完了: {output_path} ({len(final_text)} 字)")

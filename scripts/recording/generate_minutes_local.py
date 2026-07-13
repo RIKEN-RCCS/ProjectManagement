@@ -1173,10 +1173,13 @@ def generate_minutes(
     decisions_max_tokens = max_tokens
     # Stage 3 は入力が大きいため timeout を 2 倍にして余裕を持たせる
     decisions_timeout = timeout * 2
+    # 決定事項/アクションアイテムの分類は reasoning が精度に寄与するため常に think=True とする
+    # （議事内容統合・チャンク抽出ステージの think は変更しない）
+    decisions_think = True
     if consensus_enabled:
         drafts = _sample_n_times(
             decisions_prompt, consensus_n,
-            timeout=decisions_timeout, think=think, max_tokens=decisions_max_tokens,
+            timeout=decisions_timeout, think=decisions_think, max_tokens=decisions_max_tokens,
             no_chat_template_kwargs=no_chat_template_kwargs,
             base_temperature=temperature, label="Stage 3",
         )
@@ -1184,7 +1187,7 @@ def generate_minutes(
             decisions_text = _consensus_stage3(
                 drafts, min_vote=consensus_min_vote, threshold=consensus_threshold,
                 claude_md_context=claude_md_context,
-                timeout=decisions_timeout, think=think, max_tokens=decisions_max_tokens,
+                timeout=decisions_timeout, think=decisions_think, max_tokens=decisions_max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs, temperature=temperature,
             )
         else:
@@ -1193,7 +1196,7 @@ def generate_minutes(
     else:
         decisions_text = call_argus_llm(
             decisions_prompt, timeout=decisions_timeout, max_tokens=decisions_max_tokens,
-            think=think, temperature=temperature,
+            think=decisions_think, temperature=temperature,
             no_chat_template_kwargs=no_chat_template_kwargs,
         )
     if not decisions_text or not decisions_text.strip():

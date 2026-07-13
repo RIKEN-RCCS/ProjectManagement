@@ -146,6 +146,11 @@ def _call_local_llm_inner(
             payload["chat_template_kwargs"] = {"enable_thinking": True}
         payload["top_p"] = 0.95
         payload["skip_special_tokens"] = False
+    elif not no_chat_template_kwargs:
+        # reasoning 既定モデル（RIKYU glm-5.2 等）は非think指定でも内部思考し、
+        # 低 max_tokens だと思考でトークンを使い切り content=0文字を返す。
+        # think=False は「思考しない」を明示的に伝える。
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     if no_chat_template_kwargs:
         payload["top_k"] = 20
     headers = {
