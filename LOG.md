@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-07-13 recall 評価ハーネス baseline-v1 記録 — vocab-gap を定量化
+
+**背景**: `scripts/eval/recall_eval.py`（recall 回帰ハーネス）のゴールドを 14 エントリに拡充
+（エンティティ9種、source_type: minutes 5/slack 5/box 4、主題分散）し、baseline を測定。
+**結果（run_id=3, gold sha256 66999e0f, chunks 26590）**: literal クエリ（文書語彙）は
+hit@10≈0.54/hit@60≈0.69 と索引は健全な一方、**topic クエリ（主題語彙＝investigate rewrite が
+出す語彙）は hit@10≈0.07〜0.12** と 4〜7 倍低い。「事実は DB にあるのに主題語彙では拾えない」
+vocab-gap recall 欠陥が定量化された。fts と hybrid はほぼ同値、hyde/rerank も topic を大きく
+改善しない（rerank は openai_base="" で実質 hyde 先頭[:5]）。
+**決定**: 以後の recall/precision 改善（共起語拡張・source_type 多様化・rerank 再有効化等）は
+本 baseline との Δ（特に topic hit@k）で合否判定する。**注意**: 結果DB `data/eval/recall_eval.db`
+は git 管理外のためローカルのみ。再現は gold sha256 で同一性を担保する。
+
 ## 2026-07-13 investigate 出力への INFO ログ stdout 混入を修正
 
 **背景**: `terminology.py` / `glossary.py` の診断 print が stdout に出ており、investigate の

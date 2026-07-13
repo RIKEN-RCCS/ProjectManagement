@@ -64,3 +64,291 @@ entries:
       expect_count:
         min: 1
         max: 3
+
+  - id: frontflow-blue-nvhpc-compiler-bug-202606
+    entity: FrontFlow/blue
+    fact: "FrontFlow/blue が NVHPC 26.3 のコンパイラバグにより動作しない障害が発生し、NVIDIA へバグレポート提出中"
+    tags: [frontflow-blue, compiler-bug, eea]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 38292 (minutes/コデザイン系ミーティング 2026-06-18)"
+    queries:
+      - text: "FrontFlow/blue 富岳NEXT環境でのコンパイラ起因の不具合状況"
+        style: topic
+      - text: "FrontFlow/blue コンパイルバグ 動作しない"
+        style: literal
+    resolve:
+      must_contain: ["FrontFlow/blueでは、NVHPC 26.3のコンパイルバグ"]
+      regex: null
+      window:
+        since: "2026-06-15"
+        until: "2026-06-20"
+      source_type: minutes_content
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: genesis-gpu-kernel-bottleneck-202606
+    entity: GENESIS
+    fact: "GENESIS で N-site Systems / AI for Science Machine を用いた GPU カーネル計測を実施し、ボトルネックとなる主要カーネル3つとそのパラメータを特定"
+    tags: [genesis, gpu-profiling, eea]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 38293（minutes 2026-06-18）。SALMON環境障害エントリ(chunk 38294)とは別チャンクで overlap 回避のため N-site Systems 断片を必須化"
+    queries:
+      - text: "GENESIS GPU性能のボトルネック解析 進捗"
+        style: topic
+      - text: "GENESIS ボトルネック 主要カーネル NCU"
+        style: literal
+    resolve:
+      must_contain: ["GENESISでは、N-site SystemsとAI for Science Machineを用いてGPUカーネルの詳細なデータ取得が行われ"]
+      regex: null
+      window:
+        since: "2026-06-15"
+        until: "2026-06-20"
+      source_type: minutes_content
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: salmon-multi-env-build-issues-202606
+    entity: SALMON
+    fact: "SALMON の FX700/Genoa/DGX 各環境での Spack ビルドにおいて、MPI実行エラー・SLURM実行時の問題・NVHPCリンクエラーが個別に発生"
+    tags: [salmon, build-issue, eea]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 38294（minutes 2026-06-18）"
+    queries:
+      - text: "SALMON 複数マシン環境での移植・実行時トラブル状況"
+        style: topic
+      - text: "SALMON FX700 Genoa DGX 問題"
+        style: literal
+    resolve:
+      must_contain: ["FX700でのMPI実行エラー", "DGXでのNVHPCリンクエラー"]
+      regex: null
+      window:
+        since: "2026-06-15"
+        until: "2026-06-20"
+      source_type: minutes_content
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: benchpark-flashx-license-integration-202606
+    entity: Benchpark
+    fact: "外部コード Flash-X（Apache 2.0）を Benchpark/Spack 管理下に統合するための検討状況"
+    tags: [benchpark, flash-x, spack, license]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 38779（minutes 2026-06-29）"
+    queries:
+      - text: "Benchpark 外部コード取り込み ライセンス確認状況"
+        style: topic
+      - text: "Flash-X Benchpark Spack ライセンス"
+        style: literal
+    resolve:
+      must_contain: ["Flash-XはApache 2.0のオープンソースライセンスで提供"]
+      regex: null
+      window:
+        since: "2026-06-25"
+        until: "2026-07-02"
+      source_type: minutes_content
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: spack-sionna-tensorflow-binary-issue-202606
+    entity: Spack
+    fact: "共有 Spack 環境での Sionna ビルド時、既存の TensorFlow バイナリが認識されず自前ビルドが走ってしまう不具合"
+    tags: [spack, sionna, build-issue]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 38780（minutes 2026-06-19）"
+    queries:
+      - text: "共有Spack環境での既存パッケージ再利用トラブル"
+        style: topic
+      - text: "Sionna Spack TensorFlow バイナリ"
+        style: literal
+    resolve:
+      must_contain: ["Spack経由でのインストール時にその既存バイナリが利用されず"]
+      regex: null
+      window:
+        since: "2026-06-15"
+        until: "2026-06-22"
+      source_type: minutes_content
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: benchpark-dgx-cluster-config-202605
+    entity: Benchpark
+    fact: "Benchpark に DGX クラスタ設定を追加（cluster=dgx、CUDA 13系・nvhpc@26.3 固定で利用可能）"
+    tags: [benchpark, dgx, config]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 15828（slack 2026-05-25）"
+    queries:
+      - text: "Benchpark 新しい実行環境への対応状況"
+        style: topic
+      - text: "benchpark DGX cluster nvhpc"
+        style: literal
+    resolve:
+      must_contain: ["benchparkにDGXの設定を追加しました"]
+      regex: null
+      window:
+        since: "2026-05-20"
+        until: "2026-05-28"
+      source_type: slack_raw
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: lqcd-dwf-hmc-comm-profiling-progress-202606
+    entity: LQCD-DWF-HMC
+    fact: "LQCD-DWF-HMC の通信性能プロファイリングが AI for Science 環境で準備中との進捗報告（担当者欠席時の代理報告）"
+    tags: [lqcd-dwf-hmc, profiling, subwg6]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 25762/25763（slack 2026-06-16、チャンク境界で同一文が2チャンクに跨る）"
+    queries:
+      - text: "LQCD-DWF-HMC ネットワーク性能検証に向けた着手状況"
+        style: topic
+      - text: "LQCD 通信 AI4S プロファイリング"
+        style: literal
+    resolve:
+      must_contain: ["LQCDは通信のAI4Sでのプロファイリング準備中"]
+      regex: null
+      window:
+        since: "2026-06-14"
+        until: "2026-06-18"
+      source_type: slack_raw
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 3
+
+  - id: genesis-license-change-correction-202606
+    entity: GENESIS
+    fact: "GENESIS のライセンス変更（LGPL→BSD/MIT）が実際には未完了であるとの、AI生成ステータス資料への訂正"
+    tags: [genesis, license, correction]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 30082（slack 2026-06-25、Chigusa Kobayashi氏によるAI要約への訂正コメント）"
+    queries:
+      - text: "GENESIS のOSSライセンス移行はどこまで進んでいるか"
+        style: topic
+      - text: "GENESIS LGPL BSD/MIT ライセンス変更"
+        style: literal
+    resolve:
+      must_contain: ["ライセンスを LGPL から BSD/MIT へ変更する作業"]
+      regex: null
+      window:
+        since: "2026-06-23"
+        until: "2026-06-27"
+      source_type: slack_raw
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: benchkit-contribution-copyright-policy-202607
+    entity: BenchKit
+    fact: "BenchKit への外部コントリビューションに関する著作権表記ルール（個別ファイルへの著作権表記は不要、PRコミットは要sign-off）"
+    tags: [benchkit, contribution, license]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 42549（slack 2026-07-03、富士通からの確認への回答）"
+    queries:
+      - text: "BenchKit 外部からのコード貢献ルール確認"
+        style: topic
+      - text: "BenchKit 著作権 sign-off PR"
+        style: literal
+    resolve:
+      must_contain: ["個別ファイルに著作権を書いてくださいというようなことはしていません"]
+      regex: null
+      window:
+        since: "2026-07-01"
+        until: "2026-07-05"
+      source_type: slack_raw
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: scale-letkf-memory-option-b-analysis-202606
+    entity: SCALE-LETKF
+    fact: "GPUメモリオプションBでのSCALE-LETKFの性能比が突出して悪い要因分析（メモリ容量制約で4倍GPU使用、ストロングスケーリング不足）"
+    tags: [scale-letkf, gpu-memory, codesign]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 25668（slack 2026-06-15、西澤氏の資料に対するAoki氏の質問と回答）"
+    queries:
+      - text: "SCALE-LETKF メモリ構成オプション間の性能比較 要因分析"
+        style: topic
+      - text: "SCALE-LETKF Option B GPU 4倍"
+        style: literal
+    resolve:
+      must_contain: ["B / SCALE-LETKF が突出して悪い", "4倍のGPUを使うことになっています"]
+      regex: null
+      window:
+        since: "2026-06-13"
+        until: "2026-06-17"
+      source_type: slack_raw
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: e-wave-codesign-status-table-202607
+    entity: E-Wave
+    fact: "コデザイン管理表における E-Wave の属性（ライセンス Unreleased、Full App、GPU対応 OpenACC）"
+    tags: [e-wave, codesign, status-table]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 38349（box_document、COD_20260702.pptx）"
+    queries:
+      - text: "E-Wave のコデザイン管理表における現状ステータス"
+        style: topic
+      - text: "E-Wave Unreleased OpenACC Full App"
+        style: literal
+    resolve:
+      must_contain: ["4 | E-Wave | Unreleased | Full App | Unreleased | Yes | OpenACC"]
+      regex: null
+      window:
+        since: "2026-06-30"
+        until: "2026-07-04"
+      source_type: box_document
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
+
+  - id: lqcd-dwf-hmc-perf-result-replace-decision-202602
+    entity: LQCD-DWF-HMC
+    fact: "LQCD-DWF-HMC のマルチスレッド対応部分について、コードを修正した上でベンチマーク結果を差し替えることを決定（コデザイン議事録の決定事項）"
+    tags: [lqcd-dwf-hmc, decision, codesign]
+    hit_rule: any
+    query_since: null
+    notes: "chunk id 38301（box_document、2026-02-13_Co-design_Syncup_Meeting.md、held_atは再索引日の2026-07-02）"
+    queries:
+      - text: "LQCD-DWF-HMC のベンチマーク数値は最新版に更新されたか"
+        style: topic
+      - text: "LQCD-DWF-HMC マルチスレッド 結果 差し替え"
+        style: literal
+    resolve:
+      must_contain: ["LQCD-DWF-HMCの性能分析について、マルチスレッド対応部分は修正の上"]
+      regex: null
+      window:
+        since: "2026-06-30"
+        until: "2026-07-04"
+      source_type: box_document
+      source_ref_like: null
+      expect_count:
+        min: 1
+        max: 2
