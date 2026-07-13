@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-07-13 LLM re-rank が配線漏れで無効化されていた（デッドパス）と判明 — ドキュメントを実態に修正
+
+**背景**: `retrieval.py` の `rerank_chunks()` は `openai_base` が空だと即座に
+`chunks[:top_k]` を返す実装だが、呼び出し元 `mcp_tools.py:163`（`search_text`）・
+`cli_utils.py:418` のどちらも `openai_base` を渡していない。2026-06-19 の責務別モジュール
+分割（`2e3fe68`）で rerank をモジュールへ移設した際、有効化ゲートをモジュールグローバルの
+接続設定から引数化したが呼び出し元の更新が漏れ、`openai_base` が単なる ON/OFF フラグとして
+形骸化（vestigial）した配線ミス。意図的な無効化ではない。
+
+**決定**: 今回はドキュメント（architecture.md / argus_system.md / argus_outcomes.md）を
+実態（re-rank無効・最終順位は `_combined_score` = BM25 0.6 + 鮮度0.4 降順 top-5）に合わせるのみ。
+再有効化は構築中の recall/precision 評価ハーネス（`scripts/eval/recall_eval.py`）で
+baseline 完成後に before/after を測定してから判断する（今回は再有効化しない）。
+
+**影響**: precision を上げる最終選別段が現状欠落しており、BM25/鮮度スコアが高いだけの
+無関係チャンクが上位に残るリスクがある。recall 自体は HyDE 拡張＋ベクトル検索＋鮮度
+スコアリングで維持されている。関連コミット `2e3fe68`、根拠 `retrieval.py` L526-527。
+
 ## 2026-07-13 investigate/メンション応答に初期 retrieval シードを既定追加（検索0件で断定する問題の是正）
 
 **背景**: investigate 実走検証で、Pass2（`--context-file` 注入時）に DeepSeek が STEP1 で

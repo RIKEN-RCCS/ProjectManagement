@@ -336,7 +336,7 @@ LLM が自律的にツール（DB検索・全文検索・Slackメッセージ取
 | `get_unacknowledged_decisions` | 未確認決定事項 |
 | `search_action_items` | AI条件検索 |
 | `search_decisions` | 決定事項キーワード検索 |
-| `search_text` | 議事録・Slack全文検索（FTS5 + re-ranking） |
+| `search_text` | 議事録・Slack全文検索（FTS5 + embedding、re-rankingは現在無効。後述） |
 | `get_slack_messages` | 特定チャンネルの生メッセージ |
 
 **CLI モード**:
@@ -860,25 +860,35 @@ Step 5: 最新日付レコード（それでも0件の場合）
 SudachiPy形態素解析が主検索。trigramは「性能」「評価」などの2文字名詞がヒットしない
 ため補助的な位置づけ。
 
-### LLM re-ranking
+### LLM re-ranking（現在無効）
 
-FTS検索で30件取得後、LLMが質問との関連度を判定して上位5件に絞り込む。
+`scripts/argus/retrieval.py` の `rerank_chunks()` はFTS+embedding検索結果をLLMで
+関連度判定し上位5件に絞り込む**設計**だが、**現在は無効化されている**。
+`rerank_chunks(question, chunks, openai_base="", ...)` は `openai_base` 引数が
+空文字だと即座に `chunks[:top_k]` を返す実装（L526-527）で、呼び出し元
+`mcp_tools.py`（`search_text`）・`cli_utils.py` のどちらも `openai_base` を渡していない
+ため、常にこのショートサーキットに落ちる。2026-06-19 の責務別モジュール分割
+（`2e3fe68`）で `rerank_chunks` を移設した際、ゲートをモジュールグローバルの
+接続設定フラグから引数化したが呼び出し元の更新が漏れた配線ミスであり、
+意図的な無効化ではない。
+
+**現状の実効フロー**（LLM re-rankをスキップした場合の並び順）:
 
 ```
-FTS検索（30件）
+FTS5検索 + embeddingベクトル検索（RRF融合）
   ↓
-re-rankプロンプト:
-  各チャンクの先頭400文字を番号付きで提示
-  「関連する5件の番号をスペース区切りで出力」
-  max_tokens=30, timeout=30秒
+_combined_score = (1 - 鮮度重み0.4) × BM25正規化スコア + 鮮度重み0.4 × 鮮度スコア
+  （鮮度スコアは指数減衰、half-life 180日）
   ↓
-LLMが選んだ番号のチャンクのみを回答生成へ渡す
-
-※ LLMエラー・番号が得られない場合は先頭5件で代替（フォールバック）
+_combined_score 降順で先頭 top_k（既定5件）をそのまま回答生成へ渡す
 ```
 
-件数より**re-rankが見るプレビューの長さ（400文字）**が回答品質を支配する。
-プレビューが短いと関連度判定が外れ、的外れなチャンクが回答生成に渡される。
+LLMによる「質問との関連度」の最終判定は行われないため、BM25/鮮度スコアが高くても
+質問と無関係なチャンクが上位に残るケースがある（precisionの取りこぼし）。
+再有効化するかどうかは、recall/precision評価ハーネス（`scripts/eval/recall_eval.py`、
+baseline構築中）でbefore/afterを測定してから判断する方針（2026-07-13時点、
+詳細は `LOG.md` 参照）。再有効化時は呼び出し元2箇所（`mcp_tools.py:163`,
+`cli_utils.py:418`）で `openai_base` を明示的に渡す必要がある。
 
 ### チャンネル→インデックスの解決
 
@@ -937,13 +947,15 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 | パラメータ | 値 | 説明 |
 |---|---|---|
 | `TOP_K_RETRIEVE` | 30 | FTS検索で取得する件数 |
-| `TOP_K_RERANK` | 5 | re-rank後に回答生成へ渡す件数 |
-| `rerank preview` | 400文字 | re-rankプロンプトでの各チャンク提示長 |
+| `TOP_K_RERANK` | 5 | **re-rank無効化中**（下記参照）のため実質は `_combined_score` 降順の先頭件数 |
+| `rerank preview` | 400文字 | re-rankプロンプトでの各チャンク提示長（**無効化中のため未使用**） |
 | `MAX_TOKENS` | 1024 | 回答生成の最大トークン数 |
 | `LLM_TIMEOUT` | 120秒 | 回答生成のタイムアウト |
-| `RERANK_TIMEOUT` | 30秒 | re-rankのタイムアウト |
+| `RERANK_TIMEOUT` | 60秒 | re-rankのタイムアウト（コード実値。**re-rank自体が無効化中のため到達しない**） |
 | `CHUNK_MAX_CHARS` | 1000 | チャンク最大文字数 |
 | `CHUNK_OVERLAP_CHARS` | 100 | チャンクオーバーラップ文字数 |
+
+上記のうち re-rank 関連パラメータは「LLM re-ranking（現在無効）」節参照。
 
 ### pm_embed.py のオプション
 
@@ -1091,8 +1103,11 @@ crontab -l | grep argus
 - `pm_embed.py --full-rebuild --index-name <name>` で再構築
 
 **re-rankエラーがログに出る:**
-- `re-rankエラー: ...` と出た場合、LLMのコンテキスト長超過の可能性がある
-- `TOP_K_RETRIEVE` を減らすか、`rerank preview` の文字数（`pm_qa_server.py` の400）を下げる
+- 現状 `rerank_chunks()` は呼び出し元が `openai_base` を渡さないため常にショートサーキット
+  （`chunks[:top_k]` を即返す）しており、LLM呼び出し自体が発生しない。したがって
+  `re-rankエラー: ...` ログは通常発生しない（詳細は「LLM re-ranking（現在無効）」節）
+- もし再有効化後にこのエラーが出た場合は、LLMのコンテキスト長超過の可能性がある。
+  `TOP_K_RETRIEVE` を減らすか、`rerank preview` の文字数（`retrieval.py` の400）を下げる
 
 **SudachiPyが利用不可とログに出る:**
 - `~/.venv_aarch64/bin/pip install sudachipy sudachidict_core` を実行
@@ -1133,6 +1148,10 @@ crontab -l | grep argus
 - **議題単位の分割**: 現在の段落分割から `##` 見出し単位の分割に変更
 
 ### P3: Re-rankingの改善
+
+前提: LLM re-ranking自体が現在無効化中（配線漏れ、詳細は「LLM re-ranking（現在無効）」節）。
+以下は元々の設計を前提にした改善候補であり、着手前にまず re-ranking を再有効化するか
+（recall/precision評価ハーネスでの判断待ち）を先に決める必要がある。
 
 - **スコアリング方式**: 現在の「番号選択」から「各チャンクに0〜10点のスコアをつけよ」に変更することで判定精度が向上
 - **Cross-Encoderモデル**: ms-marco等の小型モデルで質問とチャンクのペアを直接スコアリング（LLM呼び出し不要）
