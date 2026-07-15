@@ -6,6 +6,12 @@ patrol_detect.py — Patrol Agent の検出ルール
 検出結果に基づいて patrol_actions の関数を呼ぶ。
 
 完了シグナル検出は LLM 判定を併用（キーワードマッチ + 自然言語分析の二段構え）。
+第2段は同一スレッド以外（会議・別チャンネル・qa_index に索引済みの資料）での
+完了報告も証拠として扱う。`auto_close_enabled` かつ確信度が
+`auto_close_min_confidence`（既定 HIGH）以上の場合のみ自動クローズし、
+それ以外（auto_close 無効、または確信度不足）は従来どおり担当者へ
+承認ボタン付き完了確認 DM を送信する
+（`patrol.completion_detection.auto_close_*` で段階的に有効化）。
 それ以外の検出器は決定論的ルールのみ（LLM 不使用）。
 """
 from __future__ import annotations
@@ -28,19 +34,22 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 def detect_completion_signals(ctx) -> int:
     """
-    Slack メッセージから open AI の完了シグナルを検出し、
-    担当者に Block Kit ボタンでクローズ確認を送信する。
+    open AI の完了シグナルを検出する。
 
     検出は二段構え:
-    1. キーワードマッチ（高速・決定論的）
-    2. LLM 判定（キーワードで拾えない自然言語表現を検出）
+    1. キーワードマッチ（Slack 同一スレッド返信、高速・決定論的）
+       → 担当者に Block Kit ボタンでクローズ確認を送信する
+    2. LLM 判定（同一スレッドの返信に加え、qa_index に索引済みの
+       会議議事録・別チャンネル等での完了報告も証拠として分析）
+       → 確信度が閾値以上かつ `auto_close_enabled` の場合のみ自動クローズする。
+         それ以外は従来どおり担当者へ承認ボタン付き完了確認 DM を送信する。
 
-    対象: source='slack' かつ source_ref が Slack パーマリンクの AI のみ。
-    Returns: 検出件数
+    対象: source IN ('slack', 'meeting') の open AI。
+    Returns: 実際にアクション（クローズ確認送信 or 自動クローズ）を行った件数
     """
     from pm_sync_canvas import CLOSE_KEYWORDS
 
-    from .actions import send_completion_confirm
+    from .actions import close_action_item, send_channel_alert, send_completion_confirm
 
     cfg = ctx.config.get("patrol", {}).get("completion_detection", {})
     if not cfg.get("enabled", True):
@@ -51,53 +60,110 @@ def detect_completion_signals(ctx) -> int:
     cutoff_date = (date.fromisoformat(ctx.today) - timedelta(days=max_age)).isoformat()
 
     rows = ctx.conn.execute(
-        "SELECT id, content, assignee, due_date, source_ref"
+        "SELECT id, content, assignee, due_date, source_ref, source, extracted_at, note"
         " FROM action_items"
         " WHERE status = 'open' AND COALESCE(deleted,0)=0"
-        "   AND source = 'slack' AND source_ref IS NOT NULL AND source_ref != ''",
+        "   AND source IN ('slack', 'meeting')",
     ).fetchall()
 
     close_kw_lower = {k.lower() for k in CLOSE_KEYWORDS}
+    auto_close_enabled = cfg.get("auto_close_enabled", False)
+    min_confidence = cfg.get("auto_close_min_confidence", "HIGH")
+    post_close_notify = cfg.get("post_close_notify", True)
     detected = 0
 
     for row in rows:
         ai_id = row["id"]
         target_key = f"ai:{ai_id}"
-        if ctx.state.already_notified("completion_confirm", target_key, cooldown_days=9999):
+        if (
+            ctx.state.already_notified("completion_confirm", target_key, cooldown_days=9999)
+            or ctx.state.already_notified("auto_close", target_key, cooldown_days=9999)
+        ):
             continue
 
-        source_ref = row["source_ref"]
-        channel_id, thread_ts = _parse_permalink(source_ref)
-        if not channel_id or not thread_ts:
-            continue
-
-        replies = _get_recent_replies(ctx.data_dir, channel_id, thread_ts, cutoff_date)
-        if not replies:
-            continue
-
-        # --- 第1段: キーワードマッチ ---
+        # --- 第1段: Slack 同一スレッド返信のキーワードマッチ（高速パス） ---
+        evidence_list: list[dict] = []
         kw_hit = False
-        for reply_text in replies:
-            text_lower = reply_text.lower().strip()
-            if any(kw in text_lower for kw in close_kw_lower):
-                evidence = reply_text[:300]
-                send_completion_confirm(ctx, ai_id, dict(row), evidence)
-                detected += 1
-                kw_hit = True
-                break
+        if row["source"] == "slack" and row["source_ref"]:
+            channel_id, thread_ts = _parse_permalink(row["source_ref"])
+            if channel_id and thread_ts:
+                replies = _get_recent_replies(ctx.data_dir, channel_id, thread_ts, cutoff_date)
+                for reply_text in replies:
+                    text_lower = reply_text.lower().strip()
+                    if any(kw in text_lower for kw in close_kw_lower):
+                        evidence = reply_text[:300]
+                        send_completion_confirm(ctx, ai_id, dict(row), evidence)
+                        detected += 1
+                        kw_hit = True
+                        break
+                if not kw_hit:
+                    evidence_list = [
+                        {
+                            "source_type": "slack_thread",
+                            "held_at": "",
+                            "source_ref": row["source_ref"],
+                            "content": r,
+                        }
+                        for r in replies
+                    ]
 
         if kw_hit:
             continue
 
-        # --- 第2段: LLM 判定 ---
+        # --- 第2段: 出典を跨いだ証拠収集 + LLM 判定 ---
         if not use_llm:
             continue
 
-        llm_result = _llm_judge_completion(row["content"], replies)
-        if llm_result:
-            evidence = f"[LLM判定] {llm_result}"
-            send_completion_confirm(ctx, ai_id, dict(row), evidence)
+        evidence_list += _get_activity_evidence(ctx, dict(row))
+        if not evidence_list:
+            continue
+
+        judged = _llm_judge_completion(row["content"], evidence_list)
+        if judged is None:
+            continue
+        is_complete, confidence, reason = judged
+        if not is_complete:
+            continue
+
+        conf_ok = (
+            _CONFIDENCE_ORDER.get(confidence, 0)
+            >= _CONFIDENCE_ORDER.get(min_confidence, 1)
+        )
+        evidence_text = f"[LLM判定/{confidence}] {reason}"
+
+        if auto_close_enabled and conf_ok:
+            if not close_action_item(ctx, ai_id, "argus_auto", note=evidence_text):
+                continue
             detected += 1
+            if not ctx.dry_run:
+                # pm.db のクローズ確定を先に commit してから state.db に記録する
+                # （順序を逆にすると、途中でプロセスが落ちた際に
+                #  「state.db は記録済みだが pm.db は open のまま」の
+                #  スタック状態になり得る）
+                ctx.conn.commit()
+                ctx.state.record_notification("auto_close", target_key)
+
+            if post_close_notify:
+                leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")
+                text = (
+                    ":white_check_mark: *自動クローズ*\n"
+                    f"*AI #{ai_id}*: {(row['content'] or '')[:200]}\n"
+                    f"根拠: {reason[:300]}\n"
+                    "誤りであれば Web UI で再オープンできます。"
+                )
+                send_channel_alert(ctx, leader_ch, text)
+            continue
+
+        # 確信度不足、または auto_close_enabled=false:
+        # 従来どおり担当者へ承認ボタン付き完了確認 DM を送る
+        # （record_notification("completion_confirm", ...) は
+        #  send_completion_confirm 内で送信成功時に記録される）
+        logger.info(
+            "AI #%d: LLM完了判定（確信度=%s, auto_close_enabled=%s）→ 承認確認DMを送信: %s",
+            ai_id, confidence, auto_close_enabled, reason[:80],
+        )
+        send_completion_confirm(ctx, ai_id, dict(row), evidence_text)
+        detected += 1
 
     if detected:
         logger.info("完了シグナル検出: %d 件", detected)
@@ -679,55 +745,149 @@ def _get_recent_articles(data_dir: Path, cutoff_date: str) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # 内部ヘルパー
 # --------------------------------------------------------------------------- #
+_CONFIDENCE_ORDER = {"LOW": 0, "HIGH": 1}
+
 _LLM_COMPLETION_PROMPT = """\
 あなたはプロジェクト管理アシスタントです。
-以下のアクションアイテム（AI）と、そのSlackスレッドの最近の返信を読んで、
+以下のアクションアイテム（AI）と、それに関連しそうな複数の証拠（Slackスレッドの
+返信、会議議事録、別チャンネルでの報告など、出典が異なるものを含む）を読んで、
 このAIが**完了した**と判断できるかを判定してください。
 
 ## アクションアイテム
 {ai_content}
 
-## スレッドの返信（新しい順）
-{replies_text}
+## 証拠（出典付き）
+{evidence_text}
 
 ## 判定基準
+- 同一スレッドの返信に限らず、別の場（会議・別チャンネル・レポート等）での
+  成果物提出・完了報告・対応済み報告も完了の根拠として扱ってよい
 - 明示的な完了報告（「完了」「done」等）だけでなく、成果物の提出・報告・対応済みの報告なども完了とみなす
 - 「検討中」「確認します」「対応予定」等は未完了
 - 部分的な進捗報告は未完了（全体が完了していない限り）
-- 返信内容がAIの内容と無関係な場合は未完了
+- 証拠の内容がAIの内容と無関係な場合は未完了
+- 単に関連する文書・議事録が検索でヒットしただけ、話題が言及されただけでは
+  完了とみなさない。担当者本人または関係者による「成果物の提出・提供」
+  「対応済み・完了した」という明確な報告がある場合のみ完了とする。
+  根拠が間接的・推測に留まる場合は確信度を LOW にすること
+- 判定理由には、根拠とした証拠の出典（source_type・日時・source_ref/会議名）を引用すること
+
+## 確信度
+- 本人／関係者による明確な完了報告など、直接的な証拠がある → HIGH
+- 完了を示唆するが間接的、または推測を伴う → LOW
 
 ## 出力
-完了と判断できる場合: YES: （根拠を1文で）
-完了と判断できない場合: NO
+完了と判断できる場合:
+YES|HIGH: （根拠と出典を1文で）
+YES|LOW: （根拠を1文で）
+完了と判断できない場合:
+NO
 """
 
+_LLM_COMPLETION_RE = re.compile(
+    r"YES\s*\|\s*(HIGH|LOW)\s*:?\s*(.*)", re.IGNORECASE | re.DOTALL
+)
+_LLM_NO_RE = re.compile(r"\bNO\b", re.IGNORECASE)
 
-def _llm_judge_completion(ai_content: str, replies: list[str]) -> str | None:
-    """LLM にスレッド返信を分析させ、AI が完了したか判定する。
 
-    Returns: 完了と判定された場合は根拠テキスト、それ以外は None。
+def _llm_judge_completion(
+    ai_content: str, evidence: list[dict]
+) -> tuple[bool, str | None, str] | None:
+    """LLM に出典付きの証拠を分析させ、AI が完了したか確信度付きで判定する。
+
+    evidence: {"source_type", "held_at", "source_ref", "content"} の辞書のリスト。
+    Returns: (is_complete, confidence, reason) のタプル。confidence は
+    完了時のみ "HIGH"|"LOW"、未完了時は None。LLM 利用不可・パース失敗時は
+    None（呼び出し側は自動判定なしとして扱う）。
     """
+    if not evidence:
+        return None
     try:
         from cli_utils import call_argus_llm
     except ImportError:
         logger.debug("cli_utils が利用不可。LLM 判定をスキップ。")
         return None
 
-    replies_text = "\n---\n".join(r[:500] for r in replies[:10])
+    evidence_text = "\n".join(
+        f"- [出典: {e.get('source_type', '?')} / {e.get('held_at') or '?'} /"
+        f" {e.get('source_ref') or '?'}] {(e.get('content') or '')[:400]}"
+        for e in evidence[:10]
+    )
     prompt = _LLM_COMPLETION_PROMPT.format(
         ai_content=ai_content[:500],
-        replies_text=replies_text,
+        evidence_text=evidence_text,
     )
 
     try:
-        result = call_argus_llm(prompt, timeout=30, max_tokens=200)
-        result = result.strip()
-        if result.upper().startswith("YES"):
-            return result[4:].strip(": 　").strip() or "LLMが完了と判定"
+        # rivault(Kimi-K2-Thinking, thinking無効化不可)が優先ルートの場合、
+        # thinking で数千トークンを消費するため max_tokens は多めに確保する。
+        result = call_argus_llm(prompt, timeout=60, max_tokens=4096).strip()
+        # think ブロックは call_argus_llm 内で除去済みだが、念のため前置き文言が
+        # 残っていてもマッチするよう search でテキスト全体から探す。
+        m = _LLM_COMPLETION_RE.search(result)
+        if m:
+            confidence = m.group(1).upper()
+            reason = m.group(2).strip(": 　").strip() or "LLMが完了と判定"
+            return (True, confidence, reason)
+        if _LLM_NO_RE.search(result):
+            return (False, None, "")
+        logger.warning("完了シグナル LLM 判定: 期待した形式で応答が得られず: %s", result[:100])
     except Exception as e:
         logger.warning("完了シグナル LLM 判定エラー: %s", e)
 
     return None
+
+
+def _get_activity_evidence(ctx, ai_row: dict) -> list[dict]:
+    """qa_index.db から、同一スレッド以外での完了報告・成果物提出等の証拠を検索する。
+
+    config `evidence_from_index`（既定 false）が有効な場合のみ動作する
+    （段階ロールアウト用。qa_index 未構築・検索失敗時は Patrol 全体を落とさない
+    よう例外を握りつぶし [] を返す）。
+    """
+    cfg = ctx.config.get("patrol", {}).get("completion_detection", {})
+    if not cfg.get("evidence_from_index", False):
+        return []
+
+    try:
+        from enrich.knowledge_context import extract_topic_keywords
+
+        content = ai_row.get("content") or ""
+        keywords = extract_topic_keywords(content)
+        query = " ".join(keywords) if keywords else content
+        if not query.strip():
+            return []
+
+        qa_index_path = ctx.data_dir / "qa_index.db"
+        if not qa_index_path.exists():
+            return []
+
+        since_date = None
+        if cfg.get("evidence_since_extracted", True):
+            extracted_at = ai_row.get("extracted_at") or ""
+            if extracted_at:
+                since_date = extracted_at[:10]
+
+        from argus.retrieval import retrieve_chunks_hybrid
+
+        chunks = retrieve_chunks_hybrid(
+            query, qa_index_path,
+            k=cfg.get("evidence_k", 6),
+            since_date=since_date,
+            index_name=cfg.get("evidence_index_name"),
+        )
+        return [
+            {
+                "source_type": c.get("source_type", "?"),
+                "held_at": c.get("held_at", ""),
+                "source_ref": c.get("source_ref", ""),
+                "content": c.get("content", ""),
+            }
+            for c in chunks
+        ]
+    except Exception as e:
+        logger.debug("AI #%s の qa_index 証拠取得エラー: %s", ai_row.get("id"), e)
+        return []
 
 
 _PERMALINK_RE = re.compile(

@@ -182,9 +182,14 @@ def send_channel_alert(ctx, channel_id: str, text: str) -> bool:
 # --------------------------------------------------------------------------- #
 # AI クローズ実行
 # --------------------------------------------------------------------------- #
-def close_action_item(ctx, ai_id: int, resolved_by: str) -> bool:
+def close_action_item(
+    ctx, ai_id: int, resolved_by: str, note: str | None = None
+) -> bool:
     """
     action_items.status を 'closed' に更新し、audit_log に記録する。
+
+    note を指定すると、既存 note に改行区切りで追記する
+    （自動クローズの根拠記録用）。
     """
     from pm_sync_canvas import write_audit_log
 
@@ -202,10 +207,12 @@ def close_action_item(ctx, ai_id: int, resolved_by: str) -> bool:
         logger.info("[DRY] AI #%d を closed に更新", ai_id)
         return True
 
-    write_audit_log(ctx.conn, ai_id, "status", "open", "closed", "argus_patrol")
+    write_audit_log(ctx.conn, ai_id, "status", "open", "closed", resolved_by)
     ctx.conn.execute(
         "UPDATE action_items SET status = 'closed' WHERE id = ?", (ai_id,)
     )
+    if note:
+        _append_close_note(ctx.conn, ai_id, ctx.today, note)
     logger.info("AI #%d を closed に更新 (by %s)", ai_id, resolved_by)
     return True
 
@@ -213,6 +220,19 @@ def close_action_item(ctx, ai_id: int, resolved_by: str) -> bool:
 # --------------------------------------------------------------------------- #
 # 内部ヘルパー
 # --------------------------------------------------------------------------- #
+def _append_close_note(conn, ai_id: int, today: str, evidence_text: str) -> None:
+    """自動クローズの根拠を note 列に追記する（既存 note は保持し改行で連結）。"""
+    row = conn.execute(
+        "SELECT note FROM action_items WHERE id = ?", (ai_id,)
+    ).fetchone()
+    existing = (row["note"] if row else "") or ""
+    entry = f"{today} 自動クローズ: {evidence_text[:200]}"
+    new_note = f"{existing}\n{entry}" if existing else entry
+    conn.execute(
+        "UPDATE action_items SET note = ? WHERE id = ?", (new_note, ai_id)
+    )
+
+
 def _send_dm_or_fallback(
     ctx,
     user_id: str | None,

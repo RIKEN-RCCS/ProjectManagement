@@ -22,6 +22,23 @@
 0件になる実測で棄却）、グローバル recency 無効化（PM 用途の新しさ優先を壊すため 0.15 の軽い重みに留めた）。
 **要注意**: `retrieval.py` の定数変更は稼働中 qa デーモンに未反映 → 反映には `pm_daemon.sh` で qa 再起動。
 
+## 2026-07-14 アクションアイテム自動消化検出（既存 Patrol 完了検出の拡張）
+
+**背景**: 抽出は軌道に乗ったが消化状況の確認が手動。実際はアイテムは日々の活動で消化され会議/Slack で
+報告されている。これを自動で突き合わせ済み化したい。既存 `detect_completion_signals`（slack同一
+スレッド返信のみで完了検出→承認）がほぼ下敷きだった。
+**決定**: 新検出器を並置せず**同関数を拡張**（同一アイテムに複数検出器が別々発火するのと dedup 分散を
+避けるため）。対象を meeting にも広げ、証拠源を qa_index ハイブリッド検索（活動報告全般）へ拡大。
+確定方式はユーザー選択で**完全自動 close**だが、安全弁として①HIGH確信度のみ自動②`auto_close_enabled`
+既定 off の段階投入③note/audit_log(source=argus_auto)/リーダーチャンネル事後通知で可視化・再open可、
+とした。**捨てた案**: CSV→pm_relink 経路（承認ボタンがある以上ムダ）、完了日専用列の追加（audit_log.
+changed_at ＋ note で足り、Phase2 送り）。
+**影響/要注意**: レビューで(a)auto_close無効時に旧承認フローが無音消失する退行→**YESなら無効時/LOW時は
+send_completion_confirm へフォールバック**して解消（毎巡回LLM再実行も同時に抑制）、(b)pm.db一括commit
+と state.db即時commitのクロスDB非原子性→close直後に`ctx.conn.commit()`してから record_notification、
+(c)max_tokens=250 が rivault(Kimi think)で枯渇し判定不発→4096/timeout60 に増、を修正。検証時 glm-5.2 が
+過剰に完了判定する傾向を確認、既定 off での観察をロールアウト前提に置いた（PLAN.md 参照）。
+
 ## 2026-07-13 非think local 呼び出しの reasoning-truncation を根治（reconcile 0字事故の対策）
 
 **背景**: RIKYU glm-5.2 で録音ジョブが失敗（`reconcile_transcript.py` の VTT×Whisper 突合が

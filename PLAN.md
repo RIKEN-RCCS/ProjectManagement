@@ -88,6 +88,30 @@ n=1 デプロイのため、実トラフィックで2週間観察してから定
 → qa デーモン起動環境に `ARGUS_DISABLE_INITIAL_SEARCH=1` を設定して opt-out（要デーモン再起動）。
 問題なければ本エントリを削除し LOG.md に1行「観察完了・定着」を記録。
 
+### アクションアイテム自動消化検出・自動クローズ（コード完了・ロールアウト保留）
+
+**ステータス**: 実装・レビュー・修正・単体検証まで完了（2026-07-14）。既定 config が全て off のため
+本番影響ゼロでマージ可能。設計判断の経緯は LOG.md「アクションアイテム自動消化検出」参照。
+
+**何をしたか**: 既存 Patrol の `detect_completion_signals`（`scripts/argus/patrol/detect.py`）を拡張。
+対象を `source IN ('slack','meeting')` に広げ、`_get_activity_evidence` が qa_index.db の
+ハイブリッド検索で活動報告（議事録・別チャンネルSlack・レポート）を証拠として引き、LLM が
+確信度付き（`YES|HIGH` / `YES|LOW` / `NO`）で完了判定。HIGH かつ `auto_close_enabled` のときのみ
+完全自動 close（＋note追記＋audit_log source=`argus_auto`＋リーダーチャンネル事後通知）、
+それ以外（auto_close無効 or LOW）は旧来の承認ボタン DM へフォールバック（退行なし）。
+
+**残作業（ロールアウト、PMが段階判断）**:
+1. **config 追加**: `data/patrol_config.yaml` の `patrol.completion_detection.*` に新キーを追記
+   （`evidence_from_index` / `evidence_index_name` / `evidence_k` / `evidence_since_extracted` /
+   `auto_close_enabled` / `auto_close_min_confidence` / `post_close_notify`。既定値はコード側にあり）。
+2. **証拠検索の有効化と観察**: まず `evidence_from_index: true`・`auto_close_enabled: false` で、
+   承認ボタン経路のまま活動報告ベース検出の精度を dry-run/実運用ログで観察。
+3. **LLM 過剰 HIGH 付与のチューニング**: 検証時 glm-5.2 が「関連文書がヒットしただけ」で完了寄りに
+   判定する傾向を確認済み。プロンプトに抑制文を追加済みだが、実データで HIGH 精度を要観察。
+   誤検出が多ければ閾値・プロンプトを調整してから `auto_close_enabled: true` に上げる。
+4. **反映**: patrol は cron/都度プロセスなので次回起動で反映（qa デーモン再起動不要 —
+   `pm_qa_server.py` は `confirm.py` のみ import、`detect.py`/`actions.py` は読まない）。
+
 ---
 
 ## 保留中の構想
