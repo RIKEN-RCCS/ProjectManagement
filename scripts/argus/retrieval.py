@@ -21,10 +21,15 @@ logger = logging.getLogger("pm_qa_server")
 TOP_K_RETRIEVE = 30   # FTS 検索で広めに取得する件数
 TOP_K_RERANK = 5      # re-rank 後に回答生成へ渡す件数
 
-# 鮮度の半減期（日数）。180 日 = 約 6 ヶ月で recency_score が 0.5 になる
-_RECENCY_HALF_LIFE_DAYS = 180.0
-# 統合スコアでの鮮度重み（0=BM25 のみ、1=鮮度のみ）
-_RECENCY_WEIGHT = 0.4
+# 鮮度の半減期（日数）。365 日 = 約 1 年で recency_score が 0.5 になる。
+# 以前は 180 日（6ヶ月）と急峻で、関連性の高い歴史的マイルストーン
+# （移植完了・OSS公開・初回性能測定等）が synthesis の上位から締め出されていた。
+# プロジェクト全期間の実績を検索対象にできるよう緩やかな減衰に変更。
+_RECENCY_HALF_LIFE_DAYS = 365.0
+# 統合スコアでの鮮度重み（0=BM25/関連性のみ、1=鮮度のみ）。
+# 以前は 0.4 と大きく、鮮度が関連性を押しのけていた。関連性を主・鮮度を軽い
+# タイブレークに落とすため 0.15 に緩和（PM 用途の軽い新しさ優先は維持）。
+_RECENCY_WEIGHT = 0.15
 
 _VECTOR_SEARCH_WEIGHT = 0.4  # RRF での vector スコアの重み
 _VECTOR_K = 50  # vector 検索の取得件数
@@ -540,7 +545,7 @@ def rerank_chunks(question: str, chunks: list[dict],
 
     prompt = (
         f"以下のチャンク一覧から、質問に最も関連するものを{top_k}件選んでください。\n"
-        f"**直近の議論を優先してください。**\n"
+        f"**関連性を最優先し、同程度に関連する場合のみ新しいものを優先してください。**\n"
         f"番号のみをスペース区切りで出力してください（例: 0 3 7 12 15）。\n\n"
         f"質問: {question}\n\n"
         f"チャンク一覧:\n{context_str}"

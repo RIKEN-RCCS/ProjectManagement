@@ -1,8 +1,12 @@
 """Pure-function tests for pm_qa_server (no DB / no LLM)."""
 from datetime import date
 
+from datetime import timedelta
+
 import pytest
 from argus.retrieval import (
+    _RECENCY_HALF_LIFE_DAYS,
+    _RECENCY_WEIGHT,
     _combined_score,
     _recency_score,
     _rrf_merge,
@@ -57,18 +61,17 @@ def test_recency_today_is_one():
 
 
 def test_recency_half_life_is_half():
-    """After _RECENCY_HALF_LIFE_DAYS (180), score is 0.5."""
+    """After _RECENCY_HALF_LIFE_DAYS, score is 0.5（定数変更に追随）。"""
     today = date(2026, 6, 19)
-    held = date(2025, 12, 21)  # ~180 days earlier
+    held = today - timedelta(days=int(_RECENCY_HALF_LIFE_DAYS))
     score = _recency_score(held.isoformat(), today)
     assert score == pytest.approx(0.5, abs=0.02)
 
 
 def test_recency_double_half_life_is_quarter():
     today = date(2026, 6, 19)
-    held = today.replace(year=today.year - 1)  # 365 days earlier
+    held = today - timedelta(days=int(_RECENCY_HALF_LIFE_DAYS) * 2)
     score = _recency_score(held.isoformat(), today)
-    # exp(-365/180 * ln2) ≈ 0.245
     assert score == pytest.approx(0.25, abs=0.02)
 
 
@@ -82,7 +85,7 @@ def test_combined_no_rank_uses_default_bm25():
     chunk = {"rank": None, "held_at": "2026-06-19"}
     score = _combined_score(chunk, today)
     # bm25_norm = 0.5, rec = 1.0
-    expected = (1 - 0.4) * 0.5 + 0.4 * 1.0
+    expected = (1 - _RECENCY_WEIGHT) * 0.5 + _RECENCY_WEIGHT * 1.0
     assert score == pytest.approx(expected)
 
 
@@ -91,7 +94,7 @@ def test_combined_rank_zero_max_bm25():
     chunk = {"rank": 0.0, "held_at": "2026-06-19"}
     # r = -0 = 0, bm25_norm = 1/(1+0) = 1.0
     score = _combined_score(chunk, today)
-    expected = (1 - 0.4) * 1.0 + 0.4 * 1.0
+    expected = (1 - _RECENCY_WEIGHT) * 1.0 + _RECENCY_WEIGHT * 1.0
     assert score == pytest.approx(expected)
 
 
@@ -99,7 +102,7 @@ def test_combined_invalid_rank_uses_half_bm25():
     today = date(2026, 6, 19)
     chunk = {"rank": "invalid", "held_at": "2026-06-19"}
     score = _combined_score(chunk, today)
-    expected = (1 - 0.4) * 0.5 + 0.4 * 1.0
+    expected = (1 - _RECENCY_WEIGHT) * 0.5 + _RECENCY_WEIGHT * 1.0
     assert score == pytest.approx(expected)
 
 

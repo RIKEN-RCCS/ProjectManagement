@@ -639,6 +639,83 @@ def index_web(
     return count
 
 
+def backfill_embeddings(index_conn, logger, *, refresh_all=False, batch_size=256, limit=None):
+    """chunks に bge-m3 埋め込みを計算して chunk_embeddings に保存する。
+
+    refresh_all=False: chunk_embeddings 未登録の chunk のみ（増分）。
+    refresh_all=True:  全 chunk を再計算（--embed-backfill 用）。
+    limit: デバッグ用の件数上限（None で全件）。
+    埋め込みエンドポイント未到達時は WARN してスキップ（FTS 構築は成功済みのため全体は失敗させない）。
+    戻り値: 埋め込みを書き込んだ件数。
+    """
+    try:
+        from embed_utils import (
+            _resolve_endpoint,
+            embed_batch,
+            healthcheck,
+            vector_to_blob,
+        )
+    except ImportError as e:
+        logger.warning(f"embedding: embed_utils を読み込めません - {e}")
+        return 0
+
+    if not healthcheck():
+        logger.warning("埋め込みエンドポイント未到達 — embedding 計算をスキップ（FTS のみ）")
+        return 0
+
+    model = _resolve_endpoint()[2]
+
+    index_conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id NOT IN (SELECT id FROM chunks)")
+    index_conn.commit()
+
+    if refresh_all:
+        query = "SELECT id, content FROM chunks WHERE content IS NOT NULL AND content != ''"
+    else:
+        query = (
+            "SELECT c.id, c.content FROM chunks c"
+            " LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id"
+            " WHERE e.chunk_id IS NULL AND c.content IS NOT NULL AND c.content != ''"
+        )
+    params: tuple = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        params = (limit,)
+    rows = index_conn.execute(query, params).fetchall()
+
+    total = len(rows)
+    if total == 0:
+        logger.info("embedding: 対象チャンクなし（最新）")
+        return 0
+
+    logger.info(f"embedding: {total} チャンクを計算します (model={model}, refresh_all={refresh_all})")
+
+    done = 0
+    for i in range(0, total, batch_size):
+        batch = rows[i:i + batch_size]
+        ids = [r[0] for r in batch]
+        texts = [r[1] for r in batch]
+        try:
+            vecs = embed_batch(texts)
+        except Exception as e:
+            logger.warning(f"embedding バッチ失敗 (offset {i}): {e} — 中断して部分保存")
+            break
+
+        ts = now_iso()
+        for cid, vec in zip(ids, vecs, strict=True):
+            if vec is None or int(vec.shape[0]) == 0 or not vec.any():
+                continue
+            index_conn.execute(
+                "INSERT OR REPLACE INTO chunk_embeddings"
+                " (chunk_id, model, dim, vector, embedded_at) VALUES (?, ?, ?, ?, ?)",
+                (cid, model, int(vec.shape[0]), vector_to_blob(vec), ts),
+            )
+        done += len(batch)
+        index_conn.commit()
+        logger.info(f"  embedding 進捗: {done}/{total}")
+
+    return done
+
+
 # --- メイン ---
 
 def build_index(
@@ -801,6 +878,12 @@ def main() -> None:
             "SELECT index_name, COUNT(*) FROM chunk_indexes GROUP BY index_name ORDER BY index_name"
         ):
             logger.info(f"  {r[0]}: {r[1]}")
+
+        if args.skip_embed:
+            logger.info("embedding: --skip-embed によりスキップ")
+        else:
+            n_emb = backfill_embeddings(index_conn, logger, refresh_all=args.embed_backfill)
+            logger.info(f"embedding: {n_emb} 件を chunk_embeddings に保存")
     index_conn.close()
 
     if args.dry_run:
