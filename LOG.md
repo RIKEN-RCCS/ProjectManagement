@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-07-16 エグゼクティブサマリー「完了」列の充実と埋め込み索引の実装
+
+**背景**: `pm_nvidia_collab_update.sh` の executive_summary pptx で「完了したこと」が薄く（一部1件・
+手続き的メモ）、1.5年の活動成果に見えなかった。調査の結果、真因は pptx 表示ではなく上流にあった。
+**判明した真因**: (1) 埋め込み索引化がハイブリッド検索導入コミット(7c8e4ab, 2026-06-12)から**未実装**で
+`chunk_embeddings` が常に空 → 全 /argus 検索が約1ヶ月 trigram FTS のみに退化、(2) recency 重み過大
+(0.4 / 半減期180日)で歴史的マイルストーンが synthesis から締め出し、(3) Pass2 の `--since` が直近
+4.5ヶ月に限定。
+**対応**: `pm_embed.py` に埋め込み索引化を実装（全26,902件構築）、`retrieval.py` の recency を緩和
+(0.15 / 365日)、`.sh` の窓を 2025-04-01 に拡張、`pm_exec_summary.py` の完了列を
+「recency非適用ハイブリッド検索＋LLM凝縮」の**決定的経路**に変更（next/vendor はレポート由来のまま）。
+**捨てた案**: 完了列を investigエージェント出力に依存し続ける案（run 毎に空/薄のムラ、SCALE-LETKF が
+0件になる実測で棄却）、グローバル recency 無効化（PM 用途の新しさ優先を壊すため 0.15 の軽い重みに留めた）。
+**要注意**: `retrieval.py` の定数変更は稼働中 qa デーモンに未反映 → 反映には `pm_daemon.sh` で qa 再起動。
+
 ## 2026-07-13 非think local 呼び出しの reasoning-truncation を根治（reconcile 0字事故の対策）
 
 **背景**: RIKYU glm-5.2 で録音ジョブが失敗（`reconcile_transcript.py` の VTT×Whisper 突合が
