@@ -21,10 +21,10 @@
 │  pm_box_crawl.py  → data/box_docs.db                                    │
 │  pm_slack_box_links.py → data/docs_*.db                                 │
 │  pm_web_fetch.py  → data/web_articles.db                                │
-│  pm_ingest.py (slack/minutes/goals の pm.db への転記)                    │
+│  pm_ingest.py (slack/minutes/goals/achievements の pm.db への転記)        │
 │                                                                         │
 │  ★ ここで pm.db が「正本」になる                                        │
-│     action_items / decisions / meetings / goals / milestones             │
+│     action_items / decisions / meetings / goals / milestones / achievements │
 └──────────────────────┬──────────────────────────────────────────────────┘
                        │
                        ▼
@@ -97,6 +97,10 @@
 旧「ナレッジ層 (knowledge.db)」は 2026-06-16 廃止（経緯は LOG.md）。
 背景知識は pm.db.decisions の rationale で代替。
 
+ボトムアップ層のうち「アプリ別の完了実績」は `pm.db.achievements`（2026-07-16 新設）に
+確定台帳として永続化する。decisions/action_items が都度ライブ抽出・ライブ検索されるのに対し、
+achievements は一度 confirmed になった行を検索せず直接参照する点が異なる（経緯は LOG.md）。
+
 **LLM と人間の役割分担**:
 
 | 活動 | 担当 |
@@ -133,18 +137,24 @@
                                   pm_ingest.py
                                   ├── slack.py  (slack.db → pm.db)
                                   ├── minutes.py (minutes/*.db → pm.db)
-                                  └── goals.py  (goals.yaml → pm.db)
+                                  ├── goals.py  (goals.yaml → pm.db)
+                                  └── achievements.py (qa_index.db検索+LLM抽出 → pm.db)
                                         │
                                         ▼
-                                  ┌─────────┐
-                                  │ pm.db   │ ← 正本
-                                  │ actions  │
-                                  │ decisions│
-                                  │ meetings │
-                                  │ goals    │
-                                  │ milestones│
-                                  └─────────┘
+                                  ┌─────────────┐
+                                  │ pm.db       │ ← 正本
+                                  │ actions      │
+                                  │ decisions    │
+                                  │ meetings     │
+                                  │ goals        │
+                                  │ milestones   │
+                                  │ achievements │
+                                  └─────────────┘
 ```
+
+`achievements.py` は Slack/議事録のような一次情報源を持たず、既存 qa_index.db（pm系索引）を
+recency 非適用でハイブリッド検索した結果を `enrich/achievements_extract.py` で LLM 凝縮する
+特殊なプラグイン（詳細は Pass 2 エンリッチメント節・LOG.md 参照）。
 
 ### 補助的な収集
 
@@ -196,6 +206,11 @@ pm.db (新規レコード)
   ▼
 pm.db (UPDATE)
 ```
+
+`scripts/enrich/achievements_extract.py` はこのディレクトリに置かれているが、既存レコードを
+補完する enrich_items.py とは役割が異なり、qa_index.db 検索＋LLM抽出で**新規の achievements
+行を生成する**共有ロジック（`ingest/achievements.py` と `pm_exec_summary.py` の完了列から
+呼ばれる）。
 
 ### FTS5 + embedding 索引 (pm_embed.py)
 
@@ -307,6 +322,7 @@ pm_qa_server.py (Socket Mode デーモン)
 |---|---|---|
 | pm_report.xlsx | `pm_xlsx_report.py` | Web UI から手動、または CRON |
 | pm_report.xlsx | `pm_minutes_publish.py --xlsx-only` | Actions/Decisions 保存時に自動 |
+| pm_report.xlsx「実績」シート | `pm_xlsx_report.py` | 上記と同じ経路で自動出力（confirmed のみ・表示専用、逆同期なし） |
 | 議事録 Markdown | `pm_minutes_catalog.py --upload` | 手動/Web UI |
 | 議事録 Markdown | `pm_minutes_publish.py` (Stage 2) | Minutes 編集保存時に自動 |
 
@@ -317,6 +333,7 @@ pm_qa_server.py (Socket Mode デーモン)
 | Dashboard | 統計サマリー、サービス状態、最近の議事録 | pm.db / admin_jobs / minutes/*.db |
 | Actions (ag-Grid) | アクションアイテム一覧・編集・保存 | pm.db → (保存時) Box XLSX 自動更新 |
 | Decisions (ag-Grid) | 決定事項一覧・編集・保存 | pm.db → (保存時) Box XLSX 自動更新 |
+| 実績 (ag-Grid) | アプリ別実績台帳の一覧・status(confirmed/rejected) 編集・保存 | pm.db.achievements → (保存時) Box XLSX 自動更新 |
 | Recording | 録音ファイルアップロード → 議事録パイプライン | processing/ → minutes/*.db |
 | Ingest | Slack/minutes/goals 取り込み実行 | AdminJobQueue → pm_ingest.py |
 | Knowledge | Embed (FTS5 索引再構築) 実行 | AdminJobQueue → pm_embed.py |
@@ -332,7 +349,7 @@ pm_qa_server.py (Socket Mode デーモン)
 |---|---|---|---|---|
 | `data/slack.db` | Slack 生データ（全チャンネル統合）| `slack_pipeline.py` | `pm_ingest.py`, Argus | ✅ |
 | `data/minutes/{kind}.db` | 議事録詳細 | `pm_minutes_import.py` | `pm_ingest.py`, Argus, Web UI | ✅ |
-| `data/pm.db` | **正本**: action_items/decisions/meetings/goals/milestones | `pm_ingest.py`, `enrich_items.py`, Web UI, `pm_sync_canvas.py`, `pm_xlsx_sync.py` | 全スクリプト | ✅ |
+| `data/pm.db` | **正本**: action_items/decisions/meetings/goals/milestones/achievements | `pm_ingest.py`, `enrich_items.py`, Web UI, `pm_sync_canvas.py`, `pm_xlsx_sync.py` | 全スクリプト | ✅ |
 | `data/docs_*.db` | BOX ドキュメントメタデータ | `pm_slack_box_links.py` | `pm_box_crawl.py` | ✅ |
 | `data/box_docs.db` | BOX ドキュメント本文 (Markdown) | `pm_box_crawl.py` | `pm_embed.py` | ✅ |
 | `data/web_articles.db` | 外部 Web 記事 | `pm_web_fetch.py` | `pm_embed.py` | ✅ |
@@ -404,6 +421,7 @@ scripts/
 ├── ingest/                            Pass 1: pm_ingest.py プラグイン
 │   ├── pm_ingest.py                   統合ランナー
 │   ├── slack.py / minutes.py / goals.py
+│   ├── achievements.py                実績台帳 populator → pm.db.achievements
 │   └── ingest_plugin.py
 │
 ├── data-pipeline/                     Pass 1: 一次情報収集
@@ -423,7 +441,8 @@ scripts/
 ├── enrich/                            Pass 2: エンリッチメント
 │   ├── enrich_items.py                pm.db 補完
 │   ├── knowledge_context.py           過去ナレッジ取得（FTS5 検索）
-│   └── pm_link_milestones.py          マイルストーン LLM 紐づけ
+│   ├── pm_link_milestones.py          マイルストーン LLM 紐づけ
+│   └── achievements_extract.py        実績検索+LLM凝縮（achievements.py / exec_summary 共有）
 │
 ├── quality/                           データ品質
 │   ├── pm_screen.py                   重複検出

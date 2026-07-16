@@ -107,6 +107,31 @@ Slack API の latest_reply  vs  MAX(replies.msg_ts)
 `pm_minutes_import.py::_parse_decisions()` / `scripts/ingest/slack.py::save_slack_items()` が
 分離して保存する。詳細は `data/FugakuNEXT_Argus_designsheet.docx` および PLAN.md「Argus 垂直軸」参照。
 
+#### achievements（実績台帳、per-app。2026-07-16 追加）
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `id` | INTEGER | PK（AUTOINCREMENT） |
+| `app` | TEXT | アプリ名 |
+| `title` | TEXT | 実績サマリ（短い一句） |
+| `category` | TEXT | 実績の種別（移植/性能測定/公開/登録/ベンチ収録/評価等） |
+| `achieved_on` | TEXT | 達成時期（`YYYY-MM` または `YYYY-MM-DD`。不明なら空文字） |
+| `evidence_ref` | TEXT | 根拠の出典参照 |
+| `evidence_quote` | TEXT | 根拠となった原文の抜粋 |
+| `confidence` | TEXT | LLM抽出の確信度（`high` / `low`） |
+| `status` | TEXT | 人間検収ゲート（`proposed` / `confirmed` / `rejected`。デフォルト `proposed`） |
+| `source` | TEXT | 抽出元（デフォルト `argus_auto`） |
+| `dedup_key` | TEXT | UNIQUE。`app\|正規化title` から生成し冪等 upsert のキーに使う |
+| `created_at` / `updated_at` | TEXT | 作成日時・更新日時 |
+| `deleted` | INTEGER | 論理削除フラグ（0=有効、1=削除済み。デフォルト0） |
+
+差分判定: populator (`scripts/ingest/achievements.py`) は既存 title を LLM に見せる「台帳認識抽出」＋
+run内 self-dedup（embedding貪欲クラスタリング）＋既存行との embedding 類似度0.85比較で重複候補を
+除外したうえで、`dedup_key` への `ON CONFLICT DO UPDATE` により冪等 upsert する。`confidence=high`
+は自動的に `confirmed`、それ以外は `proposed` のまま人間の検収を待つ。`status` が `confirmed` /
+`rejected` の行は再実行時に本文を上書きしない（人間の確定・却下を保護）。exec summary / Box XLSX
+は `confirmed` の行のみを使用する。
+
 #### slack_extractions（抽出済みスレッド管理）
 
 | カラム | 型 | 説明 |

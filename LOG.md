@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-07-16 実績DB（achievements ledger）を新設し「完了」列の検索依存を断つ
+
+**背景**: 前エントリの通り「完了列をinvestigエージェントの都度検索に依存する」設計は run 毎に
+薄い/空になるムラがあり（SCALE-LETKF が 0 件になる実測）、根本原因は「過去の完了実績は一度確定
+すれば変化しないのに毎回検索し直している」ミスマッチだった。
+**決定**: pm.db に per-app の `achievements` テーブルを新設し、確定した実績は検索せず参照する
+方式に変更。信頼モデルはハイブリッド（confidence=high→自動confirmed、low→proposedで人間が
+Web UIの「実績」タブで検収）とし、全自動（誤り混入リスク）にも全人力（運用負荷）にも寄せなかった。
+Box XLSXの「実績」シートは confirmed のみ・表示専用・逆同期なし — Web UI を編集の唯一の正路に
+保つため。捨てた案: 完了列をライブ検索のまま維持し続ける案（上記の実測により棄却）。
+**影響**: `pm_exec_summary.py` の完了列は「確定実績DB→ライブ検索フォールバック」に縮退、
+`/argus` に `get_app_achievements` ツールを追加し investigate が自動参照。本番 pm.db に全6アプリ
+39件投入済み。多層 dedup（既存title認識＋run内self-dedup＋embedding類似度0.85＋dedup_key）で
+再実行冪等、人間の confirmed/rejected は再実行時に保護される。
+
 ## 2026-07-16 エグゼクティブサマリー「完了」列の充実と埋め込み索引の実装
 
 **背景**: `pm_nvidia_collab_update.sh` の executive_summary pptx で「完了したこと」が薄く（一部1件・

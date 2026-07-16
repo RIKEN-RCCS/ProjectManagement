@@ -112,6 +112,22 @@ n=1 デプロイのため、実トラフィックで2週間観察してから定
 4. **反映**: patrol は cron/都度プロセスなので次回起動で反映（qa デーモン再起動不要 —
    `pm_qa_server.py` は `confirm.py` のみ import、`detect.py`/`actions.py` は読まない）。
 
+### 実績DB（achievements ledger）の運用定着（コード完了・運用整備が残る）
+
+**ステータス**: 本体実装・本番投入完了（2026-07-16、経緯は LOG.md「実績DB（achievements ledger）を
+新設」参照）。全6アプリ39件投入済みで `/argus` の `get_app_achievements` も稼働中。以下は残る運用整備。
+
+**残作業**:
+1. **定期 populate の cron 化** — 現状は手動 `pm_ingest.py achievements` 実行のみ。新規完了実績を
+   拾う頻度を決めて `pm_box_update.sh` 等の夜間バッチに乗せるか判断する。
+2. **rejected の再提案抑止** — `scripts/ingest/achievements.py` の `known_titles` 抽出は
+   `status IN ('confirmed','proposed')` のみで `rejected` を含めていないため、人間が却下した実績が
+   次回 run で再提案されうる。`known_titles` に rejected も加えて抑止する。
+3. **per-app commit** — 現状 `ctx.pm_conn.commit()` は全アプリ処理後の一括 1 回のみ。途中失敗時に
+   全アプリ分の upsert が失われるため、アプリ単位でコミットするよう変更を検討。
+4. **抽出品質の polish** — `evidence_ref` が日付のみで出典（議事録/Slack/レポート等）ラベルが無く
+   検証しづらい。また `title` にアプリ名が重複して入るケースがあり表記の正規化余地がある。
+
 ---
 
 ## 保留中の構想
