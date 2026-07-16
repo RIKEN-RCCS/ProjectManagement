@@ -1241,9 +1241,19 @@ def admin_minutes_delete(req: DeleteMinutesRequest):
 
 # 静的ファイル配信（API ルートより後に配置）
 # --------------------------------------------------------------------------- #
+class _NoCacheStaticFiles(StaticFiles):
+    """ブラウザのヒューリスティックキャッシュによる旧JS再利用を防ぐため
+    Cache-Control: no-cache を付与する（毎回 etag で再検証させる）。"""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 _static_dir = Path(__file__).resolve().parent.parent / "static"
 if _static_dir.is_dir():
-    app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")
+    app.mount("/", _NoCacheStaticFiles(directory=str(_static_dir), html=True), name="static")
 
 
 # --------------------------------------------------------------------------- #
