@@ -267,6 +267,25 @@ CREATE TABLE IF NOT EXISTS ledger_edges (
     created_at    TEXT,
     UNIQUE(edge_type, from_kind, from_id, to_kind, to_id)
 );
+
+-- 実績台帳: アプリ別の完了実績（LLM抽出 + 重複排除で埋める）。
+CREATE TABLE IF NOT EXISTS achievements (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    app             TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    category        TEXT,
+    achieved_on     TEXT,
+    evidence_ref    TEXT,
+    evidence_quote  TEXT,
+    confidence      TEXT DEFAULT 'low',
+    status          TEXT DEFAULT 'proposed',
+    source          TEXT DEFAULT 'argus_auto',
+    dedup_key       TEXT UNIQUE,
+    created_at      TEXT,
+    updated_at      TEXT,
+    deleted         INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_achievements_app ON achievements(app);
 """
 
 
@@ -416,6 +435,16 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
             # 2026-07-05: 選別ゲート（設計書§4: 荷重を持つ決定だけを台帳へ取り込む）
             "ALTER TABLE decisions ADD COLUMN ledger_gate TEXT",
             "ALTER TABLE decisions ADD COLUMN ledger_gate_reason TEXT",
+            # 2026-07-16: 実績台帳（achievements ledger）Phase 1
+            (
+                "CREATE TABLE IF NOT EXISTS achievements ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, app TEXT NOT NULL, title TEXT NOT NULL, "
+                "category TEXT, achieved_on TEXT, evidence_ref TEXT, evidence_quote TEXT, "
+                "confidence TEXT DEFAULT 'low', status TEXT DEFAULT 'proposed', "
+                "source TEXT DEFAULT 'argus_auto', dedup_key TEXT UNIQUE, "
+                "created_at TEXT, updated_at TEXT, deleted INTEGER DEFAULT 0)"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_achievements_app ON achievements(app)",
         ],
     )
 

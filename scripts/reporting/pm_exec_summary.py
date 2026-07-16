@@ -32,6 +32,7 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from enrich.achievements_extract import extract_completed_titles
 from utils.llm import call_argus_llm
 from utils.pptx_theme import (
     DARK,
@@ -62,10 +63,6 @@ _CATEGORY_LABELS_EN = {
 _MAX_ITEMS = {"completed": 5, "next": 3, "vendor": 3}
 _MAX_CHARS = {"completed": 30, "next": 34, "vendor": 34}
 
-# 完了列を決定的に生成するためのハイブリッド検索設定
-_COMPLETED_SEARCH_INDEX = "pm"          # 検索対象 index（マイルストーン発言は pm に含まれる）
-_COMPLETED_SEARCH_K = 20                 # 取得チャンク数
-
 _EXTRACT_PROMPT = """以下は「{app}」というアプリケーションの評価状況レポートです。
 このレポートを、経営層向けエグゼクティブサマリーの3カテゴリに凝縮してください。
 
@@ -92,25 +89,6 @@ _EXTRACT_PROMPT = """以下は「{app}」というアプリケーションの評
 ## レポート本文
 ---
 {report}
-"""
-
-_COMPLETED_PROMPT = """以下は「{app}」に関する検索結果（プロジェクト全期間）です。
-この中から、{app} が**実際に完了・達成した重要なマイルストーン**を最大{max_items}件抽出してください。
-
-## 抽出ルール
-- 対象: GPU移植/CUDA・OpenACC対応、性能測定、ベンチマーク収録、OSS・GitHub公開、EEA登録、実機評価 等の**実績**。
-- 検索結果が「〜済み/公開/実施/測定完了/対応済み」等、実績として記述している事項を採用してよい（明示的な完了報告メッセージが無くても可）。ただし検索結果に無い推測は書かない。
-- 各項目は名詞止めの短い一句（20字以内）。日付が分かれば末尾に (2025-12) の形で添える。
-- 資料作成・会議記録・「〜に言及」「対応を記録」等の手続き的メモは書かない。実質的な成果のみ。
-- {app} 以外のアプリの実績は含めない。該当が無ければ空配列 [] とする。
-- 出力は JSON のみ。前置き・説明・コードフェンス外テキスト禁止。
-
-## 出力フォーマット（例）
-{{"completed": ["OpenACC版をGitHub公開(2025-12)", "富岳ベースライン性能測定", "FS_Benchmarks収録", "EEA登録完了"]}}
-
-## 検索結果
----
-{candidates}
 """
 
 _TRANSLATE_SYSTEM = (
@@ -179,61 +157,6 @@ def extract_buckets(app_name: str, md_text: str) -> dict:
         except Exception as e:  # noqa: BLE001 — 1件の失敗で全体を止めない
             print(f"[WARN] {app_name}: 抽出失敗 (試行{attempt + 1}/2): {e}", file=sys.stderr)
     return _empty_buckets()
-
-
-def _retrieve_completed_candidates(app_name: str) -> list[str] | None:
-    """アプリ名で recency 非適用のハイブリッド検索を行い、完了実績の候補チャンク本文を返す。
-
-    DB/検索が使えない場合は None（呼び出し側がレポート由来の completed にフォールバック）。
-    プロジェクト全期間を対象にするため since_date は指定しない。
-    """
-    try:
-        from argus.mcp_tools import _QA_INDEX
-        from argus.retrieval import retrieve_chunks_hybrid
-        if not _QA_INDEX.exists():
-            return None
-        query = (
-            f"{app_name} がこれまでに完了・達成した実績・マイルストーン: "
-            f"GPU移植 CUDA対応 OpenACC対応 性能測定 ベンチマーク収録 OSS公開 "
-            f"GitHub公開 EEA登録 実機評価 リリース"
-        )
-        chunks = retrieve_chunks_hybrid(
-            query, _QA_INDEX, k=_COMPLETED_SEARCH_K,
-            index_name=_COMPLETED_SEARCH_INDEX, since_date=None,
-        )
-        if not chunks:
-            return None
-        out = []
-        for c in chunks:
-            held = (c.get("held_at") or "")[:7]  # YYYY-MM
-            content = (c.get("content") or "").strip().replace("\n", " ")[:300]
-            if content:
-                out.append(f"[{held}] {content}")
-        return out or None
-    except Exception as e:  # noqa: BLE001 — 検索失敗でも全体は止めない
-        print(f"[WARN] {app_name}: 完了検索失敗、レポート由来にフォールバック: {e}", file=sys.stderr)
-        return None
-
-
-def _extract_completed_from_search(app_name: str) -> list[str] | None:
-    """検索ベースで completed バケットを生成する。失敗/該当なしは None。"""
-    candidates = _retrieve_completed_candidates(app_name)
-    if not candidates:
-        return None
-    prompt = _COMPLETED_PROMPT.format(
-        app=app_name, max_items=_MAX_ITEMS["completed"],
-        candidates="\n\n".join(candidates),
-    )
-    for attempt in range(2):
-        try:
-            raw = call_argus_llm(prompt, timeout=180, max_tokens=1024, temperature=0.2)
-            data = extract_json(raw)
-            items = _sanitize_buckets({"completed": data.get("completed", []),
-                                       "next": [], "vendor": []})["completed"]
-            return items or None
-        except Exception as e:  # noqa: BLE001
-            print(f"[WARN] {app_name}: 完了凝縮失敗 (試行{attempt + 1}/2): {e}", file=sys.stderr)
-    return None
 
 
 def translate_buckets(buckets_by_app: list[dict]) -> list[dict]:
@@ -359,9 +282,11 @@ def main() -> int:
         print(f"[INFO] 抽出中: {app_name}", file=sys.stderr)
         buckets = extract_buckets(app_name, md_text)   # next/vendor と completed(フォールバック)
         if not args.no_completed_search:
-            searched = _extract_completed_from_search(app_name)
-            if searched:
-                buckets["completed"] = searched
+            titles = extract_completed_titles(app_name)
+            if titles:
+                buckets["completed"] = _sanitize_buckets(
+                    {"completed": titles, "next": [], "vendor": []}
+                )["completed"]
         buckets_by_app.append({"app": app_name, **buckets})
 
     if not buckets_by_app:
