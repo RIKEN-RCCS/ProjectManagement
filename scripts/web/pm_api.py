@@ -463,12 +463,19 @@ def create_achievement(req: NewAchievementRequest):
         "INSERT INTO achievements"
         " (app,title,category,achieved_on,evidence_ref,evidence_quote,"
         "  confidence,status,source,dedup_key,created_at,updated_at)"
-        " VALUES(?,?,?,?,?,?,'low','proposed','web_ui',?,?,?)",
+        " VALUES(?,?,?,?,?,?,'low','proposed','web_ui',?,?,?)"
+        " ON CONFLICT(dedup_key) DO NOTHING",
         (app_name, title, nv(req.category), nv(req.achieved_on),
          nv(req.evidence_ref), nv(req.evidence_quote), dedup_key, now_ts, now_ts),
     )
+    if cur.rowcount == 0:
+        row = conn.execute(
+            "SELECT id FROM achievements WHERE dedup_key=?", (dedup_key,),
+        ).fetchone()
+        conn.commit()
+        return {"ok": True, "id": row["id"] if row else None, "created": False}
     conn.commit()
-    return {"ok": True, "id": cur.lastrowid}
+    return {"ok": True, "id": cur.lastrowid, "created": True}
 
 
 # --- Minutes endpoint --- #

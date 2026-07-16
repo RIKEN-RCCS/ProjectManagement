@@ -42,7 +42,7 @@ def _normalize_title(title: str) -> str:
 
 
 def _dedup_key(app: str, title: str) -> str:
-    return f"{app}|{_normalize_title(title)}"
+    return f"{str(app).strip()}|{_normalize_title(title)}"
 
 
 def _semantic_max_similarity(title: str, existing_vecs, log=print) -> float:

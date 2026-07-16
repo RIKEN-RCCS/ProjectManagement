@@ -61,6 +61,7 @@ SHEET_AI = "アクションアイテム"
 SHEET_DEC = "決定事項"
 SHEET_RISK = "要注意事項"
 SHEET_MS = "プロジェクトの現在地"
+SHEET_ACH = "実績"
 
 # 編集可能フィールド（pm_xlsx_sync.py と同じ定義を共有する）
 AI_EDITABLE = ["content", "assignee", "due_date", "milestone_id", "status", "note"]
@@ -97,6 +98,15 @@ RISK_COLUMNS = [
     ("対応状況",     "note",              False),
     ("出典",         "_source_link",      False),
 ]
+ACH_COLUMNS = [
+    ("アプリ",       "app",               False),
+    ("実績",         "title",             False),
+    ("分類",         "category",          False),
+    ("時期",         "achieved_on",       False),
+    ("確信度",       "confidence",        False),
+    ("出典",         "evidence_ref",      False),
+    ("根拠",         "evidence_quote",    False),
+]
 MS_COLUMNS = [
     ("milestone_id", False),
     ("名称",         False),
@@ -122,6 +132,16 @@ def load_report_config(config_path: Path) -> dict:
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     return cfg.get("report") or {}
+
+
+def fetch_achievements(conn) -> list[dict]:
+    """確定済み実績（status='confirmed'）を一覧取得する。"""
+    rows = conn.execute(
+        "SELECT app, title, category, achieved_on, confidence, evidence_ref, evidence_quote"
+        " FROM achievements WHERE status='confirmed' AND COALESCE(deleted,0)=0"
+        " ORDER BY app, achieved_on"
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # --------------------------------------------------------------------------- #
@@ -305,6 +325,19 @@ def _build_decisions_sheet(ws: Worksheet, rows: list[dict],
     _autosize(ws, DEC_COLUMNS, {"内容": 80, "出典": 35})
 
 
+def _build_achievements_sheet(ws: Worksheet, rows: list[dict]) -> None:
+    editable = {label for label, key, ed in ACH_COLUMNS if ed}
+    _write_header(ws, ACH_COLUMNS, editable)
+    for r_idx, item in enumerate(rows, start=2):
+        for c_idx, (_label, key, ed) in enumerate(ACH_COLUMNS, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=item.get(key))
+            if not ed:
+                cell.fill = RO_FILL
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.protection.sheet = True  # 編集ブロック（ユーザー警告用）
+    _autosize(ws, ACH_COLUMNS, {"実績": 60, "根拠": 80, "出典": 35})
+
+
 def _build_risk_sheet(ws: Worksheet, rows: list[dict],
                       url_map: dict[str, dict]) -> None:
     _write_header(ws, RISK_COLUMNS, set())
@@ -373,9 +406,10 @@ def build_workbook(
     url_map: dict[str, dict],
     today: str,
     since: str | None,
+    achievements: list[dict] | None = None,
 ) -> Workbook:
     wb = Workbook()
-    # デフォルトシートを使い回し → 並び順: 現在地 / 要注意 / AI / 決定
+    # デフォルトシートを使い回し → 並び順: 現在地 / 要注意 / AI / 決定 / (実績)
     ws_ms = wb.active
     ws_ms.title = SHEET_MS
     ws_risk = wb.create_sheet(SHEET_RISK)
@@ -387,12 +421,17 @@ def build_workbook(
     _build_action_items_sheet(ws_ai, action_items, url_map)
     _build_decisions_sheet(ws_dec, decisions, url_map)
 
+    if achievements:
+        ws_ach = wb.create_sheet(SHEET_ACH)
+        _build_achievements_sheet(ws_ach, achievements)
+
     # ブックのプロパティ
     wb.properties.title = f"富岳NEXT 進捗レポート ({today})"
     wb.properties.creator = "pm_xlsx_report.py"
     wb.properties.description = (
         f"集計範囲: {since or '全期間'} / アクション {len(action_items)}件 / "
         f"決定 {len(decisions)}件 / 要注意 {len(risk_items)}件 / MS {len(milestones)}件"
+        + (f" / 実績 {len(achievements)}件" if achievements else "")
     )
     return wb
 
@@ -522,6 +561,7 @@ def main() -> None:
                                        meeting_kinds=meeting_kinds)
     risk_items = detect_risk_items(action_items)
     milestones = fetch_milestone_progress(conn)
+    achievements = fetch_achievements(conn)
     conn.close()
 
     minutes_dir = db_path.parent / "minutes"
@@ -530,9 +570,10 @@ def main() -> None:
     log(f"[INFO] アクション   : {len(action_items)}件 (要注意 {len(risk_items)}件)")
     log(f"[INFO] 決定事項     : {len(decisions)}件")
     log(f"[INFO] マイルストーン: {len(milestones)}件")
+    log(f"[INFO] 実績         : {len(achievements)}件")
 
     wb = build_workbook(action_items, decisions, risk_items, milestones,
-                        url_map, today, args.since)
+                        url_map, today, args.since, achievements=achievements)
 
     out_path = Path(args.xlsx_out) if args.xlsx_out else REPO_ROOT / "data" / filename
     out_path.parent.mkdir(parents=True, exist_ok=True)

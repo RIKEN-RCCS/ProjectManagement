@@ -36,6 +36,7 @@ from pm_report import (
 from pm_xlsx_report import (
     _build_meeting_url_map,
     build_workbook,
+    fetch_achievements,
     load_report_config,
 )
 
@@ -190,11 +191,13 @@ def main():
     decisions = fetch_recent_decisions(pm_conn, since=None, show_acknowledged=True)
     risk_items = detect_risk_items(action_items)
     milestones = fetch_milestone_progress(pm_conn)
+    achievements = fetch_achievements(pm_conn)
     url_map = _build_meeting_url_map(action_items + decisions, minutes_dir)
 
     wb = build_workbook(
         action_items, decisions, risk_items, milestones,
         url_map, today, since=None,
+        achievements=achievements,
     )
 
     # Save to temp file
