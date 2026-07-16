@@ -468,6 +468,10 @@ document.getElementById('form-dec-new').addEventListener('submit', async (e) => 
 // Achievements
 // ----------------------------------------------------------------
 const achColumnDefs = [
+  { field: 'deleted', headerName: '削除', width: 50, pinned: 'left',
+    cellRenderer: 'agCheckboxCellRenderer',
+    cellEditor: 'agCheckboxCellEditor',
+    cellRendererParams: { disabled: false } },
   { field: 'id', headerName: 'ID', editable: false, width: 50, pinned: 'left' },
   { field: 'app', headerName: 'アプリ', editable: false, width: 130 },
   { field: 'title', headerName: '実績', width: 380 },
@@ -480,7 +484,6 @@ const achColumnDefs = [
   { field: 'evidence_ref', headerName: '根拠リンク', width: 200 },
   { field: 'evidence_quote', headerName: '根拠引用', width: 280 },
   { field: 'source', hide: true },
-  { field: 'deleted', hide: true },
 ];
 
 function initAchGrid() {

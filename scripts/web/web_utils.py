@@ -470,12 +470,26 @@ def do_save_achievements(conn, original_df, edited_rows) -> tuple[int, list[dict
             continue
         orig = orig_rows.iloc[0]
         db_row = conn.execute(
-            "SELECT title, category, achieved_on, status, evidence_ref, evidence_quote"
+            "SELECT title, category, achieved_on, status, evidence_ref, evidence_quote, deleted"
             " FROM achievements WHERE id=?", (ach_id,)
         ).fetchone()
         if db_row is None:
             continue
         db = dict(db_row)
+        new_del = 1 if to_bool(row.get("deleted")) else 0
+        old_del = 1 if orig["deleted"] else 0
+        if new_del != old_del:
+            db_del = 1 if db["deleted"] else 0
+            if db_del != old_del:
+                conflicts.append({"id": ach_id, "field": "deleted",
+                                  "yours": new_del, "db": db_del})
+            else:
+                audit(conn, "achievements", ach_id, "deleted", old_del, new_del)
+                conn.execute(
+                    "UPDATE achievements SET deleted=?, updated_at=? WHERE id=?",
+                    (new_del, datetime.now(UTC).isoformat(), ach_id),
+                )
+                count += 1
         for col in editable:
             new_val = nv(row.get(col))
             if col == "status" and new_val not in _ACH_STATUSES:

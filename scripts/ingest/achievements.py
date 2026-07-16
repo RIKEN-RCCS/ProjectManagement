@@ -112,8 +112,8 @@ def upsert_achievements(
 ) -> dict:
     """1アプリ分の実績候補を dedup + upsert する。件数を分類別に返す。"""
     existing_rows = pm_conn.execute(
-        "SELECT id, title, status, dedup_key FROM achievements "
-        "WHERE app = ? AND COALESCE(deleted,0) = 0",
+        "SELECT id, title, status, dedup_key, COALESCE(deleted,0) AS deleted FROM achievements "
+        "WHERE app = ?",
         (app,),
     ).fetchall()
     existing_titles = [r["title"] for r in existing_rows]
@@ -143,10 +143,13 @@ def upsert_achievements(
                 continue
 
         existing = existing_by_key.get(dedup_key)
-        # 既存行が人間により確定/却下済みなら丸ごとスキップし、本文・状態を保護する。
-        if existing and existing["status"] in ("confirmed", "rejected"):
+        # 既存行が人間により確定/却下済み、または削除済みなら丸ごとスキップし、本文・状態を保護する。
+        if existing and (existing["status"] in ("confirmed", "rejected") or existing["deleted"]):
             counts["skip"] += 1
-            log(f"  [SKIP] {app}: 既存レコード（status={existing['status']}）を保護: {title}")
+            log(
+                f"  [SKIP] {app}: 既存レコード（status={existing['status']}, "
+                f"deleted={existing['deleted']}）を保護: {title}"
+            )
             continue
 
         status = "confirmed" if cand["confidence"] == "high" else "proposed"
@@ -205,8 +208,7 @@ class AchievementsIngestPlugin:
             ctx.log(f"[INFO] 実績抽出中: {app}")
             known_titles = [
                 r["title"] for r in ctx.pm_conn.execute(
-                    "SELECT title FROM achievements WHERE app = ? AND COALESCE(deleted,0) = 0 "
-                    "AND status IN ('confirmed', 'proposed')",
+                    "SELECT title FROM achievements WHERE app = ?",
                     (app,),
                 ).fetchall()
             ]
