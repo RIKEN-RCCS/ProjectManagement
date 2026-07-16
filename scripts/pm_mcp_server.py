@@ -65,6 +65,14 @@ def search_action_items(
 
 
 @mcp.tool()
+def get_app_achievements(app: str, limit: int = 30, since: str | None = None) -> str:
+    """指定アプリのこれまでの確定した完了実績（過去マイルストーン）を返す。
+    『あのアプリはどうなったか/これまでの実績』を問われたら最新状況のライブ検索より先にこれを使う。"""
+    from argus.mcp_tools import get_app_achievements as _impl
+    return _impl(app=app, limit=limit, since=since)
+
+
+@mcp.tool()
 def get_milestone_progress() -> str:
     """マイルストーンごとの進捗状況（完了率・期限）を取得する"""
     from argus.mcp_tools import get_milestone_progress as _impl

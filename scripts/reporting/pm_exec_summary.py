@@ -32,7 +32,7 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from enrich.achievements_extract import extract_completed_titles
+from enrich.achievements_extract import extract_completed_titles, read_confirmed_titles
 from utils.llm import call_argus_llm
 from utils.pptx_theme import (
     DARK,
@@ -264,7 +264,7 @@ def main() -> int:
     ap.add_argument("--to-box", action="store_true")
     ap.add_argument("--out-dir", default="/tmp")
     ap.add_argument("--no-completed-search", action="store_true",
-                    help="完了列を検索ベースで生成せず、レポート md からの抽出のみを使う")
+                    help="完了列を実績台帳(pm.db)読み取り・検索ベースで生成せず、レポート md からの抽出のみを使う")
     args = ap.parse_args()
 
     date_str = args.date or date.today().isoformat()
@@ -282,7 +282,9 @@ def main() -> int:
         print(f"[INFO] 抽出中: {app_name}", file=sys.stderr)
         buckets = extract_buckets(app_name, md_text)   # next/vendor と completed(フォールバック)
         if not args.no_completed_search:
-            titles = extract_completed_titles(app_name)
+            titles = read_confirmed_titles(app_name, limit=_MAX_ITEMS["completed"])
+            if not titles:
+                titles = extract_completed_titles(app_name)
             if titles:
                 buckets["completed"] = _sanitize_buckets(
                     {"completed": titles, "next": [], "vendor": []}

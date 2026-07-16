@@ -93,6 +93,42 @@ def search_action_items(
         conn.close()
 
 
+def get_app_achievements(app: str, limit: int = 30, since: str | None = None) -> str:
+    """指定アプリのこれまでの確定した完了実績（過去マイルストーン）を返す。
+
+    『あのアプリはどうなったか/これまでの実績』を問われたら最新状況のライブ検索より先にこれを使う。
+    """
+    if not _has_pm_db():
+        return "pm.db が見つかりません。"
+    app = (app or "").strip()
+    if not app:
+        return "app が指定されていません。"
+    conn = _get_pm_conn()
+    try:
+        query = (
+            "SELECT title, category, achieved_on, evidence_ref FROM achievements "
+            "WHERE app=? AND status='confirmed' AND COALESCE(deleted,0)=0"
+        )
+        params: list = [app]
+        if since:
+            query += " AND achieved_on >= ?"
+            params.append(since)
+        query += " ORDER BY achieved_on DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return f"{app} の確定実績なし。"
+    lines = [f"## {app} の確定実績（{len(rows)}件）"]
+    for r in rows:
+        date = r["achieved_on"] or "?"
+        category = f"（{r['category']}）" if r["category"] else ""
+        evidence = f" 出典: {r['evidence_ref']}" if r["evidence_ref"] else ""
+        lines.append(f"- [{date}] {r['title']}{category}{evidence}")
+    return "\n".join(lines)
+
+
 def get_milestone_progress() -> str:
     """マイルストーンごとの進捗状況（完了率・期限）を取得する"""
     if not _has_pm_db():

@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
@@ -174,6 +175,49 @@ def extract_achievements(app_name: str, known_titles: list[str] | None = None) -
         except Exception as e:  # noqa: BLE001 — 1件の失敗で全体を止めない
             print(f"[WARN] {app_name}: 実績抽出失敗 (試行{attempt + 1}/2): {e}", file=sys.stderr)
     return []
+
+
+def read_confirmed_titles(app_name: str, limit: int = 5, db_path: str | Path | None = None) -> list[str]:
+    """achievements テーブルから status='confirmed' の実績 title を achieved_on 昇順で返す。
+
+    各要素は title に日付があれば '(YYYY-MM)' を付す（既存の completed 列書式に合わせる）。
+    DB/テーブルが無い・鍵が無い等は空リスト（呼び出し側がフォールバック）。
+    """
+    from db_utils import open_pm_db
+
+    path = Path(db_path) if db_path else _REPO_ROOT / "data" / "pm.db"
+    if not path.exists():
+        return []
+    try:
+        conn = open_pm_db(path)
+    except SystemExit:
+        return []
+    except Exception:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT title, achieved_on FROM achievements "
+            "WHERE app=? AND status='confirmed' AND COALESCE(deleted,0)=0 "
+            "ORDER BY achieved_on LIMIT ?",
+            (app_name, limit),
+        ).fetchall()
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+    titles = []
+    for row in rows:
+        title = str(row["title"] or "").strip()
+        if not title:
+            continue
+        achieved_on = str(row["achieved_on"] or "").strip()
+        if achieved_on:
+            ym = achieved_on[:7]  # YYYY-MM に丸める
+            if f"({ym})" not in title and "(" not in title:
+                title = f"{title} ({ym})"
+        titles.append(title)
+    return titles
 
 
 def extract_completed_titles(app_name: str) -> list[str] | None:

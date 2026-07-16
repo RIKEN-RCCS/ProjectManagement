@@ -370,6 +370,12 @@ TOOLS: list[ToolDef] = [
         fn=_call_mcp("search_decisions"),
     ),
     ToolDef(
+        name="get_app_achievements",
+        description="指定アプリのこれまでの確定した完了実績（過去の到達点）を台帳から返す。『Xはどうなった/これまでの実績』にはライブ検索より先にこれを使う。",
+        parameters={"app": "アプリ名（必須）", "limit": "取得件数（デフォルト30）", "since": "この日付以降（YYYY-MM-DD、省略可）"},
+        fn=_call_mcp("get_app_achievements"),
+    ),
+    ToolDef(
         name="search_text",
         description="議事録・Slackメッセージを全文検索する（FTS5 + LLM re-ranking）",
         parameters={"query": "検索クエリ（自然言語可）"},
