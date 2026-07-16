@@ -49,9 +49,11 @@ from web_admin import (
 )
 from web_utils import (
     audit,
+    do_save_achievements,
     do_save_action_items,
     do_save_decisions,
     get_conn,
+    load_achievements,
     load_action_items,
     load_decisions,
     load_filter_presets,
@@ -79,6 +81,7 @@ _state: dict[str, Any] = {
     "no_encrypt": False,
     "ai_df": None,   # optimistic locking 用スナップショット
     "dec_df": None,
+    "ach_df": None,
     "job_queue": _job_queue,
     "processing_dir": None,
 }
@@ -117,6 +120,14 @@ class NewDecisionRequest(BaseModel):
     decided_at: str | None = None
     source: str | None = None
 
+class NewAchievementRequest(BaseModel):
+    app: str
+    title: str
+    category: str | None = None
+    achieved_on: str | None = None
+    evidence_ref: str | None = None
+    evidence_quote: str | None = None
+
 class NewGlossaryItemRequest(BaseModel):
     title: str
     content: str = ""
@@ -148,6 +159,7 @@ def switch_database(req: SwitchDbRequest):
     _state["db_path"] = str(p)
     _state["ai_df"] = None
     _state["dec_df"] = None
+    _state["ach_df"] = None
     return {"ok": True, "name": p.name}
 
 
@@ -411,6 +423,52 @@ def ack_all_decisions():
     count = cur.rowcount
     conn.commit()
     return {"count": count}
+
+
+# --- Achievement endpoints --- #
+
+@app.get("/api/achievements")
+def get_achievements(
+    status: str = Query(""),
+    app: str = Query(""),
+    deleted: bool = Query(False),
+):
+    df = load_achievements(_get_conn(), status or None, app or None, deleted)
+    _state["ach_df"] = df
+    return {"rows": df.to_dict("records")}
+
+
+@app.post("/api/achievements/save")
+def save_achievements(req: SaveRowsRequest):
+    if _state["ach_df"] is None:
+        return JSONResponse({"error": "データ未読込。先に一覧を取得してください"}, status_code=400)
+    n, conflicts = do_save_achievements(_get_conn(), _state["ach_df"], req.rows)
+    _state["ach_df"] = None
+    # 非同期で Box XLSX を更新
+    if n > 0:
+        _enqueue_xlsx_publish()
+    return {"updated": n, "conflicts": conflicts}
+
+
+@app.post("/api/achievements/new")
+def create_achievement(req: NewAchievementRequest):
+    from ingest.achievements import _dedup_key
+
+    conn = _get_conn()
+    now_ts = datetime.now(UTC).isoformat()
+    app_name = req.app.strip()
+    title = req.title.strip()
+    dedup_key = _dedup_key(app_name, title)
+    cur = conn.execute(
+        "INSERT INTO achievements"
+        " (app,title,category,achieved_on,evidence_ref,evidence_quote,"
+        "  confidence,status,source,dedup_key,created_at,updated_at)"
+        " VALUES(?,?,?,?,?,?,'low','proposed','web_ui',?,?,?)",
+        (app_name, title, nv(req.category), nv(req.achieved_on),
+         nv(req.evidence_ref), nv(req.evidence_quote), dedup_key, now_ts, now_ts),
+    )
+    conn.commit()
+    return {"ok": True, "id": cur.lastrowid}
 
 
 # --- Minutes endpoint --- #

@@ -43,6 +43,9 @@
     <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="dec">
       <span class="text-lg mr-1">📝</span> Decisions
     </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="ach">
+      <span class="text-lg mr-1">🏆</span> 実績
+    </button>
     <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="minutes">
       <span class="text-lg mr-1">📄</span> Minutes
     </button>
@@ -161,6 +164,38 @@
     <div id="grid-dec" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
   </div>
 
+  <!-- Achievements Panel -->
+  <div id="panel-ach" class="tab-panel flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
+    <div class="flex items-end gap-3 flex-none">
+      <label class="flex flex-col text-xs text-gray-400">
+        ステータス
+        <select id="f-ach-status" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-28 text-gray-200">
+          <option value="" selected>すべて</option>
+          <option value="proposed">proposed</option>
+          <option value="confirmed">confirmed</option>
+          <option value="rejected">rejected</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-400">
+        アプリ
+        <input id="f-ach-app" type="text" placeholder="アプリ名（完全一致）" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-40 text-gray-200">
+      </label>
+      <label class="flex items-center gap-1 text-xs text-gray-400 pb-1">
+        <input id="f-ach-deleted" type="checkbox" class="rounded">
+        削除済みを含める
+      </label>
+      <button onclick="loadAchievements()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">検索</button>
+    </div>
+
+    <div class="flex items-center gap-2 flex-none">
+      <button onclick="saveAchievements()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
+      <button onclick="loadAchievements()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">再読み込み</button>
+      <button onclick="openDialog('dialog-ach-new')" class="border border-blue-500 text-blue-400 hover:bg-blue-900/30 rounded px-3 py-1 text-sm">+ 新規追加</button>
+    </div>
+
+    <div id="grid-ach" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
+  </div>
+
   <!-- Files Panel -->
   <div id="panel-files" class="tab-panel flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
     <div class="flex items-end gap-3 flex-none flex-wrap">
@@ -222,6 +257,25 @@
         <input name="decided_at" placeholder="決定日 YYYY-MM-DD" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
         <input name="source" placeholder="出典（任意）" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
       </div>
+      <div class="flex justify-end gap-2 mt-2">
+        <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-400 hover:text-white">キャンセル</button>
+        <button type="submit" class="bg-blue-600 text-white rounded px-4 py-1 text-sm">追加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- New Achievement -->
+  <dialog id="dialog-ach-new" class="rounded-lg shadow-xl p-6 w-[560px] backdrop:bg-black/50 bg-gray-800 text-gray-200">
+    <h2 class="text-lg font-bold mb-3 text-white">新規実績</h2>
+    <form id="form-ach-new" method="dialog" class="flex flex-col gap-2">
+      <div class="flex gap-2">
+        <input name="app" placeholder="アプリ名 *" required class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
+        <input name="category" placeholder="カテゴリ" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm flex-1 text-gray-200">
+      </div>
+      <textarea name="title" rows="2" required placeholder="実績タイトル *" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200"></textarea>
+      <input name="achieved_on" placeholder="達成日 YYYY-MM-DD" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200">
+      <input name="evidence_ref" placeholder="根拠リンク（任意）" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200">
+      <textarea name="evidence_quote" rows="2" placeholder="根拠引用（任意）" class="bg-gray-700 border border-gray-600 rounded p-2 text-sm w-full text-gray-200"></textarea>
       <div class="flex justify-end gap-2 mt-2">
         <button type="button" onclick="this.closest('dialog').close()" class="px-4 py-1 text-sm text-gray-400 hover:text-white">キャンセル</button>
         <button type="submit" class="bg-blue-600 text-white rounded px-4 py-1 text-sm">追加</button>

@@ -4,6 +4,7 @@
 
 let aiGrid = null;
 let decGrid = null;
+let achGrid = null;
 let filesGrid = null;
 let _filesLoaded = false;
 let milestones = {};
@@ -464,6 +465,82 @@ document.getElementById('form-dec-new').addEventListener('submit', async (e) => 
 });
 
 // ----------------------------------------------------------------
+// Achievements
+// ----------------------------------------------------------------
+const achColumnDefs = [
+  { field: 'id', headerName: 'ID', editable: false, width: 50, pinned: 'left' },
+  { field: 'app', headerName: 'アプリ', editable: false, width: 130 },
+  { field: 'title', headerName: '実績', width: 380 },
+  { field: 'category', headerName: 'カテゴリ', width: 120 },
+  { field: 'achieved_on', headerName: '達成日', width: 110 },
+  { field: 'confidence', headerName: '確信度', editable: false, width: 90 },
+  { field: 'status', headerName: 'ステータス', width: 110,
+    cellEditor: 'agSelectCellEditor',
+    cellEditorParams: { values: ['proposed', 'confirmed', 'rejected'] } },
+  { field: 'evidence_ref', headerName: '根拠リンク', width: 200 },
+  { field: 'evidence_quote', headerName: '根拠引用', width: 280 },
+  { field: 'source', hide: true },
+  { field: 'deleted', hide: true },
+];
+
+function initAchGrid() {
+  const el = document.getElementById('grid-ach');
+  achGrid = agGrid.createGrid(el, {
+    columnDefs: achColumnDefs,
+    defaultColDef: {
+      editable: true, resizable: true, sortable: true, filter: true,
+      wrapText: true, autoHeight: true,
+    },
+    domLayout: 'autoHeight',
+    rowData: [],
+    stopEditingWhenCellsLoseFocus: true,
+    singleClickEdit: true,
+  });
+}
+
+async function loadAchievements() {
+  const status = document.getElementById('f-ach-status').value;
+  const app = document.getElementById('f-ach-app').value;
+  const deleted = document.getElementById('f-ach-deleted').checked;
+  const qs = new URLSearchParams({ status, app, deleted });
+  const data = await api('GET', '/achievements?' + qs);
+  achGrid.setGridOption('rowData', data.rows);
+}
+
+async function saveAchievements() {
+  achGrid.stopEditing();
+  const rows = [];
+  achGrid.forEachNode(node => rows.push(node.data));
+  const res = await api('POST', '/achievements/save', { rows });
+  if (res.updated > 0) toast(`${res.updated} フィールドを更新しました`, 'positive');
+  if (res.conflicts && res.conflicts.length > 0) {
+    const lines = res.conflicts.map(c =>
+      `ID:${c.id} [${c.field}] あなた: ${JSON.stringify(c.yours)} / DB現在値: ${JSON.stringify(c.db)}`
+    ).join('\n');
+    toast('競合のため保存できなかった変更があります:\n' + lines, 'warning');
+  }
+  if (res.updated === 0 && (!res.conflicts || res.conflicts.length === 0)) {
+    toast('変更はありませんでした', 'info');
+  }
+  await loadAchievements();
+}
+
+// New achievement
+document.getElementById('form-ach-new').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const body = {};
+  for (const [k, v] of fd.entries()) body[k] = v || null;
+  if (!body.app || !body.app.trim()) { toast('アプリ名は必須です', 'negative'); return; }
+  if (!body.title || !body.title.trim()) { toast('実績タイトルは必須です', 'negative'); return; }
+  await api('POST', '/achievements/new', body);
+  toast('追加しました', 'positive');
+  e.target.reset();
+  document.getElementById('dialog-ach-new').close();
+  await loadAchievements();
+});
+
+// ----------------------------------------------------------------
 // Files (AG Grid)
 // ----------------------------------------------------------------
 // チャンネル名は /api/filter-presets が返す channel_names を使う
@@ -752,15 +829,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadMilestones();
   initAiGrid();
   initDecGrid();
+  initAchGrid();
   initFilesGrid();
   initFilesChannelFilter();
   _updateSourceFilterButtonLabel('ai');
   _updateSourceFilterButtonLabel('dec');
   // 初期化後に admin.js のルーターが起動。editor ページの場合はここでデータ読み込み
   const initHash = location.hash.replace('#', '') || 'dashboard';
-  if (initHash === 'ai' || initHash === 'dec' || initHash === 'files') {
+  if (initHash === 'ai' || initHash === 'dec' || initHash === 'ach' || initHash === 'files') {
     await loadActionItems();
     await loadDecisions();
+    await loadAchievements();
     _filesLoaded = true;
     loadFiles();
   }

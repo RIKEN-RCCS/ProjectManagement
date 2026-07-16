@@ -48,7 +48,7 @@ function navigateTo(page) {
     }
   });
 
-  const isEditorPage = page === 'ai' || page === 'dec' || page === 'files';
+  const isEditorPage = page === 'ai' || page === 'dec' || page === 'ach' || page === 'files';
 
   if (isEditorPage) {
     const panel = document.getElementById('panel-' + page);
@@ -56,7 +56,9 @@ function navigateTo(page) {
     panel.classList.add('flex');
     // Trigger grid resize (delay for layout settle)
     setTimeout(() => {
-      const grid = page === 'ai' ? window.aiGrid : (page === 'dec' ? window.decGrid : window.filesGrid);
+      const grid = page === 'ai' ? window.aiGrid
+        : (page === 'dec' ? window.decGrid
+        : (page === 'ach' ? window.achGrid : window.filesGrid));
       if (grid) grid.sizeColumnsToFit();
     }, 50);
   } else {
@@ -90,7 +92,7 @@ function handleHashChange() {
   const hash = location.hash.replace('#', '') || 'dashboard';
   if (hash === 'editor' || hash === '') {
     navigateTo('dashboard');
-  } else if (hash === 'ai' || hash === 'dec' || hash === 'files') {
+  } else if (hash === 'ai' || hash === 'dec' || hash === 'ach' || hash === 'files') {
     navigateTo(hash);
   } else if (adminPages[hash]) {
     navigateTo(hash);

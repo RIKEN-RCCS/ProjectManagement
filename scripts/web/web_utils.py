@@ -270,6 +270,42 @@ def load_decisions(
     return df
 
 
+_ACH_STATUSES = ("proposed", "confirmed", "rejected")
+
+
+def load_achievements(
+    conn, status: str | None = None, app: str | None = None, deleted: bool = False,
+) -> pd.DataFrame:
+    """フィルタ条件に合う実績を DataFrame で返す。
+
+    status:  proposed/confirmed/rejected のいずれか（None ならすべて）
+    app:     アプリ名の完全一致（None ならすべて）
+    deleted: False の場合は非削除のみ、True の場合はすべて（削除済み含む）
+    """
+    q = ("SELECT id, app, title, category, achieved_on,"
+         " COALESCE(evidence_ref,'') AS evidence_ref,"
+         " COALESCE(evidence_quote,'') AS evidence_quote,"
+         " confidence, status, source, COALESCE(deleted,0) AS deleted"
+         " FROM achievements WHERE 1=1")
+    p: list = []
+    if not deleted:
+        q += " AND COALESCE(deleted,0)=0"
+    if status:
+        q += " AND status=?"
+        p.append(status)
+    if app:
+        q += " AND app=?"
+        p.append(app)
+    q += " ORDER BY id DESC"
+    df = pd.DataFrame(conn.execute(q, p).fetchall(),
+                      columns=["id", "app", "title", "category", "achieved_on",
+                               "evidence_ref", "evidence_quote", "confidence",
+                               "status", "source", "deleted"])
+    df = df.fillna("")
+    df["deleted"] = df["deleted"].apply(lambda v: bool(int(v)) if v != "" else False)
+    return df
+
+
 def load_minutes_content(meeting_id: str, no_encrypt: bool = False, kind: str = "") -> str:
     """議事録本文を取得して結合テキストで返す。"""
     if not meeting_id and not kind:
@@ -417,6 +453,45 @@ def do_save_decisions(conn, original_df, edited_rows) -> tuple[int, list[dict]]:
                 else:
                     audit(conn, "decisions", dec_id, col, old_val, new_val)
                     conn.execute(f"UPDATE decisions SET {col}=? WHERE id=?", (new_val, dec_id))
+                    count += 1
+    conn.commit()
+    return count, conflicts
+
+
+def do_save_achievements(conn, original_df, edited_rows) -> tuple[int, list[dict]]:
+    """実績の変更を保存。(変更件数, コンフリクト一覧) を返す。"""
+    editable = ["title", "category", "achieved_on", "status", "evidence_ref", "evidence_quote"]
+    count = 0
+    conflicts: list[dict] = []
+    for row in edited_rows:
+        ach_id = int(row["id"])
+        orig_rows = original_df[original_df["id"] == ach_id]
+        if orig_rows.empty:
+            continue
+        orig = orig_rows.iloc[0]
+        db_row = conn.execute(
+            "SELECT title, category, achieved_on, status, evidence_ref, evidence_quote"
+            " FROM achievements WHERE id=?", (ach_id,)
+        ).fetchone()
+        if db_row is None:
+            continue
+        db = dict(db_row)
+        for col in editable:
+            new_val = nv(row.get(col))
+            if col == "status" and new_val not in _ACH_STATUSES:
+                continue
+            old_val = nv(orig[col])
+            if new_val != old_val:
+                db_val = nv(db.get(col))
+                if db_val != old_val:
+                    conflicts.append({"id": ach_id, "field": col,
+                                      "yours": new_val, "db": db_val})
+                else:
+                    audit(conn, "achievements", ach_id, col, old_val, new_val)
+                    conn.execute(
+                        f"UPDATE achievements SET {col}=?, updated_at=? WHERE id=?",
+                        (new_val, datetime.now(UTC).isoformat(), ach_id),
+                    )
                     count += 1
     conn.commit()
     return count, conflicts
