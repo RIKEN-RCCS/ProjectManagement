@@ -191,6 +191,8 @@
       <button onclick="saveAchievements()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
       <button onclick="loadAchievements()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">再読み込み</button>
       <button onclick="openDialog('dialog-ach-new')" class="border border-blue-500 text-blue-400 hover:bg-blue-900/30 rounded px-3 py-1 text-sm">+ 新規追加</button>
+      <button onclick="bulkConfirmAchievements()" class="bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1 text-sm">表示中のproposedを承認</button>
+      <p class="text-xs text-gray-400 flex-none">※ ステータス列をダブルクリックして proposed→confirmed（承認）/ rejected（却下）を選び、[保存] で確定します。</p>
     </div>
 
     <div id="grid-ach" class="ag-theme-quartz-dark flex-1 min-h-0"></div>

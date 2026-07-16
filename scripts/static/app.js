@@ -481,8 +481,10 @@ const achColumnDefs = [
   { field: 'status', headerName: 'ステータス', width: 110,
     cellEditor: 'agSelectCellEditor',
     cellEditorParams: { values: ['proposed', 'confirmed', 'rejected'] } },
-  { field: 'evidence_ref', headerName: '根拠リンク', width: 200 },
-  { field: 'evidence_quote', headerName: '根拠引用', width: 280 },
+  { field: 'evidence_ref', headerName: '出典', width: 220,
+    wrapText: true, autoHeight: true, tooltipField: 'evidence_ref' },
+  { field: 'evidence_quote', headerName: '根拠引用', width: 320,
+    wrapText: true, autoHeight: true, tooltipField: 'evidence_quote' },
   { field: 'source', hide: true },
 ];
 
@@ -526,6 +528,15 @@ async function saveAchievements() {
     toast('変更はありませんでした', 'info');
   }
   await loadAchievements();
+}
+
+function bulkConfirmAchievements() {
+  achGrid.forEachNodeAfterFilterAndSort(node => {
+    if (node.data.status === 'proposed') {
+      node.setDataValue('status', 'confirmed');
+    }
+  });
+  toast('表示中の proposed を confirmed にしました（保存で確定）', 'info');
 }
 
 // New achievement
