@@ -80,7 +80,10 @@ CREATE TABLE IF NOT EXISTS box_files (
     folder_path    TEXT,
     index_name     TEXT,
     source_name    TEXT,
-    registered_at  TEXT NOT NULL
+    registered_at  TEXT NOT NULL,
+    relevance          TEXT,
+    relevance_reason   TEXT,
+    relevance_judged_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS doc_content (
@@ -292,25 +295,38 @@ def _is_encrypted_pdf(path: Path) -> bool:
         return False
 
 
-def convert_to_markdown(file_path: Path, fmt: str) -> tuple[str, str]:
+def convert_to_markdown(
+    file_path: Path, fmt: str,
+    *,
+    verbalize_figures: bool = False,
+    fig_max_pages: int | None = None,
+    fig_endpoints: list[str] | None = None,
+) -> tuple[str, str]:
     """ファイルを Markdown に変換する。(content_md, convert_method) を返す。"""
     if fmt in ("pptx", "docx", "xlsx") and _is_encrypted_office(file_path):
         return "[ENCRYPTED — password-protected file, cannot extract content]", "encrypted"
 
-    converters = {
-        "md": _convert_md,
-        "txt": _convert_md,
-        "docx": _convert_docx,
-        "xlsx": _convert_xlsx,
-        "pptx": _convert_pptx,
-        "pdf": _convert_pdf,
-        "boxnote": _convert_boxnote,
-    }
-    converter = converters.get(fmt)
-    if not converter:
-        return "", "unsupported"
+    if fmt == "pdf":
+        content, method = _convert_pdf(
+            file_path,
+            verbalize_figures=verbalize_figures,
+            fig_max_pages=fig_max_pages,
+            endpoints=fig_endpoints,
+        )
+    else:
+        converters = {
+            "md": _convert_md,
+            "txt": _convert_md,
+            "docx": _convert_docx,
+            "xlsx": _convert_xlsx,
+            "pptx": _convert_pptx,
+            "boxnote": _convert_boxnote,
+        }
+        converter = converters.get(fmt)
+        if not converter:
+            return "", "unsupported"
+        content, method = converter(file_path)
 
-    content, method = converter(file_path)
     # PDF の /Encrypt は権限制限（コピー・印刷禁止等）のみでオープンパスワード無し、
     # というケースが多く（政府系公開PDFに頻出）、pdftotext は空パスワードで
     # 自動復号し普通に本文を取れる。実際に抽出できたかで判定し、事前に
@@ -364,9 +380,21 @@ def _convert_pptx(path: Path) -> tuple[str, str]:
     return "", "failed"
 
 
-def _convert_pdf(path: Path) -> tuple[str, str]:
+def _convert_pdf(
+    path: Path,
+    *,
+    verbalize_figures: bool = False,
+    fig_max_pages: int | None = None,
+    endpoints: list[str] | None = None,
+) -> tuple[str, str]:
     text = _pdftotext(path)
     if text and len(text.strip()) > 100:
+        if verbalize_figures:
+            eps = endpoints if endpoints is not None else get_ocr_endpoints()
+            if eps:
+                merged, matched = _merge_pdftotext_with_figures(path, text, eps, fig_max_pages)
+                if matched:
+                    return merged, "pdftotext+figures"
         return text, "pdftotext"
     md = _convert_via_multimodal(path)
     if md:
@@ -578,6 +606,23 @@ SLIDE_OCR_PROMPT = """この画像はプレゼンテーションのスライド�
 4. 図表・グラフは [図: 説明] 形式で記述
 日本語はそのまま保持してください。Markdownのみ出力してください。"""
 
+FIGURE_VERBALIZE_PROMPT = """この画像は報告書の1ページです。本文テキストの段落（通常の文章）は無視し、
+図・グラフ・ダイアグラム・表などの視覚情報のみを言語化してください。
+
+各図について次の観点を簡潔に記述してください:
+- 図の種別（棒グラフ／折れ線グラフ／散布図／円グラフ／フロー図／模式図／表 等）
+- タイトル
+- 軸ラベルと単位
+- 系列名
+- 目立つ数値・ピーク・比較関係
+- 読み取れる傾向・結論・示唆
+
+ロゴ・ヘッダー/フッター・ページ番号・装飾要素は無視してください。
+図・グラフが1つも無いページの場合は、他の内容を一切書かず「図なし」とだけ返してください。
+
+出力は図ごとに `[図: ...]` ブロックで記述してください（複数の図がある場合はブロックを複数に分けてください）。
+確実でない情報は「（推測）」と明記してください。"""
+
 
 def _convert_via_multimodal(path: Path) -> str | None:
     """PDF を画像化してマルチモーダルLLMで各ページをOCRする。"""
@@ -636,6 +681,102 @@ def _convert_via_multimodal(path: Path) -> str | None:
             # box_docs.db に保存されてしまう。
             return None
         return "\n\n---\n\n".join(pages) if pages else None
+
+
+def _is_no_figure(text: str) -> bool:
+    """マルチモーダルLLMの「図なし」応答を判定する（句読点の揺れを許容）。"""
+    stripped = text.strip().rstrip("。.")
+    return stripped in ("", "図なし")
+
+
+# ページ並列OCRのワーカー上限。Pool(workers) 既定2〜4プロセスの中でさらに
+# スレッドを増やすとネストした並列度が飽和し 429/timeout を誘発するため抑える。
+_FIGURE_OCR_MAX_WORKERS = 4
+
+
+def _verbalize_figures(
+    pdf_path: Path,
+    endpoints: list[str],
+    max_pages: int | None = None,
+    logger: logging.Logger | None = None,
+) -> list[str]:
+    """PDF の各ページを画像化し、図・グラフ等の視覚情報のみをマルチモーダルLLMで言語化する。
+
+    ページ順のリストを返す（本文のみのページ・「図なし」は空文字に正規化）。
+    endpoints が空、画像化に失敗した場合は空リストを返す（例外は投げない）。
+    """
+    log = logger or globals()["logger"]
+    if not endpoints:
+        return []
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images = _pdf_to_images(pdf_path, Path(tmpdir))
+            if not images:
+                log.warning("    図言語化スキップ: 画像化失敗")
+                return []
+
+            if max_pages is not None and len(images) > max_pages:
+                log.info(
+                    f"    図言語化: 先頭{max_pages}ページのみ対象"
+                    f"（全{len(images)}ページ中、超過分は言語化しません）"
+                )
+                images = images[:max_pages]
+
+            def _one(idx_img: tuple[int, Path]) -> tuple[int, str]:
+                idx, img_path = idx_img
+                for ep in endpoints:
+                    text = ocr_slide_image(img_path, ep, prompt=FIGURE_VERBALIZE_PROMPT)
+                    if text:
+                        return idx, text.strip()
+                return idx, ""
+
+            results: list[str] = [""] * len(images)
+            workers = max(1, min(_FIGURE_OCR_MAX_WORKERS, len(images)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for idx, text in pool.map(_one, enumerate(images)):
+                    results[idx] = "" if _is_no_figure(text) else text
+
+            return results
+    except Exception as e:
+        log.warning(f"    図言語化スキップ: 予期しないエラー ({e})")
+        return []
+
+
+def _merge_pdftotext_with_figures(
+    path: Path,
+    text: str,
+    endpoints: list[str],
+    max_pages: int | None,
+) -> tuple[str, bool]:
+    """pdftotext 本文と図言語化結果をページ単位でマージする。
+
+    戻り値: (マージ後テキスト, 図が1つでも得られたか)。図が1つも得られなければ
+    元の本文をそのまま返す。pdftotext (`-layout`) はページ境界に `\\f` (form feed)
+    を挿入するため、それで本文を分割して図言語化結果とインデックス対応させる。
+    ページ数が一致しない場合は本文末尾にまとめて追記する（fig_max_pages 使用時など）。
+    """
+    figures = _verbalize_figures(path, endpoints, max_pages=max_pages, logger=logger)
+    if not any(figures):
+        return text, False
+
+    text_pages = text.split("\f")
+    if len(text_pages) == len(figures):
+        merged_pages = []
+        for page_text, fig_text in zip(text_pages, figures, strict=True):
+            if fig_text:
+                merged_pages.append(f"{page_text.rstrip()}\n\n{fig_text}\n")
+            else:
+                merged_pages.append(page_text)
+        return "\f".join(merged_pages), True
+
+    logger.warning(
+        f"    図言語化: ページ数不一致（本文{len(text_pages)}ページ, "
+        f"図言語化{len(figures)}ページ）— 末尾にまとめて追記します"
+    )
+    fig_blocks = "\n\n".join(f for f in figures if f)
+    merged = f"{text}\n\n## 図・グラフ（OCR言語化）\n\n{fig_blocks}"
+    return merged, True
 
 
 def _to_pdf(path: Path, tmpdir: Path) -> Path | None:
@@ -752,14 +893,15 @@ def _ocr_image(img_path: Path, base_url: str, prompt: str | None = None) -> str 
 def get_ocr_endpoints() -> list[str]:
     """マルチモーダルOCR用エンドポイントURLをルーティング優先度順に返す。
 
-    LOCAL_LLM_URL → RIVAULT_URL の順。RIVAULT_URL は RIVAULT_OCR_MODEL が
-    設定されている場合のみ追加する（テキスト専用モデルへの誤送信を防ぐため）。
+    LOCAL_LLM_URL → RIVAULT_URL の順。それぞれ対応する OCR 専用モデル
+    （LOCAL_OCR_MODEL / RIVAULT_OCR_MODEL）が設定されている場合のみ追加する
+    （テキスト専用モデルへの誤送信を防ぐため）。
     """
     from cli_utils import load_llm_secrets
     load_llm_secrets()
     endpoints: list[str] = []
     local_url = os.environ.get("LOCAL_LLM_URL", "").strip().rstrip("/")
-    if local_url:
+    if local_url and os.environ.get("LOCAL_OCR_MODEL", "").strip():
         endpoints.append(local_url)
     rivault_url = os.environ.get("RIVAULT_URL", "").strip().rstrip("/")
     if rivault_url and os.environ.get("RIVAULT_OCR_MODEL", "").strip():
@@ -967,8 +1109,15 @@ def convert_single_file(
     db_path: str,
     no_encrypt: bool,
     force: bool,
+    verbalize_figures: bool = False,
+    fig_max_pages: int | None = None,
+    fig_endpoints: list[str] | None = None,
 ) -> dict:
-    """ワーカープロセスで1ファイルを変換する。convert_files() から並列呼び出しされる。"""
+    """ワーカープロセスで1ファイルを変換する。convert_files() から並列呼び出しされる。
+
+    verbalize_figures は relevance='core' の pdf のみに適用する（呼び出し側で
+    file_info["relevance"] を見て判定、ここでは二重にガードする）。
+    """
     fid = file_info["box_file_id"]
     name = file_info["name"]
     fmt = file_info["file_format"]
@@ -991,8 +1140,14 @@ def convert_single_file(
                 logger.info(f"    [SKIP] ハッシュ変更なし (pid={pid})")
                 return {"status": "skipped", "file_id": fid, "name": name}
 
+            want_figures = verbalize_figures and fmt == "pdf" and file_info.get("relevance") == "core"
             logger.info(f"    変換中... (pid={pid})")
-            content_md, method = convert_to_markdown(file_path, fmt)
+            content_md, method = convert_to_markdown(
+                file_path, fmt,
+                verbalize_figures=want_figures,
+                fig_max_pages=fig_max_pages,
+                fig_endpoints=fig_endpoints,
+            )
 
             if method == "encrypted":
                 logger.warning(f"    [SKIP] 暗号化ファイル (pid={pid})")
@@ -1040,6 +1195,9 @@ def convert_files(
     workers: int = 2,
     no_encrypt: bool = False,
     db_path: Path | None = None,
+    figures: bool = False,
+    fig_max_pages: int | None = None,
+    fig_endpoints: list[str] | None = None,
     log=print,
 ) -> int:
     """登録済みファイルをダウンロード・変換して doc_content に保存する。"""
@@ -1062,13 +1220,35 @@ def convert_files(
     rows = conn.execute(
         f"""SELECT bf.box_file_id, bf.name, bf.file_format, bf.size_bytes,
                    bf.folder_path, bf.index_name, bf.modified_at,
-                   dc.content_hash
+                   bf.relevance, dc.content_hash
             FROM box_files bf
             LEFT JOIN doc_content dc ON bf.box_file_id = dc.box_file_id
             WHERE {where}
             ORDER BY bf.name""",
         params,
     ).fetchall()
+
+    if figures and not force:
+        # --force 未指定の場合、既に変換済みの core PDF は上の WHERE で除外され
+        # 図言語化の対象から漏れる。無言で漏らさず案内する。
+        already_where_parts = [p for p in where_parts if p != "dc.box_file_id IS NULL"]
+        already_where_parts += [
+            "bf.file_format = 'pdf'", "bf.relevance = 'core'",
+            "dc.box_file_id IS NOT NULL",
+            "(dc.convert_method IS NULL OR dc.convert_method NOT LIKE '%figures%')",
+        ]
+        already_where = " AND ".join(already_where_parts)
+        pending = conn.execute(
+            f"""SELECT COUNT(*) FROM box_files bf
+                LEFT JOIN doc_content dc ON bf.box_file_id = dc.box_file_id
+                WHERE {already_where}""",
+            params,
+        ).fetchone()[0]
+        if pending:
+            log(
+                f"[INFO] --figures 指定ですが、既に変換済みの core PDF が {pending} 件あります。"
+                f"図言語化を追加するには --force を併用してください。"
+            )
 
     if not rows:
         log("[INFO] 変換対象なし")
@@ -1091,10 +1271,13 @@ def convert_files(
         with Pool(workers) as pool:
             results = pool.starmap(
                 convert_single_file,
-                [(f, str(db_path), no_encrypt, force) for f in file_infos],
+                [(f, str(db_path), no_encrypt, force, figures, fig_max_pages, fig_endpoints) for f in file_infos],
             )
     else:
-        results = [convert_single_file(f, str(db_path), no_encrypt, force) for f in file_infos]
+        results = [
+            convert_single_file(f, str(db_path), no_encrypt, force, figures, fig_max_pages, fig_endpoints)
+            for f in file_infos
+        ]
 
     converted = sum(1 for r in results if r["status"] == "success")
     skipped = sum(1 for r in results if r["status"] == "skipped")
@@ -1324,6 +1507,10 @@ def main():
     parser.add_argument("--type", help="特定形式のみ変換（pptx/xlsx/docx/pdf/md）")
     parser.add_argument("--force", action="store_true",
                         help="変換済みファイルも再変換")
+    parser.add_argument("--figures", action="store_true",
+                        help="relevance='core' のPDFに対し図・グラフをマルチモーダルOCRで言語化して本文にマージする")
+    parser.add_argument("--figures-max-pages", type=int, default=None,
+                        help="図言語化を行う先頭ページ数の上限（未指定なら全ページ）")
     parser.add_argument("--workers", type=int, default=2,
                         help="並列処理数（デフォルト: 2、1で順次実行、最大4推奨）")
     parser.add_argument("--dry-run", action="store_true",
@@ -1409,6 +1596,11 @@ def main():
     if args.convert:
         if args.dry_run:
             log("\n[DRY-RUN] ダウンロード・変換は行いません")
+        fig_endpoints = None
+        if args.figures:
+            fig_endpoints = get_ocr_endpoints()
+            if not fig_endpoints:
+                log("[WARN] --figures 指定ですが LOCAL_OCR_MODEL/RIVAULT_OCR_MODEL 未設定のため図言語化スキップ")
         convert_files(
             conn,
             source_filter=args.source,
@@ -1419,6 +1611,9 @@ def main():
             workers=args.workers,
             no_encrypt=args.no_encrypt,
             db_path=db_path,
+            figures=args.figures,
+            fig_max_pages=args.figures_max_pages,
+            fig_endpoints=fig_endpoints,
             log=log,
         )
 
