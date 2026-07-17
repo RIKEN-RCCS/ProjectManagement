@@ -7,6 +7,28 @@
 
 ---
 
+## 2026-07-17 investigate の回答フォーマットを中立化（固定5セクション・コデザイン文脈を撤廃）
+
+**背景**: investigate の system prompt / 強制まとめ prompt は、富岳NEXTのコデザイン評価フォーマット
+（結論サマリ/詳細状況/コデザインへの含意/ボトルネック・リスク/仕様決定に向けて不足している情報の
+固定5セクション）を流用したもので、あらゆる問いに同じ構成を強制していた。
+**決定**: investigate は汎用調査エージェントであり問いの性質は多様なので、LLM が問いに応じて
+重要と判断した情報を自由な構成で出力する方針に転換。プロジェクト固有のコデザイン文脈も
+system prompt から完全削除し中立化した。terminology/glossary の用語辞書のみ中立見出しで存置。
+**影響**: brief/risk（`pm_argus.py`）は今回の対象外で固定フォーマットのまま。
+
+## 2026-07-17 argus-investigate に `--file` 特定ファイル(Box資料)スコープ検索を追加
+
+**背景**: retrieval は各チャンクの `record_id` を SELECT するのに WHERE で未使用のまま放置されており、
+embedding 済みの特定 Box 資料「1本だけ」に QA を仕掛ける手段が無かった。
+**決定**: retrieval 層に汎用の `record_ids` フィルタ（`c.record_id IN (…)`）を追加し、
+box_docs.db でファイル名 → box_file_id を解決。「このファイルだけ」を確実に保証するため
+決定論的ピン方式を採用し、ピン時は pm.db/slack.db 系の非doc検索ツール（search_decisions /
+search_action_items / get_slack_messages / search_mentions / get_milestone_progress 等9種）を
+提示・実行の両面で封鎖した。ツール引数（LLM任せ）のみに委ねる案はスコープ保証にならないため却下。
+**影響**: CLI/Slack 双方に `--file` を追加、0件解決時は停止。search_text/hybrid には LLM 用の
+`file` 引数も追加（詳細は `pm-argus-commands` スキル参照）。
+
 ## 2026-07-16 実績DB（achievements ledger）を新設し「完了」列の検索依存を断つ
 
 **背景**: 前エントリの通り「完了列をinvestigエージェントの都度検索に依存する」設計は run 毎に
