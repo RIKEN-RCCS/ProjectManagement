@@ -64,6 +64,15 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 from db_utils import open_db
 
+# 暗号化DB (sqlcipher3) 接続時の ALTER TABLE 「列が既に存在」エラーは
+# sqlite3.OperationalError のサブクラスではないため、別途 import して
+# tuple で拾えるようにする（db_utils.py と同じ二重サポートパターン）。
+try:
+    from sqlcipher3 import dbapi2 as _sqlcipher3
+    _OPERATIONAL_ERRORS = (sqlite3.OperationalError, _sqlcipher3.OperationalError)
+except ImportError:
+    _OPERATIONAL_ERRORS = (sqlite3.OperationalError,)
+
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {"pptx", "xlsx", "docx", "pdf", "md", "boxnote", "txt"}
@@ -138,7 +147,7 @@ def _open_box_docs_db(db_path: Path, *, no_encrypt: bool = False) -> sqlite3.Con
     ):
         try:
             conn.execute(col_def)
-        except sqlite3.OperationalError:
+        except _OPERATIONAL_ERRORS:
             pass  # 既存DBに列がある場合は no-op
     conn.commit()
     return conn
