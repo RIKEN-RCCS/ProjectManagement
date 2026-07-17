@@ -219,6 +219,15 @@ def _resolve_box_file_ids(
     return [r["box_file_id"] for r in rows], [r["name"] for r in rows]
 
 
+def _excerpt(content: str) -> str:
+    """チャンク本文の抜粋を返す。図言語化チャンク（[図: を含む）は数値節が
+    後半にあり 400 字切りで欠落するため全文を返し、それ以外は従来どおり 400 字。"""
+    content = content.strip()
+    if "[図:" in content:
+        return content
+    return content[:400].strip()
+
+
 def search_text(query: str, index_name: str = "pm", since: str | None = None,
                 file: str | None = None, record_ids: list[str] | None = None,
                 scoped_names: list[str] | None = None) -> str:
@@ -242,7 +251,7 @@ def search_text(query: str, index_name: str = "pm", since: str | None = None,
     for i, c in enumerate(reranked, 1):
         label = _format_source_label(c)
         lines.append(f"[{i}] 出典: {label}")
-        lines.append(f"    {c['content'][:400].strip()}")
+        lines.append(f"    {_excerpt(c['content'])}")
         lines.append("")
     return "\n".join(lines)
 
@@ -269,7 +278,7 @@ def search_text_hybrid(query: str, index_name: str = "pm", since: str | None = N
     for i, c in enumerate(chunks, 1):
         label = _format_source_label(c)
         lines.append(f"[{i}] 出典: {label}（スコア: {c.get('rrf_score', 0):.2f}）")
-        lines.append(f"    {c['content'][:400].strip()}")
+        lines.append(f"    {_excerpt(c['content'])}")
         lines.append("")
     return "\n".join(lines)
 

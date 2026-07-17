@@ -93,14 +93,23 @@ def _call_mcp(fn_name: str) -> Callable[[dict, AgentContext], str]:
 #  AgentContext 依存ツール（mcp_tools に移せないもの）
 # =========================================================================== #
 
+def _resolve_since(args: dict, ctx: AgentContext) -> str | None:
+    """ツール引数の since を解決する。'all'/'none' は無期限（None）扱い。"""
+    since = args.get("since", ctx.since)
+    if since is None or str(since).strip().lower() in ("all", "none", ""):
+        return None
+    return since
+
+
 def _tool_search_text(args: dict, ctx: AgentContext) -> str:
     from argus.mcp_tools import search_text as _mcp_search
     query = args.get("query", "")
     if not query:
         return "（検索クエリが空です）"
     file = args.get("file")
+    since = _resolve_since(args, ctx)
     # ctx.index_db を使って cited_chunks を蓄積するためラップ
-    result = _mcp_search(query, index_name=ctx.index_name, since=ctx.since,
+    result = _mcp_search(query, index_name=ctx.index_name, since=since,
                          file=file, record_ids=(ctx.record_ids or None),
                          scoped_names=(ctx.scoped_file_names or None))
     # search_text の内部で _format_source_label を使うが、
@@ -115,7 +124,8 @@ def _tool_search_text_hybrid(args: dict, ctx: AgentContext) -> str:
         return "（検索クエリが空です）"
     index_name = args.get("index_name", ctx.index_name)
     file = args.get("file")
-    return _mcp_search_hybrid(query, index_name=index_name, since=ctx.since,
+    since = _resolve_since(args, ctx)
+    return _mcp_search_hybrid(query, index_name=index_name, since=since,
                               file=file, record_ids=(ctx.record_ids or None),
                               scoped_names=(ctx.scoped_file_names or None))
 
@@ -399,6 +409,7 @@ TOOLS: list[ToolDef] = [
         parameters={
             "query": "検索クエリ（自然言語可）",
             "file": "特定の Box 資料に絞る場合のファイル名/フォルダ名の一部（省略時は全体検索）",
+            "since": "この日付以降に限定（YYYY-MM-DD）。省略時は調査期間。'all' で無期限",
         },
         fn=_tool_search_text,
     ),
@@ -409,6 +420,7 @@ TOOLS: list[ToolDef] = [
             "query": "検索クエリ",
             "index_name": "インデックス名（デフォルト: pm）",
             "file": "特定の Box 資料に絞る場合のファイル名/フォルダ名の一部（省略時は全体検索）",
+            "since": "この日付以降に限定（YYYY-MM-DD）。省略時は調査期間。'all' で無期限",
         },
         fn=_tool_search_text_hybrid,
     ),

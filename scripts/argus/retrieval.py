@@ -199,7 +199,9 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     conn = sqlite3.connect(str(index_db))
     conn.row_factory = sqlite3.Row
     try:
-        date_filter = "c.held_at >= ?" if since_date else "1=1"
+        date_filter = (
+            "(c.held_at >= ? OR c.source_type = 'box_document')" if since_date else "1=1"
+        )
         date_params = [since_date] if since_date else []
 
         if record_ids:
