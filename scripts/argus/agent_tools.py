@@ -52,6 +52,9 @@ class AgentContext:
     cited_chunks: list[dict] = field(default_factory=list)
     # 出力ツール用（オプショナル）
     box_folder_id: str = ""
+    # 決定論的ピン（--file 等で全 search をこの record_id 群に固定する）
+    record_ids: list[str] = field(default_factory=list)
+    scoped_file_names: list[str] = field(default_factory=list)
 
 
 # =========================================================================== #
@@ -95,11 +98,26 @@ def _tool_search_text(args: dict, ctx: AgentContext) -> str:
     query = args.get("query", "")
     if not query:
         return "（検索クエリが空です）"
+    file = args.get("file")
     # ctx.index_db を使って cited_chunks を蓄積するためラップ
-    result = _mcp_search(query, index_name=ctx.index_name, since=ctx.since)
+    result = _mcp_search(query, index_name=ctx.index_name, since=ctx.since,
+                         file=file, record_ids=(ctx.record_ids or None),
+                         scoped_names=(ctx.scoped_file_names or None))
     # search_text の内部で _format_source_label を使うが、
     # cited_chunks の蓄積は MCP サーバー側で行うためここではスキップ
     return result
+
+
+def _tool_search_text_hybrid(args: dict, ctx: AgentContext) -> str:
+    from argus.mcp_tools import search_text_hybrid as _mcp_search_hybrid
+    query = args.get("query", "")
+    if not query:
+        return "（検索クエリが空です）"
+    index_name = args.get("index_name", ctx.index_name)
+    file = args.get("file")
+    return _mcp_search_hybrid(query, index_name=index_name, since=ctx.since,
+                              file=file, record_ids=(ctx.record_ids or None),
+                              scoped_names=(ctx.scoped_file_names or None))
 
 
 def _tool_get_slack_messages(args: dict, ctx: AgentContext) -> str:
@@ -378,14 +396,21 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="search_text",
         description="議事録・Slackメッセージを全文検索する（FTS5 + LLM re-ranking）",
-        parameters={"query": "検索クエリ（自然言語可）"},
+        parameters={
+            "query": "検索クエリ（自然言語可）",
+            "file": "特定の Box 資料に絞る場合のファイル名/フォルダ名の一部（省略時は全体検索）",
+        },
         fn=_tool_search_text,
     ),
     ToolDef(
         name="search_text_hybrid",
         description="FTS5 + ベクトル類似度のハイブリッド検索",
-        parameters={"query": "検索クエリ", "index_name": "インデックス名（デフォルト: pm）"},
-        fn=_call_mcp("search_text_hybrid"),
+        parameters={
+            "query": "検索クエリ",
+            "index_name": "インデックス名（デフォルト: pm）",
+            "file": "特定の Box 資料に絞る場合のファイル名/フォルダ名の一部（省略時は全体検索）",
+        },
+        fn=_tool_search_text_hybrid,
     ),
     ToolDef(
         name="search_entity",
@@ -453,9 +478,10 @@ _TOOL_MAP: dict[str, ToolDef] = {t.name: t for t in TOOLS}
 #  Tool Description Builder
 # =========================================================================== #
 
-def _build_tool_descriptions() -> str:
+def _build_tool_descriptions(exclude: set[str] | None = None) -> str:
     lines = []
-    for i, t in enumerate(TOOLS, 1):
+    tools = [t for t in TOOLS if not (exclude and t.name in exclude)]
+    for i, t in enumerate(tools, 1):
         params_desc = "なし"
         if t.parameters:
             params_desc = ", ".join(f"`{k}`: {v}" for k, v in t.parameters.items())

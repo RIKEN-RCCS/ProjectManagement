@@ -187,17 +187,58 @@ def get_assignee_workload() -> str:
 #  全文検索
 # =========================================================================== #
 
-def search_text(query: str, index_name: str = "pm", since: str | None = None) -> str:
+def _resolve_box_file_ids(
+    file: str | None, record_ids: list[str] | None
+) -> tuple[list[str] | None, list[str]]:
+    """ファイル名/フォルダ名の一部から box_file_id 群を解決する。
+
+    record_ids が明示されていればそれを優先する。file / record_ids のいずれも
+    無ければスコープなし（None）を返す。戻り値は (record_ids, ファイル名一覧)。
+    ファイル名一覧はヘッダ表示用（0件解決時は空リスト）。
+    """
+    if record_ids:
+        return list(record_ids), []
+    if not file:
+        return None, []
+    from db_utils import open_db
+    box_docs_db = _DATA_DIR / "box_docs.db"
+    if not box_docs_db.exists():
+        return [], []
+    conn = open_db(box_docs_db, encrypt=True)
+    try:
+        pattern = f"%{file}%"
+        rows = conn.execute(
+            "SELECT box_file_id, name, folder_path FROM box_files"
+            " WHERE name LIKE ? OR folder_path LIKE ?",
+            (pattern, pattern),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return [], []
+    return [r["box_file_id"] for r in rows], [r["name"] for r in rows]
+
+
+def search_text(query: str, index_name: str = "pm", since: str | None = None,
+                file: str | None = None, record_ids: list[str] | None = None,
+                scoped_names: list[str] | None = None) -> str:
     """議事録・Slackメッセージを全文検索する。FTS5 + LLM re-ranking を使用"""
     if not _QA_INDEX.exists():
         return "qa_index.db が見つかりません。pm_embed.py でインデックスを構築してください。"
+    rids, names = _resolve_box_file_ids(file, record_ids)
+    if scoped_names:
+        names = scoped_names
+    if file and rids == []:
+        return f"指定ファイル『{file}』が Box 索引に見つかりません。"
     from argus.pm_qa_server import _format_source_label
     from argus.retrieval import rerank_chunks, retrieve_chunks_hyde
-    merged = retrieve_chunks_hyde(query, _QA_INDEX, index_name=index_name, max_merged=50, since_date=since)
+    merged = retrieve_chunks_hyde(query, _QA_INDEX, index_name=index_name, max_merged=50,
+                                  since_date=since, record_ids=rids)
     if not merged:
         return f"「{query}」に一致する情報は見つかりませんでした。"
     reranked = rerank_chunks(query, merged, format_source_label=_format_source_label)
-    lines = [f"## 全文検索結果（{len(reranked)}件）"]
+    scope = f"（対象: {'、'.join(names)}）" if names else ""
+    lines = [f"## 全文検索結果{scope}（{len(reranked)}件）"]
     for i, c in enumerate(reranked, 1):
         label = _format_source_label(c)
         lines.append(f"[{i}] 出典: {label}")
@@ -206,16 +247,25 @@ def search_text(query: str, index_name: str = "pm", since: str | None = None) ->
     return "\n".join(lines)
 
 
-def search_text_hybrid(query: str, index_name: str = "pm", since: str | None = None) -> str:
+def search_text_hybrid(query: str, index_name: str = "pm", since: str | None = None,
+                       file: str | None = None, record_ids: list[str] | None = None,
+                       scoped_names: list[str] | None = None) -> str:
     """FTS5 + ベクトル類似度のハイブリッド検索"""
     if not _QA_INDEX.exists():
         return "qa_index.db が見つかりません。"
+    rids, names = _resolve_box_file_ids(file, record_ids)
+    if scoped_names:
+        names = scoped_names
+    if file and rids == []:
+        return f"指定ファイル『{file}』が Box 索引に見つかりません。"
     from argus.pm_qa_server import _format_source_label
     from argus.retrieval import retrieve_chunks_hybrid
-    chunks = retrieve_chunks_hybrid(query, _QA_INDEX, k=50, index_name=index_name, since_date=since)
+    chunks = retrieve_chunks_hybrid(query, _QA_INDEX, k=50, index_name=index_name,
+                                    since_date=since, record_ids=rids)
     if not chunks:
         return f"「{query}」に一致する情報は見つかりませんでした。"
-    lines = [f"## ハイブリッド検索結果（{len(chunks)}件）"]
+    scope = f"（対象: {'、'.join(names)}）" if names else ""
+    lines = [f"## ハイブリッド検索結果{scope}（{len(chunks)}件）"]
     for i, c in enumerate(chunks, 1):
         label = _format_source_label(c)
         lines.append(f"[{i}] 出典: {label}（スコア: {c.get('rrf_score', 0):.2f}）")

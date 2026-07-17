@@ -300,8 +300,14 @@ def build_seed_data(ctx: AgentContext) -> str:
         "## プロジェクト概況\n",
         f"- 本日: {ctx.today}",
         f"- 調査対象期間: {ctx.since} 〜 {ctx.today}",
-        "",
     ]
+    if ctx.record_ids:
+        names = "、".join(ctx.scoped_file_names) if ctx.scoped_file_names else "、".join(ctx.record_ids)
+        parts.append(
+            f"- 対象ファイル: {names}"
+            "（全文検索・資料検索を対象ファイルに固定。構造化データ・Slack生ログ検索は本調査では無効）"
+        )
+    parts.append("")
     return "\n".join(parts)
 
 
@@ -336,7 +342,28 @@ def _make_progress_updater(respond: Callable | None, max_respond_calls: int = 2)
 #  Agent Loop
 # =========================================================================== #
 
+# 決定論的ピン（--file）でファイル外のコンテンツを持ち込みうるツール。
+# search_text / search_text_hybrid（スコープ済み資料検索）・synthesize_answers（統合のみ）・
+# 出力系ツール（副作用のみでコンテンツ源ではない）は対象外。
+_FILE_PINNED_EXCLUDED_TOOLS = frozenset({
+    "search_entity",
+    "search_action_items",
+    "search_decisions",
+    "get_app_achievements",
+    "get_milestone_progress",
+    "get_overdue_items",
+    "get_assignee_workload",
+    "search_mentions",
+    "get_slack_messages",
+})
+
+
 def execute_tool(name: str, args: dict, ctx: AgentContext) -> str:
+    if name in _FILE_PINNED_EXCLUDED_TOOLS and ctx.record_ids:
+        return (
+            f"エラー: 対象ファイル固定中はツール『{name}』は使用できません"
+            "（全文/資料検索のみ有効）。search_text / search_text_hybrid を使ってください。"
+        )
     tool = _TOOL_MAP.get(name)
     if tool is None:
         available = ", ".join(_TOOL_MAP.keys())
@@ -524,7 +551,8 @@ def run_agent(
     timeout は LLM 呼び出しの総予算（wall-clock）として消費される。
     context が指定された場合、調査依頼の前に背景情報として注入する（Pass 1 → Pass 2 の引き継ぎ用）。
     """
-    tool_desc = _build_tool_descriptions()
+    exclude_tools = _FILE_PINNED_EXCLUDED_TOOLS if ctx.record_ids else None
+    tool_desc = _build_tool_descriptions(exclude_tools)
     codesign_items = load_codesign_context() or "(コデザイン項目情報なし)"
     # terminology 動的用語辞書を追記
     try:
@@ -569,6 +597,12 @@ def run_agent(
     intent_header = ""
     if include_intent_header and rewrite and rewrite.get("intent"):
         intent_header = f"> **ご質問の解釈**: {rewrite['intent']}\n\n"
+    if include_intent_header and ctx.record_ids:
+        names = "、".join(ctx.scoped_file_names) if ctx.scoped_file_names else "、".join(ctx.record_ids)
+        intent_header += (
+            f"> **対象ファイル**: {names}"
+            "（全文検索・資料検索を対象ファイルに固定。構造化データ・Slack生ログ検索は無効）\n\n"
+        )
 
     context_block = f"## アプリケーション背景情報（事前調査済み）\n\n{context}\n\n" if context else ""
     base_prompt = (
@@ -916,6 +950,22 @@ def _strip_output_flags(text: str) -> str:
     return _OUTPUT_FLAG_RE.sub("", text).strip()
 
 
+_FILE_FLAG_RE = re.compile(r'--file=(?:"([^"]*)"|(\S+))')
+
+
+def _parse_file_flag(text: str) -> str | None:
+    """コマンドテキストから --file="..." の値を抽出する。無ければ None。"""
+    m = _FILE_FLAG_RE.search(text)
+    if not m:
+        return None
+    return (m.group(1) or m.group(2) or "").strip() or None
+
+
+def _strip_file_flag(text: str) -> str:
+    """--file フラグを取り除いた純粋な質問文を返す。"""
+    return _FILE_FLAG_RE.sub("", text).strip()
+
+
 def _output_to_box(result: str, today: str) -> str:
     """調査結果を一時ファイルに書き出して Box にアップロードする。"""
     import tempfile
@@ -964,11 +1014,31 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
         cmd_text = (command.get("text") or "").strip()
         channel_id = command.get("channel_id", "")
 
+        file_arg = _parse_file_flag(cmd_text)
+        if file_arg:
+            cmd_text = _strip_file_flag(cmd_text)
+
         today = date.today().isoformat()
         since_date = (date.today() - timedelta(days=_DEFAULT_SINCE_DAYS)).isoformat()
 
         index_db, channels, pm_db_paths, index_name = _resolve_index_and_channels(channel_id)
         conns = [open_pm_db(p, no_encrypt=no_encrypt) for p in pm_db_paths]
+
+        record_ids: list[str] = []
+        scoped_file_names: list[str] = []
+        if file_arg:
+            from argus.mcp_tools import _resolve_box_file_ids
+            resolved_ids, scoped_file_names = _resolve_box_file_ids(file_arg, None)
+            record_ids = resolved_ids or []
+            if record_ids == []:
+                for c in conns:
+                    c.close()
+                respond(
+                    text=f":warning: 指定ファイル『{file_arg}』が Box 索引に見つかりません。",
+                    response_type="ephemeral",
+                    replace_original=True,
+                )
+                return
 
         ctx = AgentContext(
             conns=conns,
@@ -980,6 +1050,8 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             index_db=index_db,
             index_name=index_name,
             channels=channels,
+            record_ids=record_ids,
+            scoped_file_names=scoped_file_names,
         )
 
         seed_data = build_seed_data(ctx)
@@ -1081,6 +1153,7 @@ def main():
     parser.add_argument("--to-canvas", action="store_true", help="調査結果を Canvas に投稿")
     parser.add_argument("--no-intent-header", action="store_true", help="ご質問の解釈ヘッダを出力しない（レポートファイル用）")
     parser.add_argument("--context-file", help="事前調査結果等の背景情報ファイル（Pass 1 結果を Pass 2 に渡す際に使用）")
+    parser.add_argument("--file", default="", help="Box資料名/フォルダ名の一部で検索範囲をそのファイルのみに固定する")
     args = parser.parse_args()
 
     today = date.today().isoformat()
@@ -1098,6 +1171,15 @@ def main():
         pm_db_paths = [Path(args.db)]
     conns = [open_pm_db(p, no_encrypt=args.no_encrypt) for p in pm_db_paths]
 
+    record_ids: list[str] = []
+    scoped_file_names: list[str] = []
+    if args.file:
+        from argus.mcp_tools import _resolve_box_file_ids
+        resolved_ids, scoped_file_names = _resolve_box_file_ids(args.file, None)
+        record_ids = resolved_ids or []
+        if record_ids == []:
+            parser.error(f"指定ファイル『{args.file}』が Box 索引に見つかりません。")
+
     ctx = AgentContext(
         conns=conns,
         today=today,
@@ -1108,6 +1190,8 @@ def main():
         index_db=index_db,
         index_name=index_name,
         channels=channels,
+        record_ids=record_ids,
+        scoped_file_names=scoped_file_names,
     )
 
     seed_data = build_seed_data(ctx)

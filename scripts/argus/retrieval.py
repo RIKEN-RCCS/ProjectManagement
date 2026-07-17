@@ -99,8 +99,10 @@ def sanitize_fts_query(q: str) -> str:
 
 def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
                  date_filter: str = "1=1", date_params: list | None = None,
-                 index_name: str | None = None) -> list[dict]:
+                 index_name: str | None = None,
+                 record_filter: str = "", record_params: list | None = None) -> list[dict]:
     date_params = date_params or []
+    record_params = record_params or []
     try:
         if index_name:
             sql = (
@@ -109,20 +111,20 @@ def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
                 " FROM fts"
                 " JOIN chunks c ON fts.rowid = c.id"
                 " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
-                " WHERE fts MATCH ? AND ci.index_name = ? AND " + date_filter +
+                " WHERE fts MATCH ? AND ci.index_name = ? AND " + date_filter + record_filter +
                 " ORDER BY rank LIMIT ?"
             )
-            params = [query, index_name] + date_params + [k]
+            params = [query, index_name] + date_params + record_params + [k]
         else:
             sql = (
                 "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
                 "       c.content, c.source_ref, fts.rank"
                 " FROM fts"
                 " JOIN chunks c ON fts.rowid = c.id"
-                " WHERE fts MATCH ? AND " + date_filter +
+                " WHERE fts MATCH ? AND " + date_filter + record_filter +
                 " ORDER BY rank LIMIT ?"
             )
-            params = [query] + date_params + [k]
+            params = [query] + date_params + record_params + [k]
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError as e:
@@ -132,9 +134,11 @@ def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
 
 def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
                        date_filter: str = "1=1", date_params: list | None = None,
-                       index_name: str | None = None) -> list[dict]:
+                       index_name: str | None = None,
+                       record_filter: str = "", record_params: list | None = None) -> list[dict]:
     """fts_tokens（SudachiPy形態素解析）テーブルで段階的AND検索を行う。"""
     date_params = date_params or []
+    record_params = record_params or []
     token_sets = [tokens]
     if len(tokens) > 3:
         token_sets.append(tokens[:3])
@@ -153,20 +157,20 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
                     " FROM fts_tokens"
                     " JOIN chunks c ON fts_tokens.rowid = c.id"
                     " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
-                    " WHERE fts_tokens MATCH ? AND ci.index_name = ? AND " + date_filter +
+                    " WHERE fts_tokens MATCH ? AND ci.index_name = ? AND " + date_filter + record_filter +
                     " ORDER BY rank LIMIT ?"
                 )
-                params = [query, index_name] + date_params + [k]
+                params = [query, index_name] + date_params + record_params + [k]
             else:
                 sql = (
                     "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
                     "       c.content, c.source_ref, fts_tokens.rank"
                     " FROM fts_tokens"
                     " JOIN chunks c ON fts_tokens.rowid = c.id"
-                    " WHERE fts_tokens MATCH ? AND " + date_filter +
+                    " WHERE fts_tokens MATCH ? AND " + date_filter + record_filter +
                     " ORDER BY rank LIMIT ?"
                 )
-                params = [query] + date_params + [k]
+                params = [query] + date_params + record_params + [k]
             rows = conn.execute(sql, params).fetchall()
             if rows:
                 return [dict(r) for r in rows]
@@ -178,7 +182,8 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
 
 def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
                     since_date: str | None = None,
-                    index_name: str | None = None) -> list[dict]:
+                    index_name: str | None = None,
+                    record_ids: list[str] | None = None) -> list[dict]:
     """統合 qa_index.db から関連チャンクを取得する。
 
     検索戦略（順番に試行）:
@@ -196,6 +201,14 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     try:
         date_filter = "c.held_at >= ?" if since_date else "1=1"
         date_params = [since_date] if since_date else []
+
+        if record_ids:
+            placeholders = ",".join("?" * len(record_ids))
+            record_filter = f" AND c.record_id IN ({placeholders})"
+            record_params = list(record_ids)
+        else:
+            record_filter = ""
+            record_params = []
 
         if index_name:
             ci_join = " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
@@ -219,6 +232,7 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
                 rows = _fts_tokens_search(
                     conn, sudachi_tokens, k,
                     date_filter, date_params, index_name=index_name,
+                    record_filter=record_filter, record_params=record_params,
                 )
                 if rows:
                     logger.info(
@@ -243,7 +257,8 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
 
         for tset in token_sets:
             q = " ".join(tset)
-            rows = _fts5_search(conn, q, k, date_filter, date_params, index_name=index_name)
+            rows = _fts5_search(conn, q, k, date_filter, date_params, index_name=index_name,
+                               record_filter=record_filter, record_params=record_params)
             if rows:
                 logger.info(f"trigram FTSマッチ ({len(rows)}件): [{q}] in {idx_label}")
                 return rows
@@ -256,9 +271,9 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
                 "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
                 " c.content, c.source_ref, 0 AS rank"
                 " FROM chunks c" + ci_join +
-                " WHERE " + ci_where + date_filter + " AND c.content LIKE ? LIMIT ?"
+                " WHERE " + ci_where + date_filter + record_filter + " AND c.content LIKE ? LIMIT ?"
             )
-            params = ci_params + date_params + [f"%{keyword}%", k]
+            params = ci_params + date_params + record_params + [f"%{keyword}%", k]
             rows = conn.execute(sql, params).fetchall()
             if rows:
                 logger.info(f"LIKE検索フォールバック ({len(rows)}件): [{keyword}]")
@@ -270,10 +285,10 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
             "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
             " c.content, c.source_ref, 0 AS rank"
             " FROM chunks c" + ci_join +
-            " WHERE " + ci_where + date_filter +
+            " WHERE " + ci_where + date_filter + record_filter +
             " AND c.held_at IS NOT NULL ORDER BY c.held_at DESC LIMIT ?"
         )
-        params = ci_params + date_params + [k]
+        params = ci_params + date_params + record_params + [k]
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
@@ -381,6 +396,7 @@ def retrieve_chunks_hyde(
     question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     since_date: str | None = None, n_extra: int = 2, max_merged: int = 60,
     index_name: str | None = None,
+    record_ids: list[str] | None = None,
 ) -> list[dict]:
     """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。"""
     cleaned = extract_search_keywords(question)
@@ -392,7 +408,7 @@ def retrieve_chunks_hyde(
     merged: list[dict] = []
     for q in queries:
         for c in retrieve_chunks_hybrid(q, index_db, k=k, since_date=since_date,
-                                        index_name=index_name):
+                                        index_name=index_name, record_ids=record_ids):
             key = (c.get("source_db"), c.get("record_id"), c.get("content", "")[:80])
             if key in seen:
                 continue
@@ -409,7 +425,8 @@ def retrieve_chunks_hyde(
 # --------------------------------------------------------------------------- #
 
 def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTOR_K,
-                           index_name: str | None = None) -> list[dict]:
+                           index_name: str | None = None,
+                           record_ids: list[str] | None = None) -> list[dict]:
     """chunk_embeddings を使って cosine similarity 検索を行う。"""
     try:
         from embed_utils import blob_to_vector, cosine_similarity_matrix, embed_one
@@ -423,20 +440,33 @@ def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTO
         logger.warning(f"embedding 取得エラー: {e}")
         return []
 
-    sql = """
-        SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,
-               c.content, c.source_ref, e.vector, e.dim
-        FROM chunks c
-        JOIN chunk_embeddings e ON e.chunk_id = c.id
-        JOIN chunk_indexes ci ON ci.chunk_id = c.id
-        WHERE ci.index_name = ?
-    """
-    rows = conn.execute(sql, (index_name,)).fetchall() if index_name else conn.execute(
-        "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
-        " c.content, c.source_ref, e.vector, e.dim"
-        " FROM chunks c"
-        " JOIN chunk_embeddings e ON e.chunk_id = c.id"
-    ).fetchall()
+    if record_ids:
+        placeholders = ",".join("?" * len(record_ids))
+        record_filter = f" AND c.record_id IN ({placeholders})"
+        record_params = list(record_ids)
+    else:
+        record_filter = ""
+        record_params = []
+
+    if index_name:
+        sql = (
+            "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
+            "       c.content, c.source_ref, e.vector, e.dim"
+            " FROM chunks c"
+            " JOIN chunk_embeddings e ON e.chunk_id = c.id"
+            " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
+            " WHERE ci.index_name = ?" + record_filter
+        )
+        rows = conn.execute(sql, [index_name] + record_params).fetchall()
+    else:
+        sql = (
+            "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
+            " c.content, c.source_ref, e.vector, e.dim"
+            " FROM chunks c"
+            " JOIN chunk_embeddings e ON e.chunk_id = c.id"
+            " WHERE 1=1" + record_filter
+        )
+        rows = conn.execute(sql, record_params).fetchall()
 
     if not rows:
         return []
@@ -493,15 +523,18 @@ def _rrf_merge(fts_chunks: list[dict], vec_chunks: list[dict], k: int,
 def retrieve_chunks_hybrid(
     question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     since_date: str | None = None, index_name: str | None = None,
+    record_ids: list[str] | None = None,
 ) -> list[dict]:
     """FTS5 + vector のハイブリッド検索。RRF で統合する。"""
     fts_results = retrieve_chunks(question, index_db, k=k+20,
-                                  since_date=since_date, index_name=index_name)
+                                  since_date=since_date, index_name=index_name,
+                                  record_ids=record_ids)
     conn = sqlite3.connect(str(index_db))
     conn.row_factory = sqlite3.Row
     try:
         vec_results = retrieve_chunks_vector(question, conn, k=_VECTOR_K,
-                                             index_name=index_name)
+                                             index_name=index_name,
+                                             record_ids=record_ids)
     finally:
         conn.close()
 
