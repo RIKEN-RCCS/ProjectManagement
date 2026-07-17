@@ -636,11 +636,13 @@ def run_agent(
     nudge_notes: list[str] = []
     zero_tool_nudges = 0
 
-    # STEP ループの LLM 設定（A/B 評価用の環境変数 knob。既定は従来動作）。
-    # think が冗長なモデルでは思考が max_tokens を食い潰し tool_call に
-    # 到達しないことがあるため、切り替えて計測できるようにする。
-    step_think = os.environ.get("ARGUS_STEP_THINK", "1") != "0"
-    step_max_tokens = int(os.environ.get("ARGUS_STEP_MAX_TOKENS", "32768"))
+    # STEP ループの LLM 設定（環境変数 knob で切替可能）。
+    # 既定 think=False / 16384: 2026-07-18 の A/B 9run で think=True は
+    # tool_call 準拠率 18%（1ステップ135秒・21万字の思考のみで tool_call に
+    # 到達しない失敗モードを実測）。think=False は準拠率 44-65% で、16384 は
+    # 多エンティティ調査で 8 ステップ完走・最も豊富な定量結果を示した。
+    step_think = os.environ.get("ARGUS_STEP_THINK", "0") != "0"
+    step_max_tokens = int(os.environ.get("ARGUS_STEP_MAX_TOKENS", "16384"))
 
     # STEP1 でツール呼び出しが0件のまま終わる問題の緩和策。既定で有効。
     # 無効化する場合のみ ARGUS_DISABLE_INITIAL_SEARCH=1 を設定する。

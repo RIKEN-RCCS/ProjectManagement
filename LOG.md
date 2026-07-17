@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-07-18 investigate STEPループを think=False / 16384 に変更（A/B 9run）
+
+**背景**: glm-5.2 が STEP ループ（think=True/32768）で tool_call を出さず即強制まとめに
+落ちる症状。1ステップ135秒・21万字の思考のみで tool_call 未到達の失敗モードを実測。
+**決定**: A/B 9run（think ON/OFF × 8k/16k/32k × 3クエリ）で think=True の tool_call 準拠率
+18% に対し OFF は 44-65%。OFF/16384 が多エンティティ調査で唯一8ステップ完走・最多の
+定量結果（68件）を出したため既定に採用。8192 は速度優位だが粘りで劣後（僅差・要再検証）。
+環境変数 ARGUS_STEP_THINK / ARGUS_STEP_MAX_TOKENS で戻せる。
+**影響**: gemma4 reasoning 前提だった 2026-05-14 の investigate think 運用は glm-5.2 では
+成立しないことが確定。FFB図チャンクの数値未到達は embedding エンドポイント問題
+（PLAN.md 保留エントリ）が残存。
+
 ## 2026-07-17 Box図言語化OCRの導入と、Box更新検知（鮮度問題）の解消
 
 **背景**: pdftotext でテキストが取れる報告書はグラフ・図が索引に載らず investigate が視覚情報を
