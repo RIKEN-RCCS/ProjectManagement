@@ -636,6 +636,12 @@ def run_agent(
     nudge_notes: list[str] = []
     zero_tool_nudges = 0
 
+    # STEP ループの LLM 設定（A/B 評価用の環境変数 knob。既定は従来動作）。
+    # think が冗長なモデルでは思考が max_tokens を食い潰し tool_call に
+    # 到達しないことがあるため、切り替えて計測できるようにする。
+    step_think = os.environ.get("ARGUS_STEP_THINK", "1") != "0"
+    step_max_tokens = int(os.environ.get("ARGUS_STEP_MAX_TOKENS", "32768"))
+
     # STEP1 でツール呼び出しが0件のまま終わる問題の緩和策。既定で有効。
     # 無効化する場合のみ ARGUS_DISABLE_INITIAL_SEARCH=1 を設定する。
     if os.environ.get("ARGUS_DISABLE_INITIAL_SEARCH") != "1" and rewrite and rewrite.get("search_queries"):
@@ -696,7 +702,7 @@ def run_agent(
         try:
             response = call_argus_llm(
                 prompt, system=system_prompt,
-                max_tokens=32768, timeout=remaining_s(), think=True,
+                max_tokens=step_max_tokens, timeout=remaining_s(), think=step_think,
             )
         except Exception as e:
             logger.exception(f"[STEP {step}/{max_steps}] LLM error: {e}")
