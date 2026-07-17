@@ -12,6 +12,7 @@ argus_config.yaml（旧 qa_config.yaml）の定義に従い、会議議事録本
 """
 
 import argparse
+import hashlib
 import logging
 import re
 import sqlite3
@@ -96,6 +97,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_tokens USING fts5(
 
 CHUNK_MAX_CHARS = 1000
 CHUNK_OVERLAP_CHARS = 100
+
+# backfill_embeddings の異常ベクトル検出でログ出力する警告の上限件数
+MAX_EMBEDDING_ANOMALY_WARNINGS = 20
 
 
 def now_iso() -> str:
@@ -690,6 +694,32 @@ def index_web(
     return count
 
 
+def _is_zero_vector_blob(vector: bytes) -> bool:
+    """vector（float32 raw bytes）が全ゼロなら True。"""
+    return not any(vector)
+
+
+def _vector_blob_hash(vector: bytes) -> bytes:
+    return hashlib.sha256(vector).digest()
+
+
+def _build_vector_hash_index(index_conn: sqlite3.Connection) -> dict[bytes, list[tuple[int, str]]]:
+    """既存 chunk_embeddings 全行から vector ハッシュ→[(chunk_id, content), ...] の
+    マップを構築する。backfill_embeddings のクライアント側防御ガードの初期状態として使う
+    （ゼロベクトルは検査対象外のため除外）。
+    """
+    index: dict[bytes, list[tuple[int, str]]] = {}
+    rows = index_conn.execute(
+        "SELECT ce.chunk_id, ce.vector, c.content"
+        " FROM chunk_embeddings ce JOIN chunks c ON c.id = ce.chunk_id"
+    ).fetchall()
+    for chunk_id, vector, content in rows:
+        if not vector or _is_zero_vector_blob(vector):
+            continue
+        index.setdefault(_vector_blob_hash(vector), []).append((chunk_id, content))
+    return index
+
+
 def backfill_embeddings(index_conn, logger, *, refresh_all=False, batch_size=256, limit=None):
     """chunks に bge-m3 埋め込みを計算して chunk_embeddings に保存する。
 
@@ -697,7 +727,14 @@ def backfill_embeddings(index_conn, logger, *, refresh_all=False, batch_size=256
     refresh_all=True:  全 chunk を再計算（--embed-backfill 用）。
     limit: デバッグ用の件数上限（None で全件）。
     埋め込みエンドポイント未到達時は WARN してスキップ（FTS 構築は成功済みのため全体は失敗させない）。
-    戻り値: 埋め込みを書き込んだ件数。
+
+    クライアント側防御ガード: 埋め込みエンドポイントが異なる content に対して
+    バイト同一の誤ベクトルを返すことがあるため、保存前に vector ハッシュ→content の
+    マップ（実行開始時に chunk_embeddings 全行から1回構築し、以後は本関数内で保存した
+    分を追記）と照合する。ハッシュが一致するのに content が異なる場合は異常とみなし、
+    その chunk_embeddings 行は保存しない（chunk は未 embedding のまま残り、次回の
+    差分実行で再試行される）。content が同一の正当な重複は従来どおり保存する。
+    戻り値: 処理したチャンク数（ゼロベクトル・異常検出によるスキップ分を含む）。
     """
     try:
         from embed_utils import (
@@ -740,6 +777,10 @@ def backfill_embeddings(index_conn, logger, *, refresh_all=False, batch_size=256
 
     logger.info(f"embedding: {total} チャンクを計算します (model={model}, refresh_all={refresh_all})")
 
+    vector_hash_index = _build_vector_hash_index(index_conn)
+    anomaly_skipped = 0
+    anomaly_detail_warned = 0
+
     done = 0
     for i in range(0, total, batch_size):
         batch = rows[i:i + batch_size]
@@ -752,17 +793,42 @@ def backfill_embeddings(index_conn, logger, *, refresh_all=False, batch_size=256
             break
 
         ts = now_iso()
-        for cid, vec in zip(ids, vecs, strict=True):
+        for cid, content, vec in zip(ids, texts, vecs, strict=True):
             if vec is None or int(vec.shape[0]) == 0 or not vec.any():
+                continue
+            blob = vector_to_blob(vec)
+            vhash = _vector_blob_hash(blob)
+            mismatched = [
+                (other_id, other_content)
+                for other_id, other_content in vector_hash_index.get(vhash, [])
+                if other_content != content
+            ]
+            if mismatched:
+                anomaly_skipped += 1
+                if anomaly_detail_warned < MAX_EMBEDDING_ANOMALY_WARNINGS:
+                    other_id, other_content = mismatched[0]
+                    logger.warning(
+                        "embedding 異常検出: chunk_id=%s が chunk_id=%s と同一vectorだが"
+                        " content が不一致 - 保存をスキップ (new=%r other=%r)",
+                        cid, other_id, content[:50], other_content[:50],
+                    )
+                    anomaly_detail_warned += 1
                 continue
             index_conn.execute(
                 "INSERT OR REPLACE INTO chunk_embeddings"
                 " (chunk_id, model, dim, vector, embedded_at) VALUES (?, ?, ?, ?, ?)",
-                (cid, model, int(vec.shape[0]), vector_to_blob(vec), ts),
+                (cid, model, int(vec.shape[0]), blob, ts),
             )
+            vector_hash_index.setdefault(vhash, []).append((cid, content))
         done += len(batch)
         index_conn.commit()
         logger.info(f"  embedding 進捗: {done}/{total}")
+
+    if anomaly_skipped:
+        suppressed = anomaly_skipped - anomaly_detail_warned
+        if suppressed > 0:
+            logger.warning(f"embedding 異常検出: 他 {suppressed} 件は警告を抑制")
+        logger.warning(f"embedding: 異常検出により保存をスキップした件数 = {anomaly_skipped}")
 
     return done
 
