@@ -906,7 +906,10 @@ def _ocr_image(
             timeout=120,
         )
         resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
+        text = resp.json()["choices"][0]["message"].get("content")
+        if not text:
+            logger.warning("    マルチモーダルOCR応答が空です（content未設定）")
+            return None
         from cli_utils import strip_think_blocks
         return strip_think_blocks(text)
     except Exception as e:
