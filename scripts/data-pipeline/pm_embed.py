@@ -282,6 +282,38 @@ def delete_source_chunks(index_conn: sqlite3.Connection, source_db: str,
     )
 
 
+def purge_stale_record_chunks(index_conn: sqlite3.Connection, source_db: str,
+                              source_type: str, record_id: str,
+                              current_contents: set[str]) -> None:
+    """指定 source_db + source_type + record_id のチャンクのうち、今回生成された
+    current_contents に含まれない（＝旧バージョンの内容から生じた陳腐化チャンク）を
+    削除する。chunk_indexes は FOREIGN KEY ... ON DELETE CASCADE で追随して消える
+    ため、この record_id が複数 index_name に跨って参照されていても、削除対象の
+    index_name のみを処理する delete_source_chunks では取りこぼす陳腐化チャンクを
+    ここで確実に消す。他 record_id・他 source_type には一切影響しない。
+
+    NOT IN の判定は current_contents 全体に対して一度に行う必要があるため、
+    バッチ分割してはいけない（分割すると各チャンクが「他バッチの NOT IN」に
+    引っかかり、現行チャンクごと全滅する）。SQLite の変数上限を避けるため
+    一時テーブルに current_contents を展開してからサブクエリで判定する。
+    current_contents が空の場合（異常系）は record_id の全チャンクを消して
+    しまうのを避けるため purge をスキップする。"""
+    if not current_contents:
+        return
+    index_conn.execute("DROP TABLE IF EXISTS _purge_cur_contents")
+    index_conn.execute("CREATE TEMP TABLE _purge_cur_contents (c TEXT)")
+    index_conn.executemany(
+        "INSERT INTO _purge_cur_contents (c) VALUES (?)",
+        [(c,) for c in current_contents],
+    )
+    index_conn.execute(
+        "DELETE FROM chunks WHERE source_db = ? AND record_id = ?"
+        " AND source_type = ? AND content NOT IN (SELECT c FROM _purge_cur_contents)",
+        (source_db, record_id, source_type),
+    )
+    index_conn.execute("DROP TABLE _purge_cur_contents")
+
+
 def rebuild_fts(index_conn: sqlite3.Connection) -> None:
     index_conn.execute("INSERT INTO fts(fts) VALUES('rebuild')")
     index_conn.execute("INSERT INTO fts_tokens(fts_tokens) VALUES('rebuild')")
@@ -530,6 +562,7 @@ def index_box_doc_content(
         return 0
 
     matched = 0
+    record_current_contents: dict[str, set[str]] = {}
     for row in rows:
         idx_raw = row["index_name"] or ""
         try:
@@ -548,12 +581,15 @@ def index_box_doc_content(
         if row["folder_path"]:
             heading = f"{row['folder_path']}/{heading}"
 
+        record_id = str(row["box_file_id"])
+        current_set = record_current_contents.setdefault(record_id, set())
         for chunk in split_into_chunks(content_md):
             prefixed = f"【{heading}】\n{chunk}" if heading else chunk
+            current_set.add(prefixed)
             chunk_rows.append({
                 "source_type": "box_document",
                 "source_db": source_db,
-                "record_id": str(row["box_file_id"]),
+                "record_id": record_id,
                 "held_at": (row["modified_at"] or "")[:10] or None,
                 "content": prefixed,
                 "tokens": sudachi_tokenize(prefixed),
@@ -566,6 +602,20 @@ def index_box_doc_content(
 
     if dry_run:
         return len(chunk_rows)
+
+    # 今回対象になった各 record_id について、現行 content_md から生成されない
+    # 旧バージョンのチャンクを index_name に関係なく削除する（他 index_name が
+    # 未処理でも取り残されないようにする陳腐化チャンク対策）。
+    # 注意: --index-name で部分実行した場合、この purge は record_current_contents
+    # に含まれる record_id（＝今回対象 index_name にマッチしたファイル）にしか
+    # 効かない一方、実際に削除されるのは source_db 全体（source_type=box_document
+    # の当該 record_id）の陳腐化チャンクである。そのため、ある index_name にしか
+    # 属さない未処理ファイルの内容が変更されていた場合、そのファイルは一旦
+    # 未処理 index から抜け落ち、次回の全 index 再構築（--index-name 省略）で
+    # 復帰する。これは一貫性を優先したトレードオフとして許容する。
+    for record_id, current_set in record_current_contents.items():
+        purge_stale_record_chunks(
+            index_conn, source_db, "box_document", record_id, current_set)
 
     delete_source_chunks(index_conn, source_db, index_name)
     count = insert_chunks(index_conn, chunk_rows, index_name)
