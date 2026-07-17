@@ -165,6 +165,7 @@ def open_index_db(index_db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(index_db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     for ddl in (SCHEMA_CHUNKS, SCHEMA_CHUNK_INDEXES, SCHEMA_FTS, SCHEMA_INDEX_STATE, SCHEMA_CHUNK_EMBEDDINGS):
         for stmt in ddl.split(";"):
