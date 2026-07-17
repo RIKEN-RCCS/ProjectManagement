@@ -892,7 +892,10 @@ def _expand_id_references(text: str, conns: list) -> str:
 #  調査結果の出力先フラグパース
 # =========================================================================== #
 
-_OUTPUT_FLAG_RE = re.compile(r"\b(--to-box|--to-slack|--to-canvas)\b")
+# 空白/行頭・行末に囲まれた --to-* を捉える。先頭 `\b` は空白直後の
+# `--` にマッチしない（空白も `-` も非単語文字で境界が立たない）ため、
+# 空白境界を look-around で判定する。
+_OUTPUT_FLAG_RE = re.compile(r"(?<!\S)(--to-box|--to-slack|--to-canvas)(?!\S)")
 
 
 def _parse_output_flags(text: str) -> dict[str, bool]:
