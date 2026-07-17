@@ -48,6 +48,8 @@ _DEFAULT_SINCE_DAYS = 30
 _DEFAULT_MAX_STEPS = 20
 _DEFAULT_TIMEOUT = 480.0
 _CONTEXT_CHAR_LIMIT = 100_000
+_MAX_INITIAL_SEARCH_QUERIES = 8
+_MAX_ZERO_TOOL_NUDGES = 2
 
 
 # =========================================================================== #
@@ -241,6 +243,13 @@ _FORCED_SYNTHESIS_PROMPT = """\
 """
 
 
+_ZERO_TOOL_NUDGE_MESSAGE = (
+    "前の応答にはツール呼び出し（<tool_call>）も <final_answer> も含まれていませんでした。"
+    "必ずどちらかを出力してください。複数のエンティティを跨ぐ質問では、"
+    "エンティティごとに `search_text` を個別クエリで並列に呼び出してください。"
+)
+
+
 # =========================================================================== #
 #  Seed Data (Lean Start)
 # =========================================================================== #
@@ -399,6 +408,16 @@ def _format_rewrite_for_seed(rewrite: dict) -> str:
     parts.append("（上記は LLM による自動展開。原質問の語を優先しつつ、固有名詞や言い換えで補完して検索すること）")
     parts.append("")
     return "\n".join(parts)
+
+
+def _topic_from_query(query: str, entities: list[str]) -> str:
+    """search_queries[0] からエンティティ名を除去し、残った主題語を返す。"""
+    topic = query
+    for e in entities:
+        if not e:
+            continue
+        topic = re.sub(re.escape(e), " ", topic, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", topic).strip()
 
 
 # =========================================================================== #
@@ -614,14 +633,34 @@ def run_agent(
     history: list[dict] = []
     executed_keys: set[str] = set()
     last_response = ""
+    nudge_notes: list[str] = []
+    zero_tool_nudges = 0
 
     # STEP1 でツール呼び出しが0件のまま終わる問題の緩和策。既定で有効。
     # 無効化する場合のみ ARGUS_DISABLE_INITIAL_SEARCH=1 を設定する。
     if os.environ.get("ARGUS_DISABLE_INITIAL_SEARCH") != "1" and rewrite and rewrite.get("search_queries"):
-        seed_calls = [
-            {"name": "search_text", "args": {"query": q}}
-            for q in rewrite["search_queries"][:3]
-        ]
+        search_queries = rewrite["search_queries"]
+        entities = rewrite.get("entities") or []
+        if len(entities) >= 2:
+            top_query = search_queries[0]
+            topic = _topic_from_query(top_query, entities)
+            entity_budget = _MAX_INITIAL_SEARCH_QUERIES - 1  # 混合クエリ1本分を確保
+            use_entities = entities[:entity_budget]
+            if len(entities) > entity_budget:
+                logger.info(
+                    f"[initial-search] entities{len(entities)}件中{entity_budget}件のみクエリ化"
+                    f"（上限{_MAX_INITIAL_SEARCH_QUERIES}、超過分: {entities[entity_budget:]}）"
+                )
+            seed_calls = [
+                {"name": "search_text", "args": {"query": f"{e} {topic}".strip() if topic else e}}
+                for e in use_entities
+            ]
+            seed_calls.append({"name": "search_text", "args": {"query": top_query}})
+        else:
+            seed_calls = [
+                {"name": "search_text", "args": {"query": q}}
+                for q in search_queries[:3]
+            ]
         try:
             logger.info(f"[initial-search] rewrite クエリ{len(seed_calls)}件を事前検索")
             t0 = time.monotonic()
@@ -645,6 +684,8 @@ def run_agent(
         prompt = base_prompt
         if history:
             prompt += "## これまでのツール実行結果\n\n" + _format_tool_history(history) + "\n\n"
+        if nudge_notes:
+            prompt += "## 修正指示\n\n" + "\n\n".join(nudge_notes) + "\n\n"
         prompt += (
             f"残りステップ: {max_steps - step + 1}/{max_steps}。"
             f"追加調査が必要なら `<tool_call>`、回答可能なら `<final_answer>` で出力してください。"
@@ -675,7 +716,18 @@ def run_agent(
             return intent_header + _append_sources_section(final, ctx)
 
         if not valid_calls:
-            logger.info(f"[STEP {step}/{max_steps}] tool_call も final_answer もなし — break")
+            if zero_tool_nudges < _MAX_ZERO_TOOL_NUDGES:
+                zero_tool_nudges += 1
+                logger.info(
+                    f"[STEP {step}/{max_steps}] tool_call も final_answer もなし — "
+                    f"ナッジ {zero_tool_nudges}/{_MAX_ZERO_TOOL_NUDGES} で再試行"
+                )
+                nudge_notes.append(f"（ナッジ{zero_tool_nudges}回目）{_ZERO_TOOL_NUDGE_MESSAGE}")
+                continue
+            logger.info(
+                f"[STEP {step}/{max_steps}] tool_call も final_answer もなし — "
+                f"ナッジ{_MAX_ZERO_TOOL_NUDGES}回到達、break"
+            )
             break
 
         # 重複検出
