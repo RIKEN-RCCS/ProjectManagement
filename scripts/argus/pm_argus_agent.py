@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
@@ -57,6 +58,9 @@ _DOC_QA_WINDOW_OVERLAP = 1_000
 _DOC_QA_MAX_TOTAL_CHARS = 400_000
 _DOC_QA_MAX_FILES = 3
 _DOC_QA_MIN_REMAINING_S = 30
+_DOC_QA_NO_INFO_MARK = "関連情報なし"
+_DOC_QA_SUSPICIOUS_LEN = 50  # これ未満の応答は「疑わしい却下」候補（entity一致と併用）
+_DOC_QA_FALLBACK_MIN_CHARS = 5_000  # エンティティ非依存フォールバックの窓文字数下限
 
 
 # =========================================================================== #
@@ -818,9 +822,34 @@ def run_agent(
 # =========================================================================== #
 
 _DOC_QA_MAP_PROMPT = """\
+[窓{i}/{n}]
 ユーザー質問: {question}
 以下は文書『{name}』の断片（{i}/{n}）。質問に関連する事実・数値・表・図の記述（[図: ブロック含む）を、\
 数値を省略せず抽出せよ。関連情報が無ければ「関連情報なし」とだけ返せ。
+
+---
+{window}
+---
+"""
+
+_DOC_QA_MAP_RETRY_PROMPT = """\
+[窓{i}/{n} 再試行 id={nonce}]
+ユーザー質問: {question}
+以下は文書『{name}』の断片（{i}/{n}）。この断片には {entities} に関する記述が含まれていることが\
+機械的に確認されている。見落とさずに、その記述（数値・表・[図: ブロック含む）を抽出せよ。\
+本当に関連が無い場合のみ「関連情報なし」と返せ。
+
+---
+{window}
+---
+"""
+
+_DOC_QA_MAP_RETRY_FALLBACK_PROMPT = """\
+[窓{i}/{n} 再試行(フォールバック) id={nonce}]
+ユーザー質問: {question}
+以下は文書『{name}』の断片（{i}/{n}）。この断片には{n_chars}字の本文が存在する。\
+見出し・数値・表・[図: ブロックを見落とさず確認し、質問に関連する記述を抽出せよ。\
+精査の結果、本当に関連が無い場合のみ「関連情報なし」と返せ。
 
 ---
 {window}
@@ -841,7 +870,44 @@ _DOC_QA_REDUCE_PROMPT = """\
 - あなたが重要と判断した情報を、質問の性質に応じた構成で整理すること。決まった構成に従う必要はない
 - 数値・出典（ファイル名・断片番号）を明示すること
 - 抽出結果に無い情報は推測しない。推測する場合は「（推測）」と明記すること
+- 抽出結果に存在する情報を「記載なし」と要約してはならない。あるエンティティについて「文書内に記載なし」と\
+書けるのは、全断片の抽出結果に該当が無く、かつ断片ヘッダにもそのエンティティが現れない場合のみ。\
+抽出失敗と明記された断片があるエンティティについては「抽出失敗（制限事項参照）」と書くこと
 """
+
+_DOC_QA_ENTITY_RE = re.compile(r"[A-Za-z0-9/\-]{3,}")
+
+
+def _extract_doc_qa_candidate_entities(question: str) -> list[str]:
+    """質問文から候補エンティティ（英数字トークン）を機械抽出する（LLM不使用、決定論）。"""
+    seen: set[str] = set()
+    entities: list[str] = []
+    for m in _DOC_QA_ENTITY_RE.finditer(question or ""):
+        token = m.group(0)
+        key = token.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        entities.append(token)
+    return entities
+
+
+def _entities_in_window(entities: list[str], window: str) -> list[str]:
+    """candidate_entities のうち window 本文に含まれるものを返す（casefold 比較）。"""
+    window_cf = window.casefold()
+    return [e for e in entities if e.casefold() in window_cf]
+
+
+def _is_doc_qa_no_info_like(text: str) -> bool:
+    """「関連情報なし」相当、または極端に短い応答かを判定する（疑わしい却下の検出用）。"""
+    return not text or text.startswith(_DOC_QA_NO_INFO_MARK) or len(text) < _DOC_QA_SUSPICIOUS_LEN
+
+
+def _format_doc_qa_fragment_header(name: str, i: int, n: int, entities: list[str]) -> str:
+    header = f"### {name} 断片{i}/{n}"
+    if entities:
+        header += f"（含まれるエンティティ: {', '.join(entities)}）"
+    return header
 
 
 def _fetch_doc_qa_sources(ctx: AgentContext) -> tuple[list[dict], list[str]]:
@@ -979,8 +1045,11 @@ def run_document_qa(
     def remaining_s() -> int:
         return max(10, int(deadline - time.monotonic()))
 
-    extracted: list[dict] = []
+    candidate_entities = _extract_doc_qa_candidate_entities(question)
+
+    reduce_fragments: list[dict] = []
     skipped_windows: list[str] = []
+    failed_entity_windows: list[str] = []
     budget_exhausted = False
     k = 0
     for name, windows in doc_windows:
@@ -991,11 +1060,13 @@ def run_document_qa(
                 budget_exhausted = True
                 skipped_windows.append(f"{name} 断片{i}/{n_doc}")
                 continue
+            window_entities = _entities_in_window(candidate_entities, window)
             progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}）")
             logger.info(f"[doc-qa] map {k}/{total_windows} ({name} {i}/{n_doc})")
             prompt = _DOC_QA_MAP_PROMPT.format(
                 question=question, name=name, i=i, n=n_doc, window=window,
             )
+            t0 = time.monotonic()
             try:
                 resp = call_argus_llm(prompt, think=False, max_tokens=4096, timeout=remaining_s())
             except Exception as e:
@@ -1003,12 +1074,108 @@ def run_document_qa(
                 skipped_windows.append(f"{name} 断片{i}/{n_doc}（エラー）")
                 continue
             text = resp.strip()
-            if text and not text.startswith("関連情報なし"):
-                extracted.append({"name": name, "i": i, "n": n_doc, "text": text})
+            elapsed = time.monotonic() - t0
+
+            if window_entities and _is_doc_qa_no_info_like(text):
+                logger.info(
+                    f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, "
+                    f"窓内エンティティ: {', '.join(window_entities)}）— 疑わしい却下のためリトライ"
+                )
+                progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}、再試行中）")
+                retry_prompt = _DOC_QA_MAP_RETRY_PROMPT.format(
+                    question=question, name=name, i=i, n=n_doc, window=window,
+                    entities="、".join(window_entities), nonce=uuid.uuid4().hex[:8],
+                )
+                t1 = time.monotonic()
+                try:
+                    resp2 = call_argus_llm(
+                        retry_prompt, think=False, max_tokens=4096, timeout=remaining_s(),
+                    )
+                    text2 = resp2.strip()
+                except Exception as e:
+                    logger.warning(f"[doc-qa] リトライ失敗 ({name} {i}/{n_doc}): {e}")
+                    text2 = ""
+                elapsed2 = time.monotonic() - t1
+
+                if text2 and not text2.startswith(_DOC_QA_NO_INFO_MARK):
+                    reduce_fragments.append(
+                        {"name": name, "i": i, "n": n_doc, "text": text2, "entities": window_entities},
+                    )
+                    logger.info(f"[doc-qa] 窓{k}: リトライで抽出成功（応答{len(text2)}字, {elapsed2:.1f}s）")
+                else:
+                    failed_entity_windows.append(
+                        f"{name} 断片{i}/{n_doc}には {', '.join(window_entities)} の記載があるが"
+                        "抽出に失敗（2回試行）"
+                    )
+                    reduce_fragments.append(
+                        {"name": name, "i": i, "n": n_doc, "text": None, "entities": window_entities},
+                    )
+                    logger.info(
+                        f"[doc-qa] 窓{k}: リトライ後も関連情報なし"
+                        f"（応答{len(text2)}字, {elapsed2:.1f}s）"
+                    )
+            elif (
+                not window_entities
+                and _is_doc_qa_no_info_like(text)
+                and len(window) >= _DOC_QA_FALLBACK_MIN_CHARS
+            ):
+                logger.info(
+                    f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, "
+                    f"窓内エンティティ: なし, 窓文字数{len(window)}字）— フォールバックのためリトライ"
+                )
+                progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}、再試行中）")
+                retry_prompt = _DOC_QA_MAP_RETRY_FALLBACK_PROMPT.format(
+                    question=question, name=name, i=i, n=n_doc, window=window,
+                    n_chars=len(window), nonce=uuid.uuid4().hex[:8],
+                )
+                t1 = time.monotonic()
+                try:
+                    resp2 = call_argus_llm(
+                        retry_prompt, think=False, max_tokens=4096, timeout=remaining_s(),
+                    )
+                    text2 = resp2.strip()
+                except Exception as e:
+                    logger.warning(f"[doc-qa] フォールバックリトライ失敗 ({name} {i}/{n_doc}): {e}")
+                    text2 = ""
+                elapsed2 = time.monotonic() - t1
+
+                if text2 and not text2.startswith(_DOC_QA_NO_INFO_MARK):
+                    reduce_fragments.append(
+                        {"name": name, "i": i, "n": n_doc, "text": text2, "entities": []},
+                    )
+                    logger.info(
+                        f"[doc-qa] 窓{k}: フォールバックリトライで抽出成功"
+                        f"（応答{len(text2)}字, {elapsed2:.1f}s）"
+                    )
+                else:
+                    # エンティティ根拠が無いため「関連情報なし」を受け入れる。制限事項には記録しない
+                    logger.info(
+                        f"[doc-qa] 窓{k}: フォールバックリトライ後も関連情報なし"
+                        f"（応答{len(text2)}字, {elapsed2:.1f}s）— 制限事項には記録しない"
+                    )
+            elif text and not text.startswith(_DOC_QA_NO_INFO_MARK):
+                reduce_fragments.append(
+                    {"name": name, "i": i, "n": n_doc, "text": text, "entities": window_entities},
+                )
+            else:
+                logger.info(
+                    f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, 窓内エンティティ: なし）"
+                )
+
+    def _render_fragment(f: dict) -> str:
+        header = _format_doc_qa_fragment_header(f["name"], f["i"], f["n"], f["entities"])
+        if f["text"] is None:
+            body = (
+                f"（抽出失敗: {', '.join(f['entities'])} の記載が本文に含まれる可能性があるが、"
+                "2回の抽出試行はいずれも「関連情報なし」相当を返した。制限事項参照）"
+            )
+        else:
+            body = f["text"]
+        return f"{header}\n{body}"
 
     extracted_block = (
-        "\n\n".join(f"### {e['name']} 断片{e['i']}/{e['n']}\n{e['text']}" for e in extracted)
-        if extracted else "（全窓で関連情報なしと判定されました）"
+        "\n\n".join(_render_fragment(f) for f in reduce_fragments)
+        if reduce_fragments else "（全窓で関連情報なしと判定されました）"
     )
 
     progress("最終回答を生成中...")
@@ -1034,6 +1201,8 @@ def run_document_qa(
         limitation_notes.append(
             f"タイムアウト予算超過のため未読込の断片: {', '.join(skipped_windows)}"
         )
+    if failed_entity_windows:
+        limitation_notes.extend(failed_entity_windows)
     if limitation_notes:
         answer = answer.rstrip() + "\n\n## 制限事項\n" + "\n".join(f"- {n}" for n in limitation_notes)
 
