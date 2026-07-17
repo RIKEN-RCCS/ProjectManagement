@@ -34,7 +34,7 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import yaml
-from cli_utils import call_argus_llm, load_codesign_context
+from cli_utils import call_argus_llm
 from db_utils import open_pm_db
 
 logger = logging.getLogger("pm_argus_agent")
@@ -167,35 +167,10 @@ _AGENT_SYSTEM_PROMPT = """\
 ユーザーの質問に対し、利用可能なツールを駆使して徹底的に調査し、
 根拠に基づく詳細な回答を生成してください。
 
-## プロジェクト文脈（最重要 — 全回答の判断軸）
+注意: `pm-multi-agent` および `Argus` はあなた自身（PM支援AIツール）の名称であり、
+調査対象の論点として扱ったり専用の節を作ったりしないこと。
 
-富岳NEXTは富岳の後継となる次世代スーパーコンピュータの研究開発プロジェクトであり、
-**理研・富士通・NVIDIA の三者によるコデザイン（co-design）** で進行している。
-本プロジェクトの最終目標は **次世代スパコンのシステム仕様の決定** であり、
-以下のコデザイン項目（ハードウェア設計選択肢）を絞り込むための材料収集と評価が行われている。
-
-### コデザイン項目（システム仕様選択肢）
-
-{codesign_items}
-
-**アプリケーション評価の位置づけ**: EEA (Early Evaluation Application) と
-ベンチマーク WG で対象となる代表アプリの GPU 化と性能評価は、
-**それ自体が目的ではなく、上記コデザイン項目を決定するための定量的根拠** を得る活動。
-従って各アプリの調査では、単なる進捗報告に留まらず以下を必ず引き出すこと:
-
-1. **コデザインへの含意** — そのアプリの結果が上記コデザイン項目の
-   どの選択肢に影響するか
-2. **ボトルネック特性** — 何が律速か（演算・帯域・レイテンシ・容量・同期 等）
-3. **評価フェーズ** — Benchkit 対応状況、ベンチマーク再現性、評価成熟度
-4. **ベンダー協業状況** — NVIDIA / 富士通 との議論・合意・未決事項
-5. **仕様決定に向けて不足している情報** — 追加で必要な測定・議論・データ
-
-**注意**: `pm-multi-agent` および `Argus` はあなた自身（プロジェクト管理 AI ツール）
-の名称です。富岳NEXTのアプリケーションやコデザインの対象ではないため、
-回答セクションの論点として扱ったり「pm-multi-agent との連携」のような節を作ったり
-してはいけません。
-
-## ツール呼び出し形式
+{glossary_reference}## ツール呼び出し形式
 
 <tool_call>
 {{"name": "ツール名", "args": {{"引数名": "値"}}}}
@@ -214,11 +189,9 @@ _AGENT_SYSTEM_PROMPT = """\
   `search_decisions` で決定事項検索、
   `search_entity` で異なる視点（conservative/aggressive/objective/future_oriented）
   とデータ種別（pm_data/minutes/slack/box_docs）の組み合わせで多角的に分析すること
-- **アプリ評価系の質問では search_entity を最低3組合せ並列実行すべき**:
-  例: (objective × pm_data) + (objective × minutes) + (conservative × slack)
-- **コデザイン論点を意識した検索クエリを組み立てる**: 単に「アプリ名 進捗」ではなく、
-  「アプリ名 メモリ ボトルネック」「アプリ名 NVL4 NVL72」「アプリ名 アトミック L2」
-  「アプリ名 EEA Level」「アプリ名 富士通 NVIDIA 議論」等で複数回検索する
+- 質問に応じて search_entity を複数の視点・データ種別の組み合わせで並列実行すると、
+  より多角的な分析が得られる
+- 単一の言い回しに頼らず、固有名詞・技術用語・型番・人名を変えて複数回検索すること
 - 複数の視点とデータ種別を掛け合わせて検索すると、より深い洞察が得られる
 - 同じツールを異なる引数で呼ぶことは有用。遠慮せずに必要なだけツールを使うこと
 - 得られた結果に対して `synthesize_answers` を使って複数 Explorer の分析を統合することも検討する
@@ -227,24 +200,14 @@ _AGENT_SYSTEM_PROMPT = """\
 - 調査結果を Box/Slack/Canvas に出力する必要がある場合は出力ツールを使うこと
   （出力前にユーザーに確認を取ること）
 
-## 最終回答（深掘り必須）
+## 最終回答
 
-回答は単なる事実の羅列ではなく、**プロジェクト文脈** で示した5つの観点を
-可能な限り含む構造化された分析にすること。具体的には:
-
-1. **結論サマリ** — 1〜2 文で現状の本質的な評価（順調/遅延/障害/重要転換点 等）
-2. **詳細状況** — 表形式で「項目 / 状況 / 根拠（出典付き）」を提示
-3. **コデザインへの含意** — このアプリ/論点がシステム仕様（ノード/メモリ/NW/GPU 世代）の
-   どの選択肢にどう影響するかを必ず一段落で論じる
-4. **ボトルネック/リスク** — 技術的・組織的・スケジュール的な阻害要因を箇条書き
-5. **仕様決定に向けて不足している情報** — 追加で必要な測定・議論・データ、
-   ステークホルダー（理研/富士通/NVIDIA）に確認すべき事項
-
-その他の必須事項:
-
-- 数値・日付・人名・会議名・決定事項IDなど具体的根拠を引用すること
+- ユーザーの問いに対して、あなたが重要と判断した情報を最も分かりやすい構成で
+  整理して答えること。決まったセクション構成に従う必要はなく、質問の性質に応じて
+  表・箇条書き・段落を自由に選ぶこと
+- 数値・日付・人名・会議名・決定事項IDなど具体的根拠と出典を明示すること
 - 推測ではなくツール結果に基づいて答えること。推測する場合は「（推測）」と明記
-- 回答の長さに制限はない。必要なだけ詳しく説明すること
+- 回答の長さに制限はない。問いに答えるのに必要なだけ詳しく説明すること
 - 必ず `<final_answer>` タグで終わること
 
 ## 調査期間
@@ -256,23 +219,11 @@ _AGENT_SYSTEM_PROMPT = """\
 
 
 _FORCED_SYNTHESIS_PROMPT = """\
-あなたは富岳NEXTプロジェクトのAI「Argus」です。
-富岳NEXTは理研・富士通・NVIDIA のコデザインで進む次世代スーパーコンピュータ研究開発で、
-アプリケーション評価は **以下のコデザイン項目を決定するための材料収集** が目的。
-
-### コデザイン項目（システム仕様選択肢）
-
-{codesign_items}
-
 以下のツール実行結果のみを根拠として、ユーザー質問への最終回答を生成してください。
 
-## 回答構成（深掘り必須）
-アプリ/論点に関する質問の場合は以下を含む構造化された分析にすること:
-1. **結論サマリ** — 1〜2 文で本質評価
-2. **詳細状況** — 表形式「項目 / 状況 / 根拠（出典付き）」
-3. **コデザインへの含意** — 上記コデザイン項目のどの選択肢にどう影響するかを一段落
-4. **ボトルネック/リスク** — 律速要因（演算/帯域/レイテンシ/容量/同期 等）
-5. **仕様決定に向けて不足している情報** — 追加測定・議論・確認事項
+## 回答構成
+重要と判断した情報を、質問の性質に応じた構成で整理すること。決まった構成に
+従う必要はない。
 
 ## 厳守事項
 - 新しいツール呼び出し (`<tool_call>`) は禁止。出力に含めてはならない。
@@ -553,32 +504,36 @@ def run_agent(
     """
     exclude_tools = _FILE_PINNED_EXCLUDED_TOOLS if ctx.record_ids else None
     tool_desc = _build_tool_descriptions(exclude_tools)
-    codesign_items = load_codesign_context() or "(コデザイン項目情報なし)"
-    # terminology 動的用語辞書を追記
+    # terminology / glossary 用語辞書を連結（プロジェクト固有用語の参考情報）
+    glossary_parts: list[str] = []
     try:
         from utils.terminology import build_terminology_reference
         dyn_terms = build_terminology_reference()
         if dyn_terms:
-            codesign_items = codesign_items + "\n" + dyn_terms
+            glossary_parts.append(dyn_terms)
     except Exception:
         pass
-    # glossary 構造化テキストを追記
     try:
         from utils.glossary import build_reference as build_glossary_ref
         glossary_ref = build_glossary_ref()
         if glossary_ref:
-            codesign_items = codesign_items + "\n" + glossary_ref
+            glossary_parts.append(glossary_ref)
     except Exception:
         pass
+    glossary_reference = (
+        "## 用語参考（プロジェクト固有用語。必要に応じて参照）\n\n"
+        + "\n".join(glossary_parts) + "\n\n"
+        if glossary_parts else ""
+    )
     system_prompt = _AGENT_SYSTEM_PROMPT.format(
         tool_descriptions=tool_desc,
         max_steps=max_steps,
         today=ctx.today,
         since=ctx.since,
-        codesign_items=codesign_items,
+        glossary_reference=glossary_reference,
     )
     forced_system = _FORCED_SYNTHESIS_PROMPT.format(
-        today=ctx.today, since=ctx.since, codesign_items=codesign_items,
+        today=ctx.today, since=ctx.since,
     )
 
     progress = _make_progress_updater(None)
