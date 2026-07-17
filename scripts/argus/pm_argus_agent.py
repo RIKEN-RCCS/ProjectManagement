@@ -481,6 +481,13 @@ def _execute_calls_parallel(
     return out
 
 
+def _quote_block(label: str, text: str) -> str:
+    """複数行テキストを Slack mrkdwn の引用ブロックとして整形する（省略無し）。"""
+    lines = text.split("\n")
+    quoted = "\n".join([f"> **{label}**: {lines[0]}"] + [f"> {ln}" for ln in lines[1:]])
+    return quoted + "\n\n"
+
+
 def run_agent(
     question: str,
     seed_data: str,
@@ -550,8 +557,10 @@ def run_agent(
         )
 
     intent_header = ""
+    if include_intent_header and question:
+        intent_header = _quote_block("ご質問", _strip_output_flags(question))
     if include_intent_header and rewrite and rewrite.get("intent"):
-        intent_header = f"> **ご質問の解釈**: {rewrite['intent']}\n\n"
+        intent_header += f"> **ご質問の解釈**: {rewrite['intent']}\n\n"
     if include_intent_header and ctx.record_ids:
         names = "、".join(ctx.scoped_file_names) if ctx.scoped_file_names else "、".join(ctx.record_ids)
         intent_header += (
