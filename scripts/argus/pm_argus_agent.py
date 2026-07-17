@@ -51,6 +51,13 @@ _CONTEXT_CHAR_LIMIT = 100_000
 _MAX_INITIAL_SEARCH_QUERIES = 8
 _MAX_ZERO_TOOL_NUDGES = 2
 
+# --file 全文読込 QA (run_document_qa) のパラメータ
+_DOC_QA_WINDOW_SIZE = 24_000
+_DOC_QA_WINDOW_OVERLAP = 1_000
+_DOC_QA_MAX_TOTAL_CHARS = 400_000
+_DOC_QA_MAX_FILES = 3
+_DOC_QA_MIN_REMAINING_S = 30
+
 
 # =========================================================================== #
 #  argus_config.yaml からインデックスDB・チャンネルリスト解決
@@ -806,6 +813,233 @@ def run_agent(
         "調査できませんでした（LLM 呼び出しに失敗しました）", ctx)
 
 
+# =========================================================================== #
+#  Document QA (--file 全文読込 map-reduce)
+# =========================================================================== #
+
+_DOC_QA_MAP_PROMPT = """\
+ユーザー質問: {question}
+以下は文書『{name}』の断片（{i}/{n}）。質問に関連する事実・数値・表・図の記述（[図: ブロック含む）を、\
+数値を省略せず抽出せよ。関連情報が無ければ「関連情報なし」とだけ返せ。
+
+---
+{window}
+---
+"""
+
+_DOC_QA_REDUCE_PROMPT = """\
+以下は文書『{names}』から抽出した、質問に関連する断片ごとの事実・数値です。
+これらのみを根拠に、ユーザーの質問に対する回答を生成してください。
+
+## ユーザー質問
+{question}
+
+## 抽出結果（断片ごと）
+{extracted}
+
+## 回答方針
+- あなたが重要と判断した情報を、質問の性質に応じた構成で整理すること。決まった構成に従う必要はない
+- 数値・出典（ファイル名・断片番号）を明示すること
+- 抽出結果に無い情報は推測しない。推測する場合は「（推測）」と明記すること
+"""
+
+
+def _fetch_doc_qa_sources(ctx: AgentContext) -> tuple[list[dict], list[str]]:
+    """ctx.record_ids に対応する box_docs.db.doc_content の本文を取得する。
+
+    戻り値: (docs, missing_names)。docs は [{"record_id", "name", "content"}]。
+    doc_content に行が無い record_id は missing_names に積む。
+    """
+    from db_utils import open_db
+
+    box_docs_db = ctx.data_dir / "box_docs.db"
+    docs: list[dict] = []
+    missing_names: list[str] = []
+    if not box_docs_db.exists():
+        return docs, list(ctx.scoped_file_names or ctx.record_ids)
+    conn = open_db(box_docs_db, encrypt=True)
+    try:
+        for i, rid in enumerate(ctx.record_ids):
+            name = ctx.scoped_file_names[i] if i < len(ctx.scoped_file_names) else rid
+            row = conn.execute(
+                "SELECT content_md FROM doc_content WHERE box_file_id=?", (rid,),
+            ).fetchone()
+            if not row or not row["content_md"]:
+                missing_names.append(name)
+                continue
+            docs.append({"record_id": rid, "name": name, "content": row["content_md"]})
+    finally:
+        conn.close()
+    return docs, missing_names
+
+
+def _select_doc_qa_sources(docs: list[dict]) -> tuple[list[dict], list[str]]:
+    """合計文字数/ファイル数の上限を適用し、(採用分, 除外ファイル名) を返す。
+
+    最低1件は採用する（単独で上限を超える文書でも処理対象から外さない）。
+    """
+    included: list[dict] = []
+    excluded_names: list[str] = []
+    total_chars = 0
+    for d in docs:
+        if included and (
+            len(included) >= _DOC_QA_MAX_FILES
+            or total_chars + len(d["content"]) > _DOC_QA_MAX_TOTAL_CHARS
+        ):
+            excluded_names.append(d["name"])
+            continue
+        included.append(d)
+        total_chars += len(d["content"])
+    return included, excluded_names
+
+
+def _split_document_windows(
+    content: str,
+    window_size: int = _DOC_QA_WINDOW_SIZE,
+    overlap: int = _DOC_QA_WINDOW_OVERLAP,
+) -> list[str]:
+    """content を窓に分割する。可能なら `\\f`（ページ境界）や空行を優先して切る。"""
+    n = len(content)
+    if not content:
+        return []
+    if n <= window_size:
+        return [content]
+    windows: list[str] = []
+    pos = 0
+    while pos < n:
+        end = min(pos + window_size, n)
+        if end < n:
+            search_start = pos + window_size // 2
+            ff = content.rfind("\f", search_start, end)
+            if ff != -1:
+                end = ff + 1
+            else:
+                blank = content.rfind("\n\n", search_start, end)
+                if blank != -1:
+                    end = blank + 2
+        windows.append(content[pos:end])
+        if end >= n:
+            break
+        pos = max(end - overlap, pos + 1)
+    return windows
+
+
+def run_document_qa(
+    question: str,
+    respond: Callable | None,
+    ctx: AgentContext,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+    include_intent_header: bool = True,
+    dry_run: bool = False,
+) -> str:
+    """--file スコープの質問を全文読込 map-reduce QA で処理する。
+
+    検索エージェント（run_agent）と異なり、対象ファイルの doc_content 全文を
+    窓分割して LLM で順次抽出（map）し、最後に統合回答を生成する（reduce）。
+    1文書スコープの質問は「検索」ではなく「全文読込」が正しいプリミティブという判断による。
+    """
+    progress = _make_progress_updater(respond)
+
+    docs, missing_names = _fetch_doc_qa_sources(ctx)
+    if not docs:
+        names = "、".join(ctx.scoped_file_names or ctx.record_ids)
+        return (
+            f"エラー: 対象ファイル『{names}』の本文が取得できません"
+            "（box_docs.db に doc_content が未登録・未変換の可能性があります）。"
+        )
+
+    included, excluded_names = _select_doc_qa_sources(docs)
+    doc_windows: list[tuple[str, list[str]]] = [
+        (d["name"], _split_document_windows(d["content"])) for d in included
+    ]
+    total_windows = sum(len(w) for _, w in doc_windows)
+    names_label = "、".join(d["name"] for d in included)
+
+    intent_header = ""
+    if include_intent_header and question:
+        intent_header = _quote_block("ご質問", _strip_output_flags(question))
+    intent_header += (
+        f"> **対象ファイル**: {names_label}"
+        f"（全文読込モード: {total_windows}窓）\n\n"
+    )
+
+    if dry_run:
+        lines = [f"対象ファイル: {names_label}"]
+        for name, windows in doc_windows:
+            lines.append(f"- {name}: {len(windows)}窓")
+        if missing_names:
+            lines.append(f"本文未取得（未変換）: {', '.join(missing_names)}")
+        if excluded_names:
+            lines.append(f"上限超過で除外: {', '.join(excluded_names)}")
+        return intent_header + "\n".join(lines)
+
+    deadline = time.monotonic() + timeout
+
+    def remaining_s() -> int:
+        return max(10, int(deadline - time.monotonic()))
+
+    extracted: list[dict] = []
+    skipped_windows: list[str] = []
+    budget_exhausted = False
+    k = 0
+    for name, windows in doc_windows:
+        n_doc = len(windows)
+        for i, window in enumerate(windows, 1):
+            k += 1
+            if budget_exhausted or time.monotonic() >= deadline - _DOC_QA_MIN_REMAINING_S:
+                budget_exhausted = True
+                skipped_windows.append(f"{name} 断片{i}/{n_doc}")
+                continue
+            progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}）")
+            logger.info(f"[doc-qa] map {k}/{total_windows} ({name} {i}/{n_doc})")
+            prompt = _DOC_QA_MAP_PROMPT.format(
+                question=question, name=name, i=i, n=n_doc, window=window,
+            )
+            try:
+                resp = call_argus_llm(prompt, think=False, max_tokens=4096, timeout=remaining_s())
+            except Exception as e:
+                logger.warning(f"[doc-qa] map失敗 ({name} {i}/{n_doc}): {e}")
+                skipped_windows.append(f"{name} 断片{i}/{n_doc}（エラー）")
+                continue
+            text = resp.strip()
+            if text and not text.startswith("関連情報なし"):
+                extracted.append({"name": name, "i": i, "n": n_doc, "text": text})
+
+    extracted_block = (
+        "\n\n".join(f"### {e['name']} 断片{e['i']}/{e['n']}\n{e['text']}" for e in extracted)
+        if extracted else "（全窓で関連情報なしと判定されました）"
+    )
+
+    progress("最終回答を生成中...")
+    reduce_prompt = _DOC_QA_REDUCE_PROMPT.format(
+        names=names_label, question=question, extracted=extracted_block,
+    )
+    try:
+        resp = call_argus_llm(reduce_prompt, think=False, max_tokens=8192, timeout=remaining_s())
+        answer = resp.strip()
+    except Exception as e:
+        logger.exception(f"[doc-qa] reduce失敗: {e}")
+        answer = f"回答生成に失敗しました ({e})。\n\n## 抽出結果（未統合）\n\n{extracted_block}"
+
+    limitation_notes: list[str] = []
+    if missing_names:
+        limitation_notes.append(f"本文未取得（未変換）のため対象外: {', '.join(missing_names)}")
+    if excluded_names:
+        limitation_notes.append(
+            f"合計文字数/ファイル数の上限（{_DOC_QA_MAX_TOTAL_CHARS}字・{_DOC_QA_MAX_FILES}ファイル）"
+            f"超過のため対象外: {', '.join(excluded_names)}"
+        )
+    if skipped_windows:
+        limitation_notes.append(
+            f"タイムアウト予算超過のため未読込の断片: {', '.join(skipped_windows)}"
+        )
+    if limitation_notes:
+        answer = answer.rstrip() + "\n\n## 制限事項\n" + "\n".join(f"- {n}" for n in limitation_notes)
+
+    return intent_header + answer
+
+
 _SLACK_REF_CACHE: dict[str, list[str]] = {}
 
 
@@ -1087,13 +1321,20 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             scoped_file_names=scoped_file_names,
         )
 
-        seed_data = build_seed_data(ctx)
-        result = run_agent(
-            question=cmd_text,
-            seed_data=seed_data,
-            respond=respond,
-            ctx=ctx,
-        )
+        if record_ids:
+            result = run_document_qa(
+                question=cmd_text,
+                respond=respond,
+                ctx=ctx,
+            )
+        else:
+            seed_data = build_seed_data(ctx)
+            result = run_agent(
+                question=cmd_text,
+                seed_data=seed_data,
+                respond=respond,
+                ctx=ctx,
+            )
 
         # ID 参照 (a:670 / d:42 / AI:670 / 決定:42 / ID:670) を content[:60] で展開
         result = _expand_id_references(result, conns)
@@ -1227,13 +1468,17 @@ def main():
         scoped_file_names=scoped_file_names,
     )
 
-    seed_data = build_seed_data(ctx)
-
     if args.dry_run:
-        print("=== シードデータ ===")
-        print(seed_data)
-        print(f"\n=== 調査質問 ===\n{args.investigate}")
-        print(f"\n=== ツール一覧 ===\n{_build_tool_descriptions()}")
+        if record_ids:
+            print(run_document_qa(
+                question=args.investigate, respond=None, ctx=ctx, dry_run=True,
+            ))
+        else:
+            seed_data = build_seed_data(ctx)
+            print("=== シードデータ ===")
+            print(seed_data)
+            print(f"\n=== 調査質問 ===\n{args.investigate}")
+            print(f"\n=== ツール一覧 ===\n{_build_tool_descriptions()}")
         for c in conns:
             c.close()
         return
@@ -1245,16 +1490,26 @@ def main():
         except Exception as e:
             print(f"[WARN] --context-file 読み込み失敗: {e}", file=sys.stderr)
 
-    result = run_agent(
-        question=args.investigate,
-        seed_data=seed_data,
-        respond=None,
-        ctx=ctx,
-        max_steps=args.max_steps,
-        timeout=args.timeout,
-        include_intent_header=not args.no_intent_header,
-        context=context_text,
-    )
+    if record_ids:
+        result = run_document_qa(
+            question=args.investigate,
+            respond=None,
+            ctx=ctx,
+            timeout=args.timeout,
+            include_intent_header=not args.no_intent_header,
+        )
+    else:
+        seed_data = build_seed_data(ctx)
+        result = run_agent(
+            question=args.investigate,
+            seed_data=seed_data,
+            respond=None,
+            ctx=ctx,
+            max_steps=args.max_steps,
+            timeout=args.timeout,
+            include_intent_header=not args.no_intent_header,
+            context=context_text,
+        )
 
     # ID 参照 (a:670 / d:42 / AI:670 / 決定:42 / ID:670) を content[:60] で展開
     result = _expand_id_references(result, conns)
