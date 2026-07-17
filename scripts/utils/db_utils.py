@@ -510,7 +510,7 @@ def fetch_assignee_workload(
     """担当者別の負荷（オープンアイテム数・期限超過数・期限未設定数）を取得する（LLM不使用）"""
     try:
         base_query = "SELECT assignee, due_date FROM action_items WHERE status = 'open' AND COALESCE(deleted,0)=0"
-        cond, params = _build_channel_kind_condition(channel_ids, minutes_names)
+        cond, params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
         if cond:
             base_query += cond
         rows = conn.execute(base_query, params).fetchall()
@@ -547,7 +547,7 @@ def fetch_overdue_items(
         WHERE status = 'open' AND COALESCE(deleted,0)=0 AND due_date IS NOT NULL AND due_date < ?
     """
     params: list = [today]
-    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
     if cond:
         query += cond
         params.extend(cond_params)
@@ -567,7 +567,7 @@ def fetch_unlinked_items_count(
     """milestone_id が未設定の open アイテム数（計画の穴）"""
     query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND COALESCE(deleted,0)=0 AND milestone_id IS NULL"
     params: list = []
-    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
     if cond:
         query += cond
         params.extend(cond_params)
@@ -586,7 +586,7 @@ def fetch_no_assignee_count(
     """担当者なしの open アイテム数"""
     query = "SELECT COUNT(*) FROM action_items WHERE status='open' AND COALESCE(deleted,0)=0 AND (assignee IS NULL OR assignee = '')"
     params: list = []
-    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
     if cond:
         query += cond
         params.extend(cond_params)
@@ -605,7 +605,7 @@ def fetch_weekly_trends(
     """直近 N 週の「作成件数」と「完了件数」の近似トレンド"""
     from datetime import date, timedelta
     today_dt = date.today()
-    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names)
+    cond, cond_params = _build_channel_kind_condition(channel_ids, minutes_names, table_alias="")
     result = []
     for w in range(weeks, 0, -1):
         week_start = (today_dt - timedelta(weeks=w)).isoformat()
