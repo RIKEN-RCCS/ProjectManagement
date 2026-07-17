@@ -767,6 +767,37 @@ def backfill_embeddings(index_conn, logger, *, refresh_all=False, batch_size=256
     return done
 
 
+def find_duplicate_embedding_anomalies(index_conn: sqlite3.Connection) -> list[int]:
+    """chunk_embeddings 内で「同一 vector（バイト完全一致）を共有するが、
+    元の chunks.content が異なる」chunk_id を検出する。
+
+    同一 content が同一 vector を共有するのは正常（決定論的な埋め込みで
+    同一テキストは同一ベクトルになるため）で対象外とする。埋め込み
+    エンドポイント側の取り違え（キャッシュ衝突等）で異なる content に
+    同一 vector が書き込まれた場合のみを異常として検出する。
+
+    戻り値: 異常と判定された chunk_id のリスト（昇順）。content が異なる
+    メンバーを含む vector グループは、その vector 自体の正当性が保証
+    できないため、たまたま content が一致するメンバーも含めグループ
+    全体を対象にする。
+    """
+    rows = index_conn.execute(
+        "SELECT ce.chunk_id, ce.vector, c.content"
+        " FROM chunk_embeddings ce JOIN chunks c ON c.id = ce.chunk_id"
+    ).fetchall()
+    groups: dict[bytes, dict[str, list[int]]] = {}
+    for chunk_id, vector, content in rows:
+        groups.setdefault(vector, {}).setdefault(content, []).append(chunk_id)
+
+    anomalies: list[int] = []
+    for content_groups in groups.values():
+        if len(content_groups) < 2:
+            continue
+        for ids in content_groups.values():
+            anomalies.extend(ids)
+    return sorted(anomalies)
+
+
 # --- メイン ---
 
 def build_index(
@@ -862,6 +893,12 @@ def main() -> None:
                         help="embedding ベクトル計算をスキップ（FTS5 のみ更新）")
     parser.add_argument("--embed-backfill", action="store_true",
                         help="既存チャンクに embedding を後追い計算する")
+    parser.add_argument("--repair-duplicate-embeddings", action="store_true",
+                        help="content が異なるのに同一 vector を共有する chunk_embeddings 行を検出する"
+                             "（他の処理はせず終了。デフォルトは検出のみ。--execute-repair 併用で"
+                             "該当行を削除し、次回の通常実行（差分計算）で再計算させる）")
+    parser.add_argument("--execute-repair", action="store_true",
+                        help="--repair-duplicate-embeddings と併用し、検出した chunk_embeddings 行を実際に削除する")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -907,6 +944,27 @@ def main() -> None:
     qa_index_path = data_dir / "qa_index.db"
     logger.info(f"統合インデックス DB: {qa_index_path}")
     index_conn = open_index_db(qa_index_path)
+
+    if args.repair_duplicate_embeddings:
+        anomaly_ids = find_duplicate_embedding_anomalies(index_conn)
+        logger.info(f"異常検出: content が異なるのに vector を共有する chunk_embeddings = {len(anomaly_ids)} 件")
+        if anomaly_ids:
+            logger.info(f"  対象 chunk_id（先頭20件）: {anomaly_ids[:20]}")
+            if args.execute_repair:
+                placeholders = ",".join("?" * len(anomaly_ids))
+                index_conn.execute(
+                    f"DELETE FROM chunk_embeddings WHERE chunk_id IN ({placeholders})",
+                    anomaly_ids,
+                )
+                index_conn.commit()
+                logger.info(
+                    f"削除完了: {len(anomaly_ids)} 件。次回 pm_embed.py 実行時の embedding 差分計算"
+                    "（デフォルト動作、--skip-embed を付けない限り自動）で再計算されます。"
+                )
+            else:
+                logger.info("[DRY-RUN] --execute-repair を付けていないため削除は行いません。")
+        index_conn.close()
+        return
 
     total = 0
     for index_name, index_cfg in indices.items():
