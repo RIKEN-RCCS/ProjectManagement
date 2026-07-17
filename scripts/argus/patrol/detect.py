@@ -74,6 +74,7 @@ def detect_completion_signals(ctx) -> int:
 
     for row in rows:
         ai_id = row["id"]
+        row_dict = dict(row)
         target_key = f"ai:{ai_id}"
         if (
             ctx.state.already_notified("completion_confirm", target_key, cooldown_days=9999)
@@ -92,11 +93,15 @@ def detect_completion_signals(ctx) -> int:
                     text_lower = reply_text.lower().strip()
                     if any(kw in text_lower for kw in close_kw_lower):
                         evidence = reply_text[:300]
-                        send_completion_confirm(ctx, ai_id, dict(row), evidence)
+                        send_completion_confirm(ctx, ai_id, row_dict, evidence)
                         detected += 1
                         kw_hit = True
                         break
                 if not kw_hit:
+                    # 返信は直近6件にキャップする（replies は新しい順のため先頭から取る）。
+                    # 上限を設けないと返信が多いアイテムで evidence[:N] の枠を
+                    # slack 側だけで食い潰し、qa_index 活動報告（本機能の主眼）が
+                    # 全て切り捨てられてしまう。
                     evidence_list = [
                         {
                             "source_type": "slack_thread",
@@ -104,7 +109,7 @@ def detect_completion_signals(ctx) -> int:
                             "source_ref": row["source_ref"],
                             "content": r,
                         }
-                        for r in replies
+                        for r in replies[:6]
                     ]
 
         if kw_hit:
@@ -114,7 +119,7 @@ def detect_completion_signals(ctx) -> int:
         if not use_llm:
             continue
 
-        evidence_list += _get_activity_evidence(ctx, dict(row))
+        evidence_list += _get_activity_evidence(ctx, row_dict)
         if not evidence_list:
             continue
 
@@ -162,7 +167,7 @@ def detect_completion_signals(ctx) -> int:
             "AI #%d: LLM完了判定（確信度=%s, auto_close_enabled=%s）→ 承認確認DMを送信: %s",
             ai_id, confidence, auto_close_enabled, reason[:80],
         )
-        send_completion_confirm(ctx, ai_id, dict(row), evidence_text)
+        send_completion_confirm(ctx, ai_id, row_dict, evidence_text)
         detected += 1
 
     if detected:
@@ -785,9 +790,15 @@ NO
 """
 
 _LLM_COMPLETION_RE = re.compile(
-    r"YES\s*\|\s*(HIGH|LOW)\s*:?\s*(.*)", re.IGNORECASE | re.DOTALL
+    r"^\s*YES\s*\|\s*(HIGH|LOW)\s*:?\s*(.*)$", re.IGNORECASE | re.MULTILINE
 )
-_LLM_NO_RE = re.compile(r"\bNO\b", re.IGNORECASE)
+# 確信度ラベルの無い "YES" 単独行（修正4のフォールバック用）。
+# strict 判定行（"YES|HIGH/LOW"）は除外するため、直後にパイプが続く場合は
+# マッチさせない。
+_LLM_COMPLETION_LOOSE_RE = re.compile(
+    r"^\s*YES\b(?!\s*\|)\s*:?\s*(.*)$", re.IGNORECASE | re.MULTILINE
+)
+_LLM_NO_RE = re.compile(r"^\s*NO\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def _llm_judge_completion(
@@ -811,7 +822,9 @@ def _llm_judge_completion(
     evidence_text = "\n".join(
         f"- [出典: {e.get('source_type', '?')} / {e.get('held_at') or '?'} /"
         f" {e.get('source_ref') or '?'}] {(e.get('content') or '')[:400]}"
-        for e in evidence[:10]
+        # slack返信は最大6件、qa_index活動報告は最大 evidence_k（既定6件）に
+        # キャップ済みのため、12件あれば両ソースが切り捨てられずに収まる。
+        for e in evidence[:12]
     )
     prompt = _LLM_COMPLETION_PROMPT.format(
         ai_content=ai_content[:500],
@@ -822,15 +835,35 @@ def _llm_judge_completion(
         # rivault(Kimi-K2-Thinking, thinking無効化不可)が優先ルートの場合、
         # thinking で数千トークンを消費するため max_tokens は多めに確保する。
         result = call_argus_llm(prompt, timeout=60, max_tokens=4096).strip()
-        # think ブロックは call_argus_llm 内で除去済みだが、念のため前置き文言が
-        # 残っていてもマッチするよう search でテキスト全体から探す。
-        m = _LLM_COMPLETION_RE.search(result)
-        if m:
+        # think ブロックは call_argus_llm 内で除去済みだが、念のため前置き文言に
+        # 判定様トークンが混ざっていても誤爆しないよう、行アンカーで判定「行」
+        # のみを対象にマッチさせる（前置き文中の "YES|HIGH" 等への誤一致を防止）。
+        # 応答の途中に説明のため複数の判定様トークンが現れることがあるため、
+        # 最後に出現した判定を採用する。
+        strict_matches = list(_LLM_COMPLETION_RE.finditer(result))
+        no_matches = list(_LLM_NO_RE.finditer(result))
+
+        if strict_matches and (
+            not no_matches or strict_matches[-1].start() > no_matches[-1].start()
+        ):
+            m = strict_matches[-1]
             confidence = m.group(1).upper()
             reason = m.group(2).strip(": 　").strip() or "LLMが完了と判定"
             return (True, confidence, reason)
-        if _LLM_NO_RE.search(result):
+        if no_matches and (
+            not strict_matches or no_matches[-1].start() > strict_matches[-1].start()
+        ):
             return (False, None, "")
+
+        # フォールバック: 確信度ラベル無しの "YES" 判定行（偽陰性防止）。
+        # 確信度不明のため LOW 扱いとし、auto_close（HIGH のみ）には乗らず
+        # 承認確認 DM 経路（安全側）に回す。
+        loose_matches = list(_LLM_COMPLETION_LOOSE_RE.finditer(result))
+        if loose_matches:
+            m = loose_matches[-1]
+            reason = m.group(1).strip(": 　").strip() or "LLMが完了と判定（確信度ラベルなし）"
+            return (True, "LOW", reason)
+
         logger.warning("完了シグナル LLM 判定: 期待した形式で応答が得られず: %s", result[:100])
     except Exception as e:
         logger.warning("完了シグナル LLM 判定エラー: %s", e)

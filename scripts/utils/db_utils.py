@@ -452,13 +452,13 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
 def _build_channel_kind_condition(
     channel_ids: list[str] | None,
     minutes_names: list[str] | None,
-    table_alias: str = "a",
+    table_alias: str = "",
 ) -> tuple[str, list[str]]:
     """channel_ids / minutes_names から action_items/decisions 用のフィルタ条件を構築する。
     両方 None の場合は無条件（全体検索）。
 
-    table_alias: テーブルの alias（例: "a" → "a.source"。空文字の場合は "source"）。
-    主テーブルに alias がある場合はそれを指定し、ない場合は空文字を渡す。
+    table_alias: テーブルの alias（例: "a" → "a.source"。既定は空文字で alias なし
+    （"source"）。主テーブルに alias がある場合はそれを指定する。
     Returns: (where_clause_fragment, params)
     """
     tbl = f"{table_alias}." if table_alias else ""
