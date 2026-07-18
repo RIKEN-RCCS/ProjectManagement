@@ -2,9 +2,11 @@
 # pm_box_update.sh
 #
 # ドキュメントレジストリの更新と FTS5 インデックスへの組み込みを連続実行する。
-#   ステップ1: pm_slack_box_links.py  — Slack BOXリンクを収集・LLMでメタデータ抽出
-#   ステップ2: pm_box_crawl.py  — BOXフォルダからドキュメント本文を取得・Markdown変換
-#   ステップ3: pm_embed.py            — docs_*.db + box_docs.db を FTS5 インデックスに組み込み
+#   ステップ1  : pm_slack_box_links.py  — Slack BOXリンクを収集・LLMでメタデータ抽出
+#   ステップ2  : pm_box_crawl.py  — BOXフォルダからドキュメント本文を取得・Markdown変換
+#   ステップ2.5: pm_box_relevance.py --judge — 未判定文書のrelevanceをLLM判定（増分）
+#   ステップ2.6: pm_box_crawl.py --figures-pending — core判定された新規PDFへ図OCRを自動付与
+#   ステップ3  : pm_embed.py            — docs_*.db + box_docs.db を FTS5 インデックスに組み込み
 #
 # Usage:
 #   bash scripts/pm_box_update.sh
@@ -18,7 +20,8 @@
 #   --force               抽出済み・変換済みも再処理
 #   --full-rebuild        FTS5 インデックスを全件再構築（pm_embed.py のみ）
 #   --skip-embed          ステップ3（pm_embed.py）をスキップ
-#   --skip-box-content    ステップ2（pm_box_crawl.py）をスキップ
+#   --skip-box-content    ステップ2/2.5/2.6（pm_box_crawl.py / pm_box_relevance.py）をスキップ
+#   --skip-figures        ステップ2.6（図OCRバックフィル）のみスキップ
 #   --since YYYY-MM-DD    この日付以降のメッセージのみ対象（pm_slack_box_links.py のみ）
 
 set -euo pipefail
@@ -68,6 +71,7 @@ FORCE=""
 FULL_REBUILD=""
 SKIP_EMBED=""
 SKIP_BOX_CONTENT=""
+SKIP_FIGURES=""
 SINCE=""
 
 while [[ $# -gt 0 ]]; do
@@ -79,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         --full-rebuild)      FULL_REBUILD="--full-rebuild"; shift   ;;
         --skip-embed)        SKIP_EMBED="1";               shift   ;;
         --skip-box-content)  SKIP_BOX_CONTENT="1";         shift   ;;
+        --skip-figures)      SKIP_FIGURES="1";             shift   ;;
         --since)             SINCE="$2";                   shift 2 ;;
         -h|--help)
             sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
@@ -128,6 +133,51 @@ else
     echo "================================================================"
 
     "$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_box_crawl.py" "${BOX_OPTS[@]}"
+fi
+
+# --------------------------------------------------------------------------- #
+# ステップ2.5: relevance 判定（未判定分のみ、増分）
+# --------------------------------------------------------------------------- #
+if [[ -n "$SKIP_BOX_CONTENT" ]]; then
+    echo ""
+    echo "ステップ2.5: pm_box_relevance.py はスキップします (--skip-box-content)"
+else
+    RELEVANCE_OPTS=()
+    [[ -n "$INDEX_NAME" ]] && RELEVANCE_OPTS+=(--index-name "$INDEX_NAME")
+    [[ -n "$DRY_RUN" ]]    && RELEVANCE_OPTS+=("$DRY_RUN")
+
+    echo ""
+    echo "================================================================"
+    echo "ステップ2.5: relevance判定 (pm_box_relevance.py --judge)"
+    [[ -n "$INDEX_NAME" ]] && echo "  インデックス : $INDEX_NAME"
+    [[ -n "$DRY_RUN" ]]    && echo "  dry-run      : on"
+    echo "================================================================"
+
+    "$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_box_relevance.py" --judge "${RELEVANCE_OPTS[@]}" \
+        || echo "[WARN] relevance判定に失敗しました。処理を継続します。"
+fi
+
+# --------------------------------------------------------------------------- #
+# ステップ2.6: 図OCRバックフィル（core判定された新規PDFへの図OCR自動付与）
+# --------------------------------------------------------------------------- #
+if [[ -n "$SKIP_BOX_CONTENT" ]]; then
+    echo ""
+    echo "ステップ2.6: pm_box_crawl.py --figures-pending はスキップします (--skip-box-content)"
+elif [[ -n "$SKIP_FIGURES" ]]; then
+    echo ""
+    echo "ステップ2.6: pm_box_crawl.py --figures-pending はスキップします (--skip-figures)"
+else
+    FIGURES_PENDING_OPTS=(--convert --figures-pending)
+    [[ -n "$DRY_RUN" ]] && FIGURES_PENDING_OPTS+=("$DRY_RUN")
+
+    echo ""
+    echo "================================================================"
+    echo "ステップ2.6: 図OCRバックフィル (pm_box_crawl.py --figures-pending)"
+    [[ -n "$DRY_RUN" ]] && echo "  dry-run      : on"
+    echo "================================================================"
+
+    "$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_box_crawl.py" "${FIGURES_PENDING_OPTS[@]}" \
+        || echo "[WARN] 図OCRバックフィルに失敗しました。処理を継続します。"
 fi
 
 # --------------------------------------------------------------------------- #

@@ -32,6 +32,9 @@ box_docs.db に保存する。pm_embed.py で FTS5 索引化すれば
   # 再変換
   python3 scripts/pm_box_crawl.py --convert --force
 
+  # 図OCR未確定の core PDF のみバックフィル（夜間更新用）
+  python3 scripts/pm_box_crawl.py --convert --figures-pending
+
   # 一覧表示
   python3 scripts/pm_box_crawl.py --list
 """
@@ -77,6 +80,24 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {"pptx", "xlsx", "docx", "pdf", "md", "boxnote", "txt"}
 
+# doc_content.convert_method の図OCR関連の分類（LIKE '%figures%' 系の曖昧な
+# 判定を廃し、意味を明示するための集合）。
+# - 図OCR完了・再試行不要（図あり確定 / 図なし確定）
+FIGURES_DONE_METHODS = ("pdftotext+figures", "pdftotext+nofig")
+# - 図OCR未試行 or 一部ページ失敗で要再試行
+FIGURES_RETRY_METHODS = ("pdftotext", "pdftotext+figures_partial")
+
+# 図OCR対象の文字数上限（--figures-pending 対象選定・convert_single_file の
+# core PDF figures 判定の双方で共用）。既知の外れ値（xlsx由来PDF等で実測
+# ~2.05M字）を含む極端に大きい文書は図OCRの実行コストが見合わないため対象外にする。
+FIGURES_MAX_CHARS = 1_000_000
+
+# --figures-pending の再試行間隔（日数）。恒常的にOCRが失敗するページを持つ
+# core PDF（matched=False かつ all_ok=False で method が確定しない文書）が
+# 毎晩フル再OCRされ続けるのを防ぐバックオフ。doc_content.last_figures_attempt_at
+# と比較して間隔内なら pending 対象から除外する。
+FIGURES_RETRY_INTERVAL_DAYS = 7
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS box_files (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,7 +125,8 @@ CREATE TABLE IF NOT EXISTS doc_content (
     char_count          INTEGER,
     convert_method      TEXT,
     extracted_at        TEXT NOT NULL,
-    source_modified_at  TEXT
+    source_modified_at  TEXT,
+    last_figures_attempt_at TEXT
 );
 """
 
@@ -139,11 +161,13 @@ def _open_box_docs_db(db_path: Path, *, no_encrypt: bool = False) -> sqlite3.Con
     # 追加しないため、この列が無い旧DBでも SELECT bf.relevance が落ちないようにする）
     # source_modified_at の移行（既存DBの doc_content には無いため同様に追加。
     # Box側更新検知＝bf.modified_at と dc.source_modified_at の等値比較に使う）
+    # last_figures_attempt_at の移行（--figures-pending の再試行間隔バックオフに使う）
     for col_def in (
         "ALTER TABLE box_files ADD COLUMN relevance TEXT",
         "ALTER TABLE box_files ADD COLUMN relevance_reason TEXT",
         "ALTER TABLE box_files ADD COLUMN relevance_judged_at TEXT",
         "ALTER TABLE doc_content ADD COLUMN source_modified_at TEXT",
+        "ALTER TABLE doc_content ADD COLUMN last_figures_attempt_at TEXT",
     ):
         try:
             conn.execute(col_def)
@@ -325,13 +349,19 @@ def convert_to_markdown(
     verbalize_figures: bool = False,
     fig_max_pages: int | None = None,
     fig_endpoints: list[str] | None = None,
-) -> tuple[str, str]:
-    """ファイルを Markdown に変換する。(content_md, convert_method) を返す。"""
+) -> tuple[str, str, bool]:
+    """ファイルを Markdown に変換する。(content_md, convert_method, figures_attempted) を返す。
+
+    figures_attempted は「図言語化の実OCR呼び出しを実際に行ったか」を示す
+    （結果が図あり/図なし/一部失敗のいずれであっても True。エンドポイント未設定・
+    本文が短すぎる等で図言語化そのものに入らなかった場合は False）。
+    doc_content.last_figures_attempt_at のバックオフ判定に使う。
+    """
     if fmt in ("pptx", "docx", "xlsx") and _is_encrypted_office(file_path):
-        return "[ENCRYPTED — password-protected file, cannot extract content]", "encrypted"
+        return "[ENCRYPTED — password-protected file, cannot extract content]", "encrypted", False
 
     if fmt == "pdf":
-        content, method = _convert_pdf(
+        content, method, figures_attempted = _convert_pdf(
             file_path,
             verbalize_figures=verbalize_figures,
             fig_max_pages=fig_max_pages,
@@ -348,16 +378,17 @@ def convert_to_markdown(
         }
         converter = converters.get(fmt)
         if not converter:
-            return "", "unsupported"
+            return "", "unsupported", False
         content, method = converter(file_path)
+        figures_attempted = False
 
     # PDF の /Encrypt は権限制限（コピー・印刷禁止等）のみでオープンパスワード無し、
     # というケースが多く（政府系公開PDFに頻出）、pdftotext は空パスワードで
     # 自動復号し普通に本文を取れる。実際に抽出できたかで判定し、事前に
     # ブロックしない（本文が空だった場合のみ暗号化を理由として明示する）。
     if fmt == "pdf" and not content.strip() and _is_encrypted_pdf(file_path):
-        return "[ENCRYPTED — password-protected PDF, cannot extract content]", "encrypted"
-    return content, method
+        return "[ENCRYPTED — password-protected PDF, cannot extract content]", "encrypted", False
+    return content, method, figures_attempted
 
 
 def _convert_md(path: Path) -> tuple[str, str]:
@@ -410,7 +441,12 @@ def _convert_pdf(
     verbalize_figures: bool = False,
     fig_max_pages: int | None = None,
     endpoints: list[str] | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
+    """(content, method, figures_attempted) を返す。figures_attempted は
+    _merge_pdftotext_with_figures を実際に呼び出した（＝OCRを試行した）場合に
+    True。結果が確定しなかった（matched=False かつ all_ok=False）場合も、
+    試行自体はしているので True を返す（method は "pdftotext" のまま要再試行）。
+    """
     text = _pdftotext(path)
     if text and len(text.strip()) > 100:
         if verbalize_figures:
@@ -422,12 +458,20 @@ def _convert_pdf(
                 )
                 if matched:
                     method = "pdftotext+figures" if all_ok else "pdftotext+figures_partial"
-                    return merged, method
-        return text, "pdftotext"
+                    return merged, method, True
+                if all_ok:
+                    # 図言語化を全ページ試行し、図が1つも見つからなかったことを
+                    # 確定できた場合のみ nofig を返す（再OCRループの防止）。
+                    return text, "pdftotext+nofig", True
+                # 一部ページがOCR失敗して未確認。試行はしたが結果は確定しない
+                # ため method は "pdftotext" のまま（次回の --figures-pending で
+                # 間隔バックオフを挟みつつ再試行させる）。
+                return text, "pdftotext", True
+        return text, "pdftotext", False
     md = _convert_via_multimodal(path)
     if md:
-        return md, "multimodal_ocr"
-    return text or "", "pdftotext"
+        return md, "multimodal_ocr", False
+    return text or "", "pdftotext", False
 
 
 def _convert_boxnote(path: Path) -> tuple[str, str]:
@@ -1216,22 +1260,27 @@ def convert_single_file(
 ) -> dict:
     """ワーカープロセスで1ファイルを変換する。convert_files() から並列呼び出しされる。
 
-    verbalize_figures は relevance='core' の pdf のみに適用する（呼び出し側で
-    file_info["relevance"] を見て判定、ここでは二重にガードする）。
-
-    --figures 未指定でも、既存 doc_content.convert_method に 'figures' を含む
-    （＝過去に図言語化済みの）core PDF がBox側更新で再変換される場合は、図言語化を
-    自動的に維持する（cron 夜間更新で --figures フラグを付けなくても剥がれない
-    ようにするため）。この「維持」発火時のみ OCR エンドポイントをワーカー内で
+    core PDF（relevance='core' の pdf）は --figures 未指定・既存 convert_method
+    に関わらず常に図言語化を試行する（全core一括ロールアウト完了＋新規自動付与の
+    方針確定により、「過去に図言語化済みだった場合のみ維持」の限定は不要になった。
+    'pdftotext+nofig'（図なし確定）の文書も、内容が変わって図が増えた可能性が
+    あるため Box側更新時は再試行する）。OCR エンドポイントはこのワーカー内で
     遅延解決する。エンドポイントが解決できない場合は図言語化なしで上書きすると
     既存の図説明が黙って失われるため、再変換自体をスキップし次回リトライに委ねる。
-    relevance が core から外れていた場合は維持せず text-only に落とす。
+    relevance が core から外れていた場合、または既存 char_count が
+    FIGURES_MAX_CHARS を超える場合は figures を試行せず text-only に落とす。
+
+    図言語化を実際に試行した場合（結果が図あり/図なし/一部失敗いずれでも）は
+    doc_content.last_figures_attempt_at を更新する。試行しなかった場合は
+    file_info の既存値をそのまま引き継ぐ（--figures-pending の間隔バックオフ判定に使う）。
     """
     fid = file_info["box_file_id"]
     name = file_info["name"]
     fmt = file_info["file_format"]
     content_hash_old = file_info.get("content_hash")
     existing_method = file_info.get("convert_method") or ""
+    existing_char_count = file_info.get("char_count")
+    existing_last_figures_attempt_at = file_info.get("last_figures_attempt_at")
     new_modified_at = file_info.get("modified_at")
 
     pid = os.getpid()
@@ -1261,33 +1310,47 @@ def convert_single_file(
                 return {"status": "skipped", "file_id": fid, "name": name}
 
             is_core_pdf = fmt == "pdf" and file_info.get("relevance") == "core"
-            had_figures = "figures" in existing_method
-            maintain_figures = (not verbalize_figures) and had_figures and fmt == "pdf"
+            had_figures_marker = fmt == "pdf" and (
+                existing_method in FIGURES_DONE_METHODS
+                or existing_method == "pdftotext+figures_partial"
+            )
+            oversized = (
+                is_core_pdf
+                and existing_char_count is not None
+                and existing_char_count > FIGURES_MAX_CHARS
+            )
 
             want_figures = False
             endpoints = fig_endpoints
-            if verbalize_figures and is_core_pdf:
-                want_figures = True
-            elif maintain_figures:
-                if is_core_pdf:
+            if oversized:
+                logger.warning(
+                    f"    [SKIP-FIGURES] 既存文字数が上限超過のため図OCRを試行せず"
+                    f" text-only へ変換 (char_count={existing_char_count},"
+                    f" 上限={FIGURES_MAX_CHARS}, pid={pid})"
+                )
+            elif is_core_pdf:
+                if not verbalize_figures:
                     endpoints = fig_endpoints if fig_endpoints is not None else get_ocr_endpoints()
-                    if endpoints:
-                        want_figures = True
-                    else:
-                        logger.warning(
-                            f"    [SKIP] figures 維持不可（OCRエンドポイント未設定/停止）"
-                            f"のため再変換をスキップ、次回リトライ (pid={pid})"
-                        )
-                        return {"status": "skipped_figures_unavailable", "file_id": fid, "name": name}
+                if endpoints:
+                    want_figures = True
                 else:
-                    logger.info(f"    relevance 降格のため figures 維持を停止し text-only へ変換 (pid={pid})")
+                    logger.warning(
+                        f"    [SKIP] figures 付与不可（OCRエンドポイント未設定/停止）"
+                        f"のため再変換をスキップ、次回リトライ (pid={pid})"
+                    )
+                    return {"status": "skipped_figures_unavailable", "file_id": fid, "name": name}
+            elif had_figures_marker:
+                logger.info(f"    relevance 降格のため figures 維持を停止し text-only へ変換 (pid={pid})")
 
             logger.info(f"    変換中... (pid={pid})")
-            content_md, method = convert_to_markdown(
+            content_md, method, figures_attempted = convert_to_markdown(
                 file_path, fmt,
                 verbalize_figures=want_figures,
                 fig_max_pages=fig_max_pages,
                 fig_endpoints=endpoints,
+            )
+            last_figures_attempt_at = (
+                _now_iso() if figures_attempted else existing_last_figures_attempt_at
             )
 
             if method == "encrypted":
@@ -1305,10 +1368,11 @@ def convert_single_file(
                     conn.execute(
                         """INSERT OR REPLACE INTO doc_content
                            (box_file_id, content_md, content_hash, page_count,
-                            char_count, convert_method, extracted_at, source_modified_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            char_count, convert_method, extracted_at, source_modified_at,
+                            last_figures_attempt_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (fid, content_md, content_hash, page_count, char_count, method,
-                         _now_iso(), new_modified_at),
+                         _now_iso(), new_modified_at, last_figures_attempt_at),
                     )
                     conn.commit()
                     logger.info(f"    完了: {char_count}文字, method={method} (pid={pid})")
@@ -1372,7 +1436,8 @@ def convert_files(
     rows = conn.execute(
         f"""SELECT bf.box_file_id, bf.name, bf.file_format, bf.size_bytes,
                    bf.folder_path, bf.index_name, bf.modified_at,
-                   bf.relevance, dc.content_hash, dc.convert_method
+                   bf.relevance, dc.content_hash, dc.convert_method,
+                   dc.char_count, dc.last_figures_attempt_at
             FROM box_files bf
             LEFT JOIN doc_content dc ON bf.box_file_id = dc.box_file_id
             WHERE {where}
@@ -1384,23 +1449,24 @@ def convert_files(
         # --force 未指定の場合、既に変換済みの core PDF は上の WHERE で除外され
         # 図言語化の対象から漏れる。無言で漏らさず案内する。
         already_where_parts = [p for p in where_parts if p != update_detect_clause]
+        method_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
         already_where_parts += [
             "bf.file_format = 'pdf'", "bf.relevance = 'core'",
             "dc.box_file_id IS NOT NULL",
-            "(dc.convert_method IS NULL OR dc.convert_method NOT LIKE '%figures%'"
-            " OR dc.convert_method LIKE '%figures_partial%')",
+            f"dc.convert_method IN ({method_placeholders})",
         ]
         already_where = " AND ".join(already_where_parts)
         pending = conn.execute(
             f"""SELECT COUNT(*) FROM box_files bf
                 LEFT JOIN doc_content dc ON bf.box_file_id = dc.box_file_id
                 WHERE {already_where}""",
-            params,
+            [*params, *FIGURES_RETRY_METHODS],
         ).fetchone()[0]
         if pending:
             log(
-                f"[INFO] --figures 指定ですが、既に変換済みの core PDF が {pending} 件あります。"
-                f"図言語化を追加するには --force を併用してください。"
+                f"[INFO] 図OCR未確定（{'/'.join(FIGURES_RETRY_METHODS)}）の core PDF が"
+                f" {pending} 件あります。図OCRを付与するには"
+                f" `pm_box_crawl.py --convert --figures-pending` を実行してください。"
             )
 
     if not rows:
@@ -1442,6 +1508,129 @@ def convert_files(
             log(f"  {r['file_id']} ({r['name']}): {r['status']}")
 
     log(f"\n完了: 変換 {converted}, スキップ {skipped}, 失敗 {len(failed)} / 合計 {len(rows)} 件")
+    return converted
+
+
+def convert_figures_pending(
+    conn: sqlite3.Connection,
+    *,
+    source_filter: str | None = None,
+    box_file_id_filter: str | None = None,
+    dry_run: bool = False,
+    workers: int = 2,
+    no_encrypt: bool = False,
+    db_path: Path | None = None,
+    fig_max_pages: int | None = None,
+    fig_endpoints: list[str] | None = None,
+    log=print,
+) -> int:
+    """図OCR未確定（FIGURES_RETRY_METHODS）の core PDF を図OCR付きで再変換する
+    夜間バックフィル用のエントリポイント（--figures-pending）。
+
+    convert_files() の Box側更新検知（ハッシュ変更）とは独立に、ハッシュが不変でも
+    対象を強制的に再変換する（force=True 相当を per-file で適用）。
+
+    last_figures_attempt_at が FIGURES_RETRY_INTERVAL_DAYS 日以内の文書は
+    スキップする（恒常的にOCRが失敗するページを持つ core PDF が毎晩フル再OCR
+    され続けるのを防ぐバックオフ。convert_files() 側の維持経路で figures を
+    試行済みならスタンプが更新されているため、同じ夜の重複OCRも自然に防げる）。
+    """
+    method_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
+    where_parts = [
+        "bf.relevance = 'core'",
+        "bf.file_format = 'pdf'",
+        f"dc.convert_method IN ({method_placeholders})",
+        "dc.content_md IS NOT NULL",
+    ]
+    params: list = list(FIGURES_RETRY_METHODS)
+    if source_filter:
+        where_parts.append("bf.source_name = ?")
+        params.append(source_filter)
+    if box_file_id_filter:
+        where_parts.append("bf.box_file_id = ?")
+        params.append(box_file_id_filter)
+
+    where = " AND ".join(where_parts)
+    rows = conn.execute(
+        f"""SELECT bf.box_file_id, bf.name, bf.file_format, bf.size_bytes,
+                   bf.folder_path, bf.index_name, bf.modified_at,
+                   bf.relevance, dc.content_hash, dc.convert_method, dc.char_count,
+                   dc.last_figures_attempt_at
+            FROM box_files bf
+            JOIN doc_content dc ON bf.box_file_id = dc.box_file_id
+            WHERE {where}
+            ORDER BY bf.name""",
+        params,
+    ).fetchall()
+
+    cutoff = (datetime.now(UTC) - timedelta(days=FIGURES_RETRY_INTERVAL_DAYS)).isoformat()
+
+    candidates = []
+    interval_skipped = 0
+    for row in rows:
+        char_count = row["char_count"]
+        if char_count and char_count > FIGURES_MAX_CHARS:
+            log(
+                f"[WARN] サイズ超過のため図OCRバックフィル対象外: {row['name']}"
+                f" (char_count={char_count}, 上限={FIGURES_MAX_CHARS})"
+            )
+            continue
+        last_attempt = row["last_figures_attempt_at"]
+        if last_attempt and last_attempt >= cutoff:
+            interval_skipped += 1
+            continue
+        candidates.append(row)
+
+    if interval_skipped:
+        log(
+            f"[INFO] 直近{FIGURES_RETRY_INTERVAL_DAYS}日以内に試行済みのためスキップ:"
+            f" {interval_skipped} 件"
+        )
+
+    if not candidates:
+        log("[INFO] 図OCRバックフィル: pending なし")
+        return 0
+
+    log(f"[FIGURES-PENDING] 対象: {len(candidates)} 件, workers={workers}")
+
+    if dry_run:
+        for row in candidates:
+            log(f"  [DRY] [{row['file_format']}] {row['name']} (id={row['box_file_id']})")
+        return len(candidates)
+
+    if db_path is None:
+        log("[ERROR] db_path が指定されていません")
+        return 0
+
+    endpoints = fig_endpoints if fig_endpoints is not None else get_ocr_endpoints()
+    if not endpoints:
+        log("[WARN] OCRエンドポイント未設定/停止のため図OCRバックフィルをスキップします")
+        return 0
+
+    file_infos = [dict(r) for r in candidates]
+
+    if workers > 1 and len(file_infos) > 1:
+        with Pool(workers) as pool:
+            results = pool.starmap(
+                convert_single_file,
+                [(f, str(db_path), no_encrypt, True, True, fig_max_pages, endpoints) for f in file_infos],
+            )
+    else:
+        results = [
+            convert_single_file(f, str(db_path), no_encrypt, True, True, fig_max_pages, endpoints)
+            for f in file_infos
+        ]
+
+    converted = sum(1 for r in results if r["status"] == "success")
+    skipped = sum(1 for r in results if r["status"] == "skipped")
+    failed = [r for r in results if r["status"] not in ("success", "skipped")]
+
+    if failed:
+        log(f"\n[WARN] 図OCRバックフィル失敗: {len(failed)} 件")
+        for r in failed:
+            log(f"  {r['file_id']} ({r['name']}): {r['status']}")
+
+    log(f"\n完了: 図OCRバックフィル 変換 {converted}, スキップ {skipped}, 失敗 {len(failed)} / 合計 {len(candidates)} 件")
     return converted
 
 
@@ -1662,6 +1851,10 @@ def main():
                         help="変換済みファイルも再変換")
     parser.add_argument("--figures", action="store_true",
                         help="relevance='core' のPDFに対し図・グラフをマルチモーダルOCRで言語化して本文にマージする")
+    parser.add_argument("--figures-pending", action="store_true",
+                        help="図OCR未確定（pdftotext/pdftotext+figures_partial）の core PDF のみを"
+                             "対象に図OCRバックフィルを実行する（夜間更新用、--figures とは独立。"
+                             "直近 FIGURES_RETRY_INTERVAL_DAYS 日以内に試行済みの文書は再試行しない）")
     parser.add_argument("--figures-max-pages", type=int, default=None,
                         help="図言語化を行う先頭ページ数の上限（未指定なら全ページ）")
     parser.add_argument("--workers", type=int, default=2,
@@ -1706,6 +1899,9 @@ def main():
 
     if args.figures and not args.convert:
         log("[WARN] --figures は --convert と併用しないと効果がありません")
+
+    if args.figures_pending and not args.convert:
+        log("[WARN] --figures-pending は --convert と併用しないと効果がありません")
 
     if args.debug_convert:
         debug_convert_file(Path(args.debug_convert), log=log)
@@ -1753,25 +1949,42 @@ def main():
         if args.dry_run:
             log("\n[DRY-RUN] ダウンロード・変換は行いません")
         fig_endpoints = None
-        if args.figures:
+        if args.figures or args.figures_pending:
             fig_endpoints = get_ocr_endpoints()
-            if not fig_endpoints:
-                log("[WARN] --figures 指定ですが LOCAL_OCR_MODEL/RIVAULT_OCR_MODEL 未設定のため図言語化スキップ")
-        convert_files(
-            conn,
-            source_filter=args.source,
-            box_file_id_filter=args.box_file_id,
-            type_filter=args.type,
-            force=args.force,
-            dry_run=args.dry_run,
-            workers=args.workers,
-            no_encrypt=args.no_encrypt,
-            db_path=db_path,
-            figures=args.figures,
-            fig_max_pages=args.figures_max_pages,
-            fig_endpoints=fig_endpoints,
-            log=log,
-        )
+            # --figures-pending 未設定時の warning は convert_figures_pending() 内で
+            # 一本化して出す（ここで重複して出さない）。
+            if not fig_endpoints and args.figures:
+                log("[WARN] --figures 指定ですが"
+                    " LOCAL_OCR_MODEL/RIVAULT_OCR_MODEL 未設定のため図言語化スキップ")
+        if args.figures_pending:
+            convert_figures_pending(
+                conn,
+                source_filter=args.source,
+                box_file_id_filter=args.box_file_id,
+                dry_run=args.dry_run,
+                workers=args.workers,
+                no_encrypt=args.no_encrypt,
+                db_path=db_path,
+                fig_max_pages=args.figures_max_pages,
+                fig_endpoints=fig_endpoints,
+                log=log,
+            )
+        else:
+            convert_files(
+                conn,
+                source_filter=args.source,
+                box_file_id_filter=args.box_file_id,
+                type_filter=args.type,
+                force=args.force,
+                dry_run=args.dry_run,
+                workers=args.workers,
+                no_encrypt=args.no_encrypt,
+                db_path=db_path,
+                figures=args.figures,
+                fig_max_pages=args.figures_max_pages,
+                fig_endpoints=fig_endpoints,
+                log=log,
+            )
 
     conn.close()
     if output_file:
