@@ -243,7 +243,7 @@ LLM が自律的にツール（DB検索・FTS全文検索・Slackメッセージ
 /argus-investigate M3の遅延原因 --to-box --to-slack  # 組み合わせも可
 ```
 
-### 内部ツール一覧（現行15個。`agent_tools.py` の `TOOLS` が正）
+### 内部ツール一覧（現行16個。`agent_tools.py` の `TOOLS` が正）
 
 | ツール | 情報源 | 説明 |
 |---|---|---|
@@ -255,6 +255,7 @@ LLM が自律的にツール（DB検索・FTS全文検索・Slackメッセージ
 | `get_app_achievements` | pm.db（achievements） | アプリ別確定実績（過去の到達点） |
 | `search_text` | qa_index.db（FTS5＋re-rank枠・HyDE） | 全文検索。`since` 引数（`YYYY-MM-DD` / `"all"`）で対象期間を上書き可 |
 | `search_text_hybrid` | qa_index.db（FTS5＋ベクトルRRF） | ハイブリッド検索。`since` 引数（`YYYY-MM-DD` / `"all"`）で対象期間を上書き可 |
+| `read_document` | box_docs.db（全文読込 map-reduce） | 検索でヒットした特定 Box 資料の**本文全文**を窓分割で読み込み質問に答える。`search_text` の断片抜粋では数値・図・網羅一覧が不足するとき用。`file`（資料名の一部）＋`question` を取り、内部で `run_document_qa` を起動。同時1本に直列化・timeout 上限110秒 |
 | `search_entity` | qa_index.db（pm_data/minutes/slack/box_docs × conservative/aggressive/objective/future_oriented） | Explorer マルチ視点分析 |
 | `synthesize_answers` | LLMのみ | 複数 Explorer 回答の統合 |
 | `search_mentions` | slack.db | ユーザーへのメンション・名指し集計 |
@@ -272,6 +273,14 @@ LLM が自律的にツール（DB検索・FTS全文検索・Slackメッセージ
 
 **`--file` は上記ツール一覧を経由しない**（前節参照）。`run_document_qa` による全文読込
 map-reduce の独立パスであり、決定論ピン＋ツール封鎖という旧方式は廃止済み。
+
+**全文読込の2経路**: 同じ `run_document_qa`（map 段は4並列）に (1) `--file` の決定論パス、
+(2) 通常経路のエージェントが `read_document` ツールを選択する動的パス、の2つから入れる。
+「全検索を map-reduce に置換」はコーパス規模（core+related 903文書≒740窓 → 直列で数時間/質問）
+から非現実的なため、検索で文書を特定した後に全文読込へ**エスカレーションする**ツール型
+ハイブリッドを採用した。ただし現状 `read_document` の発火はモデル（glm-5.2）のツール選択に
+依存し、確実には呼ばれない（think=False 下でツール選択率が低い既知事象）。数値・内訳を確実に
+得たい単一資料には `--file` 直指定が最も確実。
 
 ### 出力中のID参照
 
