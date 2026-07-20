@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -206,17 +207,26 @@ def _resolve_box_file_ids(
         return [], []
     conn = open_db(box_docs_db, encrypt=True)
     try:
-        pattern = f"%{file}%"
+        # macOS/Box Web UI からコピーしたファイル名は NFD（濁点分解）で届くことが
+        # あり SQL の LIKE では NFC 格納の name と一致しない。Python 側で両辺を
+        # NFC + casefold に正規化して部分一致させる（box_files は高々数百行）。
+        target = unicodedata.normalize("NFC", file).casefold()
         rows = conn.execute(
             "SELECT box_file_id, name, folder_path FROM box_files"
-            " WHERE name LIKE ? OR folder_path LIKE ?",
-            (pattern, pattern),
         ).fetchall()
     finally:
         conn.close()
-    if not rows:
+
+    def _norm(s: str | None) -> str:
+        return unicodedata.normalize("NFC", s or "").casefold()
+
+    matched = [
+        r for r in rows
+        if target in _norm(r["name"]) or target in _norm(r["folder_path"])
+    ]
+    if not matched:
         return [], []
-    return [r["box_file_id"] for r in rows], [r["name"] for r in rows]
+    return [r["box_file_id"] for r in matched], [r["name"] for r in matched]
 
 
 def _excerpt(content: str) -> str:
