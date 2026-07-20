@@ -13,10 +13,13 @@ pm_mcp_server.py（FastMCP）と同じ関数群を提供するため、挙動は
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
 import sys
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +36,12 @@ _DATA_DIR = _REPO_ROOT / "data"
 _MINUTES_DIR = _DATA_DIR / "minutes"
 _ARGUS_CONFIG = _DATA_DIR / "argus_config.yaml"
 _QA_CONFIG_LEGACY = _DATA_DIR / "qa_config.yaml"
+
+# ツール実行側 _execute_calls_parallel（pm_argus_agent.py）の120s上限より小さくして、
+# 親タイムアウトによる成果破棄＋オーファンスレッドを防ぐ
+_READ_DOCUMENT_TIMEOUT_CAP = 110.0
+# map並列度4は維持したまま、全文読込（read_document）そのものは同時に1本だけに制限する
+_READ_DOCUMENT_LOCK = threading.Semaphore(1)
 
 # =========================================================================== #
 #  AgentContext
@@ -55,6 +64,8 @@ class AgentContext:
     # 決定論的ピン（--file 等で全 search をこの record_id 群に固定する）
     record_ids: list[str] = field(default_factory=list)
     scoped_file_names: list[str] = field(default_factory=list)
+    # run_agent の time.monotonic() 基準デッドライン（read_document 等のツール内タイムアウト計算用）
+    deadline: float | None = None
 
 
 # =========================================================================== #
@@ -128,6 +139,31 @@ def _tool_search_text_hybrid(args: dict, ctx: AgentContext) -> str:
     return _mcp_search_hybrid(query, index_name=index_name, since=since,
                               file=file, record_ids=(ctx.record_ids or None),
                               scoped_names=(ctx.scoped_file_names or None))
+
+
+def _tool_read_document(args: dict, ctx: AgentContext) -> str:
+    from argus.mcp_tools import _resolve_box_file_ids
+
+    file = (args.get("file") or "").strip()
+    question = (args.get("question") or "").strip()
+    if not file or not question:
+        return "file と question の両方を指定してください。"
+
+    rids, names = _resolve_box_file_ids(file, None)
+    if not rids:
+        return f"『{file}』が Box 索引に見つかりません。search_text でファイル名を確認してください。"
+
+    ctx2 = dataclasses.replace(ctx, record_ids=rids, scoped_file_names=names)
+
+    from argus.pm_argus_agent import run_document_qa
+
+    remaining = ctx.deadline - time.monotonic() if ctx.deadline else 180.0
+    timeout = max(10.0, min(_READ_DOCUMENT_TIMEOUT_CAP, remaining))
+    with _READ_DOCUMENT_LOCK:
+        return run_document_qa(
+            question=question, respond=None, ctx=ctx2,
+            timeout=timeout, include_intent_header=False,
+        )
 
 
 def _tool_get_slack_messages(args: dict, ctx: AgentContext) -> str:
@@ -423,6 +459,20 @@ TOOLS: list[ToolDef] = [
             "since": "この日付以降に限定（YYYY-MM-DD）。省略時は調査期間。'all' で無期限",
         },
         fn=_tool_search_text_hybrid,
+    ),
+    ToolDef(
+        name="read_document",
+        description=(
+            "検索でヒットした特定の Box 資料に詳細（数値・図・網羅的な一覧・内訳）がありそうなとき、"
+            "その資料の全文を窓分割して読み込み質問に答える。search_text の断片抜粋では不足するときに"
+            "使う。1回の呼び出しで1資料が目安。時間コストが高い（15〜60秒）ので、資料が特定できている"
+            "ときだけ使うこと"
+        ),
+        parameters={
+            "file": "Box資料名/フォルダ名の一部（search_text の出典ラベルに出るファイル名を使う）",
+            "question": "その文書から抽出したい内容の具体的な質問（ユーザー質問の丸写しでなく、この文書に聞くべき形に絞る）",
+        },
+        fn=_tool_read_document,
     ),
     ToolDef(
         name="search_entity",

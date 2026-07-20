@@ -61,6 +61,7 @@ _DOC_QA_MIN_REMAINING_S = 30
 _DOC_QA_NO_INFO_MARK = "関連情報なし"
 _DOC_QA_SUSPICIOUS_LEN = 50  # これ未満の応答は「疑わしい却下」候補（entity一致と併用）
 _DOC_QA_FALLBACK_MIN_CHARS = 5_000  # エンティティ非依存フォールバックの窓文字数下限
+_DOC_QA_MAP_WORKERS = 4  # map 段（窓ごとの抽出）の並列度
 
 
 # =========================================================================== #
@@ -613,6 +614,7 @@ def run_agent(
     )
 
     deadline = time.monotonic() + timeout
+    ctx.deadline = deadline
 
     def remaining_s() -> int:
         return max(10, int(deadline - time.monotonic()))
@@ -990,6 +992,134 @@ def _split_document_windows(
     return windows
 
 
+def _map_one_window(
+    k: int,
+    total_windows: int,
+    name: str,
+    i: int,
+    n_doc: int,
+    window: str,
+    question: str,
+    candidate_entities: list[str],
+    deadline: float,
+) -> dict:
+    """1窓分の map 処理（初回呼び出し＋エンティティ検証リトライ＋フォールバックリトライ）を実行する。
+
+    ThreadPoolExecutor のワーカースレッドから呼ばれる想定。progress/respond はここでは
+    呼ばない（メインスレッド専用）。戻り値の kind: "skip" / "fragment" / "entity_failed" / "none"。
+    """
+    def remaining_s() -> int:
+        return max(10, int(deadline - time.monotonic()))
+
+    if time.monotonic() >= deadline - _DOC_QA_MIN_REMAINING_S:
+        logger.info(f"[doc-qa] map {k}/{total_windows} ({name} {i}/{n_doc}) — 時間切れのためスキップ")
+        return {"kind": "skip", "skip_label": f"{name} 断片{i}/{n_doc}"}
+
+    window_entities = _entities_in_window(candidate_entities, window)
+    logger.info(f"[doc-qa] map {k}/{total_windows} ({name} {i}/{n_doc})")
+    prompt = _DOC_QA_MAP_PROMPT.format(
+        question=question, name=name, i=i, n=n_doc, window=window,
+    )
+    t0 = time.monotonic()
+    try:
+        resp = call_argus_llm(prompt, think=False, max_tokens=4096, timeout=remaining_s())
+    except Exception as e:
+        logger.warning(f"[doc-qa] map失敗 ({name} {i}/{n_doc}): {e}")
+        return {"kind": "skip", "skip_label": f"{name} 断片{i}/{n_doc}（エラー）"}
+    text = resp.strip()
+    elapsed = time.monotonic() - t0
+
+    if window_entities and _is_doc_qa_no_info_like(text):
+        logger.info(
+            f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, "
+            f"窓内エンティティ: {', '.join(window_entities)}）— 疑わしい却下のためリトライ"
+        )
+        retry_prompt = _DOC_QA_MAP_RETRY_PROMPT.format(
+            question=question, name=name, i=i, n=n_doc, window=window,
+            entities="、".join(window_entities), nonce=uuid.uuid4().hex[:8],
+        )
+        t1 = time.monotonic()
+        try:
+            resp2 = call_argus_llm(
+                retry_prompt, think=False, max_tokens=4096, timeout=remaining_s(),
+            )
+            text2 = resp2.strip()
+        except Exception as e:
+            logger.warning(f"[doc-qa] リトライ失敗 ({name} {i}/{n_doc}): {e}")
+            text2 = ""
+        elapsed2 = time.monotonic() - t1
+
+        if text2 and not text2.startswith(_DOC_QA_NO_INFO_MARK):
+            logger.info(f"[doc-qa] 窓{k}: リトライで抽出成功（応答{len(text2)}字, {elapsed2:.1f}s）")
+            return {
+                "kind": "fragment",
+                "fragment": {"name": name, "i": i, "n": n_doc, "text": text2, "entities": window_entities},
+            }
+        failed_note = (
+            f"{name} 断片{i}/{n_doc}には {', '.join(window_entities)} の記載があるが"
+            "抽出に失敗（2回試行）"
+        )
+        logger.info(
+            f"[doc-qa] 窓{k}: リトライ後も関連情報なし（応答{len(text2)}字, {elapsed2:.1f}s）"
+        )
+        return {
+            "kind": "entity_failed",
+            "fragment": {"name": name, "i": i, "n": n_doc, "text": None, "entities": window_entities},
+            "failed_note": failed_note,
+        }
+
+    if (
+        not window_entities
+        and _is_doc_qa_no_info_like(text)
+        and len(window) >= _DOC_QA_FALLBACK_MIN_CHARS
+    ):
+        logger.info(
+            f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, "
+            f"窓内エンティティ: なし, 窓文字数{len(window)}字）— フォールバックのためリトライ"
+        )
+        retry_prompt = _DOC_QA_MAP_RETRY_FALLBACK_PROMPT.format(
+            question=question, name=name, i=i, n=n_doc, window=window,
+            n_chars=len(window), nonce=uuid.uuid4().hex[:8],
+        )
+        t1 = time.monotonic()
+        try:
+            resp2 = call_argus_llm(
+                retry_prompt, think=False, max_tokens=4096, timeout=remaining_s(),
+            )
+            text2 = resp2.strip()
+        except Exception as e:
+            logger.warning(f"[doc-qa] フォールバックリトライ失敗 ({name} {i}/{n_doc}): {e}")
+            text2 = ""
+        elapsed2 = time.monotonic() - t1
+
+        if text2 and not text2.startswith(_DOC_QA_NO_INFO_MARK):
+            logger.info(
+                f"[doc-qa] 窓{k}: フォールバックリトライで抽出成功"
+                f"（応答{len(text2)}字, {elapsed2:.1f}s）"
+            )
+            return {
+                "kind": "fragment",
+                "fragment": {"name": name, "i": i, "n": n_doc, "text": text2, "entities": []},
+            }
+        # エンティティ根拠が無いため「関連情報なし」を受け入れる。制限事項には記録しない
+        logger.info(
+            f"[doc-qa] 窓{k}: フォールバックリトライ後も関連情報なし"
+            f"（応答{len(text2)}字, {elapsed2:.1f}s）— 制限事項には記録しない"
+        )
+        return {"kind": "none"}
+
+    if text and not text.startswith(_DOC_QA_NO_INFO_MARK):
+        return {
+            "kind": "fragment",
+            "fragment": {"name": name, "i": i, "n": n_doc, "text": text, "entities": window_entities},
+        }
+
+    logger.info(
+        f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, 窓内エンティティ: なし）"
+    )
+    return {"kind": "none"}
+
+
 def run_document_qa(
     question: str,
     respond: Callable | None,
@@ -1047,120 +1177,41 @@ def run_document_qa(
 
     candidate_entities = _extract_doc_qa_candidate_entities(question)
 
-    reduce_fragments: list[dict] = []
-    skipped_windows: list[str] = []
-    failed_entity_windows: list[str] = []
-    budget_exhausted = False
-    k = 0
+    # 全ファイル分の窓をフラット化（文書内の元順序を維持したまま map 段を並列実行するため）
+    flat_windows: list[tuple[str, int, int, str]] = []
     for name, windows in doc_windows:
         n_doc = len(windows)
         for i, window in enumerate(windows, 1):
-            k += 1
-            if budget_exhausted or time.monotonic() >= deadline - _DOC_QA_MIN_REMAINING_S:
-                budget_exhausted = True
-                skipped_windows.append(f"{name} 断片{i}/{n_doc}")
-                continue
-            window_entities = _entities_in_window(candidate_entities, window)
-            progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}）")
-            logger.info(f"[doc-qa] map {k}/{total_windows} ({name} {i}/{n_doc})")
-            prompt = _DOC_QA_MAP_PROMPT.format(
-                question=question, name=name, i=i, n=n_doc, window=window,
-            )
-            t0 = time.monotonic()
-            try:
-                resp = call_argus_llm(prompt, think=False, max_tokens=4096, timeout=remaining_s())
-            except Exception as e:
-                logger.warning(f"[doc-qa] map失敗 ({name} {i}/{n_doc}): {e}")
-                skipped_windows.append(f"{name} 断片{i}/{n_doc}（エラー）")
-                continue
-            text = resp.strip()
-            elapsed = time.monotonic() - t0
+            flat_windows.append((name, i, n_doc, window))
 
-            if window_entities and _is_doc_qa_no_info_like(text):
-                logger.info(
-                    f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, "
-                    f"窓内エンティティ: {', '.join(window_entities)}）— 疑わしい却下のためリトライ"
-                )
-                progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}、再試行中）")
-                retry_prompt = _DOC_QA_MAP_RETRY_PROMPT.format(
-                    question=question, name=name, i=i, n=n_doc, window=window,
-                    entities="、".join(window_entities), nonce=uuid.uuid4().hex[:8],
-                )
-                t1 = time.monotonic()
-                try:
-                    resp2 = call_argus_llm(
-                        retry_prompt, think=False, max_tokens=4096, timeout=remaining_s(),
-                    )
-                    text2 = resp2.strip()
-                except Exception as e:
-                    logger.warning(f"[doc-qa] リトライ失敗 ({name} {i}/{n_doc}): {e}")
-                    text2 = ""
-                elapsed2 = time.monotonic() - t1
+    reduce_fragments: list[dict] = []
+    skipped_windows: list[str] = []
+    failed_entity_windows: list[str] = []
 
-                if text2 and not text2.startswith(_DOC_QA_NO_INFO_MARK):
-                    reduce_fragments.append(
-                        {"name": name, "i": i, "n": n_doc, "text": text2, "entities": window_entities},
-                    )
-                    logger.info(f"[doc-qa] 窓{k}: リトライで抽出成功（応答{len(text2)}字, {elapsed2:.1f}s）")
-                else:
-                    failed_entity_windows.append(
-                        f"{name} 断片{i}/{n_doc}には {', '.join(window_entities)} の記載があるが"
-                        "抽出に失敗（2回試行）"
-                    )
-                    reduce_fragments.append(
-                        {"name": name, "i": i, "n": n_doc, "text": None, "entities": window_entities},
-                    )
-                    logger.info(
-                        f"[doc-qa] 窓{k}: リトライ後も関連情報なし"
-                        f"（応答{len(text2)}字, {elapsed2:.1f}s）"
-                    )
-            elif (
-                not window_entities
-                and _is_doc_qa_no_info_like(text)
-                and len(window) >= _DOC_QA_FALLBACK_MIN_CHARS
-            ):
-                logger.info(
-                    f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, "
-                    f"窓内エンティティ: なし, 窓文字数{len(window)}字）— フォールバックのためリトライ"
+    if flat_windows:
+        progress(f"文書読込中（{total_windows}窓、{_DOC_QA_MAP_WORKERS}並列）...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_DOC_QA_MAP_WORKERS) as pool:
+            futures = [
+                pool.submit(
+                    _map_one_window, k, total_windows, name, i, n_doc, window,
+                    question, candidate_entities, deadline,
                 )
-                progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}、再試行中）")
-                retry_prompt = _DOC_QA_MAP_RETRY_FALLBACK_PROMPT.format(
-                    question=question, name=name, i=i, n=n_doc, window=window,
-                    n_chars=len(window), nonce=uuid.uuid4().hex[:8],
-                )
-                t1 = time.monotonic()
-                try:
-                    resp2 = call_argus_llm(
-                        retry_prompt, think=False, max_tokens=4096, timeout=remaining_s(),
-                    )
-                    text2 = resp2.strip()
-                except Exception as e:
-                    logger.warning(f"[doc-qa] フォールバックリトライ失敗 ({name} {i}/{n_doc}): {e}")
-                    text2 = ""
-                elapsed2 = time.monotonic() - t1
-
-                if text2 and not text2.startswith(_DOC_QA_NO_INFO_MARK):
-                    reduce_fragments.append(
-                        {"name": name, "i": i, "n": n_doc, "text": text2, "entities": []},
-                    )
-                    logger.info(
-                        f"[doc-qa] 窓{k}: フォールバックリトライで抽出成功"
-                        f"（応答{len(text2)}字, {elapsed2:.1f}s）"
-                    )
-                else:
-                    # エンティティ根拠が無いため「関連情報なし」を受け入れる。制限事項には記録しない
-                    logger.info(
-                        f"[doc-qa] 窓{k}: フォールバックリトライ後も関連情報なし"
-                        f"（応答{len(text2)}字, {elapsed2:.1f}s）— 制限事項には記録しない"
-                    )
-            elif text and not text.startswith(_DOC_QA_NO_INFO_MARK):
-                reduce_fragments.append(
-                    {"name": name, "i": i, "n": n_doc, "text": text, "entities": window_entities},
-                )
-            else:
-                logger.info(
-                    f"[doc-qa] 窓{k}: 関連情報なし（応答{len(text)}字, {elapsed:.1f}s, 窓内エンティティ: なし）"
-                )
+                for k, (name, i, n_doc, window) in enumerate(flat_windows, 1)
+            ]
+            # futures をリスト順（=文書内の窓順）に result() し、reduce 入力の順序を維持する
+            for k, future in enumerate(futures, 1):
+                name, i, n_doc, _window = flat_windows[k - 1]
+                result = future.result()
+                kind = result["kind"]
+                if kind == "skip":
+                    skipped_windows.append(result["skip_label"])
+                elif kind == "fragment":
+                    reduce_fragments.append(result["fragment"])
+                elif kind == "entity_failed":
+                    reduce_fragments.append(result["fragment"])
+                    failed_entity_windows.append(result["failed_note"])
+                # kind == "none": 関連情報なし（記録不要）
+                progress(f"文書読込 {k}/{total_windows}（{name} 断片{i}/{n_doc}）")
 
     def _render_fragment(f: dict) -> str:
         header = _format_doc_qa_fragment_header(f["name"], f["i"], f["n"], f["entities"])
