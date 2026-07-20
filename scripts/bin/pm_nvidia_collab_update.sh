@@ -20,6 +20,8 @@ REPO_ROOT=$(pwd)
 source ~/.secrets/slack_tokens.sh
 source ~/.secrets/pm_tokens.sh 2>/dev/null || true
 source ~/.secrets/rivault_tokens.sh 2>/dev/null || true
+# EMBED_API_BASE 等（ローカル embedding サービング）。investigate の retrieval が embed を使う
+source ~/.secrets/localLLM.sh 2>/dev/null || true
 if [ -z "${PM_DB_KEY:-}" ] && [ -f ~/.secrets/pm_db_key.txt ]; then
   export PM_DB_KEY="$(cat ~/.secrets/pm_db_key.txt)"
 fi

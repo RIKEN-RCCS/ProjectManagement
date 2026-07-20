@@ -34,6 +34,8 @@ touch $LOGFILE
 # export しておくことで子プロセスでの重複実行をスキップする。
 . ~/.secrets/slack_tokens.sh
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
+# EMBED_API_BASE 等（ローカル embedding サービング）。ingest/slack.py が embed を使う
+[ -f ~/.secrets/localLLM.sh ] && . ~/.secrets/localLLM.sh
 SCRIPT_DIR_DAILY="${BASEDIR}/scripts"
 PYTHON3="${HOME}/.venv_$(uname -m)/bin/python3"
 SCRIPT_DIR="$SCRIPT_DIR_DAILY" PYTHON3="$PYTHON3" \
