@@ -723,6 +723,23 @@ def save_slack_items(
     # それ以外の既存 slack レコードを削除してから INSERT する。
     # これにより、ユーザーが Detect Duplicates 等で削除したレコードが
     # 再抽出で復活する問題を防ぐ。
+    # 削除済みレコードの内容を収集しておき、同一内容の再INSERTを防ぐ。
+    deleted_decisions = set()
+    for row in pm_conn.execute(
+        "SELECT content FROM decisions"
+        " WHERE source='slack' AND source_ref=? AND COALESCE(deleted,0)=1",
+        (source_ref,),
+    ).fetchall():
+        deleted_decisions.add(row["content"])
+
+    deleted_actions = set()
+    for row in pm_conn.execute(
+        "SELECT content FROM action_items"
+        " WHERE source='slack' AND source_ref=? AND COALESCE(deleted,0)=1",
+        (source_ref,),
+    ).fetchall():
+        deleted_actions.add(row["content"])
+
     for table in ("action_items", "decisions"):
         pm_conn.execute(
             f"DELETE FROM {table}"
@@ -733,6 +750,9 @@ def save_slack_items(
     d_count = 0
     for d in extracted.get("decisions", []):
         if not d.get("content"):
+            continue
+        if d["content"] in deleted_decisions:
+            print(f"    [SKIP] 削除済みの決定事項をスキップ: {d['content'][:60]}", file=sys.stderr)
             continue
         decided_at = d.get("decided_at") or post_date
         pm_conn.execute(
@@ -747,6 +767,9 @@ def save_slack_items(
     a_count = 0
     for a in extracted.get("action_items", []):
         if not a.get("content"):
+            continue
+        if a["content"] in deleted_actions:
+            print(f"    [SKIP] 削除済みのアクションアイテムをスキップ: {a['content'][:60]}", file=sys.stderr)
             continue
         pm_conn.execute(
             "INSERT INTO action_items"

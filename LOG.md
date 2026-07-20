@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-07-20 action_items 意味的重複の棚卸し（embedding+LLM）＋Slack再抽出の復活穴を封止
+
+**背景**: 「表現は違うが意図は同じ」action_item が蓄積。既存 `pm_screen.py` は正規化＋先頭一致
+のみで意味的重複を取りこぼす。判定方式は純 embedding 単独と2段（embedding＋境界帯LLM審査）を
+比較し、bge-m3 のコサインだけでは 0.85〜0.92 帯の言い換え/別言語の取り違えが残るため2段を採用。
+**決定**: `detect_semantic_duplicates`（≥0.92 自動同一 / 0.85〜0.92 は `call_argus_llm` バッチ
+審査・失敗時保守的に別物 / 境界ペアは上位200件キャップ）を追加。残置は enrich 充実度優先→
+`extracted_at`→`id` 降順（＝古い薄い方を削除）。embedding はオンザフライ計算（専用テーブルは
+件数増加時まで見送り）。削除は既存の論理削除（`deleted=1`＋audit）に一本化、物理削除は
+`related_ids` ダングリングと audit 欠落のため不採用。CLI（`--semantic` 既定off で非破壊）と
+Web Quality タブ（screen_for_web に `keep` フラグ）双方に露出。keep 付与は複数カテゴリ跨りの
+共有dict変異で壊れたため浅コピーで修正。
+**影響**: 削除復活の全経路点検で `slack.py save_slack_items` に穴を発見（`--force` 再抽出で
+削除済み content を再INSERT、decisions/action_items 両方）。minutes.py と対称の「削除済み
+content 退避→再INSERTスキップ」を移植し封止。通常運用（force なし・XLSX・Canvas・enrich）は
+既に安全。過去の decisions 復活主因は `pm_xlsx_sync.py` の空セル→deleted=0 上書き（a9b4bb9 で
+修正済み）。
+
 ## 2026-07-20 investigate に read_document ツール追加＋map段4並列化（発火はモデル依存の課題残）
 
 **背景**: `--file` 全文読込QA が高品質なため通常 investigate にも波及させたい。全検索の

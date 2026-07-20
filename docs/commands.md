@@ -942,6 +942,9 @@ pm.db のアクションアイテム・決定事項から重複・類似・曖�
 - `exact_dup` — 正規化後に完全一致する重複
 - `near_dup` — 先頭N文字が一致し内容が微妙に異なる類似重複
 - `ambiguous` — 短すぎて文脈なしでは意味が類推できないもの
+- `semantic_dup` — **意味的重複（同義・表現違い）**。`--semantic` 指定時のみ。bge-m3 embedding のコサイン類似度で検出し、境界帯（`--review-threshold`〜`--merge-threshold`）はローカルLLMが「同じ意図か」を審査する2段方式。embedding サーバ（`EMBED_API_BASE`）未起動時は自動スキップして既存カテゴリのみ出力する。
+
+`exact_dup`/`semantic_dup` はクラスタ内で「残す1件」を自動選定し（enrich 充実度＝milestone_id/rationale/requested_by 等の非NULL数を優先、同点なら新しい方＝`extracted_at`→`id` 降順）、それ以外の**古い・情報の薄い行に `deleted=1` を CSV へ事前記入**する。人間は CSV を確認して調整するだけでよい。
 
 ```sh
 # スクリーニング結果を画面表示
@@ -956,6 +959,14 @@ python3 scripts/pm_screen.py --export --output screen.csv
 # 閾値調整
 python3 scripts/pm_screen.py --short-threshold 25 --prefix-len 20
 
+# 意味的重複も検出（embedding + LLM 審査）。要 EMBED_API_BASE
+EMBED_API_BASE=http://localhost:8001/v1 \
+  python3 scripts/pm_screen.py --semantic --export --output screen.csv
+
+# 閾値調整・LLM審査を無効化（embedding のみ）
+python3 scripts/pm_screen.py --semantic --merge-threshold 0.90 --review-threshold 0.85
+python3 scripts/pm_screen.py --semantic --no-llm
+
 # 決定事項も対象に含める
 python3 scripts/pm_screen.py --include-decisions
 ```
@@ -967,13 +978,18 @@ python3 scripts/pm_screen.py --include-decisions
 | `--output PATH` | `screen.csv` | CSV出力先 |
 | `--short-threshold N` | - | ambiguous と判定する文字数閾値 |
 | `--prefix-len N` | - | near_dup 判定の先頭一致文字数 |
+| `--semantic` | off | 意味的重複（embedding + LLM）検出を有効化。要 `EMBED_API_BASE` |
+| `--merge-threshold F` | 0.92 | この類似度以上は無条件で同一とみなす |
+| `--review-threshold F` | 0.85 | この類似度以上〜merge 未満をLLM審査に回す |
+| `--no-llm` | - | 境界帯のLLM審査を無効化（embedding 閾値のみ） |
 | `--include-decisions` | - | 決定事項もスクリーニング対象に含める |
 | `--no-encrypt` | - | 平文モード |
 
 **運用フロー**:
-1. `pm_screen.py --export` で重複候補をCSV出力
-2. CSVを人間が確認し、削除すべき行に `deleted=1` を立てる
-3. `pm_relink.py --import screen.csv` で一括削除を反映
+1. `pm_screen.py --semantic --export` で重複候補をCSV出力（`semantic_dup`/`exact_dup` は古い方に `deleted=1` が事前記入される）
+2. CSVを人間が確認し、残す/削除の `deleted` を調整（誤検出を外す・追加削除を立てる）
+3. `pm_relink.py --import screen.csv --dry-run` で差分確認後、本適用で論理削除（`deleted=1`）＋ audit_log 記録
+4. Web UI の Quality タブでも同じ検出・選択・論理削除が可能（`--semantic` 相当は既定 ON）
 
 ### 16. マイルストーン遡及紐づけ（pm_link_milestones.py）
 

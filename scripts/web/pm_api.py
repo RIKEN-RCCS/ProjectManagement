@@ -861,6 +861,10 @@ def admin_quality_screen_preview(
     include_decisions: bool = Query(False),
     short_threshold: int = Query(25),
     prefix_len: int = Query(20),
+    semantic: bool = Query(True),
+    merge_threshold: float = Query(0.92),
+    review_threshold: float = Query(0.85),
+    use_llm: bool = Query(True),
 ):
     """重複・類似・曖昧グループを同期的に検出して JSON で返す。
     UI で削除対象を選択してから /delete-items に POST する想定。"""
@@ -876,6 +880,10 @@ def admin_quality_screen_preview(
                 include_decisions=include_decisions,
                 short_threshold=short_threshold,
                 prefix_len=prefix_len,
+                semantic=semantic,
+                merge_threshold=merge_threshold,
+                review_threshold=review_threshold,
+                use_llm=use_llm,
             )
         finally:
             conn.close()

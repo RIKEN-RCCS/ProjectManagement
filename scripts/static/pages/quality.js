@@ -10,6 +10,8 @@ registerAdminPage('quality', async (container) => {
       return {
         screenIncludeDec: false,
         shortThreshold: 25,
+        semanticEnabled: true,
+        useLlm: true,
         scanning: false,
         scanError: '',
         actionGroups: [],     // [{category, items:[{id, content, ...}], selected:Set<int>}]
@@ -34,6 +36,7 @@ registerAdminPage('quality', async (container) => {
         return {
           exact_dup: '完全重複（正規化後一致）',
           near_dup:  '類似重複（先頭一致・表現違い）',
+          semantic_dup: '意味的重複（同義・表現違い）',
           ambiguous: '曖昧・短すぎ',
         }[cat] || cat;
       },
@@ -41,13 +44,21 @@ registerAdminPage('quality', async (container) => {
         return {
           exact_dup: 'bg-red-700 text-red-100',
           near_dup:  'bg-orange-700 text-orange-100',
+          semantic_dup: 'bg-purple-700 text-purple-100',
           ambiguous: 'bg-yellow-700 text-yellow-100',
         }[cat] || 'bg-gray-700 text-gray-100';
       },
       preselect(items, category) {
-        // 推奨: ambiguous は単独アイテムなので未選択。
-        // exact_dup/near_dup は先頭が最古（ID 昇順）= 残す推奨、それ以降を選択
+        // items に keep が付与されていれば keep===false（削除推奨）を選択。
+        // 未付与の場合のみ従来のフォールバック（ambiguous は未選択、
+        // それ以外は ID 昇順の先頭以外を選択）を使う。
         const sel = new Set();
+        if (items.length > 0 && items[0].keep !== undefined) {
+          for (const it of items) {
+            if (it.keep === false) sel.add(it.id);
+          }
+          return sel;
+        }
         if (category !== 'ambiguous' && items.length > 1) {
           const sorted = [...items].sort((a, b) => a.id - b.id);
           for (let i = 1; i < sorted.length; i++) sel.add(sorted[i].id);
@@ -72,6 +83,8 @@ registerAdminPage('quality', async (container) => {
           const params = new URLSearchParams({
             include_decisions: this.screenIncludeDec,
             short_threshold: this.shortThreshold,
+            semantic: this.semanticEnabled,
+            use_llm: this.useLlm,
           });
           const data = await api('GET', `/admin/quality/screen-preview?${params}`);
           this.actionGroups = (data.action_items?.groups || []).map(g => ({
@@ -188,6 +201,16 @@ registerAdminPage('quality', async (container) => {
               <input type="number" v-model.number="shortThreshold" min="0" max="200"
                      class="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm w-24 text-gray-200">
             </div>
+            <div class="flex items-center gap-2 mb-2">
+              <input type="checkbox" v-model="semanticEnabled" id="semEnabled"
+                     class="rounded bg-gray-700 border-gray-600">
+              <label for="semEnabled" class="text-xs text-gray-400">意味的重複を含める（embedding）</label>
+            </div>
+            <div class="flex items-center gap-2 mb-3">
+              <input type="checkbox" v-model="useLlm" id="useLlm" :disabled="!semanticEnabled"
+                     class="rounded bg-gray-700 border-gray-600">
+              <label for="useLlm" class="text-xs text-gray-400">境界帯をローカルLLM審査</label>
+            </div>
             <button @click="runScan" :disabled="scanning"
                     class="w-full bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 text-white rounded px-3 py-2 text-sm font-medium">
               {{ scanning ? 'Scanning…' : 'Run Detection' }}
@@ -266,7 +289,7 @@ registerAdminPage('quality', async (container) => {
               </thead>
               <tbody>
                 <tr v-for="(it, idx) in group.items" :key="it.id"
-                    :class="['border-b border-gray-700/50', group.selected.has(it.id) ? 'bg-red-900/30' : (idx === 0 ? 'bg-green-900/20' : '')]">
+                    :class="['border-b border-gray-700/50', group.selected.has(it.id) ? 'bg-red-900/30' : ((it.keep === true || (it.keep === undefined && idx === 0)) ? 'bg-green-900/20' : '')]">
                   <td class="py-1 pr-2">
                     <input type="checkbox" :checked="group.selected.has(it.id)"
                            @change="toggleItem(group, it.id)"
@@ -275,7 +298,11 @@ registerAdminPage('quality', async (container) => {
                   <td class="py-1 pr-2 font-mono text-gray-400">{{ it.id }}</td>
                   <td class="py-1 pr-2 text-gray-400">{{ (it.extracted_at || '').slice(0, 10) }}</td>
                   <td class="py-1 pr-2 text-gray-300">{{ it.assignee || '-' }}</td>
-                  <td class="py-1 text-gray-200">{{ it.content }}</td>
+                  <td class="py-1 text-gray-200">
+                    <span v-if="it.keep === true"
+                          class="inline-block px-1.5 py-0.5 rounded text-xs font-bold mr-1 bg-green-700 text-green-100">残す推奨</span>
+                    {{ it.content }}
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -311,7 +338,7 @@ registerAdminPage('quality', async (container) => {
               </thead>
               <tbody>
                 <tr v-for="(it, idx) in group.items" :key="it.id"
-                    :class="['border-b border-gray-700/50', group.selected.has(it.id) ? 'bg-red-900/30' : (idx === 0 ? 'bg-green-900/20' : '')]">
+                    :class="['border-b border-gray-700/50', group.selected.has(it.id) ? 'bg-red-900/30' : ((it.keep === true || (it.keep === undefined && idx === 0)) ? 'bg-green-900/20' : '')]">
                   <td class="py-1 pr-2">
                     <input type="checkbox" :checked="group.selected.has(it.id)"
                            @change="toggleItem(group, it.id)"
@@ -319,7 +346,11 @@ registerAdminPage('quality', async (container) => {
                   </td>
                   <td class="py-1 pr-2 font-mono text-gray-400">{{ it.id }}</td>
                   <td class="py-1 pr-2 text-gray-400">{{ (it.decided_at || '').slice(0, 10) }}</td>
-                  <td class="py-1 text-gray-200">{{ it.content }}</td>
+                  <td class="py-1 text-gray-200">
+                    <span v-if="it.keep === true"
+                          class="inline-block px-1.5 py-0.5 rounded text-xs font-bold mr-1 bg-green-700 text-green-100">残す推奨</span>
+                    {{ it.content }}
+                  </td>
                 </tr>
               </tbody>
             </table>
