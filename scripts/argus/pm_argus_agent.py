@@ -1386,15 +1386,18 @@ def _strip_output_flags(text: str) -> str:
     return _OUTPUT_FLAG_RE.sub("", text).strip()
 
 
-_FILE_FLAG_RE = re.compile(r'--file=(?:"([^"]*)"|(\S+))')
+# CLI (argparse) が --file value / --file=value の両方を受けるのに合わせ、
+# Slack 側も = とスペースの両区切りを受理する。引用符はスマートクォート
+# （Slack/macOS の自動変換）も許容する。
+_FILE_FLAG_RE = re.compile(r'--file[=\s]\s*(?:"([^"]*)"|“([^”]*)”|(\S+))')
 
 
 def _parse_file_flag(text: str) -> str | None:
-    """コマンドテキストから --file="..." の値を抽出する。無ければ None。"""
+    """コマンドテキストから --file="..." / --file "..." の値を抽出する。無ければ None。"""
     m = _FILE_FLAG_RE.search(text)
     if not m:
         return None
-    return (m.group(1) or m.group(2) or "").strip() or None
+    return (m.group(1) or m.group(2) or m.group(3) or "").strip() or None
 
 
 def _strip_file_flag(text: str) -> str:
