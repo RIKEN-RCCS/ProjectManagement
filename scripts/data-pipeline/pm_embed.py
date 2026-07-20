@@ -798,10 +798,14 @@ def backfill_embeddings(index_conn, logger, *, refresh_all=False, batch_size=256
                 continue
             blob = vector_to_blob(vec)
             vhash = _vector_blob_hash(blob)
+            # 空白の幅・個数のみ異なるテキストはトークナイザ正規化により
+            # 同一ベクトルになるのが正当（vLLM bge-m3 で実測）。空白除去後に
+            # 一致するものは異常扱いしない。
+            content_norm = "".join(content.split())
             mismatched = [
                 (other_id, other_content)
                 for other_id, other_content in vector_hash_index.get(vhash, [])
-                if other_content != content
+                if "".join(other_content.split()) != content_norm
             ]
             if mismatched:
                 anomaly_skipped += 1
