@@ -7,6 +7,23 @@
 
 ---
 
+## 2026-07-21 core docx にも図OCR適用＋Box relevance の大量 noise 化で索引を1/7に
+
+**背景**: Box資料の relevance を精査し core だった大半を noise へ再判定（CSV `final_relevance` 上書き
+→ `--import`）。`pm_embed.py` は noise のみ索引除外するため full-rebuild で box由来 1954→294文書、
+qa_index 全体で noise漏れ0・取り込み漏れ0 を照合。狙いは投入ノイズを削り core/related の本質資料を
+ヒットさせること。ただし残った core を点検すると、図OCR（図の言語化）は `_convert_pdf` 専用で、
+core の約半数を占める **docx（61件）は LibreOffice テキスト抽出のみ＝埋め込み図表が索引に入らない**
+穴が判明。
+**決定**: docx を全ページ multimodal OCR（pptx方式）にはせず、`_to_pdf` で PDF化→既存 `_convert_pdf`
+ハイブリッド経路に流す方式を採用。文字が密な仕様書で日本語テキスト精度を落とさず、`pdftotext+figures`
+分類・`--figures-pending` バックオフ・リトライを全面再利用できるため。全ページOCR案は精度低下と
+コスト増、既存バックフィル機構と非統合のため棄却。`_to_pdf` 恒常失敗時は `figures_attempted=True` を
+返しバックオフを効かせる（毎晩の空振り防止）。
+**影響**: 既存 core docx は `--figures-pending` で初回バックフィル可（`DOCX_TEXTONLY_METHODS` を対象に
+含めた）。トレードオフとして docx 本文が LibreOffice-HTML→pdftotext 抽出に変わり表組みの再現性が
+変化しうる。バックフィル後は `pm_embed.py` 差分更新まで検索に反映されない点に注意。
+
 ## 2026-07-20 action_items 意味的重複の棚卸し（embedding+LLM）＋Slack再抽出の復活穴を封止
 
 **背景**: 「表現は違うが意図は同じ」action_item が蓄積。既存 `pm_screen.py` は正規化＋先頭一致
