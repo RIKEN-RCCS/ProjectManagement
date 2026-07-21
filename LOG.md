@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-07-21 exec summary 完了列: 尻切れ真因はデータ切り詰め、選抜は LLM 凝縮へ
+
+**背景**: NVIDIA協業 PPTX の完了列で日付が尻切れ。描画側（TEXT_TO_FIT_SHAPE→spAutoFit）を
+2段疑って修正したが再発し、PPTX 内テキストの直接検査で真因は `_MAX_CHARS=30` の**データ切り詰め**
+（台帳 title は日付込み≒50字）と確定。レンダリング画像の「…」をクリップと誤読したのが遠回りの原因で、
+以後この種の調査は**先に XML/生テキストを検査**する。あわせて完了列が古い実績ばかりになる問題も発覚
+（`ORDER BY achieved_on LIMIT 5` 昇順＝最古5件固定）。
+**決定**: 上限を60字に緩和（暴走ガードとして残置）＋noAutofit明示＋全列8pt。選抜は「直近5件」案を
+実装後に撤回（古い重要合意が落ちるため）し、**confirmed 全件を LLM で5件に凝縮**する方式を採用
+（`condense_confirmed_titles`、失敗時は直近5件フォールバック）。E-Wave 10→4件・GENESIS 10→5件で
+最古実績の保持と関連合意の統合を実測確認。
+**影響**: 実績タブの「達成日空欄」報告も同根で調査 → DB/API は正常、ag-Grid v31+ の型自動推論が
+月精度値（YYYY-MM）を dateString として不正扱いする**フロント表示バグ**と特定し `cellDataType:'text'`
+で修正。日付系グリッド列を追加する際は型明示を忘れない。
+
 ## 2026-07-21 core docx にも図OCR適用＋Box relevance の大量 noise 化で索引を1/7に
 
 **背景**: Box資料の relevance を精査し core だった大半を noise へ再判定（CSV `final_relevance` 上書き
