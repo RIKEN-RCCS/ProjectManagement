@@ -275,35 +275,45 @@ def build_app():
 
     # --- Patrol Agent Block Kit ボタンハンドラ ---
 
-    _patrol_state = PatrolState(_REPO_ROOT / "data" / "patrol_state.db")
+    # PatrolState は sqlite3 接続を内包する。sqlite3 は作成スレッド以外からの
+    # 利用を禁止しており、Bolt のボタンハンドラは都度別スレッドで走るため、
+    # モジュールレベルで共有せずハンドラ内で毎回開いて閉じる。
+    _patrol_state_db = _REPO_ROOT / "data" / "patrol_state.db"
 
     @app.action("patrol_approve_close")
     def on_approve_close(ack, body, client):
         ack()
+        state = PatrolState(_patrol_state_db)
         pm_paths = _pm_db_map.get(_default_index, [_REPO_ROOT / "data" / "pm.db"])
         action = (body.get("actions") or [{}])[0]
-        pending_id = int(action.get("value", 0))
-        pending = _patrol_state.get_pending(pending_id)
-        ai_id = pending["target_id"] if pending else None
-
-        conns = [open_pm_db(p) for p in pm_paths]
-        target_conn = conns[0]
-        if ai_id is not None:
-            for c in conns:
-                if c.execute("SELECT id FROM action_items WHERE id=?", (ai_id,)).fetchone():
-                    target_conn = c
-                    break
+        conns = []
         try:
-            handle_approve_close(body, client, _patrol_state, target_conn)
+            pending_id = int(action.get("value", 0))
+            pending = state.get_pending(pending_id)
+            ai_id = pending["target_id"] if pending else None
+
+            conns = [open_pm_db(p) for p in pm_paths]
+            target_conn = conns[0]
+            if ai_id is not None:
+                for c in conns:
+                    if c.execute("SELECT id FROM action_items WHERE id=?", (ai_id,)).fetchone():
+                        target_conn = c
+                        break
+            handle_approve_close(body, client, state, target_conn)
             target_conn.commit()
         finally:
             for c in conns:
                 c.close()
+            state.close()
 
     @app.action("patrol_reject_close")
     def on_reject_close(ack, body, client):
         ack()
-        handle_reject_close(body, client, _patrol_state)
+        state = PatrolState(_patrol_state_db)
+        try:
+            handle_reject_close(body, client, state)
+        finally:
+            state.close()
 
     def _handle_transcribe_command(ack, respond, command, example_cmd):
         """共通: 文字起こしコマンドの受付・排他制御・バックグラウンド実行。"""

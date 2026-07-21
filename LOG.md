@@ -7,6 +7,31 @@
 
 ---
 
+## 2026-07-21 Patrol 運用開始: リマインダー3種停止・完了検出を横断証拠で本格化
+
+**背景**: Patrol 初回実行で期限超過58件＋停滞335件のリマインダー DM が洪水化。一方、本来の主眼で
+ある完了シグナル検出は 0 件 — 段階ロールアウト用の `evidence_from_index` が既定 false のままで、
+証拠が同一 Slack スレッドの返信に限定されていたのが原因。
+**決定**: overdue/deadline/stale の3検出器を無効化（ルールベースの督促は現運用では雑音と判断）、
+`completion_detection.evidence_from_index: true` で qa_index（議事録・Box・Slack全体）横断の
+LLM 完了判定を有効化。DM は全て `patrol.dm_redirect_user`（新設、actions.py）で管理者に集約。
+dry-run で16〜25件を確信度 HIGH で検出、根拠妥当を確認。LLM 判定は temperature で件数が
+実行ごとに±9件揺れるが、承認ボタンゲートがあるため実害なし。`auto_close_enabled` は品質確認後に
+true 化する段階導入とした。cron ラッパーは `scripts/bin/pm_argus_patrol.sh`（flock 付き）。
+**追記**: 承認ボタン押下が Slack 警告マークで失敗する不具合を修正。原因は pm_qa_server が
+PatrolState（sqlite3 接続内包）を起動時スレッドで1個共有していたこと — Bolt ハンドラは別スレッド
+実行のため sqlite3 のスレッド制約で ack 前に例外。押下ごとに開閉する方式へ変更（qa 再起動で反映）。
+ボタン承認クローズは pm.db 直更新のため Web UI は再読込のみで反映、Box XLSX / Canvas は対象外
+（必要なら handle_approve_close に xlsx publish ジョブ投入を追加する）。
+
+## 2026-07-21 GitHub（Issues/Projects/Actions）のPM運用導入はボツ
+
+**背景**: アクションアイテムの Issue トラックや Actions/Projects 活用、AI 自動化との親和性を検討。
+**決定**: 導入見送り。理由は (1) ステークホルダー（理研/富士通/NVIDIA 意思決定層）が GitHub 常用者で
+なく「Slack/会議から自動吸い上げる」現設計思想に逆行、(2) pm.db 正本に対し Issues 双方向同期という
+3系統目のカスケードが増え不整合の温床、(3) 機密データ（マイルストーン・体制）を SaaS に置けず
+ガバナンス上の壁が高い。開発管理用途（Issues + gh CLI）のみ将来の再検討余地あり。
+
 ## 2026-07-21 exec summary 完了列: 尻切れ真因はデータ切り詰め、選抜は LLM 凝縮へ
 
 **背景**: NVIDIA協業 PPTX の完了列で日付が尻切れ。描画側（TEXT_TO_FIT_SHAPE→spAutoFit）を

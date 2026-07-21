@@ -243,6 +243,9 @@ def _send_dm_or_fallback(
     """
     user_id が解決できれば DM、できなければリーダー会議チャンネルに投稿。
 
+    patrol.dm_redirect_user が設定されている場合、担当者の解決結果に
+    かかわらず全ての DM をそのユーザー（管理者）へ送る。
+
     Returns: (channel_id, message_ts)。失敗時は ("", "")。
     """
     if not ctx.slack:
@@ -251,6 +254,14 @@ def _send_dm_or_fallback(
     leader_ch = ctx.config.get("patrol", {}).get(
         "leader_channel", ""
     )
+
+    redirect = (
+        ctx.config.get("patrol", {}).get("dm_redirect_user") or ""
+    ).strip()
+    if redirect:
+        if assignee_name:
+            text = f"*{assignee_name}* さん宛:\n{text}"
+        user_id = redirect
 
     if not text and blocks:
         text = blocks[0].get("text", {}).get("text", "Argus Patrol 通知")
@@ -265,7 +276,7 @@ def _send_dm_or_fallback(
 
     if not target_channel:
         target_channel = leader_ch
-        if assignee_name:
+        if assignee_name and not redirect:  # redirect 時は付与済み（二重付与防止）
             text = f"*{assignee_name}* さん宛:\n{text}"
 
     try:
