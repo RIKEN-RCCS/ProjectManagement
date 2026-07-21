@@ -32,7 +32,11 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from enrich.achievements_extract import extract_completed_titles, read_confirmed_titles
+from enrich.achievements_extract import (
+    condense_confirmed_titles,
+    extract_completed_titles,
+    read_confirmed_titles,
+)
 from utils.llm import call_argus_llm
 from utils.pptx_theme import (
     DARK,
@@ -61,7 +65,11 @@ _CATEGORY_LABELS_EN = {
     "vendor": "Vendor Collaboration",
 }
 _MAX_ITEMS = {"completed": 5, "next": 3, "vendor": 3}
-_MAX_CHARS = {"completed": 30, "next": 34, "vendor": 34}
+# 文字数上限は「LLM が異常に長い項目を返した場合の暴走ガード」であり、通常項目を
+# 切るためのものではない。セルは word_wrap + noAutofit で折り返すため、実績台帳
+# title の実質上限（40字＋日付10字≒50字）より十分大きい値にする。30字だった頃は
+# 台帳由来の完了項目の日付が「…」で恒常的に尻切れになっていた。
+_MAX_CHARS = {"completed": 60, "next": 60, "vendor": 60}
 
 _EXTRACT_PROMPT = """以下は「{app}」というアプリケーションの評価状況レポートです。
 このレポートを、経営層向けエグゼクティブサマリーの3カテゴリに凝縮してください。
@@ -130,6 +138,33 @@ def _sanitize_buckets(raw: dict) -> dict:
             cleaned.append(s)
         out[cat] = cleaned
     return out
+
+
+_APP_PREFIX_SEP_CHARS = "のはが：:・-—" + " " + "　"
+
+
+def _strip_app_prefix(app_name: str, text: str) -> str:
+    """text の先頭がアプリ名で始まる場合、アプリ名＋直後の区切り文字を1回だけ剥がす。
+
+    行左のアプリ名ヘッダと重複する冗長な接頭辞をセル本文から除去するための
+    表示時整形。過剰除去（結果が空文字になる）は行わず、その場合は元の
+    text をそのまま返す。
+    """
+    if not app_name:
+        return text
+    pattern = re.compile(
+        rf"^{re.escape(app_name)}[{re.escape(_APP_PREFIX_SEP_CHARS)}]?",
+        re.IGNORECASE,
+    )
+    m = pattern.match(text)
+    if not m:
+        return text
+    # 区切りが「: 」のようにコロン＋スペースの場合、正規表現は1文字（コロン）
+    # のみ消費するため先頭に空白が残る。セル本文の見栄えのため先頭空白を除く。
+    stripped = text[m.end():].lstrip()
+    if not stripped:
+        return text
+    return stripped
 
 
 def app_name_from_report(path: Path) -> str:
@@ -243,12 +278,16 @@ def build_deck(buckets_by_app: list[dict], *, lang: str, title: str, date_str: s
         for cat in _CATEGORIES:
             x = cat_x[cat]
             items = bucket[cat] or ["—"]
-            size = 9 if cat == "completed" else 10
+            size = 8
             tb = add_bullets(slide, x + Inches(0.1), y + Inches(0.05),
-                              cat_widths[cat] - Inches(0.2), row_h - Inches(0.1),
-                              items, size=size, color=DARK, gap=2)
-            if cat == "completed":
-                tb.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+                             cat_widths[cat] - Inches(0.2), row_h - Inches(0.1),
+                             items, size=size, color=DARK, gap=2)
+            # auto_size を NONE（noAutofit）に固定する。python-pptx の add_textbox
+            # 既定は spAutoFit（枠をテキストに追従）で、LibreOffice/PowerPoint は
+            # これを「折り返し無効」と解釈し、幅を超える項目を右端でクリップして
+            # 日付が尻切れになる。枠を固定すると word_wrap が効き、長い項目は
+            # 2行に折り返して最後まで表示される。
+            tb.text_frame.auto_size = MSO_AUTO_SIZE.NONE
         add_rect(slide, left_margin, y + row_h - Inches(0.01),
                   row_total_w, Inches(0.01), GRAY)
 
@@ -282,14 +321,21 @@ def main() -> int:
         print(f"[INFO] 抽出中: {app_name}", file=sys.stderr)
         buckets = extract_buckets(app_name, md_text)   # next/vendor と completed(フォールバック)
         if not args.no_completed_search:
-            titles = read_confirmed_titles(app_name, limit=_MAX_ITEMS["completed"])
+            titles = read_confirmed_titles(app_name)
             if not titles:
                 titles = extract_completed_titles(app_name)
+            elif len(titles) > _MAX_ITEMS["completed"]:
+                titles = condense_confirmed_titles(app_name, titles, max_items=_MAX_ITEMS["completed"])
             if titles:
                 buckets["completed"] = _sanitize_buckets(
                     {"completed": titles, "next": [], "vendor": []}
                 )["completed"]
         buckets_by_app.append({"app": app_name, **buckets})
+
+    for bucket in buckets_by_app:
+        bucket["completed"] = [
+            _strip_app_prefix(bucket["app"], t) for t in bucket["completed"]
+        ]
 
     if not buckets_by_app:
         print("[ERROR] 有効なレポートがありません", file=sys.stderr)

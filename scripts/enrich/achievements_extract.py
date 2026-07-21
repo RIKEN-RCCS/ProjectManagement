@@ -196,9 +196,13 @@ def extract_achievements(app_name: str, known_titles: list[str] | None = None) -
     return []
 
 
-def read_confirmed_titles(app_name: str, limit: int = 5, db_path: str | Path | None = None) -> list[str]:
-    """achievements テーブルから status='confirmed' の実績 title を achieved_on 昇順で返す。
+def read_confirmed_titles(
+    app_name: str, limit: int | None = None, db_path: str | Path | None = None
+) -> list[str]:
+    """achievements テーブルから status='confirmed' の実績 title を返す。
 
+    achieved_on 昇順（時系列）で全件取得する。limit=None（既定）なら全件、
+    limit 指定時は末尾（直近 limit 件）を時系列のまま切り出す。
     各要素は title に日付があれば '(YYYY-MM)' を付す（既存の completed 列書式に合わせる）。
     DB/テーブルが無い・鍵が無い等は空リスト（呼び出し側がフォールバック）。
     """
@@ -217,13 +221,16 @@ def read_confirmed_titles(app_name: str, limit: int = 5, db_path: str | Path | N
         rows = conn.execute(
             "SELECT title, achieved_on FROM achievements "
             "WHERE app=? AND status='confirmed' AND COALESCE(deleted,0)=0 "
-            "ORDER BY achieved_on LIMIT ?",
-            (app_name, limit),
+            "ORDER BY achieved_on",
+            (app_name,),
         ).fetchall()
     except Exception:
         return []
     finally:
         conn.close()
+
+    if limit is not None and len(rows) > limit:
+        rows = rows[-limit:]  # 直近 limit 件を時系列のまま切り出す
 
     titles = []
     for row in rows:
@@ -237,6 +244,63 @@ def read_confirmed_titles(app_name: str, limit: int = 5, db_path: str | Path | N
                 title = f"{title} ({ym})"
         titles.append(title)
     return titles
+
+
+_CONDENSE_PROMPT = """以下は「{app}」の完了実績一覧（時系列）です。
+プロジェクト管理上重要なもの（合意・契約・公開・性能測定・提供完了 等）を優先し、
+最大{max_items}件に凝縮してください。
+
+## 抽出ルール
+- 出力は入力にある実績のみを対象とする。入力に無い実績を捏造しない。
+- 各項目は名詞止めの短い一句（50字以内）で、日付 '(YYYY-MM)' を保持する。
+- 類似・同系統の実績（例: 同時期の契約条件合意が複数件）は1件に統合してよい。
+  統合した場合、日付は代表日付、または範囲 '(2025-09〜2025-12)' を付す。
+- 出力は必ず**時系列順**（古い→新しい）に並べる。
+- 出力は JSON のみ。前置き・説明・コードフェンス外テキスト禁止。
+
+## 出力フォーマット（例）
+{{"condensed": ["契約条件合意 (2025-09〜2025-12)", "OpenACC版をGitHub公開 (2025-12)"]}}
+
+## 完了実績一覧
+---
+{numbered_titles}
+"""
+
+
+def condense_confirmed_titles(app_name: str, titles: list[str], max_items: int = 5) -> list[str]:
+    """confirmed 実績 title のリストを LLM で max_items 件に凝縮する。
+
+    件数が max_items 以下ならそのまま返す（LLM を呼ばない）。件数超過時は
+    全件を LLM に渡し、直近 max_items 件を機械的に選ぶのではなく重要な実績を
+    時系列で残しつつ凝縮する（古い重要な合意を落とさないため）。
+    LLM 失敗・JSON 不正・空リストの場合は titles[-max_items:]（直近 max_items 件）に
+    フォールバックする。
+    """
+    if len(titles) <= max_items:
+        return titles
+
+    numbered_titles = "\n".join(f"{i}. {t}" for i, t in enumerate(titles, 1))
+    prompt = _CONDENSE_PROMPT.format(
+        app=app_name, max_items=max_items, numbered_titles=numbered_titles,
+    )
+    for attempt in range(3):
+        try:
+            raw = call_argus_llm(prompt, timeout=240, max_tokens=2048, temperature=0.0)
+            data = _extract_json(raw)
+            items = data.get("condensed", [])
+            if not isinstance(items, list):
+                continue
+            result = []
+            for item in items[:max_items]:
+                s = str(item).strip()
+                if s:
+                    result.append(s)
+            if result:
+                return result
+        except Exception as e:  # noqa: BLE001 — 1回の失敗で全体を止めない
+            print(f"[WARN] {app_name}: 実績凝縮失敗 (試行{attempt + 1}/3): {e}", file=sys.stderr)
+    print(f"[WARN] {app_name}: 実績凝縮フォールバック（直近{max_items}件を使用）", file=sys.stderr)
+    return titles[-max_items:]
 
 
 def extract_completed_titles(app_name: str) -> list[str] | None:
