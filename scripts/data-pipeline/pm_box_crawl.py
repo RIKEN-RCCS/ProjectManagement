@@ -32,7 +32,7 @@ box_docs.db に保存する。pm_embed.py で FTS5 索引化すれば
   # 再変換
   python3 scripts/pm_box_crawl.py --convert --force
 
-  # 図OCR未確定の core PDF のみバックフィル（夜間更新用）
+  # 図OCR未確定の core PDF/docx のみバックフィル（夜間更新用）
   python3 scripts/pm_box_crawl.py --convert --figures-pending
 
   # 一覧表示
@@ -86,14 +86,16 @@ SUPPORTED_EXTENSIONS = {"pptx", "xlsx", "docx", "pdf", "md", "boxnote", "txt"}
 FIGURES_DONE_METHODS = ("pdftotext+figures", "pdftotext+nofig")
 # - 図OCR未試行 or 一部ページ失敗で要再試行
 FIGURES_RETRY_METHODS = ("pdftotext", "pdftotext+figures_partial")
+# - 図OCR前の docx テキストのみ変換（--figures-pending の docx バックフィル対象判定に使う）
+DOCX_TEXTONLY_METHODS = ("libreoffice_html_xhtml", "libreoffice_html_standard")
 
 # 図OCR対象の文字数上限（--figures-pending 対象選定・convert_single_file の
-# core PDF figures 判定の双方で共用）。既知の外れ値（xlsx由来PDF等で実測
+# core PDF/docx figures 判定の双方で共用）。既知の外れ値（xlsx由来PDF等で実測
 # ~2.05M字）を含む極端に大きい文書は図OCRの実行コストが見合わないため対象外にする。
 FIGURES_MAX_CHARS = 1_000_000
 
 # --figures-pending の再試行間隔（日数）。恒常的にOCRが失敗するページを持つ
-# core PDF（matched=False かつ all_ok=False で method が確定しない文書）が
+# core PDF/docx（matched=False かつ all_ok=False で method が確定しない文書）が
 # 毎晩フル再OCRされ続けるのを防ぐバックオフ。doc_content.last_figures_attempt_at
 # と比較して間隔内なら pending 対象から除外する。
 FIGURES_RETRY_INTERVAL_DAYS = 7
@@ -367,6 +369,33 @@ def convert_to_markdown(
             fig_max_pages=fig_max_pages,
             endpoints=fig_endpoints,
         )
+    elif fmt == "docx" and verbalize_figures:
+        # core docx はテキストのみの LibreOffice 変換では埋め込み図表が索引に
+        # 入らないため、PDF ハイブリッド経路（正確なテキスト抽出＋図のみOCR）を
+        # 再利用する。docx→PDF化してから既存の _convert_pdf に流し込む。
+        eps = fig_endpoints if fig_endpoints is not None else get_ocr_endpoints()
+        if eps:
+            with tempfile.TemporaryDirectory() as _td:
+                pdf_path = _to_pdf(file_path, Path(_td))
+                if pdf_path:
+                    content, method, figures_attempted = _convert_pdf(
+                        pdf_path,
+                        verbalize_figures=True,
+                        fig_max_pages=fig_max_pages,
+                        endpoints=eps,
+                    )
+                else:
+                    # PDF化そのものが失敗＝図OCRを試行したが実行できなかった扱いにする。
+                    # figures_attempted=True で last_figures_attempt_at を更新し、
+                    # FIGURES_RETRY_INTERVAL_DAYS のバックオフを効かせて毎晩の
+                    # ダウンロード+LibreOffice変換の空振りを防ぐ（PDF経路の
+                    # pdftotext+figures_partial と同じ設計思想）。
+                    logger.warning("    docx→PDF変換失敗、テキストのみ変換にフォールバック")
+                    content, method = _convert_docx(file_path)
+                    figures_attempted = True
+        else:
+            content, method = _convert_docx(file_path)
+            figures_attempted = False
     else:
         converters = {
             "md": _convert_md,
@@ -1260,7 +1289,7 @@ def convert_single_file(
 ) -> dict:
     """ワーカープロセスで1ファイルを変換する。convert_files() から並列呼び出しされる。
 
-    core PDF（relevance='core' の pdf）は --figures 未指定・既存 convert_method
+    core PDF/docx（relevance='core' の pdf/docx）は --figures 未指定・既存 convert_method
     に関わらず常に図言語化を試行する（全core一括ロールアウト完了＋新規自動付与の
     方針確定により、「過去に図言語化済みだった場合のみ維持」の限定は不要になった。
     'pdftotext+nofig'（図なし確定）の文書も、内容が変わって図が増えた可能性が
@@ -1309,13 +1338,13 @@ def convert_single_file(
                     conn.commit()
                 return {"status": "skipped", "file_id": fid, "name": name}
 
-            is_core_pdf = fmt == "pdf" and file_info.get("relevance") == "core"
-            had_figures_marker = fmt == "pdf" and (
+            is_core_figure_target = fmt in ("pdf", "docx") and file_info.get("relevance") == "core"
+            had_figures_marker = fmt in ("pdf", "docx") and (
                 existing_method in FIGURES_DONE_METHODS
                 or existing_method == "pdftotext+figures_partial"
             )
             oversized = (
-                is_core_pdf
+                is_core_figure_target
                 and existing_char_count is not None
                 and existing_char_count > FIGURES_MAX_CHARS
             )
@@ -1328,7 +1357,7 @@ def convert_single_file(
                     f" text-only へ変換 (char_count={existing_char_count},"
                     f" 上限={FIGURES_MAX_CHARS}, pid={pid})"
                 )
-            elif is_core_pdf:
+            elif is_core_figure_target:
                 if not verbalize_figures:
                     endpoints = fig_endpoints if fig_endpoints is not None else get_ocr_endpoints()
                 if endpoints:
@@ -1446,25 +1475,27 @@ def convert_files(
     ).fetchall()
 
     if figures and not force:
-        # --force 未指定の場合、既に変換済みの core PDF は上の WHERE で除外され
+        # --force 未指定の場合、既に変換済みの core PDF/docx は上の WHERE で除外され
         # 図言語化の対象から漏れる。無言で漏らさず案内する。
         already_where_parts = [p for p in where_parts if p != update_detect_clause]
-        method_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
+        pdf_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
+        docx_placeholders = ",".join("?" for _ in (*FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS))
         already_where_parts += [
-            "bf.file_format = 'pdf'", "bf.relevance = 'core'",
+            "bf.relevance = 'core'",
             "dc.box_file_id IS NOT NULL",
-            f"dc.convert_method IN ({method_placeholders})",
+            f"( (bf.file_format='pdf'  AND dc.convert_method IN ({pdf_placeholders})) OR "
+            f"  (bf.file_format='docx' AND dc.convert_method IN ({docx_placeholders})) )",
         ]
         already_where = " AND ".join(already_where_parts)
         pending = conn.execute(
             f"""SELECT COUNT(*) FROM box_files bf
                 LEFT JOIN doc_content dc ON bf.box_file_id = dc.box_file_id
                 WHERE {already_where}""",
-            [*params, *FIGURES_RETRY_METHODS],
+            [*params, *FIGURES_RETRY_METHODS, *FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS],
         ).fetchone()[0]
         if pending:
             log(
-                f"[INFO] 図OCR未確定（{'/'.join(FIGURES_RETRY_METHODS)}）の core PDF が"
+                f"[INFO] 図OCR未確定（{'/'.join(FIGURES_RETRY_METHODS)}）の core PDF/docx が"
                 f" {pending} 件あります。図OCRを付与するには"
                 f" `pm_box_crawl.py --convert --figures-pending` を実行してください。"
             )
@@ -1524,25 +1555,27 @@ def convert_figures_pending(
     fig_endpoints: list[str] | None = None,
     log=print,
 ) -> int:
-    """図OCR未確定（FIGURES_RETRY_METHODS）の core PDF を図OCR付きで再変換する
-    夜間バックフィル用のエントリポイント（--figures-pending）。
+    """図OCR未確定（FIGURES_RETRY_METHODS、docx はテキストのみ変換も含む）の
+    core PDF/docx を図OCR付きで再変換する夜間バックフィル用のエントリポイント
+    （--figures-pending）。
 
     convert_files() の Box側更新検知（ハッシュ変更）とは独立に、ハッシュが不変でも
     対象を強制的に再変換する（force=True 相当を per-file で適用）。
 
     last_figures_attempt_at が FIGURES_RETRY_INTERVAL_DAYS 日以内の文書は
-    スキップする（恒常的にOCRが失敗するページを持つ core PDF が毎晩フル再OCR
+    スキップする（恒常的にOCRが失敗するページを持つ core PDF/docx が毎晩フル再OCR
     され続けるのを防ぐバックオフ。convert_files() 側の維持経路で figures を
     試行済みならスタンプが更新されているため、同じ夜の重複OCRも自然に防げる）。
     """
-    method_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
+    pdf_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
+    docx_placeholders = ",".join("?" for _ in (*FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS))
     where_parts = [
         "bf.relevance = 'core'",
-        "bf.file_format = 'pdf'",
-        f"dc.convert_method IN ({method_placeholders})",
         "dc.content_md IS NOT NULL",
+        f"( (bf.file_format='pdf'  AND dc.convert_method IN ({pdf_placeholders})) OR "
+        f"  (bf.file_format='docx' AND dc.convert_method IN ({docx_placeholders})) )",
     ]
-    params: list = list(FIGURES_RETRY_METHODS)
+    params: list = [*FIGURES_RETRY_METHODS, *FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS]
     if source_filter:
         where_parts.append("bf.source_name = ?")
         params.append(source_filter)
@@ -1850,9 +1883,10 @@ def main():
     parser.add_argument("--force", action="store_true",
                         help="変換済みファイルも再変換")
     parser.add_argument("--figures", action="store_true",
-                        help="relevance='core' のPDFに対し図・グラフをマルチモーダルOCRで言語化して本文にマージする")
+                        help="relevance='core' のPDF/docxに対し図・グラフをマルチモーダルOCRで言語化して本文にマージする")
     parser.add_argument("--figures-pending", action="store_true",
-                        help="図OCR未確定（pdftotext/pdftotext+figures_partial）の core PDF のみを"
+                        help="図OCR未確定（pdftotext/pdftotext+figures_partial、docxはテキストのみ変換も含む）"
+                             "の core PDF/docx のみを"
                              "対象に図OCRバックフィルを実行する（夜間更新用、--figures とは独立。"
                              "直近 FIGURES_RETRY_INTERVAL_DAYS 日以内に試行済みの文書は再試行しない）")
     parser.add_argument("--figures-max-pages", type=int, default=None,
