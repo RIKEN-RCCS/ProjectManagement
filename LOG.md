@@ -23,6 +23,10 @@ PatrolState（sqlite3 接続内包）を起動時スレッドで1個共有して
 実行のため sqlite3 のスレッド制約で ack 前に例外。押下ごとに開閉する方式へ変更（qa 再起動で反映）。
 ボタン承認クローズは pm.db 直更新のため Web UI は再読込のみで反映、Box XLSX / Canvas は対象外
 （必要なら handle_approve_close に xlsx publish ジョブ投入を追加する）。
+**追記2**: auto_close 有効化後「LOW だけが DM で届く」ため判定が厳しく見える（実分布は HIGH 81%）。
+LOW 6件を精査し、成果物の存在が確認できるのに完了宣言が無いだけのケース（アンケート集計済み・
+報告書記載済み）が LOW に落ちていたため、確信度基準に「成果物そのものの存在が直接確認できる→HIGH」
+を追加（detect.py プロンプト）。推測・部分完了は従来どおり LOW。合成ケースで昇格/棄却を検証済み。
 
 ## 2026-07-21 GitHub（Issues/Projects/Actions）のPM運用導入はボツ
 
