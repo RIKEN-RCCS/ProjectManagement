@@ -476,7 +476,9 @@ const achColumnDefs = [
   { field: 'app', headerName: 'アプリ', editable: false, width: 130 },
   { field: 'title', headerName: '実績', width: 380 },
   { field: 'category', headerName: 'カテゴリ', width: 120 },
-  { field: 'achieved_on', headerName: '達成日', width: 110 },
+  // cellDataType を明示しないと ag-Grid v31+ が先頭行から dateString 型を推論し、
+  // 月精度の値（例: "2026-06"）が不正な日付として空欄表示される
+  { field: 'achieved_on', headerName: '達成日', width: 110, cellDataType: 'text' },
   { field: 'confidence', headerName: '確信度', editable: false, width: 90 },
   { field: 'status', headerName: 'ステータス', width: 110,
     cellEditor: 'agSelectCellEditor',
