@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-07-22 terminology 辞書を 1216→72 語に浄化、slide_ocr 抽出に LLM フィルタ追加
+
+**背景**: `slide_ocr.extract_terminology()` が正規表現のみ（大文字語・カタカナ4文字以上）で抽出
+するため、一般語（THE / README / アプリケーション等）や OCR 誤認識（NVDIA / NIKEN 等）が録音処理の
+たびに pm.db terminology へ流入。一般語ほど frequency が伸び、Whisper initial_prompt の 224 トークン
+枠を占有していた。
+**決定**: プロジェクト固有語のみ残す keep リストで一括削除（バックアップ:
+`data/terminology_backup_20260722.csv`）。再流入防止として slide_ocr に `filter_terminology_llm()`
+（call_argus_llm 経由、hallucination ガード付き）を追加。判断基準は「LLM/Whisper が通常認識できる
+語は登録不要」。
+**留意**: LLM ルート（rivault/local）不達時は fail-closed で当該回のスライド用語が空になる
+（DB 由来の initial_prompt は別経路で維持）。escape hatch は `--no-llm-filter`。
+
 ## 2026-07-21 Patrol 運用開始: リマインダー3種停止・完了検出を横断証拠で本格化
 
 **背景**: Patrol 初回実行で期限超過58件＋停滞335件のリマインダー DM が洪水化。一方、本来の主眼で

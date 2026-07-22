@@ -18,6 +18,7 @@ slide_ocr.py — mp4 動画からスライドフレームを抽出しマルチ�
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import shutil
@@ -30,6 +31,8 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
+
+from cli_utils import call_argus_llm  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -311,9 +314,72 @@ _STOPWORDS = {
     "YES", "NO", "TRUE", "FALSE", "TODO",
 }
 
+_TERMINOLOGY_FILTER_PROMPT = """\
+以下は会議スライドの OCR テキストから正規表現で抽出した固有名詞候補のリストです。
+このプロジェクト固有の固有名詞のみを残し、それ以外を除外してください。
 
-def extract_terminology(slide_mds: Iterable[str], max_terms: int = 80) -> list[str]:
-    """スライド Markdown から Whisper initial_prompt 用の固有名詞候補を抽出する。"""
+残す対象:
+- このプロジェクト固有の HPC アプリケーション名・内部ベンチマークコード名
+- 組織内のチーム名・エリアコード
+- 人名
+- 一般に広く知られていない製品名・サービス名
+
+除外する対象:
+- 一般的な英単語 (THE, SUMMARY, README, LICENSE, WARNING 等)
+- 一般的なカタカナ語 (アプリケーション、レポート 等)
+- 年度表記 (FY2026, CY2025 等)
+- 広く知られた技術・製品・企業名 (CUDA, PyTorch, GitHub, AWS, NVIDIA, GB200, NVL72, RIKEN 等)
+- OCR 誤認識と思われる表記揺れ
+
+候補リスト:
+{terms}
+
+残すべき語のみを JSON 配列で出力してください。前置き・説明・コードフェンスは不要です。
+例: ["GENESIS", "MONAKA-X"]
+"""
+
+
+def filter_terminology_llm(terms: list[str]) -> list[str]:
+    """LLM で用語候補から一般語・OCR誤認識を除外する（入力順を維持して返す）。
+
+    LLM 呼び出し失敗・JSON パース不能時は fail-closed で空リストを返す
+    （ノイズを Whisper prompt と DB に流すより、その回は用語なしの方が安全）。
+    """
+    if not terms:
+        return []
+    prompt = _TERMINOLOGY_FILTER_PROMPT.format(terms="\n".join(terms))
+    try:
+        result = call_argus_llm(
+            prompt,
+            timeout=120,
+            max_tokens=2048,
+            system="あなたはプロジェクト用語の選別を行う専門家です。指定された出力形式を厳守してください。",
+        )
+        text = result.strip()
+        m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
+        raw = m.group(1) if m else text
+        m2 = re.search(r"\[[\s\S]*\]", raw)
+        if m2:
+            raw = m2.group(0)
+        filtered = json.loads(raw)
+        if not isinstance(filtered, list):
+            raise ValueError(f"JSON 配列ではありません: {raw[:200]}")
+    except Exception as e:
+        print(f"[WARN] filter_terminology_llm: LLM フィルタ失敗、用語なしで継続: {e}", file=sys.stderr)
+        return []
+
+    kept = {t for t in filtered if isinstance(t, str)}
+    return [t for t in terms if t in kept]
+
+
+def extract_terminology(
+    slide_mds: Iterable[str], max_terms: int = 80, use_llm_filter: bool = True,
+) -> list[str]:
+    """スライド Markdown から Whisper initial_prompt 用の固有名詞候補を抽出する。
+
+    正規表現抽出は一般語・OCR誤認識を大量に拾うため、use_llm_filter=True（既定）の
+    場合は filter_terminology_llm() でプロジェクト固有語のみに絞り込む。
+    """
     seen: dict[str, None] = {}  # 出現順保持のため dict を set 代わりに使う
     for md in slide_mds:
         if _is_skippable(md):
@@ -326,8 +392,16 @@ def extract_terminology(slide_mds: Iterable[str], max_terms: int = 80) -> list[s
                     continue
                 seen.setdefault(m, None)
                 if len(seen) >= max_terms:
-                    return list(seen.keys())
-    return list(seen.keys())
+                    break
+            if len(seen) >= max_terms:
+                break
+        if len(seen) >= max_terms:
+            break
+
+    candidates = list(seen.keys())
+    if use_llm_filter:
+        return filter_terminology_llm(candidates)
+    return candidates
 
 
 # --------------------------------------------------------------------------- #
@@ -340,6 +414,7 @@ def process_video(
     max_frames: int = 200,
     base_url: str | None = None,
     max_workers: int = 8,
+    use_llm_filter: bool = True,
 ) -> tuple[str, list[str]]:
     """動画 → フレーム抽出 → OCR → (slide_context, terminology) を返す。
 
@@ -352,7 +427,7 @@ def process_video(
 
     slide_mds = ocr_slides(frames, base_url, max_workers=max_workers)
     slide_context = build_slide_context(slide_mds)
-    terminology = extract_terminology(slide_mds)
+    terminology = extract_terminology(slide_mds, use_llm_filter=use_llm_filter)
     return slide_context, terminology
 
 
@@ -376,6 +451,8 @@ def main() -> int:
                         help="terminology.txt の出力パス（1行1語）")
     parser.add_argument("--ocr-only", action="store_true",
                         help="VIDEO を既存のフレーム PNG ディレクトリとして扱い OCR のみ実行")
+    parser.add_argument("--no-llm-filter", action="store_true",
+                        help="terminology の LLM フィルタを無効化し、正規表現抽出結果をそのまま出力（デバッグ用）")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -398,7 +475,7 @@ def main() -> int:
         frames = sorted(video_path.glob("*.png"))
         slide_mds = ocr_slides(frames, max_workers=args.max_workers)
         slide_context = build_slide_context(slide_mds)
-        terminology = extract_terminology(slide_mds)
+        terminology = extract_terminology(slide_mds, use_llm_filter=not args.no_llm_filter)
     else:
         work_dir = Path(args.out_dir) if args.out_dir else Path(tempfile.mkdtemp(prefix="slide_ocr_"))
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -407,6 +484,7 @@ def main() -> int:
             scene_threshold=args.scene_threshold,
             max_frames=args.max_frames,
             max_workers=args.max_workers,
+            use_llm_filter=not args.no_llm_filter,
         )
 
     if args.context_out:
