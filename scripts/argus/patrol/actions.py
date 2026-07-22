@@ -101,6 +101,94 @@ def send_completion_confirm(ctx, ai_id: int, ai_row: dict, evidence: str) -> boo
 
 
 # --------------------------------------------------------------------------- #
+# 方針転換確認（Block Kit ボタン付き DM）
+# --------------------------------------------------------------------------- #
+def send_obsolete_confirm(ctx, ai_id: int, ai_row: dict, reason: str) -> bool:
+    """
+    担当者に DM で Block Kit ボタン付き方針転換確認メッセージを送信する。
+
+    action_type は既存の "close_ai" を再利用する（qa サーバーの
+    patrol_approve_close / patrol_reject_close ボタンハンドラをそのまま
+    使い回すため）。
+
+    Returns: 送信成功なら True
+    """
+    if ctx.dry_run:
+        logger.info(
+            "[DRY] 方針転換確認送信: AI #%d (%s) → %s",
+            ai_id,
+            ai_row.get("content", "")[:40],
+            ai_row.get("assignee", "?"),
+        )
+        return True
+
+    pending_id = ctx.state.create_pending("close_ai", ai_id, f"[方針転換] {reason}")
+
+    assignee = ai_row.get("assignee", "")
+    user_id = ctx.user_resolver.resolve(assignee) if assignee else None
+
+    content_preview = (ai_row.get("content") or "")[:200]
+    due_date = ai_row.get("due_date") or "未設定"
+    reason_preview = reason[:300] if reason else ""
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    ":arrows_counterclockwise: *方針転換の可能性*\n"
+                    "このアクションアイテムは方針転換により不要になった可能性があります。"
+                ),
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*AI #{ai_id}*: {content_preview}\n"
+                    f"*担当者*: {assignee}\n"
+                    f"*期限*: {due_date}\n\n"
+                    f"*検出根拠*:\n> {reason_preview}"
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "クローズする"},
+                    "style": "primary",
+                    "action_id": "patrol_approve_close",
+                    "value": str(pending_id),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "まだ有効"},
+                    "style": "danger",
+                    "action_id": "patrol_reject_close",
+                    "value": str(pending_id),
+                },
+            ],
+        },
+    ]
+
+    fallback_text = f"方針転換確認: AI #{ai_id} {content_preview[:60]}"
+    channel_id, message_ts = _send_dm_or_fallback(
+        ctx, user_id, assignee, blocks, fallback_text
+    )
+
+    if channel_id:
+        ctx.state.record_notification(
+            "obsolete_confirm", f"ai:{ai_id}", channel_id, message_ts
+        )
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
 # リマインダー送信
 # --------------------------------------------------------------------------- #
 def send_reminder(
@@ -220,13 +308,16 @@ def close_action_item(
 # --------------------------------------------------------------------------- #
 # 内部ヘルパー
 # --------------------------------------------------------------------------- #
-def _append_close_note(conn, ai_id: int, today: str, evidence_text: str) -> None:
-    """自動クローズの根拠を note 列に追記する（既存 note は保持し改行で連結）。"""
+def _append_close_note(
+    conn, ai_id: int, today: str, evidence_text: str, label: str = "自動クローズ"
+) -> None:
+    """クローズの根拠を note 列（Web UI の「対応状況」）に追記する
+    （既存 note は保持し改行で連結）。"""
     row = conn.execute(
         "SELECT note FROM action_items WHERE id = ?", (ai_id,)
     ).fetchone()
     existing = (row["note"] if row else "") or ""
-    entry = f"{today} 自動クローズ: {evidence_text[:200]}"
+    entry = f"{today} {label}: {evidence_text[:200]}"
     new_note = f"{existing}\n{entry}" if existing else entry
     conn.execute(
         "UPDATE action_items SET note = ? WHERE id = ?", (new_note, ai_id)

@@ -64,6 +64,18 @@ def handle_approve_close(
         conn.execute(
             "UPDATE action_items SET status = 'closed' WHERE id = ?", (ai_id,)
         )
+        # 検出根拠（pending に保存済みの LLM 判定理由等）を note 列
+        # （Web UI「対応状況」）に残す。自動クローズ時の記録と同じ経路。
+        evidence = (pending.get("evidence") or "").strip()
+        if evidence:
+            from datetime import date
+
+            from .actions import _append_close_note
+
+            _append_close_note(
+                conn, ai_id, date.today().isoformat(), evidence,
+                label="Patrol承認クローズ",
+            )
 
     state.resolve_pending(pending_id, "approved", user_id)
     logger.info("AI #%d を closed に更新 (approved by %s)", ai_id, user_id)

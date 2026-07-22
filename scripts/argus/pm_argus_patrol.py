@@ -50,6 +50,7 @@ from argus.patrol.detect import (
     detect_completion_signals,
     detect_external_signals,
     detect_milestone_health,
+    detect_obsolete_items,
     detect_overdue_items,
     detect_stale_items,
     detect_unacknowledged_decisions,
@@ -109,6 +110,7 @@ class PatrolContext:
 # --------------------------------------------------------------------------- #
 DETECTORS: dict[str, Any] = {
     "completion": detect_completion_signals,
+    "obsolete": detect_obsolete_items,
     "overdue": detect_overdue_items,
     "deadline": detect_approaching_deadlines,
     "decisions": detect_unacknowledged_decisions,

@@ -2,7 +2,7 @@
 """
 patrol_detect.py — Patrol Agent の検出ルール
 
-8つの検出関数を提供する。各関数は PatrolContext を受け取り、
+9つの検出関数を提供する。各関数は PatrolContext を受け取り、
 検出結果に基づいて patrol_actions の関数を呼ぶ。
 
 完了シグナル検出は LLM 判定を併用（キーワードマッチ + 自然言語分析の二段構え）。
@@ -12,6 +12,9 @@ patrol_detect.py — Patrol Agent の検出ルール
 それ以外（auto_close 無効、または確信度不足）は従来どおり担当者へ
 承認ボタン付き完了確認 DM を送信する
 （`patrol.completion_detection.auto_close_*` で段階的に有効化）。
+方針転換（obsolete）検出は完了検出とは独立に、qa_index に索引済みの証拠から
+「タスク自体が方針転換で不要になったか」を LLM 判定し、該当時のみ
+クローズ確認 DM を送信する（自動クローズはしない）。
 それ以外の検出器は決定論的ルールのみ（LLM 不使用）。
 """
 from __future__ import annotations
@@ -748,6 +751,174 @@ def _get_recent_articles(data_dir: Path, cutoff_date: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# カテゴリ9: 方針転換（obsolete）検出
+# --------------------------------------------------------------------------- #
+def detect_obsolete_items(ctx) -> int:
+    """open AI が方針転換により不要になっていないかを検出する。
+
+    完了検出（detect_completion_signals）は「完了の証拠」しか見ないため、
+    タスクの目標自体が方針転換で覆された（例:「Aへの統合を目指す」→
+    後の会議で「Aには載せない」と決定）ケースを拾えない。本検出器は
+    qa_index の証拠を LLM 判定させ、方針転換が明確に読み取れる場合のみ
+    担当者へクローズ確認 DM を送る（自動クローズはしない）。
+
+    対象: source IN ('slack', 'meeting') の open AI。
+    Returns: 確認 DM を送信した件数
+    """
+    from .actions import send_obsolete_confirm
+
+    cfg = ctx.config.get("patrol", {}).get("obsolete_detection", {})
+    if not cfg.get("enabled", True):
+        return 0
+
+    max_llm_per_run = cfg.get("max_llm_per_run", 50)
+    max_per_run = cfg.get("max_per_run", 5)
+    recheck_days = cfg.get("recheck_days", 7)
+
+    # 本検出器は qa_index 検索が本体のため evidence_from_index の既定を True にする
+    # （_get_activity_evidence 単体の既定は completion 側の段階ロールアウトに合わせ False）
+    evidence_cfg = dict(cfg)
+    evidence_cfg.setdefault("evidence_from_index", True)
+
+    rows = ctx.conn.execute(
+        "SELECT id, content, assignee, due_date, source_ref, source, extracted_at"
+        " FROM action_items"
+        " WHERE status = 'open' AND COALESCE(deleted,0)=0"
+        "   AND source IN ('slack', 'meeting')"
+        " ORDER BY id",
+    ).fetchall()
+
+    detected = 0
+    llm_calls = 0
+    for row in rows:
+        ai_id = row["id"]
+        row_dict = dict(row)
+        target_key = f"ai:{ai_id}"
+
+        # 通知済みは一発勝負（completion_confirm/auto_close とは独立に判定する）
+        if ctx.state.already_notified("obsolete_confirm", target_key, cooldown_days=9999):
+            continue
+        if ctx.state.already_notified("obsolete_checked", target_key, recheck_days):
+            continue
+
+        evidence = _get_activity_evidence(ctx, row_dict, evidence_cfg)
+        if not evidence:
+            if not ctx.dry_run:
+                ctx.state.record_notification("obsolete_checked", target_key)
+            continue
+
+        if llm_calls >= max_llm_per_run:
+            break
+        llm_calls += 1
+
+        judged = _llm_judge_obsolete(row["content"], evidence)
+        if judged is None:
+            continue
+        is_obsolete, reason = judged
+        if not is_obsolete:
+            if not ctx.dry_run:
+                ctx.state.record_notification("obsolete_checked", target_key)
+            continue
+
+        send_obsolete_confirm(ctx, ai_id, row_dict, reason)
+        detected += 1
+        if detected >= max_per_run:
+            break
+
+    if detected:
+        logger.info("方針転換検出: %d 件", detected)
+    return detected
+
+
+_LLM_OBSOLETE_PROMPT = """\
+あなたはプロジェクト管理アシスタントです。
+以下のアクションアイテム（AI）と、関連する複数の証拠（会議議事録・Slack・
+文書など）を読んで、このAIが**方針転換により不要になった**と判断できるかを
+判定してください。
+
+## アクションアイテム
+{ai_content}
+
+## 証拠（出典付き）
+{evidence_text}
+
+## 判定基準
+- 「このタスクはやらない」「別のアプローチを採用する」「中止する」等、
+  タスクの目標そのものを覆す決定・方針が証拠から明確に読み取れる場合のみ
+  不要と判定する
+- タスクの前提（対象システム・契約・計画）が消滅したことが明確な場合も不要とする
+- 単なる停滞・進行中・優先度低下・延期は不要とみなさない
+- タスクの一部だけが変更された場合（部分的な方針変更）は不要とみなさない
+- 証拠がAIの内容と無関係、または方針転換かどうか曖昧な場合は不要とみなさない
+- 判定理由には、根拠とした証拠の出典（source_type・日時・source_ref/会議名）を引用すること
+
+## 出力
+不要になったと判断できる場合:
+OBSOLETE: （方針転換の内容と出典を1-2文で）
+そうでない場合:
+NOT_OBSOLETE
+"""
+
+_LLM_OBSOLETE_RE = re.compile(r"^\s*OBSOLETE\s*:?\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+_LLM_NOT_OBSOLETE_RE = re.compile(r"^\s*NOT[_\s]?OBSOLETE\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _llm_judge_obsolete(ai_content: str, evidence: list[dict]) -> tuple[bool, str] | None:
+    """LLM に出典付きの証拠を分析させ、AI が方針転換により不要になったか判定する。
+
+    evidence: {"source_type", "held_at", "source_ref", "content"} の辞書のリスト。
+    Returns: (is_obsolete, reason) のタプル。LLM 利用不可・パース失敗時は
+    None（呼び出し側は判定なしとして扱う）。
+    """
+    if not evidence:
+        return None
+    try:
+        from cli_utils import call_argus_llm
+    except ImportError:
+        logger.debug("cli_utils が利用不可。方針転換のLLM判定をスキップ。")
+        return None
+
+    evidence_text = "\n".join(
+        f"- [出典: {e.get('source_type', '?')} / {e.get('held_at') or '?'} /"
+        f" {e.get('source_ref') or '?'}] {(e.get('content') or '')[:400]}"
+        for e in evidence[:12]
+    )
+    prompt = _LLM_OBSOLETE_PROMPT.format(
+        ai_content=ai_content[:500],
+        evidence_text=evidence_text,
+    )
+
+    try:
+        # rivault(Kimi-K2-Thinking, thinking無効化不可)が優先ルートの場合、
+        # thinking で数千トークンを消費するため max_tokens は多めに確保する。
+        result = call_argus_llm(prompt, timeout=60, max_tokens=4096).strip()
+        # "OBSOLETE" は "NOT_OBSOLETE" の部分文字列だが、行アンカーで先頭一致
+        # させているため NOT_OBSOLETE 行（"N" で始まる）には誤爆しない。
+        # 応答中に判定様トークンが複数現れる場合は最後の出現を採用する。
+        obsolete_matches = list(_LLM_OBSOLETE_RE.finditer(result))
+        not_obsolete_matches = list(_LLM_NOT_OBSOLETE_RE.finditer(result))
+
+        if obsolete_matches and (
+            not not_obsolete_matches
+            or obsolete_matches[-1].start() > not_obsolete_matches[-1].start()
+        ):
+            m = obsolete_matches[-1]
+            reason = m.group(1).strip(": 　").strip() or "LLMが方針転換と判定"
+            return (True, reason)
+        if not_obsolete_matches and (
+            not obsolete_matches
+            or not_obsolete_matches[-1].start() > obsolete_matches[-1].start()
+        ):
+            return (False, "")
+
+        logger.warning("方針転換 LLM 判定: 期待した形式で応答が得られず: %s", result[:100])
+    except Exception as e:
+        logger.warning("方針転換 LLM 判定エラー: %s", e)
+
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # 内部ヘルパー
 # --------------------------------------------------------------------------- #
 _CONFIDENCE_ORDER = {"LOW": 0, "HIGH": 1}
@@ -772,9 +943,18 @@ _LLM_COMPLETION_PROMPT = """\
 - 部分的な進捗報告は未完了（全体が完了していない限り）
 - 証拠の内容がAIの内容と無関係な場合は未完了
 - 単に関連する文書・議事録が検索でヒットしただけ、話題が言及されただけでは
-  完了とみなさない。担当者本人または関係者による「成果物の提出・提供」
-  「対応済み・完了した」という明確な報告がある場合のみ完了とする。
+  完了とみなさない。次のいずれかを満たす場合に完了とする:
+  (1) 担当者本人または関係者による「成果物の提出・提供」「対応済み・完了した」
+      という明確な報告がある
+  (2) 明確な報告がなくても、求められていた成果物そのものの存在が証拠から
+      直接確認できる（提出済みの文書・報告書への記載・公開済みの資料等）
+  (3) 求められていた成果物・環境・仕組みが**実際に稼働・利用されている記録**が
+      証拠から確認できる（利用報告・運用上の議論・利用時のトラブル対応等。
+      作られていなければ起こり得ない活動の痕跡）
   根拠が間接的・推測に留まる場合は確信度を LOW にすること
+- アイテムが完了可能な作業と継続的な役割（「管理・運用を担当する」等）の
+  両方を含む場合、作業部分の完了が確認できれば完了としてよい
+  （継続的役割は完了の判定対象に含めない）
 - 判定理由には、根拠とした証拠の出典（source_type・日時・source_ref/会議名）を引用すること
 
 ## 確信度
@@ -782,6 +962,7 @@ _LLM_COMPLETION_PROMPT = """\
 - 明示的な完了宣言がなくても、求められていた成果物そのものの存在が証拠から
   直接確認できる（提出済みのリスト・報告書への記載・公開済みの資料・
   実施済みの依頼と結果報告等）→ HIGH
+- 成果物・環境が実際に稼働・利用されている記録からの判断（上記(3)）→ LOW
 - 別の成果物・状況からの推測に基づく、部分的な完了に留まる、
   または未確定事項が残る → LOW
 
@@ -875,14 +1056,16 @@ def _llm_judge_completion(
     return None
 
 
-def _get_activity_evidence(ctx, ai_row: dict) -> list[dict]:
+def _get_activity_evidence(ctx, ai_row: dict, cfg: dict | None = None) -> list[dict]:
     """qa_index.db から、同一スレッド以外での完了報告・成果物提出等の証拠を検索する。
 
+    cfg を省略した場合は completion_detection の設定を用いる（従来どおり）。
     config `evidence_from_index`（既定 false）が有効な場合のみ動作する
     （段階ロールアウト用。qa_index 未構築・検索失敗時は Patrol 全体を落とさない
     よう例外を握りつぶし [] を返す）。
     """
-    cfg = ctx.config.get("patrol", {}).get("completion_detection", {})
+    if cfg is None:
+        cfg = ctx.config.get("patrol", {}).get("completion_detection", {})
     if not cfg.get("evidence_from_index", False):
         return []
 
@@ -890,10 +1073,19 @@ def _get_activity_evidence(ctx, ai_row: dict) -> list[dict]:
         from enrich.knowledge_context import extract_topic_keywords
 
         content = ai_row.get("content") or ""
-        keywords = extract_topic_keywords(content)
-        query = " ".join(keywords) if keywords else content
-        if not query.strip():
+        if not content.strip():
             return []
+
+        # クエリは「本文そのまま」と「キーワード抽出」の2本立てで検索しマージする。
+        # キーワード抽出は "Megatron-DeepSpeed" のような固有名詞句をトークンに
+        # 分解してしまい、決定的な証拠が上位に入らないことがある（AI#2983 で実測）。
+        # 逆に本文そのままだと一般語が支配的なアイテムで漏れるため、両方を使う。
+        queries = [content]
+        keywords = extract_topic_keywords(content)
+        if keywords:
+            kw_query = " ".join(keywords)
+            if kw_query.strip() and kw_query != content:
+                queries.append(kw_query)
 
         qa_index_path = ctx.data_dir / "qa_index.db"
         if not qa_index_path.exists():
@@ -907,12 +1099,33 @@ def _get_activity_evidence(ctx, ai_row: dict) -> list[dict]:
 
         from argus.retrieval import retrieve_chunks_hybrid
 
-        chunks = retrieve_chunks_hybrid(
-            query, qa_index_path,
-            k=cfg.get("evidence_k", 6),
-            since_date=since_date,
-            index_name=cfg.get("evidence_index_name"),
-        )
+        k = cfg.get("evidence_k", 6)
+        results_per_query = [
+            retrieve_chunks_hybrid(
+                q, qa_index_path,
+                k=k,
+                since_date=since_date,
+                index_name=cfg.get("evidence_index_name"),
+            )
+            for q in queries
+        ]
+
+        # 各クエリの上位を交互に取り、重複排除して 2*k 件までに収める
+        # （LLM 側は evidence[:12] でキャップされるため、k=6 なら全件渡る）
+        merged: list[dict] = []
+        seen: set[tuple] = set()
+        for rank in range(k):
+            for res in results_per_query:
+                if rank >= len(res):
+                    continue
+                c = res[rank]
+                key = (c.get("source_ref"), (c.get("content") or "")[:80])
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(c)
+        merged = merged[: 2 * k]
+
         return [
             {
                 "source_type": c.get("source_type", "?"),
@@ -920,7 +1133,7 @@ def _get_activity_evidence(ctx, ai_row: dict) -> list[dict]:
                 "source_ref": c.get("source_ref", ""),
                 "content": c.get("content", ""),
             }
-            for c in chunks
+            for c in merged
         ]
     except Exception as e:
         logger.debug("AI #%s の qa_index 証拠取得エラー: %s", ai_row.get("id"), e)
