@@ -31,7 +31,7 @@ CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 # --------------------------------------------------------------------------- #
 #   key=NAME
 #   value=TARGET_SCRIPT|LOG_BASENAME|SOURCE_RIVAULT|SET_DEFAULT_LLM|SOURCE_FISH|EXTRA_ARGS
-#     TARGET_SCRIPT    : scripts/ からの相対パス
+#     TARGET_SCRIPT    : scripts/ からの相対パス。`venv:<名前>` と書くと venv の bin/<名前> を指す
 #     LOG_BASENAME     : logs/{name}.log / logs/{name}.pid に使う識別子
 #     SOURCE_RIVAULT   : 1 なら ~/.secrets/rivault_tokens.sh を読み込む
 #     SET_DEFAULT_LLM  : 1 なら ~/.secrets/localLLM.sh を読み込み LOCAL_LLM_URL/TOKEN を設定
@@ -41,6 +41,7 @@ CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 declare -A SERVICES=(
     [qa]="argus/pm_qa_server.py|pm_qa_server|1|1|1|"
     [web]="pm_api.py|pm_web|0|0|0|--port ${PM_WEB_PORT:-8501}"
+    [docling]="venv:docling-serve|docling_serve|0|0|0|run --host 127.0.0.1 --port ${DOCLING_PORT:-5001}"
     # fish は別サーバー運用に移行したため削除（2026-06-11）
 )
 
@@ -96,7 +97,11 @@ load_service() {
     IFS='|' read -r SVC_TARGET SVC_LOG_BASE SVC_RIVAULT SVC_DEFAULT_LLM SVC_FISH SVC_EXTRA <<< "$spec"
     SVC_LOG_FILE="$LOG_DIR/${SVC_LOG_BASE}.log"
     SVC_PID_FILE="$LOG_DIR/${SVC_LOG_BASE}.pid"
-    SVC_TARGET_PATH="$SCRIPT_DIR/$SVC_TARGET"
+    if [[ "$SVC_TARGET" == venv:* ]]; then
+        SVC_TARGET_PATH="$(dirname "$(detect_python)")/${SVC_TARGET#venv:}"
+    else
+        SVC_TARGET_PATH="$SCRIPT_DIR/$SVC_TARGET"
+    fi
 }
 
 cmd_start() {
@@ -131,6 +136,14 @@ cmd_start() {
     if [[ "${SVC_FISH:-0}" == "1" && -f "$HOME/.secrets/fish_tts.sh" ]]; then
         # shellcheck disable=SC1091
         source "$HOME/.secrets/fish_tts.sh"
+    fi
+    if [[ "$name" == "docling" ]]; then
+        # MAX_SYNC_WAIT はサーバ側同期待ちの上限。既定 120s のままだと大型 PDF
+        # （table_mode=accurate）が途中で 404 を返しクライアントがフォールバックする。
+        # pm_box_crawl 側の DOCLING_TIMEOUT(600s) と揃える。
+        export UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
+        export DOCLING_SERVE_ENABLE_UI="${DOCLING_SERVE_ENABLE_UI:-true}"
+        export DOCLING_SERVE_MAX_SYNC_WAIT="${DOCLING_SERVE_MAX_SYNC_WAIT:-600}"
     fi
 
     # 起動確認

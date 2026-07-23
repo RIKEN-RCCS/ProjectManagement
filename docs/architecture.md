@@ -161,6 +161,8 @@ recency 非適用でハイブリッド検索した結果を `enrich/achievements
 ```
 [BOX ドキュメント]
   └── pm_box_crawl.py ──→ data/box_docs.db (本文 Markdown)
+       └── DOCLING_SERVE_URL 設定時: docling-serve (pm_daemon.sh start docling) 経由でpdf/docx/xlsx/pptxを変換。
+           health不通・変換失敗時は既存の pdftotext/LibreOffice/マルチモーダルOCR 経路へ自動フォールバック
 
 [BOX リンク (Slack上)]
   └── pm_slack_box_links.py ──→ data/docs_*.db (メタデータ)
@@ -223,7 +225,10 @@ pm.db (UPDATE)
   data/box_docs.db       (BOX ドキュメント)
   data/web_articles.db   (Web 記事)
   │
-  ├── split_into_chunks (1000 chars, 100 overlap)
+  ├── split_into_chunks_by_heading (`#`〜`###` 見出し単位でセクション分割し、
+  │     各チャンク先頭に見出しパスを付与した上でセクション内を段落詰め
+  │     1000 chars, 100 overlap。box_document/minutes_content/web が対象、
+  │     slack_raw は従来の段落分割のまま)
   ├── SudachiPy 形態素解析 → fts_tokens
   │
   ▼

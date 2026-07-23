@@ -32,6 +32,21 @@ export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
 . ~/.secrets/slack_tokens.sh
 [ -f ~/.secrets/localLLM.sh ] && . ~/.secrets/localLLM.sh
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
+
+# docling-serve（常駐、pm_daemon.sh start docling）。停止時は pm_box_crawl 側が既存経路へ自動フォールバック
+export DOCLING_SERVE_URL="${DOCLING_SERVE_URL:-http://127.0.0.1:5001}"
+
+# docling-serve の起動待ち（未起動でも警告のみで続行 — pm_box_crawl 側が自動フォールバック）
+if [[ -n "${DOCLING_SERVE_URL:-}" ]]; then
+    for _i in $(seq 1 12); do
+        if curl -sf -m 5 "${DOCLING_SERVE_URL}/health" >/dev/null 2>&1; then
+            echo "docling-serve OK: ${DOCLING_SERVE_URL}"
+            break
+        fi
+        [[ $_i -eq 12 ]] && echo "WARN: docling-serve に接続できません（既存経路にフォールバックします）: ${DOCLING_SERVE_URL}" || sleep 5
+    done
+fi
+
 ARCH=$(uname -m)
 if [[ "$ARCH" == "aarch64" ]]; then
     PYTHON3="$HOME/.venv_aarch64/bin/python3"

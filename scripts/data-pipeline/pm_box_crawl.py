@@ -83,11 +83,25 @@ SUPPORTED_EXTENSIONS = {"pptx", "xlsx", "docx", "pdf", "md", "boxnote", "txt"}
 # doc_content.convert_method の図OCR関連の分類（LIKE '%figures%' 系の曖昧な
 # 判定を廃し、意味を明示するための集合）。
 # - 図OCR完了・再試行不要（図あり確定 / 図なし確定）
-FIGURES_DONE_METHODS = ("pdftotext+figures", "pdftotext+nofig")
+FIGURES_DONE_METHODS = ("pdftotext+figures", "pdftotext+nofig",
+                        "docling+figures", "docling+nofig")
 # - 図OCR未試行 or 一部ページ失敗で要再試行
-FIGURES_RETRY_METHODS = ("pdftotext", "pdftotext+figures_partial")
+FIGURES_RETRY_METHODS = ("pdftotext", "pdftotext+figures_partial",
+                         "docling", "docling+figures_partial")
+# - 図OCR一部ページ失敗（pdftotext/docling共通で「未確定」判定に使う）
+FIGURES_PARTIAL_METHODS = ("pdftotext+figures_partial", "docling+figures_partial")
+# - pptx の図OCR未試行 or 一部ページ失敗で要再試行（pptxはDoclingのみ対応のため独立集合）
+PPTX_FIGURES_RETRY_METHODS = ("docling", "docling+figures_partial")
 # - 図OCR前の docx テキストのみ変換（--figures-pending の docx バックフィル対象判定に使う）
 DOCX_TEXTONLY_METHODS = ("libreoffice_html_xhtml", "libreoffice_html_standard")
+
+# Docling (docling-serve HTTP API) 変換対象の形式。設定されていれば
+# pdf/docx/xlsx/pptx はまず Docling 経由での変換を試み、失敗時のみ
+# 既存の pdftotext/LibreOffice/マルチモーダルOCR経路にフォールバックする。
+DOCLING_FORMATS = ("pdf", "docx", "xlsx", "pptx")
+DOCLING_TIMEOUT = int(os.environ.get("DOCLING_TIMEOUT", "600"))
+DOCLING_OCR_PRESET = os.environ.get("DOCLING_OCR_PRESET", "easyocr")
+DOCLING_OCR_LANG = [s.strip() for s in os.environ.get("DOCLING_OCR_LANG", "ja,en").split(",") if s.strip()]
 
 # 図OCR対象の文字数上限（--figures-pending 対象選定・convert_single_file の
 # core PDF/docx figures 判定の双方で共用）。既知の外れ値（xlsx由来PDF等で実測
@@ -361,6 +375,18 @@ def convert_to_markdown(
     """
     if fmt in ("pptx", "docx", "xlsx") and _is_encrypted_office(file_path):
         return "[ENCRYPTED — password-protected file, cannot extract content]", "encrypted", False
+
+    docling_url = get_docling_url()
+    if docling_url and fmt in DOCLING_FORMATS and _docling_available(docling_url):
+        eps = fig_endpoints if fig_endpoints is not None else (get_ocr_endpoints() if verbalize_figures else [])
+        result = _convert_via_docling(
+            file_path, fmt, docling_url,
+            verbalize_figures=verbalize_figures,
+            fig_max_pages=fig_max_pages, endpoints=eps or [],
+        )
+        if result is not None:
+            return result
+        logger.warning(f"    Docling 変換失敗 → 既存経路にフォールバック: {file_path.name}")
 
     if fmt == "pdf":
         content, method, figures_attempted = _convert_pdf(
@@ -1085,6 +1111,210 @@ def get_ocr_endpoints() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Docling (docling-serve HTTP API) conversion
+# ---------------------------------------------------------------------------
+
+_DOCLING_MIME_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+# プロセス内で URL ごとに1回だけ実ヘルスチェックし、以降はキャッシュを返す。
+_DOCLING_HEALTH_CACHE: dict[str, bool] = {}
+
+
+def get_docling_url() -> str | None:
+    """docling-serve のベースURLを環境変数から取得する（未設定なら None）。"""
+    return os.environ.get("DOCLING_SERVE_URL", "").strip().rstrip("/") or None
+
+
+def _docling_available(base_url: str) -> bool:
+    """docling-serve の /health を叩いて疎通を確認する（成功時のみプロセス内でキャッシュ）。"""
+    if _DOCLING_HEALTH_CACHE.get(base_url):
+        return True
+    import requests
+    try:
+        resp = requests.get(base_url + "/health", timeout=5)
+        ok = resp.status_code == 200
+    except Exception as e:
+        logger.warning(f"    Doclingヘルスチェック失敗 ({base_url}): {e}")
+        ok = False
+    if ok:
+        _DOCLING_HEALTH_CACHE[base_url] = True
+    return ok
+
+
+def _docling_convert_file(path: Path, fmt: str, base_url: str) -> str | None:
+    """docling-serve の /v1/convert/file で単一ファイルをMarkdownに変換する。"""
+    import requests
+    mimetype = _DOCLING_MIME_TYPES.get(fmt, "application/octet-stream")
+    url = base_url + "/v1/convert/file"
+    try:
+        with open(path, "rb") as fh:
+            files = {"files": (path.name, fh, mimetype)}
+            data = {
+                "to_formats": "md",
+                "do_ocr": "true",
+                "ocr_preset": DOCLING_OCR_PRESET,
+                "ocr_lang": DOCLING_OCR_LANG,
+                "pdf_backend": "dlparse_v4",
+                "table_mode": "accurate",
+                "image_export_mode": "placeholder",
+            }
+            resp = requests.post(url, files=files, data=data, timeout=DOCLING_TIMEOUT)
+        resp.raise_for_status()
+        result = resp.json()
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logger.warning(f"    Docling変換失敗（疎通不可、次回ヘルスチェックを再実行） ({path.name}): {e}")
+        _DOCLING_HEALTH_CACHE.pop(base_url, None)
+        return None
+    except Exception as e:
+        logger.warning(f"    Docling変換失敗 ({path.name}): {e}")
+        return None
+
+    if result.get("status") != "success":
+        logger.warning(
+            f"    Docling変換失敗 (status={result.get('status')}, "
+            f"errors={result.get('errors')}): {path.name}"
+        )
+        return None
+
+    md_content = (result.get("document") or {}).get("md_content")
+    if not md_content or not md_content.strip():
+        logger.warning(f"    Docling変換結果が空: {path.name}")
+        return None
+    return md_content
+
+
+def _append_figures_section(
+    content_md: str,
+    pdf_path: Path,
+    endpoints: list[str],
+    max_pages: int | None,
+) -> tuple[str, bool, bool]:
+    """Docling変換済み本文に図言語化セクション（ページ別見出し付き）を追記する。
+
+    戻り値: (マージ後md, 図が1つでも得られたか, 全ページOCRに成功したか)。
+    図が1つも得られなければ元の本文をそのまま返す。
+    """
+    figures, failed_pages = _verbalize_figures(pdf_path, endpoints, max_pages=max_pages, logger=logger)
+    all_ok = not failed_pages
+    matched = any(fig for fig in figures)
+    if not matched:
+        return content_md, False, all_ok
+
+    section = "\n\n## 図・グラフ（OCR言語化）\n\n"
+    section += "".join(
+        f"### ページ {i}\n\n{fig}\n" for i, fig in enumerate(figures, 1) if fig
+    )
+    merged = content_md + section
+    return merged, True, all_ok
+
+
+def _decrypt_pdf_if_needed(path: Path, tmpdir: Path) -> Path | None:
+    """権限制限のみ（オープンパスワード無し）の暗号化PDFを復号する。
+
+    docling-serve の PDFium バックエンドは空パスワードでの自動復号に対応せず
+    「Incorrect password error」で拒否するため、pikepdf で事前に復号してから
+    送信する。暗号化されていなければ path をそのまま返す。真のオープン
+    パスワード付きPDF（空パスワードで開けない）や pikepdf 未導入の環境では
+    None を返し、呼び出し元が既存経路（pdftotext 等）にフォールバックできる
+    ようにする。
+    """
+    if not _is_encrypted_pdf(path):
+        return path
+    try:
+        import pikepdf
+    except ImportError:
+        logger.info(f"    pikepdf未導入のためPDF復号スキップ: {path.name}")
+        return None
+    try:
+        with pikepdf.open(path, password="") as pdf:
+            decrypted_path = tmpdir / f"{path.stem}_decrypted.pdf"
+            pdf.save(decrypted_path)
+            return decrypted_path
+    except pikepdf.PasswordError:
+        logger.info(f"    オープンパスワード付きPDFのため復号不可: {path.name}")
+        return None
+    except Exception as e:
+        logger.warning(f"    PDF復号に失敗: {path.name}: {e}")
+        return None
+
+
+def _convert_via_docling(
+    path: Path,
+    fmt: str,
+    base_url: str,
+    *,
+    verbalize_figures: bool,
+    fig_max_pages: int | None,
+    endpoints: list[str],
+) -> tuple[str, str, bool] | None:
+    """Docling経由での変換を統括する。(content, method, figures_attempted) を返す。
+
+    変換自体に失敗した、または結果が短すぎる場合は None を返し、呼び出し元
+    (convert_to_markdown) が既存経路へフォールバックできるようにする。
+    """
+    if fmt == "pdf":
+        # 権限制限（コピー・印刷禁止等）のみでオープンパスワード無しの暗号化PDFは
+        # docling-serve (PDFium) が空パスワード自動復号に対応せず拒否するため、
+        # 送信前に pikepdf で復号する。復号済みファイルは Docling 送信・図言語化
+        # の両方で使うため、この with 節の中で完結させる。
+        with tempfile.TemporaryDirectory() as td:
+            send_path = _decrypt_pdf_if_needed(path, Path(td))
+            if send_path is None:
+                return None
+            md = _docling_convert_file(send_path, fmt, base_url)
+            if md is None:
+                return None
+            if len(md.strip()) < 100:
+                # 既存 _convert_pdf の 100字ルールと対称。短い本文は既存の
+                # マルチモーダルOCR経路（スキャンPDF等）に委ねる。
+                return None
+            if not verbalize_figures or not endpoints:
+                return md, "docling", False
+            merged, matched, all_ok = _append_figures_section(md, send_path, endpoints, fig_max_pages)
+            if matched:
+                method = "docling+figures" if all_ok else "docling+figures_partial"
+            elif all_ok:
+                method = "docling+nofig"
+            else:
+                method = "docling"
+            return merged, method, True
+
+    md = _docling_convert_file(path, fmt, base_url)
+    if md is None:
+        return None
+
+    if fmt == "pptx" and len(md.strip()) < 100:
+        # 既存 _convert_pptx の 100字ルールと対称。短い本文は既存の
+        # マルチモーダルOCR経路（画像主体pptx等）に委ねる。
+        return None
+
+    if not verbalize_figures or not endpoints:
+        return md, "docling", False
+
+    with tempfile.TemporaryDirectory() as _td:
+        pdf_path = _to_pdf(path, Path(_td))
+        if pdf_path is None:
+            # PDF化そのものが失敗＝図OCRを試行したが実行できなかった扱いにする
+            # （既存docx+verbalize経路の docx→PDF変換失敗時と同じ設計思想）。
+            logger.warning(f"    Docling: 図言語化用PDF変換失敗、テキストのみ採用: {path.name}")
+            return md, "docling", True
+        merged, matched, all_ok = _append_figures_section(md, pdf_path, endpoints, fig_max_pages)
+
+    if matched:
+        method = "docling+figures" if all_ok else "docling+figures_partial"
+    elif all_ok:
+        method = "docling+nofig"
+    else:
+        method = "docling"
+    return merged, method, True
+
+
+# ---------------------------------------------------------------------------
 # Scan: register BOX files
 # ---------------------------------------------------------------------------
 
@@ -1339,12 +1569,19 @@ def convert_single_file(
                 return {"status": "skipped", "file_id": fid, "name": name}
 
             is_core_figure_target = fmt in ("pdf", "docx") and file_info.get("relevance") == "core"
-            had_figures_marker = fmt in ("pdf", "docx") and (
+            # pptx は Docling 経由の図OCRのみ対応。DOCLING_SERVE_URL 未設定の環境では
+            # 対象化せず従来通り text-only（既存の multimodal_ocr/libreoffice 経路）にする。
+            is_pptx_figure_target = (
+                fmt == "pptx"
+                and file_info.get("relevance") != "noise"
+                and get_docling_url() is not None
+            )
+            had_figures_marker = fmt in ("pdf", "docx", "pptx") and (
                 existing_method in FIGURES_DONE_METHODS
-                or existing_method == "pdftotext+figures_partial"
+                or existing_method in FIGURES_PARTIAL_METHODS
             )
             oversized = (
-                is_core_figure_target
+                (is_core_figure_target or is_pptx_figure_target)
                 and existing_char_count is not None
                 and existing_char_count > FIGURES_MAX_CHARS
             )
@@ -1368,6 +1605,16 @@ def convert_single_file(
                         f"のため再変換をスキップ、次回リトライ (pid={pid})"
                     )
                     return {"status": "skipped_figures_unavailable", "file_id": fid, "name": name}
+            elif is_pptx_figure_target:
+                if not verbalize_figures:
+                    endpoints = fig_endpoints if fig_endpoints is not None else get_ocr_endpoints()
+                if endpoints:
+                    want_figures = True
+                else:
+                    logger.info(
+                        f"    OCRエンドポイント未設定/停止のため図OCR無しで"
+                        f" text-only 変換を続行 (pid={pid})"
+                    )
             elif had_figures_marker:
                 logger.info(f"    relevance 降格のため figures 維持を停止し text-only へ変換 (pid={pid})")
 
@@ -1475,27 +1722,29 @@ def convert_files(
     ).fetchall()
 
     if figures and not force:
-        # --force 未指定の場合、既に変換済みの core PDF/docx は上の WHERE で除外され
+        # --force 未指定の場合、既に変換済みの core PDF/docx・pptx は上の WHERE で除外され
         # 図言語化の対象から漏れる。無言で漏らさず案内する。
         already_where_parts = [p for p in where_parts if p != update_detect_clause]
         pdf_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
         docx_placeholders = ",".join("?" for _ in (*FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS))
+        pptx_placeholders = ",".join("?" for _ in PPTX_FIGURES_RETRY_METHODS)
         already_where_parts += [
-            "bf.relevance = 'core'",
             "dc.box_file_id IS NOT NULL",
-            f"( (bf.file_format='pdf'  AND dc.convert_method IN ({pdf_placeholders})) OR "
-            f"  (bf.file_format='docx' AND dc.convert_method IN ({docx_placeholders})) )",
+            f"( (bf.relevance = 'core' AND bf.file_format='pdf'  AND dc.convert_method IN ({pdf_placeholders})) OR "
+            f"  (bf.relevance = 'core' AND bf.file_format='docx' AND dc.convert_method IN ({docx_placeholders})) OR "
+            f"  (COALESCE(bf.relevance,'') != 'noise' AND bf.file_format='pptx' AND dc.convert_method IN ({pptx_placeholders})) )",
         ]
         already_where = " AND ".join(already_where_parts)
         pending = conn.execute(
             f"""SELECT COUNT(*) FROM box_files bf
                 LEFT JOIN doc_content dc ON bf.box_file_id = dc.box_file_id
                 WHERE {already_where}""",
-            [*params, *FIGURES_RETRY_METHODS, *FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS],
+            [*params, *FIGURES_RETRY_METHODS, *FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS,
+             *PPTX_FIGURES_RETRY_METHODS],
         ).fetchone()[0]
         if pending:
             log(
-                f"[INFO] 図OCR未確定（{'/'.join(FIGURES_RETRY_METHODS)}）の core PDF/docx が"
+                f"[INFO] 図OCR未確定の core PDF/docx・pptx が"
                 f" {pending} 件あります。図OCRを付与するには"
                 f" `pm_box_crawl.py --convert --figures-pending` を実行してください。"
             )
@@ -1569,13 +1818,15 @@ def convert_figures_pending(
     """
     pdf_placeholders = ",".join("?" for _ in FIGURES_RETRY_METHODS)
     docx_placeholders = ",".join("?" for _ in (*FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS))
+    pptx_placeholders = ",".join("?" for _ in PPTX_FIGURES_RETRY_METHODS)
     where_parts = [
-        "bf.relevance = 'core'",
         "dc.content_md IS NOT NULL",
-        f"( (bf.file_format='pdf'  AND dc.convert_method IN ({pdf_placeholders})) OR "
-        f"  (bf.file_format='docx' AND dc.convert_method IN ({docx_placeholders})) )",
+        f"( (bf.relevance = 'core' AND bf.file_format='pdf'  AND dc.convert_method IN ({pdf_placeholders})) OR "
+        f"  (bf.relevance = 'core' AND bf.file_format='docx' AND dc.convert_method IN ({docx_placeholders})) OR "
+        f"  (COALESCE(bf.relevance,'') != 'noise' AND bf.file_format='pptx' AND dc.convert_method IN ({pptx_placeholders})) )",
     ]
-    params: list = [*FIGURES_RETRY_METHODS, *FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS]
+    params: list = [*FIGURES_RETRY_METHODS, *FIGURES_RETRY_METHODS, *DOCX_TEXTONLY_METHODS,
+                    *PPTX_FIGURES_RETRY_METHODS]
     if source_filter:
         where_parts.append("bf.source_name = ?")
         params.append(source_filter)
@@ -1722,6 +1973,16 @@ def debug_convert_file(file_path: Path, *, log=print):
     log(f"\n=== デバッグ変換: {file_path.name} ===")
     log(f"ファイルサイズ: {file_path.stat().st_size / 1024 / 1024:.2f} MB")
     log(f"拡張子: {file_path.suffix}")
+
+    docling_url = get_docling_url()
+    fmt = file_path.suffix.lower().lstrip(".")
+    if docling_url:
+        if fmt in DOCLING_FORMATS and _docling_available(docling_url):
+            log(f"Docling: {docling_url} 利用可能 → convert_to_markdown() ではこの形式は"
+                f" method='docling' 系（docling/docling+figures/docling+nofig/"
+                f"docling+figures_partial）で変換されます")
+        else:
+            log(f"Docling: {docling_url} は設定されていますが利用不可（既存経路にフォールバック）")
 
     if file_path.suffix.lower() == ".docx":
         log("\n--- LibreOffice変換 ---")
@@ -1885,8 +2146,9 @@ def main():
     parser.add_argument("--figures", action="store_true",
                         help="relevance='core' のPDF/docxに対し図・グラフをマルチモーダルOCRで言語化して本文にマージする")
     parser.add_argument("--figures-pending", action="store_true",
-                        help="図OCR未確定（pdftotext/pdftotext+figures_partial、docxはテキストのみ変換も含む）"
-                             "の core PDF/docx のみを"
+                        help="図OCR未確定（pdftotext/pdftotext+figures_partial/docling/"
+                             "docling+figures_partial、docxはテキストのみ変換も含む）"
+                             "の core PDF/docx、および relevance!='noise' の pptx（Docling利用時のみ）を"
                              "対象に図OCRバックフィルを実行する（夜間更新用、--figures とは独立。"
                              "直近 FIGURES_RETRY_INTERVAL_DAYS 日以内に試行済みの文書は再試行しない）")
     parser.add_argument("--figures-max-pages", type=int, default=None,

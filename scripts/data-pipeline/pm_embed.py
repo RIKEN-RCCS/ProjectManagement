@@ -216,6 +216,78 @@ def split_into_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int 
     return chunks
 
 
+def split_into_chunks_by_heading(
+    text: str,
+    max_chars: int = CHUNK_MAX_CHARS,
+    overlap: int = CHUNK_OVERLAP_CHARS,
+    max_heading_level: int = 3,
+) -> list[str]:
+    """Markdown の見出し（`#`〜`###`）単位でセクションに分割してから、各セクションを
+    split_into_chunks で分割する。各チャンク先頭に所属する見出しパス
+    （例: `【章 > 節】`）を付与し、LLM の文脈理解を助ける。
+
+    コードフェンス（```）内の `#` 行は見出しとして扱わない。見出しが1つも
+    無い text では split_into_chunks(text) と完全に同一のリストを返す。
+    """
+    if not text or not text.strip():
+        return []
+
+    heading_re = re.compile(rf"^(#{{1,{max_heading_level}}})\s+(.*)$")
+    fence_re = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+    lines = text.split("\n")
+
+    sections: list[tuple[list[str], str]] = []
+    heading_stack: list[str] = []
+    current_lines: list[str] = []
+    in_fence = False
+    fence_char = ""
+
+    def flush_section() -> None:
+        section_text = "\n".join(current_lines)
+        heading_path = " > ".join(heading_stack)
+        sections.append((section_text, heading_path))
+
+    for line in lines:
+        fence_m = fence_re.match(line)
+        if fence_m:
+            marker_char = fence_m.group(1)[0]
+            if not in_fence:
+                in_fence = True
+                fence_char = marker_char
+                current_lines.append(line)
+                continue
+            if marker_char == fence_char:
+                in_fence = False
+                fence_char = ""
+                current_lines.append(line)
+                continue
+
+        m = None if in_fence else heading_re.match(line)
+        if m:
+            flush_section()
+            current_lines = []
+            level = len(m.group(1))
+            heading_text = m.group(2).strip()
+            heading_stack = heading_stack[: level - 1]
+            heading_stack.append(heading_text)
+        else:
+            current_lines.append(line)
+
+    flush_section()
+
+    chunks: list[str] = []
+    for section_text, heading_path in sections:
+        if not section_text.strip():
+            continue
+        heading_path = heading_path[:100]
+        for chunk in split_into_chunks(section_text, max_chars, overlap):
+            if heading_path:
+                chunks.append(f"【{heading_path}】\n{chunk}")
+            else:
+                chunks.append(chunk)
+    return chunks
+
+
 def get_last_indexed(index_conn: sqlite3.Connection, source_db: str,
                      index_name: str) -> str | None:
     row = index_conn.execute(
@@ -356,7 +428,7 @@ def index_minutes_content(
 
     for row in src_conn.execute("SELECT id, meeting_id, content FROM minutes_content"):
         inst = instances.get(row["meeting_id"], {})
-        for chunk in split_into_chunks(row["content"] or ""):
+        for chunk in split_into_chunks_by_heading(row["content"] or ""):
             chunk_rows.append({
                 "source_type": "minutes_content",
                 "source_db": source_db,
@@ -588,7 +660,7 @@ def index_box_doc_content(
 
         record_id = str(row["box_file_id"])
         current_set = record_current_contents.setdefault(record_id, set())
-        for chunk in split_into_chunks(content_md):
+        for chunk in split_into_chunks_by_heading(content_md):
             prefixed = f"【{heading}】\n{chunk}" if heading else chunk
             current_set.add(prefixed)
             chunk_rows.append({
@@ -670,7 +742,7 @@ def index_web(
             body += row["title"] + "\n\n"
         body += (row["content"] or row["summary"] or "")
 
-        for chunk in split_into_chunks(body):
+        for chunk in split_into_chunks_by_heading(body):
             chunk_rows.append({
                 "source_type": "web",
                 "source_db": source_db,

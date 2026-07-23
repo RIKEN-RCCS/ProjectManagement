@@ -582,6 +582,11 @@ tail -f logs/pm_web.log
 - フィルタ: status（open/closed/すべて）・マイルストーン・発生日・削除状態（非削除/削除済み/すべて）
 - 楽観的排他制御: 別タブや他ユーザーが先に保存した場合はエラーを表示し上書きを防止
 
+**pm_daemon.sh が管理するサービス**: `qa`（Argus Socket Modeデーモン）・`web`（本Web UI）に加え、
+`docling`（docling-serve、§12a参照）も同じ `start/stop/status` インターフェースで管理できる
+（`bash scripts/pm_daemon.sh start docling` / `stop docling` / `status docling`）。Web UI の
+Services 画面からも起動・停止・ログ閲覧が可能。
+
 ### 12. ドキュメントレジストリ（pm_slack_box_links.py）
 
 Slack投稿中のBOXリンクを収集し、ローカルLLMで構造化メタデータを抽出して `docs_{index_name}.db` に保存する。情報の散逸に対処するための機能。
@@ -706,6 +711,39 @@ python3 scripts/pm_box_crawl.py --remove --folder-pattern "アーカイブ/*"
 | boxnote | JSON 抽出（`_extract_boxnote_text`）| — |
 
 **マルチモーダル変換**: 文字情報を持たないPPTXやスキャンPDFは ffmpeg 等で画像化したうえで `OPENAI_API_BASE` のマルチモーダルLLMに投げて Markdown 化する。`OPENAI_API_BASE` 未設定の場合はテキスト抽出のみで進む。
+
+**Docling 変換経路（優先経路、環境変数ゲート）**:
+
+上記は `DOCLING_SERVE_URL` 未設定時（既定）の変換チェーン。設定時は pdf/docx/xlsx/pptx の変換が
+docling-serve（`pm_daemon.sh start docling` で常駐する HTTP API、`POST /v1/convert/file`）経由に切り替わる。
+
+| 環境変数 | デフォルト | 説明 |
+|---|---|---|
+| `DOCLING_SERVE_URL` | 未設定（Docling無効） | docling-serve のベースURL（例 `http://127.0.0.1:5001`）|
+| `DOCLING_TIMEOUT` | `600`（秒） | 変換リクエストのタイムアウト |
+| `DOCLING_OCR_PRESET` | `easyocr` | OCRエンジン。rapidocr は同梱モデルが中国語/英語/ラテンのみで日本語かな非対応のため既定は easyocr |
+| `DOCLING_OCR_LANG` | `ja,en` | OCR対象言語（カンマ区切り） |
+
+変換オプションは `pdf_backend=dlparse_v4` / `table_mode=accurate` / `do_ocr=true` 固定。
+
+**フォールバック**: docling-serve の `/health` が不通、変換APIがエラーを返す、または pdf/pptx で
+本文が100字未満の場合は上記の既存変換チェーン（pdftotext / LibreOffice / マルチモーダルLLM OCR）へ
+自動フォールバックする。
+
+**`doc_content.convert_method` の新しい値**:
+
+| 値 | 意味 |
+|---|---|
+| `docling` | Docling経由・図言語化なし |
+| `docling+figures` | Docling経由・全ページ図言語化成功 |
+| `docling+figures_partial` | Docling経由・図言語化が一部ページ失敗 |
+| `docling+nofig` | Docling経由・図言語化を試行したが図が見つからなかった |
+
+**pptx の併用方式**: Docling は pptx の図OCRに未対応のため、本文・表は Docling で抽出したうえで、
+`relevance != noise` の pptx には既存のマルチモーダル LLM OCR による図言語化を
+「## 図・グラフ（OCR言語化）」セクションとして本文末尾に追記する（core pdf/docx の図言語化は従来どおり）。
+図言語化エンドポイント未設定時はテキストのみで変換し、`--figures-pending` の再試行バックフィル対象に
+pptx も含まれるようになった。
 
 #### ステップC: relevance 判定（pm_box_relevance.py）
 

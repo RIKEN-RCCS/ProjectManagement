@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-07-23 Docling 統合 — Box 抽出品質の底上げと見出し考慮チャンク分割
+
+**背景**: OpenWebUI RAG（Docling + bge-m3）の高品質を確認。embedding・チャンクは Argus と同等で、
+品質差の主因は Docling の抽出（表構造化・レイアウト・OCR）と特定。
+**決定**: pm_box_crawl に `DOCLING_SERVE_URL` ゲートの Docling 経路を追加（失敗時は既存経路へ自動
+フォールバック、pptx は Docling 本文＋既存マルチモーダル OCR の図言語化を併用）。docling-serve は
+pm_daemon 管理（port 5001、`venv:` 記法）に一本化し tmux 手動運用を廃止。pm_embed に
+`split_into_chunks_by_heading`（P2 の議題単位分割＋見出しパス付与）を実装し全件再索引。
+**捨てた案**: OCR=rapidocr（docling 同梱モデルが中国語/英語/ラテンのみで日本語かな非対応と実機確認
+→ easyocr ja,en に変更）。noise 含む全件 --force 再変換（1660 件は索引対象外で無駄が大きいと
+ユーザー判断 → non-noise 208 件の個別再変換に切替）。
+**結果**: non-noise pdf/docx/pptx の 96%（267/279）が docling 系 method、図言語化セクション入り
+チャンク 3,109 件、索引 27,271 チャンク（見出しプレフィックス付与済み）。権限制限 PDF は pikepdf
+空パスワード復号の前処理で対応（poppler のみ読める特殊暗号化 PDF 8 件は pdftotext 残置が正）。
+
 ## 2026-07-22 terminology 辞書を 1216→72 語に浄化、slide_ocr 抽出に LLM フィルタ追加
 
 **背景**: `slide_ocr.extract_terminology()` が正規表現のみ（大文字語・カタカナ4文字以上）で抽出

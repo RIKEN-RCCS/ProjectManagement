@@ -917,10 +917,10 @@ Slack要約の出典はチャンネルIDではなく人が読みやすい名称�
 | ソースDB | source_type | チャンク化単位 |
 |---|---|---|
 | `docs_{index_name}.db` | `document` | 1ドキュメント = 1チャンク（タイトル・種別・説明・共有者・トピック・URL を連結）|
-| `box_docs.db` (本文) | `document` | Markdown 本文を `CHUNK_MAX_CHARS=1000` で分割（`pm_box_relevance.py` で `noise` と判定されたファイルは除外）|
-| `data/minutes/{kind}.db` | `minutes_content` | 議題・段落単位 |
-| `data/slack.db` | `slack_raw` | スレッド単位（親 + 返信を連結） |
-| `data/web_articles.db` | `web` | 1記事 = 1チャンク |
+| `box_docs.db` (本文) | `document` | `split_into_chunks_by_heading()` で `#`〜`###` 見出し単位にセクション分割し、各チャンク先頭に見出しパス（例 `【第2章 性能評価 > GPU実行結果】`）を付与した上でセクション内を `CHUNK_MAX_CHARS=1000` で段落詰め（`pm_box_relevance.py` で `noise` と判定されたファイルは除外）|
+| `data/minutes/{kind}.db` | `minutes_content` | 議題・段落単位（`box_docs.db` と同じ `split_into_chunks_by_heading()` を使用）|
+| `data/slack.db` | `slack_raw` | スレッド単位（親 + 返信を連結、見出し分割は非適用）|
+| `data/web_articles.db` | `web` | 見出しがあれば `split_into_chunks_by_heading()` でセクション分割、無ければ従来どおり1記事に近い単位 |
 
 ```
 pm_slack_box_links.py → docs_pm.db          (Slack 上の Box リンクのメタデータ)
@@ -966,6 +966,10 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 | `--config PATH` | `data/argus_config.yaml` | 設定ファイルのパス |
 | `--data-dir PATH` | `data` | ソースDBの検索ディレクトリ |
 | `--dry-run` | なし | 書き込みなしでチャンク数のみ表示 |
+
+見出し考慮チャンク分割（`split_into_chunks_by_heading()`、P2「チャンク設計の改善」参照）は
+新規インデックス時にのみ適用されるため、既存インデックスの分割単位を変更するには
+`pm_embed.py --full-rebuild` での再構築が必要。
 
 ### 既存ワークフローへの統合
 
@@ -1143,9 +1147,19 @@ crontab -l | grep argus
 
 ### P2: チャンク設計の改善
 
-- **見出しの引き継ぎ**: 各チャンク先頭に所属する議題名を付与（例: `【2026-01-14 リーダー会議 / GPU性能評価】`）することでLLMの文脈理解が向上
+`scripts/data-pipeline/pm_embed.py::split_into_chunks_by_heading()`（2026-07-23）により
+以下2点は実現済み:
+
+- **議題単位の分割**: `#`〜`###` 見出し（コードフェンス外のみ）でセクション分割し、セクション内は
+  従来どおり段落詰め（`CHUNK_MAX_CHARS=1000` / `CHUNK_OVERLAP_CHARS=100`）
+- **見出しの引き継ぎ**: 各チャンク先頭に所属する見出しパスを付与（例:
+  `【第2章 性能評価 > GPU実行結果】`）することでLLMの文脈理解が向上。適用対象は
+  box_document / minutes_content / web（slack_raw は従来の段落分割のまま）。見出しの無い
+  文書は従来と完全同一の分割結果になる（後方互換）
+
+未実装のまま残る課題:
+
 - **親子チャンク**: 小チャンク（200文字）でFTS検索 → ヒットしたら親チャンク（1000文字）を回答生成に渡す
-- **議題単位の分割**: 現在の段落分割から `##` 見出し単位の分割に変更
 
 ### P3: Re-rankingの改善
 

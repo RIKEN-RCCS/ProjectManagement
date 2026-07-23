@@ -692,6 +692,7 @@ def admin_service_logs(name: str, lines: int = Query(100, ge=10, le=500)):
         "qa": _REPO / "logs" / "pm_qa_server.log",
         "web": _REPO / "logs" / "pm_web.log",
         "fish": _REPO / "logs" / "pm_fish_tts.log",
+        "docling": _REPO / "logs" / "docling_serve.log",
     }
     log_path = log_files.get(name)
     if not log_path:

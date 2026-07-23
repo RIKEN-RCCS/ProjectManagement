@@ -37,6 +37,7 @@ _SCRIPTS_DIR = _REPO / "scripts"
 _SERVICE_LOG_FILES: dict[str, Path] = {
     "qa": _LOG_DIR / "pm_qa_server.log",
     "web": _LOG_DIR / "pm_web.log",
+    "docling": _LOG_DIR / "docling_serve.log",
 }
 
 # --------------------------------------------------------------------------- #
@@ -388,9 +389,9 @@ async def get_service_status(name: str) -> dict:
 
 
 async def get_all_services() -> list[dict]:
-    """全サービス (qa/web) の状態を返す。"""
+    """全サービス (qa/web/docling) の状態を返す。"""
     results = []
-    for name in ["qa", "web"]:
+    for name in ["qa", "web", "docling"]:
         results.append(await get_service_status(name))
     return results
 
