@@ -558,18 +558,22 @@ def retrieve_chunks_hybrid(
 
 def rerank_chunks(question: str, chunks: list[dict],
                   openai_base: str = "", top_k: int = TOP_K_RERANK,
-                  format_source_label=None) -> list[dict]:
+                  format_source_label=None, use_llm: bool = False) -> list[dict]:
     """LLMを使って質問に最も関連するチャンクを top_k 件に絞り込む。
 
     format_source_label: chunk → str のラベル生成関数（省略時は source_ref/source_type を使用）。
     pm_qa_server.py から呼ぶ場合は _format_source_label を渡す。
+    openai_base: 歴史的経緯の有効化フラグ（truthy なら re-rank を実行）。
+        call_argus_llm が内部でルーティングするため URL としては未使用。
+    use_llm: openai_base と同様の有効化フラグ（新規呼び出し元向け）。
+        有効判定は `use_llm or bool(openai_base)`。
     """
     from cli_utils import call_argus_llm
 
     if not chunks or len(chunks) <= top_k:
         return chunks
 
-    if not openai_base:
+    if not (use_llm or openai_base):
         return chunks[:top_k]
 
     def _default_label(c: dict) -> str:
@@ -593,7 +597,10 @@ def rerank_chunks(question: str, chunks: list[dict],
     )
 
     try:
-        result = call_argus_llm(prompt=prompt, max_tokens=30, timeout=60, temperature=0.0)
+        # max_tokens=4096: 上限であり非thinkingモデルの消費は増えない。rivaultフォールバック先が
+        # Kimi-K2-Thinkingの場合thinkingだけで2-3k消費するため4096未満だと本文が出ず無言で先頭切りに退化する。
+        # timeout=30s: search_textは高頻度ツールのためinvestigateの480s予算を守る。
+        result = call_argus_llm(prompt=prompt, max_tokens=4096, timeout=30, temperature=0.0)
         indices: list[int] = []
         for token in result.strip().split():
             try:

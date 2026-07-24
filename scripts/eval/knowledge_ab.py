@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""knowledge_ab.py — Slack抽出ナレッジ検索 第一段 (LLM vs SudachiPy) A/B評価
+"""knowledge_ab.py — Slack抽出ナレッジ検索 A/B評価（keywords / rerank 比較モード）
 
-retrieve_knowledge_for_extraction() の第一段トピックキーワード抽出を
-keyword_mode="llm" / "sudachi" の両方で実行し、抽出される背景資料
+retrieve_knowledge_for_extraction() の抽出される背景資料
 （decisions/action_items 抽出プロンプトへの注入テキスト）の質を
-LLM-as-a-judge で比較する。
+LLM-as-a-judge で比較する。--compare で比較軸を切り替える:
+
+- keywords（既定）: 第一段トピックキーワード抽出を keyword_mode="llm" / "sudachi" の
+  両方で実行して比較する（method 名は "llm" / "sudachi"）
+- rerank: keyword_mode="llm" 固定で、re-rank を llm_rerank=False / True の
+  両方で実行して比較する（method 名は "norerank" / "rerank"）
 
 - Slack スレッドは data/slack.db から scripts/ingest/slack.py の
   open_slack_db / fetch_threads 経由で取得する（直 sqlite3 接続はしない）
@@ -17,6 +21,7 @@ LLM-as-a-judge で比較する。
 例:
     source ~/.secrets/rivault_tokens.sh
     ~/.venv_aarch64/bin/python3 scripts/eval/knowledge_ab.py run --limit 30
+    ~/.venv_aarch64/bin/python3 scripts/eval/knowledge_ab.py run --compare rerank --limit 30
     ~/.venv_aarch64/bin/python3 scripts/eval/knowledge_ab.py report
 """
 from __future__ import annotations
@@ -44,6 +49,18 @@ DEFAULT_QA_DB = REPO_ROOT / "data" / "qa_index.db"
 DEFAULT_JSONL = REPO_ROOT / "data" / "eval" / "knowledge_ab.jsonl"
 
 _WIN_TIE_THRESHOLD = 0.60
+
+# --compare モード → (method名, retrieve_knowledge_for_extraction への追加kwargs) のペア
+_COMPARE_VARIANTS: dict[str, list[tuple[str, dict]]] = {
+    "keywords": [
+        ("sudachi", {"keyword_mode": "sudachi"}),
+        ("llm", {"keyword_mode": "llm"}),
+    ],
+    "rerank": [
+        ("norerank", {"keyword_mode": "llm", "llm_rerank": False}),
+        ("rerank", {"keyword_mode": "llm", "llm_rerank": True}),
+    ],
+}
 
 JUDGE_SYSTEM = (
     "あなたは Slack スレッドからの決定事項・アクションアイテム抽出を支援する"
@@ -129,7 +146,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     rng = random.Random(args.seed)
     rng.shuffle(candidates)
     sampled = candidates[: args.limit] if args.limit else candidates
-    print(f"サンプリング: {len(sampled)} 件 (seed={args.seed})", file=sys.stderr)
+    print(f"サンプリング: {len(sampled)} 件 (seed={args.seed}, compare={args.compare})",
+          file=sys.stderr)
+
+    (name_0, kwargs_0), (name_1, kwargs_1) = _COMPARE_VARIANTS[args.compare]
 
     with open(jsonl_path, "a", encoding="utf-8") as out_f:
         for i, thread in enumerate(sampled, 1):
@@ -138,36 +158,34 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  [{i}/{len(sampled)}] thread_ts={thread_ts} "
                   f"({len(thread_text)}字) ...", file=sys.stderr, flush=True)
 
-            log_sudachi = _CaptureLogger()
-            out_sudachi = retrieve_knowledge_for_extraction(
+            log_0 = _CaptureLogger()
+            out_0 = retrieve_knowledge_for_extraction(
                 thread_text, qa_db_path=qa_db_path, top_k=args.top_k,
-                index_name=args.index_name, keyword_mode="sudachi",
-                logger=log_sudachi,
+                index_name=args.index_name, logger=log_0, **kwargs_0,
             )
-            log_llm = _CaptureLogger()
-            out_llm = retrieve_knowledge_for_extraction(
+            log_1 = _CaptureLogger()
+            out_1 = retrieve_knowledge_for_extraction(
                 thread_text, qa_db_path=qa_db_path, top_k=args.top_k,
-                index_name=args.index_name, keyword_mode="llm",
-                logger=log_llm,
+                index_name=args.index_name, logger=log_1, **kwargs_1,
             )
 
             record = {
                 "thread_ts": thread_ts,
                 "channel_id": thread.get("channel_id"),
-                "keywords_sudachi": _extract_keyword_line(log_sudachi),
-                "keywords_llm": _extract_keyword_line(log_llm),
+                f"keywords_{name_0}": _extract_keyword_line(log_0),
+                f"keywords_{name_1}": _extract_keyword_line(log_1),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
 
-            if out_sudachi == out_llm:
+            if out_0 == out_1:
                 record.update(identical=True, swap=None,
                               prefer_method="tie", rationale="identical_output")
-            elif _is_effectively_empty(out_sudachi) and _is_effectively_empty(out_llm):
+            elif _is_effectively_empty(out_0) and _is_effectively_empty(out_1):
                 record.update(identical=False, swap=None,
                               prefer_method="tie", rationale="both_empty")
             else:
                 swap = rng.randint(0, 1)
-                methods = [("sudachi", out_sudachi), ("llm", out_llm)]
+                methods = [(name_0, out_0), (name_1, out_1)]
                 if swap:
                     methods = methods[::-1]
                 (method_a, out_a), (method_b, out_b) = methods
@@ -211,47 +229,79 @@ def cmd_run(args: argparse.Namespace) -> int:
 # report
 # --------------------------------------------------------------------------- #
 
+# compare モードごとの「新方式」「既定（ベースライン）方式」の method 名。
+# JSONL のレコードは keywords_{name_0}/keywords_{name_1} キーの有無で
+# どの compare モードのレコードかを判別する（複数 compare モードの
+# レコードが同じ JSONL に混在していても集計を分離できる）。
+_COMPARE_NEW_METHOD = {"keywords": "llm", "rerank": "rerank"}
+_COMPARE_BASELINE_METHOD = {"keywords": "sudachi", "rerank": "norerank"}
+# 不合格時に案内する退避用 env（両機能とも既定有効・opt-out 方式）
+_FALLBACK_ENV = {"keywords": "ARGUS_DISABLE_LLM_KEYWORDS=1", "rerank": "ARGUS_DISABLE_LLM_RERANK=1"}
+
+
+def _detect_compare_mode(rec: dict) -> str | None:
+    for mode, variants in _COMPARE_VARIANTS.items():
+        name_0, name_1 = variants[0][0], variants[1][0]
+        if f"keywords_{name_0}" in rec and f"keywords_{name_1}" in rec:
+            return mode
+    return None
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     jsonl_path = Path(args.jsonl)
     if not jsonl_path.exists():
         print(f"JSONL が見つかりません: {jsonl_path}", file=sys.stderr)
         return 2
 
-    counts = {"llm": 0, "sudachi": 0, "tie": 0, "parse_failed": 0}
-    total = 0
+    groups: dict[str, dict[str, int]] = {}
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
-            total += 1
+            mode = _detect_compare_mode(rec) or "unknown"
+            counts = groups.setdefault(mode, {})
             pm = rec.get("prefer_method", "parse_failed")
-            if pm not in counts:
-                pm = "parse_failed"
-            counts[pm] += 1
+            counts[pm] = counts.get(pm, 0) + 1
 
-    print("# Knowledge A/B Report — LLM keyword extraction vs SudachiPy\n")
-    print(f"total: {total}")
-    print(f"llm_wins: {counts['llm']}")
-    print(f"sudachi_wins: {counts['sudachi']}")
-    print(f"ties: {counts['tie']}")
-    print(f"parse_failed: {counts['parse_failed']}")
-
-    valid = counts["llm"] + counts["sudachi"] + counts["tie"]
-    if valid == 0:
-        print("\n有効サンプルなし（judge解析失敗のみ）。判定不能")
+    if not groups:
+        print("レコードなし", file=sys.stderr)
         return 1
 
-    win_tie_rate = (counts["llm"] + counts["tie"]) / valid
-    print(f"\nllm 勝ち+引き分け率: {win_tie_rate:.1%} "
-          f"({counts['llm'] + counts['tie']}/{valid})")
-    if win_tie_rate >= _WIN_TIE_THRESHOLD:
-        print(f"合否判定: 合格（≥{_WIN_TIE_THRESHOLD:.0%}）→ 既定有効のままロールアウト可")
-    else:
-        print(f"合否判定: 未達（<{_WIN_TIE_THRESHOLD:.0%}）→ "
-              f"opt-in（ARGUS_ENABLE_LLM_KEYWORDS=1）への反転を検討")
-    return 0
+    print("# Knowledge A/B Report\n")
+    any_valid = False
+    for mode, counts in groups.items():
+        total = sum(counts.values())
+        new_method = _COMPARE_NEW_METHOD.get(mode)
+        baseline_method = _COMPARE_BASELINE_METHOD.get(mode)
+        print(f"## compare={mode} (n={total})\n")
+        for method, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {method}: {n}")
+
+        if new_method is None:
+            print("  (compare モード不明。method 別件数のみ表示)\n")
+            continue
+
+        new_wins = counts.get(new_method, 0)
+        baseline_wins = counts.get(baseline_method, 0)
+        ties = counts.get("tie", 0)
+        valid = new_wins + baseline_wins + ties
+        if valid == 0:
+            print("  有効サンプルなし（judge解析失敗のみ）。判定不能\n")
+            continue
+
+        any_valid = True
+        win_tie_rate = (new_wins + ties) / valid
+        fallback_env = _FALLBACK_ENV.get(mode, "")
+        print(f"\n  {new_method} 勝ち+引き分け率: {win_tie_rate:.1%} ({new_wins + ties}/{valid})")
+        if win_tie_rate >= _WIN_TIE_THRESHOLD:
+            print(f"  合否判定: 合格（≥{_WIN_TIE_THRESHOLD:.0%}）→ 既定有効のままロールアウト可\n")
+        else:
+            print(f"  合否判定: 未達（<{_WIN_TIE_THRESHOLD:.0%}）→ "
+                  f"退避 env（{fallback_env}）で無効化して既定を見直す\n")
+
+    return 0 if any_valid else 1
 
 
 # --------------------------------------------------------------------------- #
@@ -260,11 +310,14 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Slack抽出ナレッジ検索 第一段 (LLM vs SudachiPy) A/B評価",
+        description="Slack抽出ナレッジ検索 A/B評価（keywords: LLM vs SudachiPy / rerank: LLM re-rank有無）",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="サンプリング→両手法実行→judge→JSONL追記")
+    r.add_argument("--compare", choices=sorted(_COMPARE_VARIANTS), default="keywords",
+                   help="比較軸: keywords=キーワード抽出(sudachi/llm)、"
+                        "rerank=re-rank有無(norerank/rerank、keyword_modeはllm固定)")
     r.add_argument("--slack-db", default=str(DEFAULT_SLACK_DB), metavar="PATH")
     r.add_argument("--qa-db", default=str(DEFAULT_QA_DB), metavar="PATH")
     r.add_argument("--jsonl", default=str(DEFAULT_JSONL), metavar="PATH")

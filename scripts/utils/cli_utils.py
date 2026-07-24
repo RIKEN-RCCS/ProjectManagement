@@ -325,6 +325,7 @@ def retrieve_knowledge_for_extraction(
     logger=None,
     index_name: str = "pm-all",
     keyword_mode: str = "auto",
+    llm_rerank: bool | None = None,
 ) -> str:
     """
     抽出処理用のナレッジ検索。
@@ -342,6 +343,9 @@ def retrieve_knowledge_for_extraction(
             auto は環境変数 ARGUS_DISABLE_LLM_KEYWORDS が "1" でない限り LLM 抽出を
             試行し、失敗（None）時のみ SudachiPy にフォールバックする。
             llm/sudachi は明示指定（env より優先。A/B・テスト用）。
+        llm_rerank: re-rank に LLM を使うか（None は環境変数
+            ARGUS_DISABLE_LLM_RERANK が "1" でない限り有効。bool 明示は env より優先。
+            既定 None・env未設定時は有効＝LLM re-rank で上位top_k件を選抜する）。
 
     Returns:
         フォーマット済みナレッジテキスト。検索失敗時は空文字列。
@@ -407,8 +411,12 @@ def retrieve_knowledge_for_extraction(
             logger.debug("ナレッジ検索: 該当なし")
             return "（該当する過去議論なし）"
 
-        # LLM re-ranking で上位top_k件に絞り込み
-        reranked = rerank_chunks(search_query, chunks)[:top_k]
+        # LLM re-ranking で上位top_k件に絞り込み（既定有効・opt-out）
+        use_llm_rerank = (
+            llm_rerank if llm_rerank is not None
+            else os.environ.get("ARGUS_DISABLE_LLM_RERANK") != "1"
+        )
+        reranked = rerank_chunks(search_query, chunks, use_llm=use_llm_rerank)[:top_k]
 
         # プロンプト注入用フォーマット
         return format_context(reranked)

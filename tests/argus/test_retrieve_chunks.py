@@ -282,6 +282,99 @@ class TestRetrieveChunksHydeSkipKeyword:
 
 
 # --------------------------------------------------------------------------- #
+# rerank_chunks — use_llm / openai_base 後方互換・max_tokens スケーリング
+# --------------------------------------------------------------------------- #
+
+class TestRerankChunksUseLlm:
+    def test_use_llm_true_invokes_llm_and_selects_indices(self, monkeypatch):
+        import cli_utils
+
+        def fake_call(prompt, **kw):
+            return "0 3"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": f"c{i}"} for i in range(5)]
+        result = rerank_chunks("q", chunks, top_k=2, use_llm=True)
+        assert [c["content"] for c in result] == ["c0", "c3"]
+
+    def test_use_llm_false_and_no_openai_base_skips_llm(self, monkeypatch):
+        import cli_utils
+        called = {"n": 0}
+
+        def fake_call(prompt, **kw):
+            called["n"] += 1
+            return "0"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": f"c{i}"} for i in range(5)]
+        result = rerank_chunks("q", chunks, top_k=2)
+        assert called["n"] == 0
+        assert [c["content"] for c in result] == ["c0", "c1"]
+
+    def test_openai_base_truthy_is_backward_compatible(self, monkeypatch):
+        """use_llm 未指定でも openai_base が truthy なら従来どおり LLM が呼ばれる。"""
+        import cli_utils
+
+        def fake_call(prompt, **kw):
+            return "1 2"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": f"c{i}"} for i in range(5)]
+        result = rerank_chunks("q", chunks, top_k=2, openai_base="http://example/v1")
+        assert [c["content"] for c in result] == ["c1", "c2"]
+
+    def test_max_tokens_fixed_at_4096(self, monkeypatch):
+        """max_tokens=4096 固定。Kimi-K2-Thinking フォールバック時の thinking 消費
+        （2-3k）を吸収するための下限であり top_k とは無関係。"""
+        import cli_utils
+        captured = {}
+
+        def fake_call(prompt, **kw):
+            captured.update(kw)
+            return "0"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": f"c{i}"} for i in range(25)]
+        rerank_chunks("q", chunks, top_k=20, use_llm=True)
+        assert captured.get("max_tokens") == 4096
+
+    def test_timeout_fixed_at_30s(self, monkeypatch):
+        """timeout=30s 固定。search_text は高頻度ツールのため investigate の
+        480s 予算を守る。"""
+        import cli_utils
+        captured = {}
+
+        def fake_call(prompt, **kw):
+            captured.update(kw)
+            return "0"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": f"c{i}"} for i in range(10)]
+        rerank_chunks("q", chunks, top_k=3, use_llm=True)
+        assert captured.get("timeout") == 30
+
+    def test_len_chunks_le_top_k_skips_llm_even_when_enabled(self, monkeypatch):
+        import cli_utils
+        called = {"n": 0}
+
+        def fake_call(prompt, **kw):
+            called["n"] += 1
+            return "0"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": f"c{i}"} for i in range(3)]
+        result = rerank_chunks("q", chunks, top_k=5, use_llm=True)
+        assert called["n"] == 0
+        assert result == chunks
+
+
+# --------------------------------------------------------------------------- #
 # build_full_context_sections / generate_brief_report (全文脈方式, call_argus_llm mocked)
 # --------------------------------------------------------------------------- #
 

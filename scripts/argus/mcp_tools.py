@@ -7,6 +7,7 @@ pm_mcp_server.py（FastMCP 経由）と pm_argus_agent.py（/argus-investigate�
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import unicodedata
 from datetime import date
@@ -255,7 +256,10 @@ def search_text(query: str, index_name: str = "pm", since: str | None = None,
                                   since_date=since, record_ids=rids)
     if not merged:
         return f"「{query}」に一致する情報は見つかりませんでした。"
-    reranked = rerank_chunks(query, merged, format_source_label=_format_source_label)
+    reranked = rerank_chunks(
+        query, merged, format_source_label=_format_source_label,
+        use_llm=os.environ.get("ARGUS_DISABLE_LLM_RERANK") != "1",
+    )
     scope = f"（対象: {'、'.join(names)}）" if names else ""
     lines = [f"## 全文検索結果{scope}（{len(reranked)}件）"]
     for i, c in enumerate(reranked, 1):

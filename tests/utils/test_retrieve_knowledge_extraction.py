@@ -160,3 +160,83 @@ def test_qa_db_missing_returns_empty(tmp_path):
     from cli_utils import retrieve_knowledge_for_extraction
     result = retrieve_knowledge_for_extraction("text", qa_db_path=tmp_path / "nonexistent.db")
     assert result == ""
+
+
+# --------------------------------------------------------------------------- #
+# llm_rerank 結線（rerank_chunks への use_llm 伝播）
+# --------------------------------------------------------------------------- #
+
+
+def _patch_pipeline_with_chunks(monkeypatch, *, llm_keywords, capture=None):
+    """retrieve_chunks_hyde が非空チャンクを返すようにし、rerank_chunks に
+    渡される kwargs を capture に記録する。"""
+    import argus.retrieval as retrieval
+    import enrich.knowledge_context as kc
+
+    monkeypatch.setattr(kc, "extract_topic_keywords_llm", lambda text, **kw: llm_keywords)
+    monkeypatch.setattr(kc, "extract_topic_keywords", lambda t: ["sudachi_kw"])
+    monkeypatch.setattr(retrieval, "retrieve_chunks_hyde",
+                        lambda *a, **kw: [{"content": "chunk1"}])
+
+    def fake_rerank(query, chunks, **kw):
+        if capture is not None:
+            capture.update(kw)
+        return chunks
+    monkeypatch.setattr(retrieval, "rerank_chunks", fake_rerank)
+
+
+def test_llm_rerank_true_passes_use_llm_true(monkeypatch, qa_db_path):
+    capture = {}
+    _patch_pipeline_with_chunks(monkeypatch, llm_keywords=["kw"], capture=capture)
+
+    from cli_utils import retrieve_knowledge_for_extraction
+    retrieve_knowledge_for_extraction("text", qa_db_path=qa_db_path, llm_rerank=True)
+
+    assert capture.get("use_llm") is True
+
+
+def test_llm_rerank_none_without_env_is_enabled_by_default(monkeypatch, qa_db_path):
+    """既定（opt-out）: env 未設定なら LLM re-rank は有効。"""
+    capture = {}
+    _patch_pipeline_with_chunks(monkeypatch, llm_keywords=["kw"], capture=capture)
+
+    from cli_utils import retrieve_knowledge_for_extraction
+    retrieve_knowledge_for_extraction("text", qa_db_path=qa_db_path)
+
+    assert capture.get("use_llm") is True
+
+
+def test_llm_rerank_none_with_disable_env_is_disabled(monkeypatch, qa_db_path):
+    monkeypatch.setenv("ARGUS_DISABLE_LLM_RERANK", "1")
+    capture = {}
+    _patch_pipeline_with_chunks(monkeypatch, llm_keywords=["kw"], capture=capture)
+
+    from cli_utils import retrieve_knowledge_for_extraction
+    retrieve_knowledge_for_extraction("text", qa_db_path=qa_db_path)
+
+    assert capture.get("use_llm") is False
+
+
+def test_llm_rerank_false_overrides_default_enabled(monkeypatch, qa_db_path):
+    """bool 明示指定は env より優先（keyword_mode と同じ流儀）。
+    env 未設定（既定有効）でも llm_rerank=False を明示すれば無効になる。"""
+    capture = {}
+    _patch_pipeline_with_chunks(monkeypatch, llm_keywords=["kw"], capture=capture)
+
+    from cli_utils import retrieve_knowledge_for_extraction
+    retrieve_knowledge_for_extraction("text", qa_db_path=qa_db_path, llm_rerank=False)
+
+    assert capture.get("use_llm") is False
+
+
+def test_llm_rerank_true_overrides_disable_env(monkeypatch, qa_db_path):
+    """bool 明示指定は env より優先: ARGUS_DISABLE_LLM_RERANK=1 でも
+    llm_rerank=True を明示すれば有効になる。"""
+    monkeypatch.setenv("ARGUS_DISABLE_LLM_RERANK", "1")
+    capture = {}
+    _patch_pipeline_with_chunks(monkeypatch, llm_keywords=["kw"], capture=capture)
+
+    from cli_utils import retrieve_knowledge_for_extraction
+    retrieve_knowledge_for_extraction("text", qa_db_path=qa_db_path, llm_rerank=True)
+
+    assert capture.get("use_llm") is True

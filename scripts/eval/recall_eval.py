@@ -351,11 +351,17 @@ def _stage_hyde(question, since_date, index_name, index_db, args):
 
 
 def _stage_rerank(question, since_date, index_name, index_db, args):
+    """LLM re-rank 段。top_k=10 で LLM 選抜し、選ばれなかった残り候補を元の順序で
+    後ろに連結する安定並べ替えを返す（hit@5/10 で昇格効果、hit@30/60 で取りこぼしを測る）。
+    """
     merged, hyde_queries = _call_capturing_hyde(
         retrieve_chunks_hyde, question, index_db, k=30, since_date=since_date,
         max_merged=50, index_name=index_name,
     )
-    ranked = rerank_chunks(question, merged, openai_base=args.rerank_llm_base, top_k=50)
+    ranked = rerank_chunks(question, merged, openai_base=args.rerank_llm_base, top_k=10)
+    if len(ranked) < len(merged):
+        ranked_ids = {c["id"] for c in ranked}
+        ranked = ranked + [c for c in merged if c["id"] not in ranked_ids]
     return ranked, hyde_queries
 
 
@@ -802,7 +808,8 @@ def main() -> int:
     rn.add_argument("--entry", default=None, help="単一エントリのみ実行")
     rn.add_argument("--label", default="", help="run のラベル")
     rn.add_argument("--rerank-llm-base", default="",
-                    help="rerank 段の LLM base url（既定 空文字＝rerank_chunks が LLM をスキップ）")
+                    help="rerank 段の有効化フラグ（truthy なら LLM re-rank 有効。"
+                         "call_argus_llm が内部ルーティングするため URL としては未使用）")
     rn.set_defaults(func=cmd_run)
 
     rp = sub.add_parser("report", help="直近 run と baseline を比較したレポートを出力する")
