@@ -92,6 +92,11 @@ def main() -> None:
         help="Pass 1 投入後の自動エンリッチメント（Pass 2）をスキップ",
     )
     parser.add_argument(
+        "--enrich-backfill", type=int, default=10, metavar="N",
+        help="自動エンリッチ時に未エンリッチ残（related_ids IS NULL）を古い順に最大 N 件ずつ"
+             "追加で回収する。0 で無効",
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="既存レコードの上書きを許可",
     )
@@ -149,11 +154,32 @@ def main() -> None:
             post_d, post_a = _max_ids()
             new_d = [{"id": i} for i in range(pre_d + 1, post_d + 1)]
             new_a = [{"id": i} for i in range(pre_a + 1, post_a + 1)]
-            if new_d or new_a:
+
+            backfill_d: list[dict] = []
+            backfill_a: list[dict] = []
+            if args.enrich_backfill > 0:
+                try:
+                    from enrich.enrich_items import _fetch_backfill_items
+                    backfill_d, backfill_a = _fetch_backfill_items(
+                        pm_conn, limit=args.enrich_backfill,
+                    )
+                except Exception as e:
+                    log(f"[WARN] backfill 対象取得失敗（スキップ）: {e}")
+
+            new_d_ids = {d["id"] for d in new_d}
+            new_a_ids = {a["id"] for a in new_a}
+            backfill_d = [d for d in backfill_d if d["id"] not in new_d_ids]
+            backfill_a = [a for a in backfill_a if a["id"] not in new_a_ids]
+            merged_d = new_d + backfill_d
+            merged_a = new_a + backfill_a
+
+            if merged_d or merged_a:
                 log(f"\n[INFO] 自動エンリッチ対象: decisions={len(new_d)}件, action_items={len(new_a)}件")
+                if backfill_d or backfill_a:
+                    log(f"[INFO] 未エンリッチ backfill: decisions={len(backfill_d)}件, action_items={len(backfill_a)}件")
                 try:
                     from enrich.enrich_items import _fetch_target_items, enrich_batch
-                    ids = [f"d:{d['id']}" for d in new_d] + [f"a:{a['id']}" for a in new_a]
+                    ids = [f"d:{d['id']}" for d in merged_d] + [f"a:{a['id']}" for a in merged_a]
                     decisions, action_items = _fetch_target_items(pm_conn, item_ids=ids)
                     project_context = load_claude_md_context()
                     enrich_batch(

@@ -944,6 +944,31 @@ def _fetch_target_items(
     return decisions, action_items
 
 
+def _fetch_backfill_items(pm_conn, *, limit: int) -> tuple[list[dict], list[dict]]:
+    """未エンリッチ（related_ids IS NULL）の行を古い順に最大 limit 件ずつ取得する。
+
+    自動エンリッチが「新規挿入 ID 範囲」しか対象にしないため、LLM 失敗（`{"error": ...}`）
+    で取りこぼされた行が二度と自動再試行されない恒久未回収バグの回収用。
+    `_save_decision_enrichment`/`_save_action_item_enrichment` は成功時必ず related_ids を
+    書き込むため、related_ids IS NULL が未エンリッチの正確なマーカーになる。
+    """
+    decisions_rows = pm_conn.execute(
+        "SELECT * FROM decisions WHERE COALESCE(deleted, 0) = 0 AND related_ids IS NULL"
+        " ORDER BY id LIMIT ?",
+        (limit,),
+    ).fetchall()
+    decisions = [dict(r) for r in decisions_rows]
+
+    action_rows = pm_conn.execute(
+        "SELECT * FROM action_items WHERE COALESCE(deleted, 0) = 0 AND related_ids IS NULL"
+        " ORDER BY id LIMIT ?",
+        (limit,),
+    ).fetchall()
+    action_items = [dict(r) for r in action_rows]
+
+    return decisions, action_items
+
+
 def ledger_regrade(
     pm_conn,
     *,
@@ -1040,6 +1065,8 @@ def main():
     parser.add_argument("--since", help="この日付以降のアイテムのみ対象 (YYYY-MM-DD)")
     parser.add_argument("--id", nargs="+", dest="item_ids",
                         help="特定IDのみ (d:42 a:15 形式)")
+    parser.add_argument("--backfill", type=int, default=0, metavar="N",
+                        help="未エンリッチ（related_ids IS NULL）の行を古い順に最大 N 件ずつ再エンリッチする")
     parser.add_argument("--dry-run", action="store_true",
                         help="DB更新なし、結果を標準出力のみ")
     parser.add_argument("--output", help="結果をファイルにも保存")
@@ -1051,6 +1078,9 @@ def main():
     parser.add_argument("--regrade-all", action="store_true",
                         help="--ledger-regrade で判定済み（ledger_gate設定済み）も含めて全件やり直す")
     args = parser.parse_args()
+
+    if args.backfill and args.item_ids:
+        parser.error("--backfill と --id は同時指定できません")
 
     db_path = Path(args.db)
     if not db_path.is_absolute():
@@ -1089,9 +1119,12 @@ def main():
             print(f"\n[INFO] 結果を {args.output} に保存しました")
         return
 
-    decisions, action_items = _fetch_target_items(
-        pm_conn, since=args.since, item_ids=args.item_ids,
-    )
+    if args.backfill > 0:
+        decisions, action_items = _fetch_backfill_items(pm_conn, limit=args.backfill)
+    else:
+        decisions, action_items = _fetch_target_items(
+            pm_conn, since=args.since, item_ids=args.item_ids,
+        )
 
     log(f"[INFO] 対象: decisions={len(decisions)}件, action_items={len(action_items)}件")
     if not decisions and not action_items:
