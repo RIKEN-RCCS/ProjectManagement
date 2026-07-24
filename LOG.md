@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-07-24 LLM re-rank を修理し既定有効化 — investigate hit@5 最大3倍、extraction A/B 92.9%
+
+**背景**: rerank_chunks が本番全経路（investigate の search_text / Slack 抽出）で no-op と判明
+（openai_base 未配線）。さらに評価側 _stage_rerank も top_k=50 の早期 return で LLM が呼ばれず、
+max_tokens=30 も選抜に不足 — 「測定器ごと壊れていた」状態だった。
+**決定**: 測定器を修理（top10 選抜+残候補後置の安定並べ替え）した上で両側を実測 —
+recall_eval（gold 28クエリ）: literal hit@5 0.231→0.692（3倍）・topic 0→0.286・hit@30/60 悪化ゼロ・
+MRR 6倍。knowledge_ab（実スレッド30件）: rerank 24勝/2敗/2分（92.9%）。両側合格により
+**既定有効**（退避は `ARGUS_DISABLE_LLM_RERANK=1`）。コストは検索1回 +LLM 1呼（2秒級）。
+**留意**: rivault フォールバック先が Kimi-K2-Thinking の場合 thinking がトークンを食うため
+max_tokens=4096 固定（上限であり非 thinking モデルの消費は不変）・timeout 30s に設定。
+rerank 失敗時は従来の先頭切りへ静かに退化する（クラッシュしない）設計。
+
 ## 2026-07-24 Slack 抽出ナレッジ検索の第一段を LLM 化 — A/B 90% で既定有効ロールアウト
 
 **背景**: 旧「同種バグ調査」の最後の残件。第一段が SudachiPy 出現順先頭 15 名詞のため、
