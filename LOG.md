@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-07-24 「V4-Flash 切替の follow-up」計画を obsolete としてクローズ — glm-5.2 移行で前提消滅
+
+**背景**: 2026-06-05 起票の残課題 3 件を点検。(1) Pass1 抽出の call_local_llm 直叩きは
+現行 slack.py で全経路 call_argus_llm 化済み、(2) think 再検証は 2026-07-18 に glm-5.2 で
+A/B 実測済み（investigate think=False 既定で決着）、(3) gpu_memory_utilization 0.5→0.8 は
+チャット系 LLM が RIKYU リモート glm-5.2 へ移行しローカル vLLM が bge-m3 のみとなったため
+前提消滅（GPU 逼迫なし、WhisperX ピーク 7.1GB/121GB）。
+**決定**: 3 件とも解消済み/前提消滅のため PLAN から削除。V4-Flash 固有のチューニング知見
+（AI 過剰抽出対策の個数上限等）はコードに残置で問題なし。
+
 ## 2026-07-24 enrich の恒久未回収を backfill 機構で解消 — 「同種バグ調査」残課題 3 件を決着
 
 **背景**: PLAN 保留構想「argus-investigate と同種バグ（途中結果の静かな破棄）」の残 3 容疑を

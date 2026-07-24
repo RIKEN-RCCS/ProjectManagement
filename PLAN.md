@@ -117,25 +117,6 @@ whisperx_pyfix オーバーレイ）で動作し、reconcile に決定論的話�
    高頻度なら glm-5.2 の think=True 集約プロンプト側の見直しを検討
 3. 問題なければ本エントリを削除（LOG.md に記録済み）
 
-### V4-Flash 切替の本番適用と follow-up
-
-**ステータス**: コード修正完了・デーモン稼働確認済み (2026-06-05)。録音パイプライン (`pm_from_recording.sh` / `/argus-transcribe`) も RiVault 経由で動作確認済み。
-
-**完了項目**:
-- `call_claude()` / `call_local_llm()` / `detect_vllm_model()` / `slide_ocr` / `transcribe_pipeline` すべて
-  `ARGUS_PREFER_RIVAULT=1` で RiVault に切替。CLI フラグ追加なし。
-- `pm_daemon.sh` が `rivault_tokens.sh` 読み込み後に `ARGUS_PREFER_RIVAULT=1` を自動 export。
-- V4-Flash のアクションアイテム過剰抽出対策（個数上限 5 件を明示）。
-
-**残課題**:
-- **Pass1 抽出 (Slack/議事録)**: `scripts/ingest/slack.py:368` が `call_local_llm()` を直接叩く。
-  V4-Flash に乗せるなら `call_argus_llm` 経由に書き換える必要あり (gemma4 のままで良いか要判断)。
-- **think モード再検証**: investigate の深い推論ケースだけ think ON のほうが良い可能性。
-  Stage 6 では brief/risk が支配的だったため Non-think 優位だが、investigate のサブセットで
-  再評価する余地あり (`scripts/eval/argus_ab.py run --target rivault --think-on-v4`)。
-- **GB10 の余剰メモリ活用**: gemma4 が外れることで gpu_memory_utilization を 0.5 → 0.8 程度に
-  上げられる。Whisper 同居の OOM 余裕度が増す。
-
 ### initial-search 既定ON の事後観察（期限 2026-07-27）
 
 **ステータス**: 観察中（2026-07-13〜）。コミット `6855533` で investigate/メンション応答の
