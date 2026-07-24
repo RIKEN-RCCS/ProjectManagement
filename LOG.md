@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-07-24 Slack 抽出ナレッジ検索の第一段を LLM 化 — A/B 90% で既定有効ロールアウト
+
+**背景**: 旧「同種バグ調査」の最後の残件。第一段が SudachiPy 出現順先頭 15 名詞のため、
+長スレッドで冒頭の雑談名詞が検索スロットを食い複数話題が混線していた。精査で
+retrieve_chunks_hyde が既に extract_search_keywords（質問向け LLM rewrite）を無条件に
+呼んでいる二重構造も判明。
+**決定**: extract_topic_keywords_llm（スレッド向けプロンプト・head+tail 4000字切り詰め・
+失敗時 SudachiPy フォールバック）を新設し、成功時は下流の質問向け rewrite をスキップ
+（総 LLM 呼び出し数は現状維持の 2 回）。実スレッド 30 件の A/B（judge=Kimi、順序スワップ付き）
+で **LLM 版 18 勝 / SudachiPy 3 勝 / 引き分け 9（勝ち+引き分け 90%）** → 既定有効で投入。
+退避は `ARGUS_DISABLE_LLM_KEYWORDS=1`（LLM 全断時は劣化経路で呼び出しが 3 回に増えるため、
+不調が続く場合はこの env で止める）。共有関数 extract_topic_keywords は他 4 箇所が使うため不変更。
+**副産物・留意**: (1) extraction 経路の rerank_chunks は openai_base 未指定で no-op
+（BM25+鮮度順の先頭切り）と判明 — 将来課題。(2) 評価は scripts/eval/knowledge_ab.py
+（gitignore 許可リスト追加）。eval JSONL にはキーワード（人名を含みうる）が残るため
+data/eval/ のローカル限定運用を維持。(3) judge の Kimi は max_tokens 512 だと think で
+使い切り全件 parse_failed になる罠を再確認（既定 4096 に修正）。
+
 ## 2026-07-24 日程調整 Agent・RiVault embedding バグ報告・Web UI 認証を PM 判断で取り下げ
 
 **背景**: 日程調整 Agent（/argus-schedule、2026-05-26 起票・Modal 案まで検討済み）、
