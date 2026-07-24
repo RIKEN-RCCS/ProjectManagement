@@ -41,6 +41,16 @@ else
   echo "Unknown architecture: $ARCH"; exit 1
 fi
 
+WHISPER_ENGINE="${WHISPER_ENGINE:-whisperx}"
+WHISPERX_SIF="${WHISPERX_SIF:-/lvs0/rccs-sdt/hikaru.inoue/cpu_aarch64/singularity/whisperx-blackwell.sif}"
+WHISPERX_PYFIX="${WHISPERX_PYFIX:-/lvs0/rccs-sdt/hikaru.inoue/cpu_aarch64/singularity/whisperx_pyfix}"
+if [[ "$WHISPER_ENGINE" == "whisperx" ]]; then
+  if [[ ! -f "$WHISPERX_SIF" || ! -d "$WHISPERX_PYFIX" || "$ARCH" != "aarch64" ]]; then
+    echo "[WARN] WHISPER_ENGINE=whisperx が指定されましたが SIF/PYFIX が見つからないか aarch64 以外のため transformers にフォールバックします"
+    WHISPER_ENGINE="transformers"
+  fi
+fi
+
 export SINGULARITY_BIND=/lvs0
 
 if [[ -f ~/.secrets/localLLM.sh ]]; then
@@ -209,7 +219,19 @@ print('\n'.join(terms))
     WHISPER_EXTRA_OPT="--initial-prompt-extra $TERMINOLOGY_FILE"
   fi
 
-  cat << EOF > "$WORKDIR/run.sh"
+  if [[ "$WHISPER_ENGINE" == "whisperx" ]]; then
+    cat << EOF > "$WORKDIR/run.sh"
+if [ -n "$SKIP_SECONDS" ]; then
+  ffmpeg -y -ss $SKIP_SECONDS -i $INPUT_ABS -c copy $TMP_FILE
+else
+  ffmpeg -y -i $INPUT_ABS -c copy $TMP_FILE
+fi
+ffmpeg -y -i $TMP_FILE -ac 1 -ar 16000 -vn -af "highpass=f=1000" -sample_fmt s16 $WAV_FILE
+ffprobe -v error -show_format -show_streams -i $WAV_FILE
+python3 $WHISPER_VAD $WAV_FILE $BASENAME.md --engine whisperx $WHISPER_EXTRA_OPT
+EOF
+  else
+    cat << EOF > "$WORKDIR/run.sh"
 . /.venv/bin/activate
 export HUGGING_FACE_TOKEN="${HUGGING_FACE_TOKEN:?HUGGING_FACE_TOKEN 環境変数が設定されていません}"
 export HF_HOME="$WORKDIR/hf_cache"
@@ -223,6 +245,13 @@ ffmpeg -y -i $TMP_FILE -ac 1 -ar 16000 -vn -af "highpass=f=1000" -sample_fmt s16
 ffprobe -v error -show_format -show_streams -i $WAV_FILE
 python3 $WHISPER_VAD $WAV_FILE $BASENAME.md $WHISPER_EXTRA_OPT
 EOF
+  fi
+
+  if [[ "$WHISPER_ENGINE" == "whisperx" ]]; then
+    # --env での引き渡しは ps/proc/*/cmdline から読めるため、機密は
+    # SINGULARITYENV_* 環境変数経由（singularity が自動で継承）に限定する
+    export SINGULARITYENV_HUGGING_FACE_TOKEN="${HUGGING_FACE_TOKEN:?HUGGING_FACE_TOKEN 環境変数が設定されていません}"
+  fi
 
   # GPU OOM は再実行で成功することが多い（vLLM 等の他プロセスのメモリ占有が変動するため）。
   # OOM パターンを検出した場合のみリトライする。コード起因の失敗をリトライしないように
@@ -234,7 +263,16 @@ EOF
   for ((attempt = 1; attempt <= MAX_RETRIES; attempt++)); do
     echo "[INFO] Whisper 試行 $attempt / $MAX_RETRIES"
     set +e
-    time singularity run --nv "$SIFFILE1" sh "$WORKDIR/run.sh" 2>&1 | tee "$RUN_LOG"
+    if [[ "$WHISPER_ENGINE" == "whisperx" ]]; then
+      time singularity exec --nv \
+        --env PYTHONPATH="$WHISPERX_PYFIX" \
+        --env LD_LIBRARY_PATH="$WHISPERX_PYFIX/ct2/lib" \
+        --env HF_HOME="$HOME/.cache/huggingface" \
+        --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+        "$WHISPERX_SIF" sh "$WORKDIR/run.sh" 2>&1 | tee "$RUN_LOG"
+    else
+      time singularity run --nv "$SIFFILE1" sh "$WORKDIR/run.sh" 2>&1 | tee "$RUN_LOG"
+    fi
     STATUS=${PIPESTATUS[0]}
     set -e
     if [[ $STATUS -eq 0 ]]; then
@@ -386,12 +424,17 @@ EOF
     if [[ -n "$SLIDE_CONTEXT_FILE" && -s "$SLIDE_CONTEXT_FILE" ]]; then
       SLIDE_CTX_OPT="--slide-context $SLIDE_CONTEXT_FILE"
     fi
+    VTT_OFFSET_OPT=""
+    if [[ -n "$SKIP_SECONDS" && "$SKIP_SECONDS" -gt 0 ]]; then
+      VTT_OFFSET_OPT="--vtt-offset $SKIP_SECONDS"
+    fi
     if PYTHONPATH="$SCRIPT_DIR" "$PYTHON3" \
         "$SCRIPT_DIR/recording/reconcile_transcript.py" \
         "$BASENAME.md" \
         --vtt "$VTT_FILE" \
         --output "$RECONCILED_MD" \
-        $SLIDE_CTX_OPT; then
+        $SLIDE_CTX_OPT \
+        $VTT_OFFSET_OPT; then
       mv "$RECONCILED_MD" "$BASENAME.md"
       echo "[INFO] reconcile 完了: $BASENAME.md を更新しました"
     else

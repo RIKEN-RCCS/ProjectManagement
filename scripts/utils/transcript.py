@@ -106,6 +106,75 @@ def _ts_to_sec(ts: str) -> int:
     return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
 
 
+_SPEAKER_CLUSTER_RE = re.compile(r"^SPEAKER_\d+$")
+
+
+def build_cluster_name_map(
+    whisper_segments: list[dict],
+    vtt_segments: list[dict],
+    *,
+    vtt_offset_sec: int = 0,
+    min_share: float = 0.6,
+    min_ratio: float = 1.5,
+    min_overlap_sec: float = 5.0,
+) -> dict[str, dict]:
+    """Whisper の SPEAKER_XX クラスタを VTT 実名話者へ時間重なり多数決で対応付ける。
+
+    whisper_segments と vtt_segments の各ペアについて時間的な重なり秒数を
+    (クラスタ, VTT話者名) ごとに累積し、クラスタごとに最多重なりの VTT 話者を
+    確定候補とする。以下を全て満たすクラスタのみ確定として返す:
+      (a) 1位話者の重なりがクラスタ総重なりの min_share 以上
+      (b) 1位/2位の重なり比が min_ratio 以上（2位が無ければ無条件成立）
+      (c) 1位の重なり絶対値が min_overlap_sec 以上
+
+    vtt_offset_sec は whisper 時刻→VTT 時刻の補正秒（録音冒頭を --skip N で
+    切り落とした場合に N を渡す）。
+
+    Returns
+    -------
+    dict[str, dict]: 確定したクラスタのみを含む。
+        {"SPEAKER_03": {"name": "<VTT話者名>", "share": 0.82, "overlap_sec": 213.5}, ...}
+    """
+    vtt_ranges = []
+    for v in vtt_segments:
+        if v["speaker"] == "Unknown":
+            continue
+        vtt_ranges.append((v["speaker"], _ts_to_sec(v["start"]), _ts_to_sec(v["end"])))
+
+    overlap: dict[str, dict[str, float]] = {}
+    for w in whisper_segments:
+        speaker = w["speaker"]
+        if speaker == "UNKNOWN" or not _SPEAKER_CLUSTER_RE.match(speaker):
+            continue
+        w_start = w["start"] + vtt_offset_sec
+        w_end = w["end"] + vtt_offset_sec
+        for v_speaker, v_start, v_end in vtt_ranges:
+            ov = max(0, min(w_end, v_end) - max(w_start, v_start))
+            if ov <= 0:
+                continue
+            counts = overlap.setdefault(speaker, {})
+            counts[v_speaker] = counts.get(v_speaker, 0.0) + ov
+
+    result: dict[str, dict] = {}
+    for cluster, counts in overlap.items():
+        total = sum(counts.values())
+        if total <= 0:
+            continue
+        ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        top_name, top_overlap = ranked[0]
+        share = top_overlap / total
+        if share < min_share:
+            continue
+        if top_overlap < min_overlap_sec:
+            continue
+        if len(ranked) > 1:
+            _, second_overlap = ranked[1]
+            if top_overlap / second_overlap < min_ratio:
+                continue
+        result[cluster] = {"name": top_name, "share": share, "overlap_sec": top_overlap}
+    return result
+
+
 def get_speaker_timeline(vtt_segments: list[dict], start_ts: str, end_ts: str) -> str:
     """指定時間帯の話者発言を時系列で要約（誰がどの順番で話したか）。"""
     start_sec = _ts_to_sec(start_ts)
@@ -190,6 +259,31 @@ def build_speaker_map(speakers: list[str], context: str) -> str:
         else:
             mapping.append(f"- {vtt_speaker} → （参加者リストから特定してください）")
     return "\n".join(mapping)
+
+
+_PAREN_SUFFIX_RE = re.compile(r"\s*\(.*\)$")
+
+
+def resolve_speaker_name(vtt_name: str, mapped_name: str) -> str:
+    """build_speaker_map の正規化結果が VTT 名の姓を落としている場合に補正する。
+
+    mapped_name が ASCII のみで、かつ VTT 名（括弧書きサフィックス除去後、大文字小文字
+    無視）の部分文字列であり、その VTT 名より短い場合は、姓が欠落したとみなし
+    括弧書きサフィックス（` (RIKEN)` 等）を除いた VTT 名を正規名として採用する。
+    それ以外は mapped_name をそのまま返す。
+
+    例: VTT "William Dawson" × map "William" → "William Dawson"
+        VTT "Yasumichi Aoki (RIKEN)" × map "青木 保道" → "青木 保道"（非ASCIIのため変更なし）
+    """
+    stripped_vtt = _PAREN_SUFFIX_RE.sub("", vtt_name).strip()
+    if (
+        mapped_name
+        and mapped_name.isascii()
+        and mapped_name.lower() in stripped_vtt.lower()
+        and len(mapped_name) < len(stripped_vtt)
+    ):
+        return stripped_vtt
+    return mapped_name
 
 
 _COMBINED_PART_RE = re.compile(

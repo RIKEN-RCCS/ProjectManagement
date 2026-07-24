@@ -807,6 +807,14 @@ def _consensus_stage3(
                     file=sys.stderr,
                 )
                 decisions_md = _decisions_fallback_from_clusters(accepted)
+            else:
+                if not _split_decisions_list(decisions_md):
+                    print(
+                        f"[WARN] Stage 3 決定事項集約が空/不正形（{len(decisions_md)} chars）、"
+                        f"投票通過済みクラスタ {len(accepted)} 件の代表 bullet で代替",
+                        file=sys.stderr,
+                    )
+                    decisions_md = _decisions_fallback_from_clusters(accepted)
         elif clusters:
             print(f"[WARN] Stage 3 決定事項: 投票閾値 {min_vote} 通過なし → 「（なし）」", file=sys.stderr)
             decisions_md = "## 決定事項\n\n（なし）"
@@ -875,6 +883,14 @@ def _consensus_stage3(
                     file=sys.stderr,
                 )
                 actions_md = _actions_fallback_from_clusters(accepted)
+            else:
+                if not _split_action_rows(actions_md):
+                    print(
+                        f"[WARN] Stage 3 AI集約が空/不正形（{len(actions_md)} chars）、"
+                        f"投票通過済みクラスタ {len(accepted)} 件の代表行で代替",
+                        file=sys.stderr,
+                    )
+                    actions_md = _actions_fallback_from_clusters(accepted)
         elif clusters:
             print(f"[WARN] Stage 3 AI: 投票閾値 {min_vote} 通過なし → 「（なし）」", file=sys.stderr)
             actions_md = "## アクションアイテム\n\n（なし）"

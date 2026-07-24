@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -26,7 +27,14 @@ REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from cli_utils import call_argus_llm, load_claude_md_context
-from utils.transcript import _ts_to_sec, parse_vtt, parse_whisper_transcript
+from utils.transcript import (
+    _ts_to_sec,
+    build_cluster_name_map,
+    build_speaker_map,
+    parse_vtt,
+    parse_whisper_transcript,
+    resolve_speaker_name,
+)
 
 # セグメント突合の許容タイムずれ（秒）— VTT と Whisper のタイムスタンプ誤差を吸収
 _TIME_TOLERANCE_SEC = 10
@@ -59,6 +67,9 @@ _RECONCILE_PROMPT = """\
 ## 参加者リスト（話者同定の参照）
 {claude_md_context}
 
+## 話者名の正規表記（出力ではこの表記のみを使用）
+{canonical_speakers}
+
 ## Whisper 文字起こし（{time_range}）
 {whisper_text}
 
@@ -74,11 +85,13 @@ _RECONCILE_PROMPT = """\
 ルール:
 1. タイムスタンプは Whisper のものを基準とし、VTT で補完する
 2. 話者名は VTT に記載の実名を使用、VTT に対応なければ参加者リストから推測、不明なら「不明」
-3. 発言内容は用語辞書・スライドを参照して誤認識を修正する
-4. 両方のASRに発言があれば内容を統合（より詳細・正確な方を選ぶ）
-5. 片方にしかない発言は、それが妥当なら採用する
-6. SPEAKER_00, SPEAKER_01 等の匿名ラベルを出力に含めないこと
-7. 出力は修正済み発言のみ。説明や補足は不要
+3. Whisper 文字起こし側で既に実名が付いている発言の話者名は確定済みである。変更・別表記への置き換えをしないこと。SPEAKER_XX のまま残っている発言のみ、VTT と参加者リストから話者を推測する
+4. 出力の話者名は「話者名の正規表記」に記載の表記のみを使用する（英名・カナ・敬称付き等の別表記に書き換えない）
+5. 発言内容は用語辞書・スライドを参照して誤認識を修正する
+6. 両方のASRに発言があれば内容を統合（より詳細・正確な方を選ぶ）
+7. 片方にしかない発言は、それが妥当なら採用する
+8. SPEAKER_00, SPEAKER_01 等の匿名ラベルを出力に含めないこと
+9. 出力は修正済み発言のみ。説明や補足は不要
 
 修正済み文字起こし:
 """
@@ -96,12 +109,15 @@ def _parse_whisper_to_timed(text: str) -> list[dict]:
     return segments  # already has start/end as int seconds
 
 
-def _vtt_in_range(vtt_segments: list[dict], start_sec: int, end_sec: int) -> list[dict]:
-    """VTT セグメントのうち [start_sec, end_sec) に属するものを返す。"""
+def _vtt_in_range(
+    vtt_segments: list[dict], start_sec: int, end_sec: int, vtt_offset: int = 0
+) -> list[dict]:
+    """VTT セグメントのうち whisper 時刻 [start_sec, end_sec) に対応する VTT 時刻範囲
+    ([start_sec + vtt_offset, end_sec + vtt_offset)) に属するものを返す。"""
     result = []
     for seg in vtt_segments:
         seg_start = _ts_to_sec(seg["start"])
-        if start_sec <= seg_start < end_sec:
+        if start_sec + vtt_offset <= seg_start < end_sec + vtt_offset:
             result.append(seg)
     return result
 
@@ -156,12 +172,14 @@ def reconcile_chunk(
     claude_md_context: str,
     terminology_text: str,
     slide_context: str,
+    canonical_speaker_text: str = "（なし）",
     timeout: int = 480,
+    vtt_offset: int = 0,
 ) -> str:
     """1 チャンクを LLM で突合修正し、修正済みテキストを返す。"""
     time_range = f"{_sec_to_hms(start_sec)}〜{_sec_to_hms(end_sec)}"
     whisper_chunk = _whisper_in_range(whisper_segs, start_sec, end_sec)
-    vtt_chunk = _vtt_in_range(vtt_segs, start_sec, end_sec)
+    vtt_chunk = _vtt_in_range(vtt_segs, start_sec, end_sec, vtt_offset)
 
     # 両方空のチャンクはスキップ
     if not whisper_chunk and not vtt_chunk:
@@ -174,6 +192,7 @@ def reconcile_chunk(
         terminology=terminology_text,
         slide_context=slide_context or "（スライドOCR なし）",
         claude_md_context=claude_md_context,
+        canonical_speakers=canonical_speaker_text or "（なし）",
         time_range=time_range,
         whisper_text=whisper_text,
         vtt_text=vtt_text,
@@ -197,6 +216,7 @@ def reconcile_transcript(
     chunk_sec: int = _CHUNK_SEC,
     timeout: int = 480,
     verbose: bool = True,
+    vtt_offset: int = 0,
 ) -> Path:
     """Whisper トランスクリプト全体を VTT と突合修正して保存する。
 
@@ -209,6 +229,8 @@ def reconcile_transcript(
     meeting_kind    : 用語辞書フィルタ用の会議種別
     chunk_sec       : 1 チャンクあたりの秒数（デフォルト 300 = 5 分）
     timeout         : LLM 呼び出しタイムアウト（秒）
+    vtt_offset      : whisper 時刻→VTT 時刻の補正秒（録音冒頭を --skip N で
+                      切り落とした場合に N を指定）
 
     Returns
     -------
@@ -230,6 +252,16 @@ def reconcile_transcript(
     whisper_segs = _parse_whisper_to_timed(raw_text)
     vtt_segs = parse_vtt(str(vtt_path))
 
+    # 決定論的話者名寄せ（LLM 前に実施し、未解決クラスタの推測のみを LLM に残す）
+    cluster_map = build_cluster_name_map(whisper_segs, vtt_segs, vtt_offset_sec=vtt_offset)
+    # 診断用: 閾値を無効化し、未確定クラスタの「1位候補」を把握する（verbose 時のみ）
+    raw_cluster_map: dict = {}
+    if verbose:
+        raw_cluster_map = build_cluster_name_map(
+            whisper_segs, vtt_segs, vtt_offset_sec=vtt_offset,
+            min_share=0.0, min_ratio=0.0, min_overlap_sec=0.0,
+        )
+
     if not whisper_segs:
         if verbose:
             print("[WARN] reconcile: Whisper セグメントが検出されませんでした。元のファイルをそのまま使用します。")
@@ -246,6 +278,53 @@ def reconcile_transcript(
             claude_md_context = claude_md_context + glossary_ref
     except Exception:
         pass
+
+    # 全 VTT 話者名を参加者リストの正規表記に変換（対応が取れなければ VTT 名のまま）。
+    # 確定クラスタの話者名書き換えと、未解決発言向けプロンプト注入テーブルの両方に使う。
+    all_vtt_speakers = sorted({s["speaker"] for s in vtt_segs if s["speaker"] != "Unknown"})
+    canonical_name_by_vtt: dict[str, str] = {}
+    if all_vtt_speakers:
+        speaker_map_text = build_speaker_map(all_vtt_speakers, claude_md_context)
+        for line in speaker_map_text.splitlines():
+            m = re.match(r"^-\s*(.+?)\s*→\s*(.+)$", line.strip())
+            if not m:
+                continue
+            vtt_name, resolved = m.group(1), m.group(2)
+            if resolved == "（参加者リストから特定してください）":
+                canonical_name_by_vtt[vtt_name] = vtt_name
+            else:
+                canonical_name_by_vtt[vtt_name] = resolve_speaker_name(vtt_name, resolved)
+
+    canonical_speaker_text = (
+        "\n".join(f"- {name} → {canonical_name_by_vtt[name]}" for name in all_vtt_speakers)
+        if all_vtt_speakers else "（VTT 話者情報なし）"
+    )
+
+    # 確定した VTT 名を正規表記に書き換え
+    if cluster_map:
+        speaker_rename: dict[str, str] = {}
+        for cluster, info in cluster_map.items():
+            speaker_rename[cluster] = canonical_name_by_vtt.get(info["name"], info["name"])
+
+        for seg in whisper_segs:
+            if seg["speaker"] in speaker_rename:
+                seg["speaker"] = speaker_rename[seg["speaker"]]
+
+        if verbose:
+            for cluster, info in cluster_map.items():
+                print(
+                    f"[INFO] 話者名寄せ: {cluster}→{speaker_rename[cluster]} "
+                    f"(share {info['share']:.2f}, {info['overlap_sec']:.0f}s)"
+                )
+
+    if verbose:
+        for cluster, info in raw_cluster_map.items():
+            if cluster in cluster_map:
+                continue
+            print(
+                f"[INFO] 話者名寄せ未確定: {cluster} (1位 {info['name']} share {info['share']:.2f})"
+            )
+
     terminology_text = _build_terminology_text(meeting_kind)
 
     # 全体の時間範囲
@@ -274,7 +353,9 @@ def reconcile_transcript(
             claude_md_context=claude_md_context,
             terminology_text=terminology_text,
             slide_context=slide_context,
+            canonical_speaker_text=canonical_speaker_text,
             timeout=timeout,
+            vtt_offset=vtt_offset,
         )
         if result:
             chunks_output.append(result)
@@ -305,6 +386,8 @@ if __name__ == "__main__":
     parser.add_argument("--meeting-kind", help="会議種別（用語辞書フィルタ用）")
     parser.add_argument("--chunk-sec", type=int, default=_CHUNK_SEC, help=f"チャンク秒数（デフォルト: {_CHUNK_SEC}）")
     parser.add_argument("--timeout", type=int, default=480, help="LLM タイムアウト秒数")
+    parser.add_argument("--vtt-offset", type=int, default=0,
+                         help="whisper 時刻→VTT 時刻の補正秒。録音冒頭を --skip N で切り落とした場合に N を指定")
     args = parser.parse_args()
 
     slide_ctx = ""
@@ -319,5 +402,6 @@ if __name__ == "__main__":
         meeting_kind=args.meeting_kind,
         chunk_sec=args.chunk_sec,
         timeout=args.timeout,
+        vtt_offset=args.vtt_offset,
     )
     print(f"[完了] {out}")

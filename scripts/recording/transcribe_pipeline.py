@@ -40,6 +40,27 @@ elif _ARCH == "x86_64":
 else:
     SIF_FILE = Path("/tmp/whisper.sif")  # フォールバック（実行時エラーになる）
 
+# WhisperX エンジン切替（既定: transformers、既存動作無変更）
+# module import 時に評価され qa デーモンに常駐する。変更はデーモン起動環境に設定して
+# pm_daemon.sh stop qa → start qa で反映すること。
+WHISPER_ENGINE = os.environ.get("WHISPER_ENGINE", "whisperx")
+WHISPERX_SIF = Path(os.environ.get(
+    "WHISPERX_SIF",
+    "/lvs0/rccs-sdt/hikaru.inoue/cpu_aarch64/singularity/whisperx-blackwell.sif",
+))
+WHISPERX_PYFIX = Path(os.environ.get(
+    "WHISPERX_PYFIX",
+    "/lvs0/rccs-sdt/hikaru.inoue/cpu_aarch64/singularity/whisperx_pyfix",
+))
+if WHISPER_ENGINE == "whisperx" and (
+    not WHISPERX_SIF.is_file() or not WHISPERX_PYFIX.is_dir() or _ARCH != "aarch64"
+):
+    logger.warning(
+        "WHISPER_ENGINE=whisperx が指定されましたが SIF/PYFIX が見つからないか "
+        "aarch64 以外のため transformers にフォールバックします"
+    )
+    WHISPER_ENGINE = "transformers"
+
 # PyAnnoteモデルの永続キャッシュ
 HF_HOME = Path.home() / ".cache" / "huggingface"
 
@@ -347,29 +368,38 @@ def run_whisper(audio_path, terminology_path: Path | None = None):
 
     extra_opt = f"--initial-prompt-extra '{terminology_path}'" if terminology_path else ""
 
-    # FFmpeg 4.x → 6.x の soname マッピング（コンテナ内 FFmpeg 6.x vs torchcodec 要求 4.x）
-    _FFMPEG_SHIMS = {
-        "libavutil.so.56":    "/usr/lib/aarch64-linux-gnu/libavutil.so.58",
-        "libavcodec.so.58":   "/usr/lib/aarch64-linux-gnu/libavcodec.so.60",
-        "libavformat.so.58":  "/usr/lib/aarch64-linux-gnu/libavformat.so.60",
-        "libavdevice.so.58":  "/usr/lib/aarch64-linux-gnu/libavdevice.so.60",
-        "libavfilter.so.7":   "/usr/lib/aarch64-linux-gnu/libavfilter.so.9",
-        "libswscale.so.5":    "/usr/lib/aarch64-linux-gnu/libswscale.so.7",
-        "libswresample.so.3": "/usr/lib/aarch64-linux-gnu/libswresample.so.4",
-    }
-    lib_shim_dir = Path(audio_save_dir) / "lib_shim"
-    lib_shim_dir.mkdir(parents=True, exist_ok=True)
-    for name, target in _FFMPEG_SHIMS.items():
-        symlink = lib_shim_dir / name
-        if not symlink.is_symlink():
-            symlink.symlink_to(target)
-
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".sh", dir=audio_save_dir, delete=False
     ) as f:
         run_sh = Path(f.name)
         wav_path = audio_path.with_suffix(".wav")
-        f.write(f"""\
+        if WHISPER_ENGINE == "whisperx":
+            f.write(f"""\
+[ -z "${{HUGGING_FACE_TOKEN:-}}" ] && [ -f ~/.secrets/hf_tokens.sh ] && . ~/.secrets/hf_tokens.sh
+
+ffmpeg -y -i '{audio_path}' -ac 1 -ar 16000 -vn -af "highpass=f=1000" -sample_fmt s16 '{wav_path}'
+python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' --engine whisperx {extra_opt}
+""")
+        else:
+            # FFmpeg 4.x → 6.x の soname マッピング（コンテナ内 FFmpeg 6.x vs torchcodec 要求 4.x）
+            # whisperx コンテナは LD_LIBRARY_PATH を ct2/lib で上書きするため不要
+            _FFMPEG_SHIMS = {
+                "libavutil.so.56":    "/usr/lib/aarch64-linux-gnu/libavutil.so.58",
+                "libavcodec.so.58":   "/usr/lib/aarch64-linux-gnu/libavcodec.so.60",
+                "libavformat.so.58":  "/usr/lib/aarch64-linux-gnu/libavformat.so.60",
+                "libavdevice.so.58":  "/usr/lib/aarch64-linux-gnu/libavdevice.so.60",
+                "libavfilter.so.7":   "/usr/lib/aarch64-linux-gnu/libavfilter.so.9",
+                "libswscale.so.5":    "/usr/lib/aarch64-linux-gnu/libswscale.so.7",
+                "libswresample.so.3": "/usr/lib/aarch64-linux-gnu/libswresample.so.4",
+            }
+            lib_shim_dir = Path(audio_save_dir) / "lib_shim"
+            lib_shim_dir.mkdir(parents=True, exist_ok=True)
+            for name, target in _FFMPEG_SHIMS.items():
+                symlink = lib_shim_dir / name
+                if not symlink.is_symlink():
+                    symlink.symlink_to(target)
+
+            f.write(f"""\
 . /.venv/bin/activate
 [ -f ~/.secrets/hf_tokens.sh ] && . ~/.secrets/hf_tokens.sh
 export HUGGING_FACE_TOKEN="${{HUGGING_FACE_TOKEN:-{hugging_face_token}}}"
@@ -383,6 +413,21 @@ python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' {extr
 
     env = os.environ.copy()
     env["SINGULARITY_BIND"] = "/lvs0"
+
+    if WHISPER_ENGINE == "whisperx":
+        # --env での引き渡しは ps/proc/*/cmdline から読めるため、機密は
+        # SINGULARITYENV_* 環境変数経由（singularity が自動で継承）に限定する
+        env["SINGULARITYENV_HUGGING_FACE_TOKEN"] = hugging_face_token
+        cmd = [
+            "singularity", "exec", "--nv",
+            "--env", f"PYTHONPATH={WHISPERX_PYFIX}",
+            "--env", f"LD_LIBRARY_PATH={WHISPERX_PYFIX}/ct2/lib",
+            "--env", f"HF_HOME={HF_HOME}",
+            "--env", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
+            str(WHISPERX_SIF), "sh", str(run_sh),
+        ]
+    else:
+        cmd = ["singularity", "run", "--nv", str(SIF_FILE), "sh", str(run_sh)]
 
     # GPU OOM は再実行で成功することが多い（vLLM 等の他プロセスのメモリ占有が変動するため）。
     # OOM パターンを検出した場合のみリトライする。
@@ -400,7 +445,7 @@ python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' {extr
             logger.info(f"Whisper 試行 {attempt} / {max_retries}")
             output_lines = []
             proc = subprocess.Popen(
-                ["singularity", "run", "--nv", str(SIF_FILE), "sh", str(run_sh)],
+                cmd,
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
