@@ -399,9 +399,15 @@ def retrieve_chunks_hyde(
     since_date: str | None = None, n_extra: int = 2, max_merged: int = 60,
     index_name: str | None = None,
     record_ids: list[str] | None = None,
+    skip_keyword_extract: bool = False,
 ) -> list[dict]:
-    """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。"""
-    cleaned = extract_search_keywords(question)
+    """HyDE クエリ拡張で複数クエリ検索→重複排除→マージ。
+
+    skip_keyword_extract: True の場合 extract_search_keywords（LLM呼び出し）をスキップし、
+    question をそのまま HyDE 拡張の入力に使う（呼び出し元で既にキーワード抽出済みの場合の
+    二重 rewrite 回避用）。既定 False は従来どおりの挙動。
+    """
+    cleaned = question if skip_keyword_extract else extract_search_keywords(question)
     if cleaned != question:
         logger.info(f"[KeywordExtract] '{question}' → '{cleaned}'")
     queries = expand_query_hyde(cleaned, n_extra=n_extra)

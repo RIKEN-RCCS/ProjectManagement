@@ -51,5 +51,6 @@ scripts/eval/*
 !scripts/eval/recall_eval.py
 !scripts/eval/recall_gold.yaml
 !scripts/eval/embedding_duplicate_repro.py
+!scripts/eval/knowledge_ab.py
 scripts/ingest/*.bak
 scripts/data/voice_uploads.db

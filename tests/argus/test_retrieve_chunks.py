@@ -244,6 +244,44 @@ class TestRetrieveChunksHybrid:
 
 
 # --------------------------------------------------------------------------- #
+# retrieve_chunks_hyde — skip_keyword_extract
+# --------------------------------------------------------------------------- #
+
+class TestRetrieveChunksHydeSkipKeyword:
+    """skip_keyword_extract の真偽で extract_search_keywords 呼び出し有無が切り替わること。"""
+
+    def test_skip_false_calls_extract_search_keywords(self, tmp_path, monkeypatch):
+        import argus.retrieval as srv
+        called = {"n": 0}
+
+        def fake_extract(q, timeout=30):
+            called["n"] += 1
+            return q
+        monkeypatch.setattr(srv, "extract_search_keywords", fake_extract)
+        monkeypatch.setattr(srv, "expand_query_hyde", lambda q, n_extra=2, timeout=30: [q])
+        monkeypatch.setattr(srv, "retrieve_chunks_hybrid", lambda *a, **kw: [])
+
+        from argus.retrieval import retrieve_chunks_hyde
+        retrieve_chunks_hyde("質問", tmp_path / "qa.db")
+        assert called["n"] == 1
+
+    def test_skip_true_does_not_call_extract_search_keywords(self, tmp_path, monkeypatch):
+        import argus.retrieval as srv
+        called = {"n": 0}
+
+        def fake_extract(q, timeout=30):
+            called["n"] += 1
+            return q
+        monkeypatch.setattr(srv, "extract_search_keywords", fake_extract)
+        monkeypatch.setattr(srv, "expand_query_hyde", lambda q, n_extra=2, timeout=30: [q])
+        monkeypatch.setattr(srv, "retrieve_chunks_hybrid", lambda *a, **kw: [])
+
+        from argus.retrieval import retrieve_chunks_hyde
+        retrieve_chunks_hyde("質問", tmp_path / "qa.db", skip_keyword_extract=True)
+        assert called["n"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # build_full_context_sections / generate_brief_report (全文脈方式, call_argus_llm mocked)
 # --------------------------------------------------------------------------- #
 

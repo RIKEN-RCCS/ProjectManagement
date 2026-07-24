@@ -69,6 +69,66 @@ def extract_topic_keywords(text: str) -> list[str]:
     return [t for t in re.findall(r'[A-Za-z0-9]+|[゠-ヿ]{2,}|[一-鿿]{2,}', text) if len(t) >= 2]
 
 
+def extract_topic_keywords_llm(
+    text: str,
+    *,
+    timeout: int = 30,
+    max_input_chars: int = 4000,
+) -> list[str] | None:
+    """Slackスレッド本文から LLM でトピックキーワードを抽出する。
+
+    extract_search_keywords（argus/retrieval.py、質問文向けの rewrite）のスレッド版。
+    長スレッドは結論が末尾に出がちなため、超過時は先頭と末尾を残して中間を切り詰める。
+    抽出結果が劣化している場合（例外・空・「なし」・句点混入・有効トークン0）は
+    None を返し、呼び出し側で SudachiPy フォールバックに委ねる。
+    """
+    if len(text) > max_input_chars:
+        text = text[:3000] + "\n...\n" + text[-1000:]
+
+    prompt = (
+        "以下はSlackスレッドの会話ログです。\n"
+        "主題となる固有名詞・技術用語・人名・組織名・略語を"
+        "本文中の表記のままスペース区切りで最大15語抽出してください。\n\n"
+        "除外する語:\n"
+        "- 挨拶・雑談\n"
+        "- 日程調整語（会議, 予定, 日程, 来週, 何時 等）\n"
+        "- メタ語: 議論, 検討, 討議, 進捗, 経緯, 推移, 動向, 状況, 内容, 整理, まとめ, 要約\n"
+        "- 話者名プレフィックス（[HH:MM] 名前: の部分）\n\n"
+        "該当する語が無い場合は「なし」とだけ出力してください。\n\n"
+        f"スレッド:\n{text}\n\n"
+        "出力（キーワードをスペース区切り、説明文・コードブロック禁止、1行のみ）:"
+    )
+
+    try:
+        from utils.llm import call_argus_llm, strip_think_blocks
+        response = call_argus_llm(prompt, max_tokens=100, timeout=timeout, temperature=0.0)
+    except Exception as e:
+        logger.warning(f"[KeywordExtractLLM] 失敗: {e}")
+        return None
+
+    response = strip_think_blocks(response).strip()
+    if not response:
+        return None
+
+    line = response.splitlines()[0].strip()
+    line = re.sub(r"^[-*\d.）)\s]+", "", line).strip()
+
+    if not line or line == "なし" or "。" in line:
+        return None
+
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for tok in line.split():
+        if 2 <= len(tok) <= 30 and tok not in seen:
+            seen.add(tok)
+            tokens.append(tok)
+
+    if not tokens:
+        return None
+
+    return tokens[:15]
+
+
 # ---------------------------------------------------------------------------
 # pm.db 構造化クエリ
 # ---------------------------------------------------------------------------

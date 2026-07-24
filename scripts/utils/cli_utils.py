@@ -324,6 +324,7 @@ def retrieve_knowledge_for_extraction(
     since_days: int = 90,
     logger=None,
     index_name: str = "pm-all",
+    keyword_mode: str = "auto",
 ) -> str:
     """
     抽出処理用のナレッジ検索。
@@ -337,6 +338,10 @@ def retrieve_knowledge_for_extraction(
         since_days: 検索対象を直近N日以内に限定（デフォルト90日）
         logger: ロガー（省略時は標準出力）
         index_name: chunk_indexes でフィルタする論理 index 名（デフォルト pm-all）
+        keyword_mode: トピックキーワード抽出の第一段（"auto"|"llm"|"sudachi"）。
+            auto は環境変数 ARGUS_DISABLE_LLM_KEYWORDS が "1" でない限り LLM 抽出を
+            試行し、失敗（None）時のみ SudachiPy にフォールバックする。
+            llm/sudachi は明示指定（env より優先。A/B・テスト用）。
 
     Returns:
         フォーマット済みナレッジテキスト。検索失敗時は空文字列。
@@ -362,21 +367,41 @@ def retrieve_knowledge_for_extraction(
         if _scripts_dir not in sys.path:
             sys.path.insert(0, _scripts_dir)
         from argus.retrieval import rerank_chunks, retrieve_chunks_hyde
-        from enrich.knowledge_context import extract_topic_keywords, format_context
+        from enrich.knowledge_context import (
+            extract_topic_keywords,
+            extract_topic_keywords_llm,
+            format_context,
+        )
 
-        # トピックキーワード抽出（名詞・固有名詞のみ）
-        keywords = extract_topic_keywords(query_text)
+        # トピックキーワード抽出: 第一段は LLM（auto/llm）→ 失敗時 SudachiPy にフォールバック
+        use_llm = keyword_mode == "llm" or (
+            keyword_mode == "auto" and os.environ.get("ARGUS_DISABLE_LLM_KEYWORDS") != "1"
+        )
+        llm_keywords = extract_topic_keywords_llm(query_text) if use_llm else None
+
+        if llm_keywords is not None:
+            keywords = llm_keywords
+            kw_source = "llm"
+            skip_keyword_extract = True
+        else:
+            keywords = extract_topic_keywords(query_text)
+            kw_source = "sudachi"
+            skip_keyword_extract = False
+
         search_query = " ".join(keywords[:15])  # 上位15個
 
         # 日付カットオフ計算
         cutoff_date = (datetime.now() - timedelta(days=since_days)).strftime("%Y-%m-%d")
 
-        logger.info(f"ナレッジ検索: {cutoff_date} 以降, キーワード={search_query[:100]}, index={index_name}")
+        logger.info(
+            f"ナレッジ検索: {cutoff_date} 以降, キーワード({kw_source})={search_query[:100]}, index={index_name}"
+        )
 
         # FTS5検索（HyDE クエリ拡張 + 日付フィルタ + index_name フィルタ）
         chunks = retrieve_chunks_hyde(
             search_query, qa_db_path, k=20,
             since_date=cutoff_date, index_name=index_name,
+            skip_keyword_extract=skip_keyword_extract,
         )
         if not chunks:
             logger.debug("ナレッジ検索: 該当なし")
