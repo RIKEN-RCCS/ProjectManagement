@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import logging
 import os
 import re
@@ -68,22 +69,14 @@ from format_utils import (
 from utils.slack_post import _split_mrkdwn_to_blocks, _to_slack_mrkdwn
 
 from argus.prompts import (  # noqa: F401 — 後方互換のため全プロンプト定数を再 export
-    _BRIEF_ORCHESTRATOR_PROMPT,
     _BRIEF_PROMPT,
-    _BRIEF_WORKER_CONVERSATION_PROMPT,
-    _BRIEF_WORKER_MINUTES_PROMPT,
-    _BRIEF_WORKER_PM_PROMPT,
     _DAILY_SUMMARY_PROMPT,
     _DRAFT_AGENDA_PROMPT,
     _DRAFT_REPORT_PROMPT,
     _DRAFT_REQUEST_PROMPT,
-    _RISK_ORCHESTRATOR_PROMPT,
     _RISK_PROMPT,
-    _RISK_WORKER_CONVERSATION_PROMPT,
-    _RISK_WORKER_KNOWLEDGE_PROMPT,
-    _RISK_WORKER_MINUTES_PROMPT,
-    _RISK_WORKER_PM_PROMPT,
 )
+from argus.qa_engine import _query_action_items, _query_decisions
 
 # --------------------------------------------------------------------------- #
 # 設定・定数
@@ -96,10 +89,19 @@ _QA_CONFIG_FILE_LEGACY = _DATA_DIR / "qa_config.yaml"
 
 _DEFAULT_SINCE_DAYS = 30
 _DRAFT_REPORT_SINCE_DAYS = 14
-_WORKER_MAX_CHARS = 8000  # Worker に渡す各セクションの最大文字数
+_WORKER_MAX_CHARS = 8000  # Worker に渡す各セクションの最大文字数（ARGUS_DISABLE_FULLCTX 時のみ使用）
 _KNOWLEDGE_MAX_ITEMS_DEFAULT = 30
 _KNOWLEDGE_MAX_CHARS = 4000
 _MAX_CHARS_PER_CHANNEL = 20000   # 1チャンネルあたりの最大文字数（最新を優先）
+
+# 全文脈方式（検索なし・期間内全データ投入）の予算。ARGUS_FULLCTX_CHAR_BUDGET で上書き可。
+# 350,000字 = glm-5.2 入力上限 200k tok を実測 1.96字/tok で換算した上での安全マージン込み既定値。
+_FULLCTX_CHAR_BUDGET_DEFAULT = 350_000
+_FULLCTX_BOX_CHAR_CAP = 100_000
+# est_tokens 換算係数。glm-5.2 実測 1.96字/tok (2026-07-23)。
+_FULLCTX_CHARS_PER_TOKEN = 1.96
+# brief/risk の出力上限。出力2千字要件 + 退化暴走幅の抑制（2026-07-23、旧32768から縮小）。
+_BRIEF_RISK_MAX_TOKENS = 8192
 
 # /argus-transcribe ジョブ排他制御
 _transcribe_jobs: dict[str, tuple[str, str]] = {}  # thread_ts → (filename, channel_id)
@@ -465,6 +467,281 @@ def merge_pm_stats(stats_list: list[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 全文脈ビルダー（検索なし・期間内全データ投入方式）
+# --------------------------------------------------------------------------- #
+
+def _format_full_decisions(rows: list[dict]) -> str:
+    if not rows:
+        return "（decisions なし）"
+    lines = []
+    for r in rows:
+        who = f" by {r.get('decided_by')}" if r.get("decided_by") else ""
+        lines.append(f"- **[D-{r['id']}]** ({r.get('decided_at') or ''}) {r.get('content') or ''}{who}")
+        if r.get("rationale"):
+            lines.append(f"  根拠: {r['rationale']}")
+    return "\n".join(lines)
+
+
+def _format_full_action_items(rows: list[dict]) -> str:
+    if not rows:
+        return "（action_items なし）"
+    lines = []
+    for r in rows:
+        lines.append(
+            f"- **[AI-{r['id']}]** [{r.get('status') or ''}] {r.get('content') or ''} "
+            f"(担当: {r.get('assignee') or '未定'}, 期限: {r.get('due_date') or '未定'})"
+        )
+    return "\n".join(lines)
+
+
+def _fetch_box_documents_full(
+    box_docs_path: Path, *, since_date: str, index_name: str, no_encrypt: bool, char_cap: int,
+) -> tuple[str, dict]:
+    """box_docs.db から期間内更新 + relevance 採用分を新しい順に char_cap まで取得する。
+    参照: scripts/data-pipeline/pm_embed.py:630-634（relevance フィルタ）/
+          scripts/data-pipeline/pm_box_crawl.py:118-146（スキーマ）
+    """
+    if not box_docs_path.exists() or char_cap <= 0:
+        return "", {"doc_count": 0, "used_count": 0, "truncated": char_cap <= 0}
+    try:
+        conn = open_db(box_docs_path, encrypt=not no_encrypt)
+    except Exception as e:
+        logger.warning(f"box_docs.db 接続失敗: {e}")
+        return "", {"doc_count": 0, "used_count": 0, "truncated": False}
+    try:
+        rows = conn.execute(
+            "SELECT dc.box_file_id, dc.content_md, bf.name, bf.folder_path, bf.modified_at, bf.index_name "
+            "FROM doc_content dc JOIN box_files bf ON dc.box_file_id = bf.box_file_id "
+            "WHERE COALESCE(bf.relevance, '') != 'noise' AND bf.modified_at >= ? "
+            "ORDER BY bf.modified_at DESC",
+            (since_date,),
+        ).fetchall()
+    except Exception as e:
+        logger.warning(f"box_docs.db クエリ失敗: {e}")
+        rows = []
+    finally:
+        conn.close()
+
+    doc_count = 0
+    parts: list[str] = []
+    used_chars = 0
+    truncated = False
+    for row in rows:
+        idx_raw = row["index_name"] or ""
+        try:
+            targets = json.loads(idx_raw)
+        except Exception:
+            targets = [idx_raw] if idx_raw else []
+        if index_name not in targets:
+            continue
+        doc_count += 1
+        content = (row["content_md"] or "").strip()
+        if not content:
+            continue
+        heading = row["name"] or ""
+        if row["folder_path"]:
+            heading = f"{row['folder_path']}/{heading}"
+        piece = f"### {heading} ({row['modified_at'] or ''})\n\n{content}"
+        if used_chars + len(piece) > char_cap:
+            truncated = True
+            break
+        parts.append(piece)
+        used_chars += len(piece)
+    return "\n\n---\n\n".join(parts), {"doc_count": doc_count, "used_count": len(parts), "truncated": truncated}
+
+
+def build_full_context_sections(
+    since_date: str,
+    today: str,
+    *,
+    index_name: str | None = None,
+    no_encrypt: bool = False,
+    char_budget: int | None = None,
+    include_box: bool = True,
+    box_char_cap: int = _FULLCTX_BOX_CHAR_CAP,
+    pm_db_paths: list[Path] | None = None,
+) -> tuple[dict[str, str], dict]:
+    """期間内の全データ（検索なし）を収集し、セクション別 Markdown dict と meta を返す。
+
+    brief/risk の全文脈方式（generate_brief_report/generate_risk_report）が使う。
+    優先度（超過時は下位から切り詰め、構造化データ=優先1は切り詰めない）:
+      1. pm.db 統計 + decisions/action_items 全件 + milestones
+      2. 議事録全文（fetch_recent_minutes は元々無切り詰め）
+      3. Slack 全対象チャンネル全ログ（予算超過時は実サイズ比例で按分）
+      4. Box 資料（include_box=False で除外可、box_char_cap まで）
+
+    char_budget は未指定時 ARGUS_FULLCTX_CHAR_BUDGET 環境変数 → 既定 350,000字。
+
+    Returns: (sections, meta)
+      sections: {"pm_stats": str, "minutes": str, "slack": str, "box": str}
+      meta: 期間・index・セクション別 chars/est_tokens/truncated 等
+    """
+    if char_budget is None:
+        char_budget = int(os.environ.get("ARGUS_FULLCTX_CHAR_BUDGET", _FULLCTX_CHAR_BUDGET_DEFAULT))
+
+    if pm_db_paths is None:
+        pm_db_paths = load_pm_db_paths(index_name)
+    channel_ids = _load_channel_ids(index_name)
+    minutes_names = _load_minutes_names(index_name)
+    channel_names = _build_channel_name_map()
+    resolved_index = index_name or "pm"
+
+    meta: dict = {
+        "since_date": since_date, "today": today, "index_name": index_name or "(default)",
+        "char_budget": char_budget, "sections": {},
+    }
+    remaining = char_budget
+
+    # --- 優先1: pm.db 統計 + decisions/action_items 全件 + milestones（切り詰めなし） ---
+    stats_list = []
+    decisions_all: list[dict] = []
+    actions_all: list[dict] = []
+    milestones: list[dict] = []
+    for p in pm_db_paths:
+        try:
+            conn = open_pm_db(p, no_encrypt=no_encrypt)
+        except Exception as e:
+            logger.warning(f"pm.db 接続失敗 ({p}): {e}")
+            continue
+        try:
+            stats_list.append(fetch_pm_stats(
+                conn, today, since=since_date, channel_ids=channel_ids, minutes_names=minutes_names,
+            ))
+            decisions_all.extend(_query_decisions(conn, since=since_date, limit=1_000_000))
+            actions_all.extend(_query_action_items(conn, since=since_date, limit=1_000_000))
+            milestones.extend(fetch_milestone_progress(conn))
+        except Exception as e:
+            logger.warning(f"pm.db 統計取得失敗 ({p}): {e}")
+        finally:
+            conn.close()
+    stats = merge_pm_stats(stats_list) if stats_list else {
+        "milestones": [], "overdue_items": [], "assignee_workload": [], "unlinked_count": 0,
+        "no_assignee_count": 0, "weekly_trends": [], "unacknowledged_decisions": [], "stats": {},
+    }
+    if milestones:
+        stats["milestones"] = milestones
+    s = stats.get("stats", {})
+    stats_section = (
+        _build_stats_section(stats, s, today)
+        + f"\n\n## 全決定事項一覧（{len(decisions_all)}件、切り詰めなし）\n\n"
+        + _format_full_decisions(decisions_all)
+        + f"\n\n## 全アクションアイテム一覧（{len(actions_all)}件、切り詰めなし）\n\n"
+        + _format_full_action_items(actions_all)
+    )
+    stats_header = f"## 構造化データ（期間: {since_date}〜{today}, 切り詰めなし）\n\n"
+    stats_section = stats_header + stats_section
+    meta["sections"]["pm_stats"] = {
+        "chars": len(stats_section), "est_tokens": len(stats_section) / _FULLCTX_CHARS_PER_TOKEN, "truncated": False,
+        "decisions": len(decisions_all), "action_items": len(actions_all),
+    }
+    remaining -= len(stats_section)
+
+    # --- 優先2: 議事録全文 ---
+    minutes_text = fetch_recent_minutes(
+        since_date, minutes_dir=_MINUTES_DIR, no_encrypt=no_encrypt, minutes_names=minutes_names or None,
+    )
+    minutes_truncated = False
+    if remaining <= 0:
+        minutes_text = "（予算超過のため省略）"
+        minutes_truncated = True
+    elif len(minutes_text) > remaining:
+        # fetch_recent_minutes は kind ごとに held_at DESC で連結されるため、末尾を
+        # 切り詰めるのは厳密な「最古から削除」ではなく近似（現実的な妥協）
+        minutes_text = minutes_text[:remaining]
+        minutes_truncated = True
+    minutes_header = f"## 議事録（期間: {since_date}〜{today}, 切り詰め{'あり' if minutes_truncated else 'なし'}）\n\n"
+    minutes_section = minutes_header + minutes_text
+    meta["sections"]["minutes"] = {
+        "chars": len(minutes_section), "est_tokens": len(minutes_section) / _FULLCTX_CHARS_PER_TOKEN, "truncated": minutes_truncated,
+    }
+    remaining -= len(minutes_section)
+
+    # --- 優先3: Slack 全対象チャンネル全ログ ---
+    channel_raw_full: dict[str, str] = {}
+    total_slack_chars = 0
+    for ch_id in channel_ids:
+        raw = fetch_raw_messages(
+            ch_id, since_date, data_dir=_DATA_DIR, no_encrypt=no_encrypt, max_chars=10**9,
+        )
+        channel_raw_full[ch_id] = raw
+        total_slack_chars += len(raw)
+
+    slack_truncated = False
+    if remaining <= 0:
+        channel_raw = dict.fromkeys(channel_ids, "（予算超過のため省略）")
+        slack_truncated = True
+    elif total_slack_chars > remaining:
+        # 実サイズに比例して按分する（均等割りだと閑散チャンネルの余りが多忙チャンネルに
+        # 再配分されず予算の使い残しが発生し、下位優先度セクションへ意図せず流れるため）
+        scale = remaining / total_slack_chars if total_slack_chars > 0 else 0
+        channel_raw = {}
+        for ch_id in channel_ids:
+            actual = channel_raw_full[ch_id]
+            cap = max(500, int(len(actual) * scale))
+            if len(actual) <= cap:
+                channel_raw[ch_id] = actual  # 既に取得済みで按分後も収まる場合は再取得しない
+            else:
+                channel_raw[ch_id] = fetch_raw_messages(
+                    ch_id, since_date, data_dir=_DATA_DIR, no_encrypt=no_encrypt, max_chars=cap,
+                )
+        slack_truncated = True
+    else:
+        channel_raw = channel_raw_full
+
+    slack_parts = []
+    for ch_id in channel_ids:
+        raw = channel_raw.get(ch_id, "")
+        if not raw:
+            continue
+        label = f"{ch_id} (#{channel_names[ch_id]})" if ch_id in channel_names else ch_id
+        slack_parts.append(f"## チャンネル: {label}\n\n{raw}")
+    slack_text = "\n\n---\n\n".join(slack_parts)
+    slack_header = (
+        f"## Slack 会話（期間: {since_date}〜{today}, {len(channel_ids)}チャンネル全対象, "
+        f"切り詰め{'あり' if slack_truncated else 'なし'}）\n\n"
+    )
+    slack_section = slack_header + (slack_text or "（データなし）")
+    meta["sections"]["slack"] = {
+        "chars": len(slack_section), "est_tokens": len(slack_section) / _FULLCTX_CHARS_PER_TOKEN, "truncated": slack_truncated,
+        "channels": len(channel_ids),
+    }
+    remaining -= len(slack_section)
+
+    # --- 優先4: Box 資料（オプション） ---
+    if include_box:
+        box_char_cap_eff = min(box_char_cap, max(remaining, 0))
+        box_text, box_meta = _fetch_box_documents_full(
+            _DATA_DIR / "box_docs.db", since_date=since_date, index_name=resolved_index,
+            no_encrypt=no_encrypt, char_cap=box_char_cap_eff,
+        )
+        box_header = (
+            f"## Box 資料（期間: {since_date}〜{today}以降更新, {box_meta['doc_count']}件中"
+            f"{box_meta['used_count']}件採用, 切り詰め{'あり' if box_meta['truncated'] else 'なし'}）\n\n"
+        )
+        box_section = box_header + (box_text or "（対象文書なし）")
+        meta["sections"]["box"] = {
+            "chars": len(box_section), "est_tokens": len(box_section) / _FULLCTX_CHARS_PER_TOKEN,
+            "truncated": box_meta["truncated"], "doc_count": box_meta["doc_count"],
+            "used_count": box_meta["used_count"],
+        }
+    else:
+        box_section = "## Box 資料\n\n（除外設定により省略）"
+        meta["sections"]["box"] = {"chars": len(box_section), "est_tokens": len(box_section) / _FULLCTX_CHARS_PER_TOKEN,
+                                    "truncated": False, "skipped": True}
+
+    meta["total_chars"] = sum(sec["chars"] for sec in meta["sections"].values())
+    meta["total_est_tokens"] = int(meta["total_chars"] / _FULLCTX_CHARS_PER_TOKEN)
+
+    sections = {
+        "pm_stats": stats_section,
+        "minutes": minutes_section,
+        "slack": slack_section,
+        "box": box_section,
+    }
+    return sections, meta
+
+
+# --------------------------------------------------------------------------- #
 # プロンプト構築
 # --------------------------------------------------------------------------- #
 
@@ -819,11 +1096,380 @@ def _collect_all_data(
 
 
 # --------------------------------------------------------------------------- #
+# 共有生成ロジック（brief/risk — Slack ハンドラと CLI --brief-to-canvas/--risk で共有）
+# --------------------------------------------------------------------------- #
+
+def _brief_prompt_truncated(context, focus, stats_section, conversation_section, minutes_section,
+                             knowledge_summary, web_articles) -> str:
+    """従来（切り詰め）方式の brief プロンプト。ARGUS_DISABLE_FULLCTX=1 またはフォールバック時に使用。"""
+    return (
+        f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
+        f"以下のプロジェクトデータを分析し、ブリーフィングを生成してください。\n"
+        f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
+        f"必要に応じて使い、多角的な視点から分析してください。\n\n"
+        f"## プロジェクト文脈\n\n{context}\n\n"
+        f"## フォーカス指定\n\n{focus}\n\n"
+        f"## pm.db 統計\n\n{stats_section}\n\n"
+        f"## Slack 会話\n\n{conversation_section}\n\n"
+        f"## 議事録\n\n{minutes_section}\n\n"
+        f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+        f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
+        f"## 指示\n\n"
+        f"- 上記のデータを統合し、優先順位を付けたブリーフィングを生成してください\n"
+        f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
+        f"- 全体で2,000字以内に収めること。画面1枚で読み切れる分量が厳守事項です。"
+        f"最重要の3〜5項目に絞り優先度順に、見出し+簡潔な箇条書きで記載してください。"
+        f"詳細の列挙ではなく、PMが次に取るべき行動につながる要点のみを書いてください\n"
+        f"- `<final_answer>` タグで回答を囲んでください\n"
+    )
+
+
+def _brief_prompt_fullctx(context, focus, sections, knowledge_summary, web_articles) -> str:
+    """全文脈（検索なし・期間内全データ投入）方式の brief プロンプト。
+    指示部は _brief_prompt_truncated と1字も変えず、データセクションのみ全文版に差し替え
+    + 構造化全件（sections['pm_stats']内）/ Box を追加。既定の brief 生成経路。
+    """
+    return (
+        f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
+        f"以下のプロジェクトデータを分析し、ブリーフィングを生成してください。\n"
+        f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
+        f"必要に応じて使い、多角的な視点から分析してください。\n\n"
+        f"## プロジェクト文脈\n\n{context}\n\n"
+        f"## フォーカス指定\n\n{focus}\n\n"
+        f"{sections['pm_stats']}\n\n"
+        f"{sections['slack']}\n\n"
+        f"{sections['minutes']}\n\n"
+        f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+        f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
+        f"{sections['box']}\n\n"
+        f"## 指示\n\n"
+        f"- 上記のデータを統合し、優先順位を付けたブリーフィングを生成してください\n"
+        f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
+        f"- 全体で2,000字以内に収めること。画面1枚で読み切れる分量が厳守事項です。"
+        f"最重要の3〜5項目に絞り優先度順に、見出し+簡潔な箇条書きで記載してください。"
+        f"詳細の列挙ではなく、PMが次に取るべき行動につながる要点のみを書いてください\n"
+        f"- `<final_answer>` タグで回答を囲んでください\n"
+    )
+
+
+def _risk_prompt_truncated(context, focus, stats_section, conversation_section, minutes_section,
+                            knowledge_summary, web_articles) -> str:
+    """従来（切り詰め）方式の risk プロンプト。ARGUS_DISABLE_FULLCTX=1 またはフォールバック時に使用。"""
+    return (
+        f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
+        f"以下のプロジェクトデータを分析し、リスク分析レポートを生成してください。\n"
+        f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
+        f"必要に応じて使い、多角的な視点からリスクを洗い出してください。\n\n"
+        f"## プロジェクト文脈\n\n{context}\n\n"
+        f"## フォーカス指定\n\n{focus}\n\n"
+        f"## pm.db 統計\n\n{stats_section}\n\n"
+        f"## Slack 会話\n\n{conversation_section}\n\n"
+        f"## 議事録\n\n{minutes_section}\n\n"
+        f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+        f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
+        f"## 指示\n\n"
+        f"- 上記のデータからリスク・懸念・予兆を洗い出し、優先度付きで報告してください\n"
+        f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
+        f"- リスクは「顕在化しているリスク」と「放置すると問題になりうる予兆」に分けて記載\n"
+        f"- 全体で2,000字以内に収めること。画面1枚で読み切れる分量が厳守事項です。"
+        f"リスクは影響度の高い上位3〜5件に絞り、各リスクは2〜3行（状況・根拠・推奨対応）で"
+        f"記載してください\n"
+        f"- `<final_answer>` タグで回答を囲んでください\n"
+    )
+
+
+def _risk_prompt_fullctx(context, focus, sections, knowledge_summary, web_articles) -> str:
+    """全文脈（検索なし・期間内全データ投入）方式の risk プロンプト。
+    指示部は _risk_prompt_truncated と1字も変えず、データセクションのみ全文版に差し替え
+    + 構造化全件（sections['pm_stats']内）/ Box を追加。既定の risk 生成経路。
+    """
+    return (
+        f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
+        f"以下のプロジェクトデータを分析し、リスク分析レポートを生成してください。\n"
+        f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
+        f"必要に応じて使い、多角的な視点からリスクを洗い出してください。\n\n"
+        f"## プロジェクト文脈\n\n{context}\n\n"
+        f"## フォーカス指定\n\n{focus}\n\n"
+        f"{sections['pm_stats']}\n\n"
+        f"{sections['slack']}\n\n"
+        f"{sections['minutes']}\n\n"
+        f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
+        f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
+        f"{sections['box']}\n\n"
+        f"## 指示\n\n"
+        f"- 上記のデータからリスク・懸念・予兆を洗い出し、優先度付きで報告してください\n"
+        f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
+        f"- リスクは「顕在化しているリスク」と「放置すると問題になりうる予兆」に分けて記載\n"
+        f"- 全体で2,000字以内に収めること。画面1枚で読み切れる分量が厳守事項です。"
+        f"リスクは影響度の高い上位3〜5件に絞り、各リスクは2〜3行（状況・根拠・推奨対応）で"
+        f"記載してください\n"
+        f"- `<final_answer>` タグで回答を囲んでください\n"
+    )
+
+
+def _load_context_with_glossary() -> str:
+    """プロジェクト文脈（docs/project.md）+ 動的用語辞書 + glossary を組み立てる。"""
+    context = load_claude_md_context()
+    try:
+        from utils.terminology import build_terminology_reference
+        dyn_terms = build_terminology_reference()
+        if dyn_terms:
+            context = context + dyn_terms
+    except Exception:
+        pass
+    try:
+        from utils.glossary import build_reference as build_glossary_ref
+        glossary_ref = build_glossary_ref()
+        if glossary_ref:
+            context = context + glossary_ref
+    except Exception:
+        pass
+    return context
+
+
+def _extract_final_answer(result: str) -> str:
+    """<final_answer> タグがあれば抽出、なければタグを除去して返す。"""
+    final = re.search(r"<final_answer>(.*?)</final_answer>", result, re.DOTALL)
+    if final:
+        return final.group(1).strip()
+    return re.sub(r"<[^>]+>", "", result).strip()
+
+
+def _fetch_knowledge_and_web_articles(
+    pm_db_paths: list[Path], no_encrypt: bool, index_name: str | None,
+) -> tuple[str, str]:
+    """確定済みナレッジ・外部記事を個別に取得する（全文脈方式・従来方式で共通）。
+
+    どちらか一方が失敗しても、それだけで全文脈方式全体をフォールバックさせない
+    （build_full_context_sections + call_argus_llm のみをフォールバック対象にするため）。
+    失敗時は空文字に縮退する。
+    """
+    try:
+        knowledge_summary = fetch_background_knowledge(pm_db_paths=pm_db_paths, no_encrypt=no_encrypt)
+    except Exception as e:
+        logger.warning(f"fetch_background_knowledge 失敗（{type(e).__name__}: {e}）。空文字で継続")
+        knowledge_summary = ""
+    try:
+        web_articles = fetch_recent_web_articles(_DATA_DIR / "qa_index.db", index_name=index_name)
+    except Exception as e:
+        logger.warning(f"fetch_recent_web_articles 失敗（{type(e).__name__}: {e}）。空文字で継続")
+        web_articles = ""
+    return knowledge_summary, web_articles
+
+
+def _log_fullctx_meta(tag: str, ctx_meta: dict) -> None:
+    """build_full_context_sections の meta を1行に要約してログ出力する
+    （明朝の無人 cron 実行の事後診断用）。"""
+    section_summary = " ".join(
+        f"{name}={info.get('chars', 0)}chars/trunc={info.get('truncated', False)}"
+        for name, info in ctx_meta.get("sections", {}).items()
+    )
+    logger.info(
+        f"{tag} fullctx meta: total_chars={ctx_meta.get('total_chars')} "
+        f"est_tokens={ctx_meta.get('total_est_tokens')} {section_summary}"
+    )
+
+
+# 同一文字の100連続以上（「!」を32,768トークン埋め尽くす反復退化の検知用）
+_DEGENERATE_RUN_RE = re.compile(r"(.)\1{99,}")
+
+
+def _is_degenerate_output(text: str) -> bool:
+    """LLM 出力が退化（同一文字反復・タグ未クローズ・記号だらけ）していないか判定する。
+
+    call_argus_llm は例外にならず正常終了として退化出力（例: 32,768トークン全部が「!」）を
+    返すことが実測で確認されている（温度0.8でも確率的に発生）ため、例外系フォールバックとは
+    別に出力そのものの品質ゲートが必要。
+    """
+    if not text:
+        return True
+    # (a) 同一文字の100連続以上
+    if _DEGENERATE_RUN_RE.search(text):
+        return True
+    # (b) <final_answer> が開いているのに閉じていない（タグ除去前の生テキストで判定）
+    if "<final_answer>" in text and "</final_answer>" not in text:
+        return True
+    # (c) 有効文字（英数字・かな漢字等）が空白除去後の50%未満 = 記号・反復だらけ
+    non_ws = [c for c in text if not c.isspace()]
+    if non_ws:
+        meaningful = sum(1 for c in non_ws if c.isalnum())
+        if meaningful / len(non_ws) < 0.5:
+            return True
+    return False
+
+
+def _sanitize_degenerate_output(text: str) -> str:
+    """退化出力から同一文字の長い連続 run 以降を切り落として返す。
+    切り落とし後に実質空ならエラーメッセージ文字列を返す（無限リトライはしない）。
+    """
+    m = _DEGENERATE_RUN_RE.search(text)
+    if m:
+        text = text[: m.start(1)]
+    text = text.strip()
+    if len(text) < 20:
+        return "（Argus: 出力生成に失敗しました。しばらく待ってから再度お試しください）"
+    return text
+
+
+def _ensure_not_degenerate(result: str, tag: str) -> str:
+    """フォールバック（従来切り詰め方式）の出力も退化していないか最終確認する。
+    退化していた場合は logger.error の上、退化部分を切り落として返す（無限リトライはしない）。
+    """
+    if _is_degenerate_output(result):
+        logger.error(f"{tag} 従来方式の出力も退化と判定されました: {result[:100]!r}")
+        return _sanitize_degenerate_output(result)
+    return result
+
+
+def generate_brief_report(
+    today: str,
+    since_date: str,
+    *,
+    index_name: str | None = None,
+    no_encrypt: bool = False,
+    assignee: str | None = None,
+    topic: str | None = None,
+    pm_db_paths: list[Path] | None = None,
+) -> str:
+    """ブリーフィング本文を生成する（/argus-brief と --brief-to-canvas の共有ロジック）。
+
+    既定で全文脈方式（検索なし・期間内全データ投入）を使う。2026-07-23 の盲検 A/B（judge:
+    RiVault Kimi-K2-Thinking）では risk は fullctx が明確勝ち、brief は僅差（4対5）だった。
+    期間サマリー型タスク（brief/risk）への適用として PM 判断で全文脈方式を既定化した
+    （ARGUS_DISABLE_FULLCTX=1 で従来の切り詰め single-shot に戻せる）。
+    全文脈方式の構築・生成（build_full_context_sections + call_argus_llm）が例外になった
+    場合は logger.warning の上、従来方式で1回だけ再試行する（フォールバック。
+    系統Bの旧worker/orchestratorには戻さない）。
+
+    pm_db_paths: CLI --db 等で pm.db パスを明示指定したい場合に渡す。省略時は
+    index_name から load_pm_db_paths() で解決する。
+    """
+    context = _load_context_with_glossary()
+    focus_lines = []
+    if assignee:
+        focus_lines.append(f"担当者フォーカス: {assignee}")
+    if topic:
+        focus_lines.append(f"話題フォーカス: {topic}")
+    focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
+
+    resolved_pm_db_paths = pm_db_paths if pm_db_paths is not None else load_pm_db_paths(index_name)
+
+    def _run_truncated() -> str:
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
+            today, since_date, no_encrypt=no_encrypt, pm_db_paths=resolved_pm_db_paths,
+            index_name=index_name,
+        )
+        s = stats.get("stats", {})
+        stats_section = _build_stats_section(stats, s, today)
+        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
+        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
+        prompt = _brief_prompt_truncated(context, focus_section_str, stats_section,
+                                          conversation_section, minutes_section,
+                                          knowledge_summary, web_articles)
+        return call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。",
+                               max_tokens=_BRIEF_RISK_MAX_TOKENS, timeout=600)
+
+    if os.environ.get("ARGUS_DISABLE_FULLCTX") == "1":
+        result = _ensure_not_degenerate(_run_truncated(), "[argus-brief]")
+    else:
+        knowledge_summary, web_articles = _fetch_knowledge_and_web_articles(
+            resolved_pm_db_paths, no_encrypt, index_name,
+        )
+        try:
+            sections, ctx_meta = build_full_context_sections(
+                since_date, today, index_name=index_name, no_encrypt=no_encrypt,
+                pm_db_paths=resolved_pm_db_paths,
+            )
+            _log_fullctx_meta("[argus-brief]", ctx_meta)
+            prompt = _brief_prompt_fullctx(context, focus_section_str, sections,
+                                            knowledge_summary, web_articles)
+            result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。",
+                                     max_tokens=_BRIEF_RISK_MAX_TOKENS, timeout=600)
+            if _is_degenerate_output(result):
+                logger.warning(f"[argus-brief] fullctx 出力が退化、truncated 方式へフォールバック: "
+                                f"{result[:100]!r}")
+                result = _ensure_not_degenerate(_run_truncated(), "[argus-brief]")
+        except Exception as e:
+            logger.warning(f"[argus-brief] 全文脈方式が失敗（{type(e).__name__}: {e}）。"
+                            f"従来の切り詰めプロンプトで1回だけ再試行します")
+            result = _ensure_not_degenerate(_run_truncated(), "[argus-brief]")
+
+    return _extract_final_answer(result)
+
+
+def generate_risk_report(
+    today: str,
+    since_date: str,
+    *,
+    index_name: str | None = None,
+    no_encrypt: bool = False,
+    assignee: str | None = None,
+    topic: str | None = None,
+    pm_db_paths: list[Path] | None = None,
+) -> str:
+    """リスク分析レポート本文を生成する（/argus-risk と --risk の共有ロジック）。
+    挙動は generate_brief_report と対称（全文脈既定 / ARGUS_DISABLE_FULLCTX / フォールバック /
+    pm_db_paths 明示指定）。2026-07-23 の盲検 A/B では risk は fullctx が明確勝ちだった。
+    """
+    context = _load_context_with_glossary()
+    focus_lines = []
+    if assignee:
+        focus_lines.append(f"担当者フォーカス: {assignee}")
+    if topic:
+        focus_lines.append(f"話題フォーカス: {topic}")
+    focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
+
+    resolved_pm_db_paths = pm_db_paths if pm_db_paths is not None else load_pm_db_paths(index_name)
+
+    def _run_truncated() -> str:
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
+            today, since_date, no_encrypt=no_encrypt, pm_db_paths=resolved_pm_db_paths,
+            index_name=index_name,
+        )
+        s = stats.get("stats", {})
+        stats_section = _build_stats_section(stats, s, today)
+        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
+        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
+        prompt = _risk_prompt_truncated(context, focus_section_str, stats_section,
+                                         conversation_section, minutes_section,
+                                         knowledge_summary, web_articles)
+        return call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。",
+                               max_tokens=_BRIEF_RISK_MAX_TOKENS, timeout=600)
+
+    if os.environ.get("ARGUS_DISABLE_FULLCTX") == "1":
+        result = _ensure_not_degenerate(_run_truncated(), "[argus-risk]")
+    else:
+        knowledge_summary, web_articles = _fetch_knowledge_and_web_articles(
+            resolved_pm_db_paths, no_encrypt, index_name,
+        )
+        try:
+            sections, ctx_meta = build_full_context_sections(
+                since_date, today, index_name=index_name, no_encrypt=no_encrypt,
+                pm_db_paths=resolved_pm_db_paths,
+            )
+            _log_fullctx_meta("[argus-risk]", ctx_meta)
+            prompt = _risk_prompt_fullctx(context, focus_section_str, sections,
+                                           knowledge_summary, web_articles)
+            result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。",
+                                     max_tokens=_BRIEF_RISK_MAX_TOKENS, timeout=600)
+            if _is_degenerate_output(result):
+                logger.warning(f"[argus-risk] fullctx 出力が退化、truncated 方式へフォールバック: "
+                                f"{result[:100]!r}")
+                result = _ensure_not_degenerate(_run_truncated(), "[argus-risk]")
+        except Exception as e:
+            logger.warning(f"[argus-risk] 全文脈方式が失敗（{type(e).__name__}: {e}）。"
+                            f"従来の切り詰めプロンプトで1回だけ再試行します")
+            result = _ensure_not_degenerate(_run_truncated(), "[argus-risk]")
+
+    return _extract_final_answer(result)
+
+
+# --------------------------------------------------------------------------- #
 # Slack コマンドのバックグラウンド処理
 # --------------------------------------------------------------------------- #
 
 def _run_brief(respond, command, *, no_encrypt: bool = False):
-    """Slack /argus-brief のバックグラウンド処理 — single-shot（pm-multi-agent 統合）"""
+    """Slack /argus-brief のバックグラウンド処理 — 全文脈方式（ARGUS_DISABLE_FULLCTX でopt-out）"""
     import logging
     logger = logging.getLogger("pm_argus")
     try:
@@ -844,67 +1490,10 @@ def _run_brief(respond, command, *, no_encrypt: bool = False):
         ])
         logger.info(f"[argus-brief] since={since_date}{focus_desc}")
 
-        # データ収集
-        context = load_claude_md_context()
-        # terminology 動的用語辞書を追記
-        try:
-            from utils.terminology import build_terminology_reference
-            dyn_terms = build_terminology_reference()
-            if dyn_terms:
-                context = context + dyn_terms
-        except Exception:
-            pass
-        # glossary 構造化テキストを追記
-        try:
-            from utils.glossary import build_reference as build_glossary_ref
-            glossary_ref = build_glossary_ref()
-            if glossary_ref:
-                context = context + glossary_ref
-        except Exception:
-            pass
-        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
+        result = generate_brief_report(
+            today, since_date, index_name=index_name, no_encrypt=no_encrypt,
+            assignee=assignee, topic=topic,
         )
-
-        s = stats.get("stats", {})
-        stats_section = _build_stats_section(stats, s, today)
-        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
-        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
-
-        focus_lines = []
-        if assignee:
-            focus_lines.append(f"担当者フォーカス: {assignee}")
-        if topic:
-            focus_lines.append(f"話題フォーカス: {topic}")
-        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
-
-        # プロジェクト文脈と全データを1つのプロンプトにまとめて LLM に投げる
-        prompt = (
-            f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
-            f"以下のプロジェクトデータを分析し、ブリーフィングを生成してください。\n"
-            f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
-            f"必要に応じて使い、多角的な視点から分析してください。\n\n"
-            f"## プロジェクト文脈\n\n{context}\n\n"
-            f"## フォーカス指定\n\n{focus_section_str}\n\n"
-            f"## pm.db 統計\n\n{stats_section}\n\n"
-            f"## Slack 会話\n\n{conversation_section}\n\n"
-            f"## 議事録\n\n{minutes_section}\n\n"
-            f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
-            f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
-            f"## 指示\n\n"
-            f"- 上記のデータを統合し、優先順位を付けたブリーフィングを生成してください\n"
-            f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
-            f"- 回答の長さに制限はありません。必要なだけ詳しく説明してください\n"
-            f"- `<final_answer>` タグで回答を囲んでください\n"
-        )
-        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。", max_tokens=32768, timeout=600)
-
-        # <final_answer> タグがあれば抽出
-        final = re.search(r"<final_answer>(.*?)</final_answer>", result, re.DOTALL)
-        if final:
-            result = final.group(1).strip()
-        else:
-            result = re.sub(r"<[^>]+>", "", result).strip()
 
         header = f"*Argus ブリーフィング ({today})*"
         if assignee:
@@ -961,24 +1550,6 @@ def _build_stats_section(stats: dict, s: dict, today: str) -> str:
         f"## 未確認決定事項\n\n"
         f"{format_decisions_list(stats.get('unacknowledged_decisions', []))}"
     )
-
-
-def _run_brief_worker(worker_type: str, data: str) -> str:
-    """ブリーフィング Worker を実行する（ThreadPoolExecutor 用）。"""
-    prompt_map = {
-        "pm": _BRIEF_WORKER_PM_PROMPT,
-        "conversation": _BRIEF_WORKER_CONVERSATION_PROMPT,
-        "minutes": _BRIEF_WORKER_MINUTES_PROMPT,
-    }
-    tmpl = prompt_map.get(worker_type)
-    if not tmpl:
-        return f"（不明な Worker: {worker_type}）"
-    prompt = tmpl.format(
-        stats_section=data,
-        conversation_section=data,
-        minutes_section=data,
-    )
-    return call_argus_llm(prompt, system="あなたはAIエージェントです。与えられたデータからアクション候補を抽出してください。", max_tokens=4096)
 
 
 def _run_draft(respond, command, *, no_encrypt: bool = False):
@@ -1049,7 +1620,7 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
 
 
 def _run_risk(respond, command, *, no_encrypt: bool = False):
-    """Slack /argus-risk のバックグラウンド処理 — single-shot（pm-multi-agent 統合）"""
+    """Slack /argus-risk のバックグラウンド処理 — 全文脈方式（ARGUS_DISABLE_FULLCTX でopt-out）"""
     import logging
     logger = logging.getLogger("pm_argus")
     try:
@@ -1068,69 +1639,10 @@ def _run_risk(respond, command, *, no_encrypt: bool = False):
         ])
         logger.info(f"[argus-risk] since={since_date}{focus_desc}")
 
-        # データ収集
-        logger.info("[argus-risk] データ収集")
-        context = load_claude_md_context()
-        # terminology 動的用語辞書を追記
-        try:
-            from utils.terminology import build_terminology_reference
-            dyn_terms = build_terminology_reference()
-            if dyn_terms:
-                context = context + dyn_terms
-        except Exception:
-            pass
-        # glossary 構造化テキストを追記
-        try:
-            from utils.glossary import build_reference as build_glossary_ref
-            glossary_ref = build_glossary_ref()
-            if glossary_ref:
-                context = context + glossary_ref
-        except Exception:
-            pass
-        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
+        result = generate_risk_report(
+            today, since_date, index_name=index_name, no_encrypt=no_encrypt,
+            assignee=assignee, topic=topic,
         )
-
-        s = stats.get("stats", {})
-        stats_section = _build_stats_section(stats, s, today)
-        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
-        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
-
-        focus_lines = []
-        if assignee:
-            focus_lines.append(f"担当者フォーカス: {assignee}")
-        if topic:
-            focus_lines.append(f"話題フォーカス: {topic}")
-        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
-
-        # プロジェクト文脈と全データを1つのプロンプトにまとめて LLM に投げる
-        prompt = (
-            f"あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。\n"
-            f"以下のプロジェクトデータを分析し、リスク分析レポートを生成してください。\n"
-            f"利用可能なツール（search_text / search_decisions / search_entity 等）を\n"
-            f"必要に応じて使い、多角的な視点からリスクを洗い出してください。\n\n"
-            f"## プロジェクト文脈\n\n{context}\n\n"
-            f"## フォーカス指定\n\n{focus_section_str}\n\n"
-            f"## pm.db 統計\n\n{stats_section}\n\n"
-            f"## Slack 会話\n\n{conversation_section}\n\n"
-            f"## 議事録\n\n{minutes_section}\n\n"
-            f"## 確定済みナレッジ\n\n{knowledge_summary or '（なし）'}\n\n"
-            f"## 外部記事\n\n{web_articles or '（なし）'}\n\n"
-            f"## 指示\n\n"
-            f"- 上記のデータからリスク・懸念・予兆を洗い出し、優先度付きで報告してください\n"
-            f"- 数値・決定事項ID・担当者名など具体的根拠を引用すること\n"
-            f"- リスクは「顕在化しているリスク」と「放置すると問題になりうる予兆」に分けて記載\n"
-            f"- 回答の長さに制限はありません。必要なだけ詳しく説明してください\n"
-            f"- `<final_answer>` タグで回答を囲んでください\n"
-        )
-        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。", max_tokens=32768, timeout=600)
-
-        # <final_answer> タグがあれば抽出
-        final = re.search(r"<final_answer>(.*?)</final_answer>", result, re.DOTALL)
-        if final:
-            result = final.group(1).strip()
-        else:
-            result = re.sub(r"<[^>]+>", "", result).strip()
 
         header = f"*Argus リスク分析 ({today})*"
         if assignee:
@@ -1239,28 +1751,6 @@ def _run_direction(respond, command, *, no_encrypt: bool = False):
                 }
             ],
         )
-
-
-def _run_risk_worker(worker_type: str, data: str) -> str:
-    """リスク Worker を実行する（ThreadPoolExecutor 用）。
-    worker_type: 'pm' / 'conversation' / 'minutes' / 'knowledge'
-    """
-    prompt_map = {
-        "pm": _RISK_WORKER_PM_PROMPT,
-        "conversation": _RISK_WORKER_CONVERSATION_PROMPT,
-        "minutes": _RISK_WORKER_MINUTES_PROMPT,
-        "knowledge": _RISK_WORKER_KNOWLEDGE_PROMPT,
-    }
-    tmpl = prompt_map.get(worker_type)
-    if not tmpl:
-        return f"（不明な Worker: {worker_type}）"
-    prompt = tmpl.format(
-        stats_section=data,
-        conversation_section=data,
-        minutes_section=data,
-        knowledge_section=data,
-    )
-    return call_argus_llm(prompt, system="あなたはAIエージェントです。与えられたデータからリスクを分析してください。", max_tokens=4096)
 
 
 def _build_channel_name_map() -> dict[str, str]:
@@ -1668,72 +2158,16 @@ def main() -> None:
         print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
         return
 
-    context = load_claude_md_context()
-    # terminology 動的用語辞書を追記
-    try:
-        from utils.terminology import build_terminology_reference
-        dyn_terms = build_terminology_reference()
-        if dyn_terms:
-            context = context + dyn_terms
-    except Exception:
-        pass
-    # glossary 構造化テキストを追記
-    try:
-        from utils.glossary import build_reference as build_glossary_ref
-        glossary_ref = build_glossary_ref()
-        if glossary_ref:
-            context = context + glossary_ref
-    except Exception:
-        pass
     print(f"[INFO] since: {since_date} / today: {today} / "
           f"index: {args.index_name or '(default)'}", file=sys.stderr)
 
-    messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
-        today, since_date,
-        no_encrypt=args.no_encrypt,
-        pm_db_paths=pm_db_paths_cli,
-        index_name=args.index_name,
-    )
-
     if args.brief_to_canvas:
-        # マルチWorker + Orchestrator で生成
-        print("[INFO] 多視点 Worker でブリーフィング生成中...", file=sys.stderr)
-        s = stats.get("stats", {})
-        stats_section = _build_stats_section(stats, s, today)
-        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
-        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
-        focus_lines = []
-        if args.assignee:
-            focus_lines.append(f"担当者フォーカス: {args.assignee}")
-        if args.topic:
-            focus_lines.append(f"話題フォーカス: {args.topic}")
-        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
-
-        worker_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            wfuts = {
-                pool.submit(_run_brief_worker, "pm", stats_section): "pm",
-                pool.submit(_run_brief_worker, "conversation", conversation_section): "conversation",
-                pool.submit(_run_brief_worker, "minutes", minutes_section): "minutes",
-            }
-            for f in concurrent.futures.as_completed(wfuts):
-                name = wfuts[f]
-                try:
-                    worker_results[name] = f.result()
-                except Exception as e:
-                    worker_results[name] = f"（{name} Worker エラー: {e}）"
-                    print(f"[WARN] Worker {name} 失敗: {e}", file=sys.stderr)
-
-        orch_prompt = _BRIEF_ORCHESTRATOR_PROMPT.format(
-            context=context,
-            knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
-            focus_section=focus_section_str,
-            worker_pm=worker_results.get("pm", "（エラー）"),
-            worker_conversation=worker_results.get("conversation", "（エラー）"),
-            worker_minutes=worker_results.get("minutes", "（エラー）"),
+        print("[INFO] ブリーフィング生成中（全文脈方式。ARGUS_DISABLE_FULLCTX=1で従来方式）...",
+              file=sys.stderr)
+        result = generate_brief_report(
+            today, since_date, index_name=args.index_name, no_encrypt=args.no_encrypt,
+            assignee=args.assignee, topic=args.topic, pm_db_paths=pm_db_paths_cli,
         )
-        print("[INFO] Orchestrator 統合中...", file=sys.stderr)
-        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
 
         title = "Argus 日次活動サマリー" if days == 0 else "Argus ブリーフィング"
         canvas_content = f"# {title} ({today})\n\n{result}\n\n_生成: {today} JST_"
@@ -1757,46 +2191,12 @@ def main() -> None:
         print(f"[INFO] Canvas {canvas_id} に投稿しました", file=sys.stderr)
 
     elif args.risk:
-        # マルチWorker + Orchestrator で生成
-        print("[INFO] 多視点 Worker でリスク分析生成中...", file=sys.stderr)
-        s = stats.get("stats", {})
-        stats_section = _build_stats_section(stats, s, today)
-        conversation_section = (messages or "（データなし）")[-_WORKER_MAX_CHARS:]
-        minutes_section = (minutes or "（データなし）")[-_WORKER_MAX_CHARS:]
-        knowledge_section = knowledge_summary or "（蒸留ナレッジなし）"
-        focus_lines = []
-        if args.assignee:
-            focus_lines.append(f"担当者フォーカス: {args.assignee}")
-        if args.topic:
-            focus_lines.append(f"話題フォーカス: {args.topic}")
-        focus_section_str = "\n".join(focus_lines) if focus_lines else "なし"
-
-        worker_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            wfuts = {
-                pool.submit(_run_risk_worker, "pm", stats_section): "pm",
-                pool.submit(_run_risk_worker, "conversation", conversation_section): "conversation",
-                pool.submit(_run_risk_worker, "minutes", minutes_section): "minutes",
-                pool.submit(_run_risk_worker, "knowledge", knowledge_section): "knowledge",
-            }
-            for f in concurrent.futures.as_completed(wfuts):
-                name = wfuts[f]
-                try:
-                    worker_results[name] = f.result()
-                except Exception as e:
-                    worker_results[name] = f"（{name} Worker エラー: {e}）"
-                    print(f"[WARN] Worker {name} 失敗: {e}", file=sys.stderr)
-
-        orch_prompt = _RISK_ORCHESTRATOR_PROMPT.format(
-            context=context,
-            focus_section=focus_section_str,
-            worker_pm=worker_results.get("pm", "（エラー）"),
-            worker_conversation=worker_results.get("conversation", "（エラー）"),
-            worker_minutes=worker_results.get("minutes", "（エラー）"),
-            worker_knowledge=worker_results.get("knowledge", "（エラー）"),
+        print("[INFO] リスク分析生成中（全文脈方式。ARGUS_DISABLE_FULLCTX=1で従来方式）...",
+              file=sys.stderr)
+        result = generate_risk_report(
+            today, since_date, index_name=args.index_name, no_encrypt=args.no_encrypt,
+            assignee=args.assignee, topic=args.topic, pm_db_paths=pm_db_paths_cli,
         )
-        print("[INFO] Orchestrator 統合中...", file=sys.stderr)
-        result = call_argus_llm(orch_prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         canvas_content = f"# Argus リスク分析 ({today})\n\n{result}\n\n_生成: {today} JST_"
         print("\n" + "=" * 60)
         print(canvas_content)

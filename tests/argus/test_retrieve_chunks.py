@@ -244,32 +244,187 @@ class TestRetrieveChunksHybrid:
 
 
 # --------------------------------------------------------------------------- #
-# _run_brief_worker / _run_risk_worker (call_argus_llm mocked)
+# build_full_context_sections / generate_brief_report (全文脈方式, call_argus_llm mocked)
 # --------------------------------------------------------------------------- #
 
-class TestArgusWorkers:
-    def test_brief_worker_pm_calls_llm(self, monkeypatch):
-        """_run_brief_worker("pm") が call_argus_llm を呼んで結果を返す。"""
-        import argus.pm_argus as pm_argus
-        monkeypatch.setattr(pm_argus, "call_argus_llm", lambda *a, **kw: "brief result")
-        from argus.pm_argus import _run_brief_worker
-        result = _run_brief_worker("pm", "test data")
-        assert result == "brief result"
+class TestBuildFullContextSections:
+    """build_full_context_sections が LLM を使わずセクション dict + meta を返し、
+    char_budget を守ることを検証する（重い I/O はモックして決定的にする）。"""
 
-    def test_brief_worker_unknown_type(self):
-        """不明な worker_type は LLM 呼び出しなしにエラーメッセージを返す。"""
-        from argus.pm_argus import _run_brief_worker
-        result = _run_brief_worker("unknown_type", "data")
-        assert "不明" in result
+    def _patch_common(self, monkeypatch, pm_argus):
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(pm_argus, "_load_channel_ids", lambda index_name=None: ["C111", "C222"])
+        monkeypatch.setattr(pm_argus, "_load_minutes_names", lambda index_name=None: ["kind1"])
+        monkeypatch.setattr(pm_argus, "_build_channel_name_map", lambda: {})
 
-    def test_brief_worker_conversation(self, monkeypatch):
+    def test_respects_char_budget_and_returns_sections(self, monkeypatch):
+        """予算超過時、優先度1(pm_stats)は切り詰めず下位セクションが切り詰められる。"""
         import argus.pm_argus as pm_argus
-        monkeypatch.setattr(pm_argus, "call_argus_llm", lambda *a, **kw: "conv result")
-        from argus.pm_argus import _run_brief_worker
-        assert _run_brief_worker("conversation", "data") == "conv result"
+        self._patch_common(monkeypatch, pm_argus)
+        monkeypatch.setattr(pm_argus, "fetch_recent_minutes", lambda *a, **kw: "議事録本文" * 500)
+        monkeypatch.setattr(
+            pm_argus, "fetch_raw_messages",
+            lambda ch_id, since_date, *, data_dir, no_encrypt, max_chars=10**9: ("会話ログ" * 2000)[:max_chars],
+        )
+        monkeypatch.setattr(
+            pm_argus, "_fetch_box_documents_full",
+            lambda *a, **kw: ("box本文" * 100, {"doc_count": 1, "used_count": 1, "truncated": False}),
+        )
 
-    def test_brief_worker_minutes(self, monkeypatch):
+        sections, meta = pm_argus.build_full_context_sections(
+            "2026-06-01", "2026-07-01", char_budget=2000, include_box=True,
+        )
+
+        assert set(sections.keys()) == {"pm_stats", "minutes", "slack", "box"}
+        assert meta["char_budget"] == 2000
+        for name in ("pm_stats", "minutes", "slack", "box"):
+            assert name in meta["sections"]
+            assert meta["sections"][name]["chars"] == len(sections[name])
+        # 優先度1（構造化データ）は切り詰めない
+        assert meta["sections"]["pm_stats"]["truncated"] is False
+        # 予算が小さいため下位優先度セクションのいずれかは切り詰められているはず
+        assert meta["sections"]["minutes"]["truncated"] or meta["sections"]["slack"]["truncated"]
+        assert meta["total_chars"] == sum(info["chars"] for info in meta["sections"].values())
+        assert meta["total_est_tokens"] == int(meta["total_chars"] / pm_argus._FULLCTX_CHARS_PER_TOKEN)
+
+    def test_no_pm_db_paths_returns_empty_structured_section(self, monkeypatch):
+        """pm_db_paths が空でも例外にならず空の構造化データセクションを返す。"""
         import argus.pm_argus as pm_argus
-        monkeypatch.setattr(pm_argus, "call_argus_llm", lambda *a, **kw: "minutes result")
-        from argus.pm_argus import _run_brief_worker
-        assert _run_brief_worker("minutes", "data") == "minutes result"
+        self._patch_common(monkeypatch, pm_argus)
+        monkeypatch.setattr(pm_argus, "fetch_recent_minutes", lambda *a, **kw: "")
+        monkeypatch.setattr(
+            pm_argus, "fetch_raw_messages",
+            lambda ch_id, since_date, *, data_dir, no_encrypt, max_chars=10**9: "",
+        )
+
+        sections, meta = pm_argus.build_full_context_sections(
+            "2026-06-01", "2026-07-01", char_budget=350_000, include_box=False,
+        )
+
+        assert "（decisions なし）" in sections["pm_stats"]
+        assert "（action_items なし）" in sections["pm_stats"]
+        assert meta["sections"]["box"]["skipped"] is True
+        assert meta["total_chars"] <= meta["char_budget"]
+
+
+class TestGenerateBriefReportFullctxToggle:
+    """ARGUS_DISABLE_FULLCTX=1 で generate_brief_report が従来（切り詰め）プロンプトを
+    使うことを検証する（call_argus_llm はモック）。"""
+
+    def test_disable_fullctx_uses_truncated_prompt(self, monkeypatch):
+        import argus.pm_argus as pm_argus
+        monkeypatch.setenv("ARGUS_DISABLE_FULLCTX", "1")
+
+        captured = {}
+
+        def fake_call_argus_llm(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return "<final_answer>truncated result</final_answer>"
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", fake_call_argus_llm)
+        monkeypatch.setattr(pm_argus, "_load_context_with_glossary", lambda: "context")
+        monkeypatch.setattr(
+            pm_argus, "_collect_all_data",
+            lambda *a, **kw: ("messages", "minutes", {"stats": {}}, "knowledge", "web"),
+        )
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+
+        result = pm_argus.generate_brief_report("2026-07-23", "2026-06-23")
+
+        assert result == "truncated result"
+        assert "## pm.db 統計" in captured["prompt"]
+        assert "## 構造化データ" not in captured["prompt"]
+        assert captured["kwargs"]["max_tokens"] == pm_argus._BRIEF_RISK_MAX_TOKENS
+        assert captured["kwargs"]["timeout"] == 600
+
+    def test_fullctx_enabled_by_default_uses_structured_prompt(self, monkeypatch):
+        """既定（ARGUS_DISABLE_FULLCTX 未設定）では全文脈プロンプトが使われる。"""
+        import argus.pm_argus as pm_argus
+        monkeypatch.delenv("ARGUS_DISABLE_FULLCTX", raising=False)
+
+        captured = {}
+
+        def fake_call_argus_llm(prompt, **kwargs):
+            captured["prompt"] = prompt
+            return "<final_answer>fullctx result</final_answer>"
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", fake_call_argus_llm)
+        monkeypatch.setattr(pm_argus, "_load_context_with_glossary", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(
+            pm_argus, "_fetch_knowledge_and_web_articles", lambda *a, **kw: ("knowledge", "web"),
+        )
+        fake_sections = {"pm_stats": "## 構造化データ\n\nダミー", "minutes": "## 議事録\n\nダミー",
+                          "slack": "## Slack 会話\n\nダミー", "box": "## Box 資料\n\nダミー"}
+        fake_meta = {"total_chars": 100, "total_est_tokens": 62,
+                     "sections": {k: {"chars": len(v), "truncated": False} for k, v in fake_sections.items()}}
+        monkeypatch.setattr(
+            pm_argus, "build_full_context_sections", lambda *a, **kw: (fake_sections, fake_meta),
+        )
+
+        result = pm_argus.generate_brief_report("2026-07-23", "2026-06-23")
+
+        assert result == "fullctx result"
+        assert "## 構造化データ" in captured["prompt"]
+        assert "## pm.db 統計" not in captured["prompt"]
+
+
+# --------------------------------------------------------------------------- #
+# 出力品質バリデーション（退化検知ゲート）
+# --------------------------------------------------------------------------- #
+
+class TestDegenerateOutputGuard:
+    def test_is_degenerate_output_detects_repeated_char(self):
+        """同一文字の100連続以上は退化と判定される（32,768トークン「!」埋め尽くしの再現）。"""
+        import argus.pm_argus as pm_argus
+        assert pm_argus._is_degenerate_output("!" * 32768) is True
+
+    def test_is_degenerate_output_accepts_normal_text(self):
+        """通常の日本語テキストは退化と判定されない。"""
+        import argus.pm_argus as pm_argus
+        normal_text = (
+            "## ブリーフィング\n\n- **[優先度: 高]** マイルストーンM1の期限超過対応\n"
+            "  - 状況: 3件のアクションアイテムが期限超過しています。\n"
+            "  - 根拠: AI-101, AI-102, AI-103（担当: 西澤）\n"
+        )
+        assert pm_argus._is_degenerate_output(normal_text) is False
+
+    def test_generate_brief_report_falls_back_when_fullctx_output_degenerate(self, monkeypatch):
+        """fullctx 出力が退化（「!」連続）していた場合、truncated 方式へフォールバックすること。"""
+        import argus.pm_argus as pm_argus
+
+        monkeypatch.delenv("ARGUS_DISABLE_FULLCTX", raising=False)
+        monkeypatch.setattr(pm_argus, "_load_context_with_glossary", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(
+            pm_argus, "_fetch_knowledge_and_web_articles", lambda *a, **kw: ("knowledge", "web"),
+        )
+        fake_sections = {"pm_stats": "## 構造化データ\n\nダミー", "minutes": "## 議事録\n\nダミー",
+                          "slack": "## Slack 会話\n\nダミー", "box": "## Box 資料\n\nダミー"}
+        fake_meta = {"total_chars": 100, "total_est_tokens": 62,
+                     "sections": {k: {"chars": len(v), "truncated": False} for k, v in fake_sections.items()}}
+        monkeypatch.setattr(
+            pm_argus, "build_full_context_sections", lambda *a, **kw: (fake_sections, fake_meta),
+        )
+        monkeypatch.setattr(
+            pm_argus, "_collect_all_data",
+            lambda *a, **kw: ("messages", "minutes", {"stats": {}}, "knowledge", "web"),
+        )
+
+        calls = []
+
+        def flaky_call_argus_llm(prompt, **kwargs):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return "!" * 32768  # fullctx 1回目: 退化出力（例外ではなく正常終了）
+            return "<final_answer>truncated fallback result</final_answer>"
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", flaky_call_argus_llm)
+
+        result = pm_argus.generate_brief_report("2026-07-23", "2026-06-23")
+
+        assert result == "truncated fallback result"
+        assert len(calls) == 2
+        assert "## 構造化データ" in calls[0]
+        assert "## pm.db 統計" in calls[1] and "## 構造化データ" not in calls[1]

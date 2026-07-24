@@ -6,6 +6,21 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 
 ## 現在進行中の計画
 
+### brief/risk 全文脈化の事後観察（本体は適用済み — LOG.md 2026-07-23 参照）
+
+**ステータス**: PM 判断により brief/risk を全文脈 single-shot に統一・本番適用（2026-07-23）。
+qa デーモン再起動後に有効。opt-out は `ARGUS_DISABLE_FULLCTX=1`、失敗時は従来切り詰め方式へ
+自動フォールバック（1 回）。
+
+**残作業**:
+1. **翌朝（07-24 07:47）の cron 確認** — pm_argus_daily.sh の Canvas 投稿が全文脈経路で
+   成功したか（ログの total chars/est_tokens/truncated 行と、フォールバック warning の有無）
+2. **数日の品質観察** — /argus-brief・/argus-risk・毎朝 Canvas の体感品質。
+   問題があれば `ARGUS_DISABLE_FULLCTX=1` を qa デーモン起動環境と cron に設定して即戻せる
+3. **A/B テスト成果物の後始末** — `data/eval/ctx_ab_report.md`（0600）を目視確認後、
+   `data/eval/ctx_ab.db` / `ctx_ab_report.md` / `ctx_ab_night.log` / `run_ctx_ab_night.sh` を
+   削除（機密の平文蓄積を残さない）。再現は argus_ab.py build-ctx で随時可能
+
 ### Docling 統合の事後観察（本体は完了 — LOG.md 2026-07-23 参照）
 
 **ステータス**: 実装・再変換・全件再索引まで完了（2026-07-23）。以下の観察のみ残る。

@@ -7,6 +7,38 @@
 
 ---
 
+## 2026-07-23 brief/risk を全文脈 single-shot に統一（PM 判断で本番適用）
+
+**背景**: 下記 A/B の結果、期間サマリー型（brief/risk）は fullctx が互角以上（risk 明確勝ち・
+brief 4対5 僅差）。PM 判断で brief/risk のみ全文脈化を決定。
+**決定**: 系統 A（Slack /argus-brief・/argus-risk）と系統 B（cron pm_argus_daily.sh →
+--brief-to-canvas/--risk。**旧 orchestrator-worker が実は生き残っていた**）を共有関数
+`generate_brief_report`/`generate_risk_report`（全文脈 single-shot、budget 350k 字、
+`ARGUS_FULLCTX_CHAR_BUDGET` で調整可）に統一。worker/orchestrator 実装（2 関数 + prompts 9 定数）
+は削除。失敗時は従来切り詰めプロンプトへ 1 回自動フォールバック、`ARGUS_DISABLE_FULLCTX=1` で
+常時従来方式。investigate は検索型が優位のため不変。
+**適用直後の調整**: e2e で glm-5.2 の反復退化（成功応答のままゴミ）を確認 → 退化ガード
+（同一文字100連続/final_answer未クローズ/有効文字率<50% でフォールバック）を追加。ユーザー FB
+「長すぎる・画面1枚でないと読まれない」→ 指示部を 2,000 字以内・上位3〜5項目に変更、
+max_tokens 32768→8192。短縮後 e2e: brief 2,069字/23s・risk 1,230字/16s、全文脈経路で退化なし。
+**影響**: qa デーモン再起動が必要（Slack 経路、22:24 実施済み）。cron は次回実行から自動反映。
+
+## 2026-07-23 全文脈投入（OpenWebUI 風）vs 現行 RAG の盲検 A/B — 現行 10 勝 4 敗で現行優位
+
+**背景**: gemma4 前提の「検索 top-5 + 400字切り詰め」を glm-5.2 移行後も継続中。OpenWebUI の
+「文脈丸ごと」の体感品質を受け、期間 30 日の全データ（Slack 全ログ+議事録全文+decisions/actions
+全件+Box、33.7 万字 ≈ 17.1 万 tok）を 1 プロンプト投入する方式を盲検比較（argus_ab.py 拡張、
+本番無変更・`data/eval/ctx_ab.db`）。
+**結果**: Kimi 盲検 14 ペアで current 10 勝 / fullctx 4 勝。ただし**構造的非対称**あり — fullctx は
+30 日窓の外（2026-05 の Yamaura boxnote 等）を見られず、窓外に正解がある質問（gold 由来の過去事実
+QA）は原理的に不利。窓内が正解の質問と risk では fullctx が勝ち、brief も 4 対 5 の僅差。
+**知見**: (1) RIKYU 長文プレフィルは日中スタックし得る（20 分無応答）が、同一コンテキスト共有なら
+vLLM prefix cache で 2 件目以降数秒。(2) temperature 0.3 + 32k 生成で「!!!!」反復退化 → 本番同値の
+0.8 で解消。(3) Kimi judge は max_tokens 2048 では think で尽き parse 失敗 50% → 8192 で全件成功。
+**評価の限界**: judge は原データ非提示のため factual 軸は不完全（gold 目視で補完）。
+**判断**: アーカイブ横断 QA（investigate）は検索型が優位。全文脈投入は「期間サマリー型」
+（brief/risk/today）への適用が有望で、採否は PLAN.md の残項目として検討。
+
 ## 2026-07-23 Docling 統合 — Box 抽出品質の底上げと見出し考慮チャンク分割
 
 **背景**: OpenWebUI RAG（Docling + bge-m3）の高品質を確認。embedding・チャンクは Argus と同等で、
