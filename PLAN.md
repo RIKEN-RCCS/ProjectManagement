@@ -48,18 +48,6 @@ read_document は「呼ばれれば効く」補助として残置。再燃時の
 別文書×別質問型の検証スイープを実施。観測ログ（窓別応答字数・所要・エンティティ）は
 整備済みで、実運用で問題が出れば診断は即可能。
 
-### RiVault embedding バグの運用者報告（任意・材料準備済み）
-
-**ステータス**: 当プロジェクトへの実害は 2026-07-20 のローカルサービング移行で解消済み
-（経緯は LOG.md）。RiVault 側のバグ自体は未修理のまま残っており、他利用者のために
-報告する場合の材料は揃っている:
-- 再現スクリプト `scripts/eval/embedding_duplicate_repro.py`＋公開Web記事のみの
-  `scripts/eval/suspects.json`（git管理外）
-- 症状: 無関係なテキストに同一ベクトル（単独リクエストで再現・キャッシュ状態依存）、
-  実効入力長 ~8,000字の無言切り詰め（別件）。**ローカル vLLM（同一モデル・同一テキスト）
-  では衝突しないことを確認済み＝RiVault のサービング層に固有**。
-- chat completions 側にも同種の疑いあり（全文読込QAで観測、クライアント側は回避済み）。
-
 ### WhisperX 既定エンジン切替の事後観察（本体は完了 — LOG.md 2026-07-24 参照）
 
 **ステータス**: 2026-07-24 に PM 判断で既定切替・本番投入済み。`pm_from_recording.sh` /
@@ -121,23 +109,6 @@ n=1 デプロイのため、実トラフィックで2週間観察してから定
 ## 保留中の構想
 
 着手判断待ちの計画。動かすときは「現在進行中の計画」セクションに移動して詳細化する。
-
-### 1. 日程調整 Agent (`/argus-schedule`)
-
-**ステータス**: 保留中（2026-05-26〜）。Modal (views.open) 案が最有力。
-
-**保留理由**: Slack 単独 UI では TONTON 並みのグリッド体験が得られない。
-DM + checkboxes は要素上限制約、Box xlsx 共同編集は排他制御リスクで NG（ユーザー判断）。
-
-**再開時の出発点**:
-- UI は Modal (views.open) を第一候補に詳細化
-- `pm_qa_server.py` に Socket Mode で trigger を受信するハンドラを追加
-- 候補日生成は Argus が直近会話から推定 + 引数明示の両対応
-- 確定後は `.ics` 添付で OAuth 不要のカレンダー連携
-- DB は `data/schedule.db` を新設、確定したものだけ `pm.db.meetings` に転記
-- 締切処理は `pm_argus_patrol.py` の cron サイクルに乗せる
-
-UI モックの履歴は専用 Canvas 末尾と検討用 DM に蓄積（具体的な ID は memory `project_schedule_agent` を参照）。
 
 ### 2. Argus Phase 2: `/argus-do` 自動実行
 

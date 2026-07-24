@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-24 日程調整 Agent と RiVault embedding バグ報告を PM 判断で取り下げ
+
+**背景**: 日程調整 Agent（/argus-schedule、2026-05-26 起票・Modal 案まで検討済み）と、
+RiVault embedding バグの運用者報告（実害は 2026-07-20 のローカルサービング移行で解消済み・
+報告材料準備済み）の 2 件が PLAN に残っていた。
+**決定**: PM 判断で両方とも取り下げ（2026-07-24）。日程調整の UI 検討履歴（Modal 案・
+NG となった DM checkboxes / Box xlsx 案の理由）と RiVault 再現材料
+（scripts/eval/embedding_duplicate_repro.py）は再開・報告する場合に備えて残置。
+
 ## 2026-07-24 Docling 統合と Argus 垂直軸の観察完了 — PM 体感確認で問題なしと判定しクローズ
 
 **背景**: 両計画とも本体は完了済みで観察のみ残っていた（Docling: 夜間バッチ確認済み +
