@@ -232,22 +232,16 @@ UI モックの履歴は専用 Canvas 末尾と検討用 DM に蓄積（具体�
 **ステータス**: 情報セキュリティ部門の確認待ち（実装保留中）。
 詳細はメモリ `project_web_auth_todo` 参照。
 
-### 4. argus-investigate と同種バグの追加調査（残課題）
+### 4. Slack 抽出のナレッジ検索に query rewrite が無い（残 1 件）
 
-**ステータス**: 保留中（2026-05-28〜）。今回 #1, #2（generate_minutes_local.py の Stage 3）は対応済み。
+**ステータス**: 保留中。旧「argus-investigate と同種バグの追加調査」の残り 1 件
+（他 2 件は 2026-07-24 に決着 — LOG.md 参照: slack.py 単発抽出の例外は呼び出し側 guard +
+次回リトライで緩和済みと確認、enrich の未回収は backfill 機構で修正・バックログ 81 件回収済み）。
 
-**残っている疑い箇所**（2026-07-02、Argus垂直軸作業でのファイル変更に伴い行番号を再確認）:
-- `scripts/ingest/slack.py:675` (`consensus_n <= 1` 分岐) — `consensus_n=1` 時は集約せず単発抽出、
-  `extract_json`（同ファイル415-422）の `ValueError` が上位に伝播しうる（consensus_n>=2 経路では
-  空配列で吸収）。1 スレッドが静かに失われるリスクは残存
-- `scripts/ingest/slack.py:659` — `retrieve_knowledge_for_extraction` にスレッド全文を投入しており、
-  4ba721c の query rewrite 相当（固有名詞展開・略語正規化）が無い。HyDE 過剰展開のリスク
-- `scripts/enrich/enrich_items.py:333, 382` — LLM 失敗時に `{"error":...}` で個別アイテムを
-  未エンリッチのまま記録。リトライなし
-
-**判断軸**: enrich の「歩留まり」が運用上問題になるかを、pm.db の
-`decisions WHERE decided_by IS NULL AND rationale IS NULL`（未エンリッチ相当）件数で
-観察してから着手判断する（専用の進捗管理列は無い）。
+- `scripts/ingest/slack.py:659` 付近 — `retrieve_knowledge_for_extraction` にスレッド全文を
+  投入しており、4ba721c の query rewrite 相当（固有名詞展開・略語正規化）が無い。
+  HyDE 過剰展開のリスク。retrieval 品質に触るため、着手時は保留構想 5 と同じく
+  recall 評価ハーネス（`scripts/eval/recall_eval.py`）での回帰測定が必須。
 
 ### 5. investigate の retrieval recall 限界（主題外の固有名詞に埋もれた事実）
 
