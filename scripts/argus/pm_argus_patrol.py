@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date
@@ -98,6 +99,9 @@ class PatrolContext:
     today: str
     config: dict
     data_dir: Path = field(default=_DATA_DIR)
+    # 1 巡回サイクル（複数 pm.db を跨ぐ）で実際に自動クローズが確定した件数の共有カウンタ。
+    # run_patrol() が全 pm.db 共通で1つのリストを生成し、各 PatrolContext に同じ参照を渡す。
+    auto_close_tracker: list[int] = field(default_factory=lambda: [0])
 
     @property
     def conn(self) -> Any:
@@ -173,6 +177,9 @@ def run_patrol(
             return
 
     total = 0
+    # 1 巡回サイクル（複数 pm.db を跨ぐ）を通じて共有する自動クローズ件数カウンタ。
+    # 各 pm.db の PatrolContext に同じ参照を渡し、実際にクローズが確定した件数を累積する。
+    auto_close_tracker: list[int] = [0]
     for ci, conn in enumerate(conns):
         db_label = pm_db_paths[ci].name
         logger.info("Patrol 巡回: %s", db_label)
@@ -186,6 +193,7 @@ def run_patrol(
             today=today,
             config=config,
             data_dir=_DATA_DIR,
+            auto_close_tracker=auto_close_tracker,
         )
 
         for name, detector_fn in detectors_to_run.items():
@@ -204,7 +212,58 @@ def run_patrol(
         c.close()
     state.close()
 
+    # Box XLSX は open 行のみを載せるため、自動クローズ直後に再エクスポートしないと
+    # pm_xlsx_sync.py 実行時に古いシート値で closed→open へ巻き戻る恐れがある。
+    # サイクル内で1件以上の自動クローズが確定した場合のみ、末尾で1回だけ再実行する。
+    if not dry_run and auto_close_tracker[0] > 0:
+        n_closed = auto_close_tracker[0]
+        logger.info(
+            "自動クローズ %d 件を Box XLSX へ反映するため再エクスポートを実行", n_closed,
+        )
+        _export_xlsx_after_close(logger)
+
     logger.info("Patrol 完了: %d 件のアクション (%s)", total, "dry-run" if dry_run else "実行")
+
+
+# --------------------------------------------------------------------------- #
+# 自動クローズ後の Box XLSX 再エクスポート
+# --------------------------------------------------------------------------- #
+# 現状 patrol 対象 pm.db は1つ（primary、_load_pm_db_paths が通常は単一パスを返す）で、
+# この再エクスポートも primary の XLSX のみを更新する。複数 pm.db を跨いだ運用にする場合は
+# DB 別に auto_close_tracker を分離し、--db/--config を pm.db ごとに個別指定して
+# pm_minutes_publish.py --xlsx-only を DB 単位で呼び分ける必要がある（未対応）。
+def _export_xlsx_after_close(log: logging.Logger) -> bool:
+    """自動クローズ後に pm_minutes_publish.py --xlsx-only を実行し、Box XLSX を再エクスポートする。
+
+    XLSX は open 行のみを載せるため、クローズ直後に再エクスポートすればその行が
+    シートから消え、pm_xlsx_sync.py による「古いシート値での巻き戻し」が
+    構造的に起きなくなる。失敗（非ゼロ exit / timeout / 例外）は WARNING に記録し、
+    例外は外へ漏らさない（巡回全体は継続させる）。
+    """
+    script = _SCRIPT_DIR / "minutes" / "pm_minutes_publish.py"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--xlsx-only"],
+            timeout=300,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("Box XLSX 再エクスポートがタイムアウトしました（300秒）")
+        return False
+    except Exception as e:
+        log.warning("Box XLSX 再エクスポートに失敗しました: %s", e)
+        return False
+
+    if result.returncode != 0:
+        log.warning(
+            "Box XLSX 再エクスポートが失敗しました (exit=%d): %s",
+            result.returncode, (result.stderr or "")[-500:],
+        )
+        return False
+
+    log.info("Box XLSX 再エクスポート完了: %s", (result.stdout or "")[-300:])
+    return True
 
 
 def list_pending() -> None:

@@ -150,6 +150,12 @@ def detect_completion_signals(ctx) -> int:
                 #  スタック状態になり得る）
                 ctx.conn.commit()
                 ctx.state.record_notification("auto_close", target_key)
+                # Box XLSX は open 行のみを載せるため、実際にクローズが確定した件数を
+                # サイクル単位の共有カウンタに記録する（巡回末尾での再エクスポート判定用、
+                # pm_argus_patrol.py 側で参照）。
+                auto_close_tracker = getattr(ctx, "auto_close_tracker", None)
+                if auto_close_tracker is not None:
+                    auto_close_tracker[0] += 1
 
             if post_close_notify:
                 leader_ch = ctx.config.get("patrol", {}).get("leader_channel", "")

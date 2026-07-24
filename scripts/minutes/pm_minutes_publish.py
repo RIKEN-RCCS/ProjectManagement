@@ -151,6 +151,28 @@ def main():
     def log(msg: str) -> None:
         print(msg)
 
+    # ---- Box 同時変更ガード: ジョブ開始時点の Box ファイル状態を記録する ---- #
+    # Stage 1-3（minutes 同期・Box Markdown 更新・XLSX 再構築）は時間がかかりうるため、
+    # ここで先に記録した状態と Stage 4 アップロード直前の状態を比較し、
+    # その間に他ジョブが Box 側を更新していないかを検知する。
+    # Box CLI 不通時は file_id/ts_before を None に縮退させ、ガードを無効化した上で
+    # 従来どおり Stage 1-4 を続行する（ここで例外を漏らして Stage 1 を止めない）。
+    report_cfg = load_report_config(config_path)
+    folder_id = report_cfg.get("box_folder_id")
+    filename = report_cfg.get("filename") or DEFAULT_FILENAME
+    file_id = None
+    ts_before = None
+    if folder_id:
+        try:
+            file_id = box_find_file(folder_id, filename)
+            ts_before = get_file_modified_at(file_id) if file_id else None
+            if file_id:
+                log(f"  Box file modified_at at job start: {ts_before}")
+        except Exception as e:
+            log(f"  WARNING: Box照会に失敗しました（同時変更ガードなしで続行します）: {e}")
+            file_id = None
+            ts_before = None
+
     if args.xlsx_only:
         log("[xlsx-only] XLSX 更新のみ実行")
         pm_conn = open_pm_db(db_path, no_encrypt=args.no_encrypt)
@@ -215,26 +237,16 @@ def main():
     # ---- Stage 4: Upload XLSX to Box with optimistic locking ---- #
     log("[4/4] Uploading XLSX to Box")
 
-    report_cfg = load_report_config(config_path)
-    folder_id = report_cfg.get("box_folder_id")
-    filename = report_cfg.get("filename") or DEFAULT_FILENAME
-
     if folder_id:
-        file_id = box_find_file(folder_id, filename)
-
         if file_id:
-            ts_before = get_file_modified_at(file_id)
-            log(f"  Box file modified_at at job start: {ts_before}")
-
-            box_upload_or_version(tmp_path, folder_id, filename, log)
-
-            ts_after = get_file_modified_at(file_id)
-            if ts_before and ts_after and ts_before != ts_after:
+            ts_pre_upload = get_file_modified_at(file_id)
+            if ts_before and ts_pre_upload and ts_before != ts_pre_upload:
                 log("  WARNING: Concurrent modification detected!")
-                log(f"    Before: {ts_before}")
-                log(f"    After:  {ts_after}")
-                log("    Skipping — Box file was modified by another job.")
+                log(f"    At job start:  {ts_before}")
+                log(f"    Before upload: {ts_pre_upload}")
+                log("  ジョブ開始後に Box 側が変更されたためアップロードを中止します。")
             else:
+                box_upload_or_version(tmp_path, folder_id, filename, log)
                 log(f"  Box upload complete (file_id={file_id})")
         else:
             log("  File not found on Box, uploading new...")
