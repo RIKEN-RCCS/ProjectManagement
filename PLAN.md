@@ -137,29 +137,24 @@ n=1 デプロイのため、実トラフィックで2週間観察してから定
 → qa デーモン起動環境に `ARGUS_DISABLE_INITIAL_SEARCH=1` を設定して opt-out（要デーモン再起動）。
 問題なければ本エントリを削除し LOG.md に1行「観察完了・定着」を記録。
 
-### アクションアイテム自動消化検出・自動クローズ（コード完了・ロールアウト保留）
+### アクションアイテム自動クローズの事後観察（本番稼働中 — 経緯は LOG.md 2026-07-24）
 
-**ステータス**: 実装・レビュー・修正・単体検証まで完了（2026-07-14）。既定 config が全て off のため
-本番影響ゼロでマージ可能。設計判断の経緯は LOG.md「アクションアイテム自動消化検出」参照。
+**ステータス**: 2026-07-22 に config 投入済みで**本番稼働中**（`auto_close_enabled: true`、
+7/21〜24 に 64 件を自動クローズ）。段階ロールアウト案（まず false で観察）は経ていないが、
+証拠 note のサンプル確認では判定品質は妥当。2026-07-24 に **xlsx_sync 衝突による巻き戻し
+33 件を発見・復元**し、恒久対策（自動クローズ後の XLSX 再エクスポート）を実装済み
+（次回 patrol cron 起動で反映）。
 
-**何をしたか**: 既存 Patrol の `detect_completion_signals`（`scripts/argus/patrol/detect.py`）を拡張。
-対象を `source IN ('slack','meeting')` に広げ、`_get_activity_evidence` が qa_index.db の
-ハイブリッド検索で活動報告（議事録・別チャンネルSlack・レポート）を証拠として引き、LLM が
-確信度付き（`YES|HIGH` / `YES|LOW` / `NO`）で完了判定。HIGH かつ `auto_close_enabled` のときのみ
-完全自動 close（＋note追記＋audit_log source=`argus_auto`＋リーダーチャンネル事後通知）、
-それ以外（auto_close無効 or LOW）は旧来の承認ボタン DM へフォールバック（退行なし）。
-
-**残作業（ロールアウト、PMが段階判断）**:
-1. **config 追加**: `data/patrol_config.yaml` の `patrol.completion_detection.*` に新キーを追記
-   （`evidence_from_index` / `evidence_index_name` / `evidence_k` / `evidence_since_extracted` /
-   `auto_close_enabled` / `auto_close_min_confidence` / `post_close_notify`。既定値はコード側にあり）。
-2. **証拠検索の有効化と観察**: まず `evidence_from_index: true`・`auto_close_enabled: false` で、
-   承認ボタン経路のまま活動報告ベース検出の精度を dry-run/実運用ログで観察。
-3. **LLM 過剰 HIGH 付与のチューニング**: 検証時 glm-5.2 が「関連文書がヒットしただけ」で完了寄りに
-   判定する傾向を確認済み。プロンプトに抑制文を追加済みだが、実データで HIGH 精度を要観察。
-   誤検出が多ければ閾値・プロンプトを調整してから `auto_close_enabled: true` に上げる。
-4. **反映**: patrol は cron/都度プロセスなので次回起動で反映（qa デーモン再起動不要 —
-   `pm_qa_server.py` は `confirm.py` のみ import、`detect.py`/`actions.py` は読まない）。
+**残作業（観察のみ）**:
+1. **HIGH 判定の精度観察** — 今後の自動クローズ（リーダーチャンネル事後通知）を数週間分
+   確認し、誤クローズがあれば `auto_close_min_confidence` / プロンプト抑制文を調整。
+   誤りが目立つ場合は `auto_close_enabled: false` で承認ボタン運用に即戻せる
+2. **再エクスポートの初回発動確認** — patrol ログの「自動クローズ N 件を Box XLSX へ反映」と
+   publish 出力。cron の最小 PATH で `box` CLI が見つからない場合は warning 止まりで
+   巻き戻し防止が無効化されるため、初回発動時にログを必ず確認する
+3. **XLSX を手編集する際の注意（運用共有）** — シートの編集～ `pm_xlsx_sync.py` 実行の間に
+   patrol がクローズした項目は、sync 時に古いシート値で巻き戻る余地が残る（再エクスポートで
+   窓は大幅に縮小済み）。長時間かけてシートを編集する場合は sync 前に最新シートと差分確認
 
 ### 実績DB（achievements ledger）週次 populate の初回観察
 
