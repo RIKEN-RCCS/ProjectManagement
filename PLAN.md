@@ -13,8 +13,12 @@ qa デーモン再起動後に有効。opt-out は `ARGUS_DISABLE_FULLCTX=1`、�
 自動フォールバック（1 回）。
 
 **残作業**:
-1. **翌朝（07-24 07:47）の cron 確認** — pm_argus_daily.sh の Canvas 投稿が全文脈経路で
-   成功したか（ログの total chars/est_tokens/truncated 行と、フォールバック warning の有無）
+1. ~~翌朝の cron 確認~~ — **確認済み（2026-07-24）**: 07:47 の cron は brief/risk とも全文脈方式で
+   実行、フォールバック warning 0 件、Canvas 投稿成功（replace方式）。なお total chars/est_tokens の
+   計測行はログに出ていなかった（成否には影響なし。次回この観察を閉じる際に verbose 配線を確認）。
+   同日 09時台の実行で temp canvas 削除の `canvas_editing_locked` WARN を 3 件観測 —
+   投稿自体は成功しており実害なしだが、replace 方式の残骸掃除が単発失敗しうる点は Canvas
+   エントリの既知挙動として記憶しておく
 2. **数日の品質観察** — /argus-brief・/argus-risk・毎朝 Canvas の体感品質。
    問題があれば `ARGUS_DISABLE_FULLCTX=1` を qa デーモン起動環境と cron に設定して即戻せる
 
@@ -25,8 +29,9 @@ qa デーモン再起動後に有効。opt-out は `ARGUS_DISABLE_FULLCTX=1`、�
 **ステータス**: 実装・再変換・全件再索引まで完了（2026-07-23）。以下の観察のみ残る。
 
 **残作業**:
-1. **翌晩（07-24 02:00）の夜間バッチ確認** — `logs/pm_box_update.log` で docling health 待ちの成功、
-   差分変換が docling 経由で走ること、`--figures-pending` の pptx バックフィル選定を確認
+1. ~~翌晩の夜間バッチ確認~~ — **確認済み（2026-07-24）**: 02:00 バッチで差分変換が docling 経由で
+   成功（`method=docling+figures` を確認、pptx 含む）。失敗 1 件はダウンロード失敗（Box 側、
+   docling 無関係）。図OCRバックフィルはサイズ超過 1 件を設計どおり除外
 2. **検索品質の体感確認** — /argus-investigate や OpenWebUI で使った質問を投げ、表・図由来の
    情報（図言語化セクション 3,109 チャンク）が回答に乗るか確認
 3. 問題なければ本エントリを削除（LOG.md に記録済み）
