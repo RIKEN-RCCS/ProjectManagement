@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-07-24 achievements ledger の運用整備 4 件を消化 — 週次 cron 化と抽出時 title 正規化
+
+**背景**: PLAN 起票（07-16）の 4 件のうち 2 件は点検で解決済みと判明（rejected 再提案抑止は
+known_titles の status フィルタ撤廃で対応済み・rejected 現存 0 件、evidence_ref の出典ラベルは
+実測 0/53 が日付のみ）。実残は per-app commit と title のアプリ名重複（16/53 件）のみだった。
+**決定**: per-app commit 化（途中失敗時の全損防止）、抽出時の `_strip_app_name_prefix` 正規化
+（既存 confirmed 行は人間承認済み台帳のため不変更）、populate は pm_box_update.sh 内で
+**月曜のみ週次実行**（embed 後に依存、`ACHIEVEMENTS_WEEKLY=0` で無効化）。毎晩は実績の発生
+頻度に対し LLM コスト過剰と判断。GENESIS 1 アプリの dry-run で e2e 動作確認済み。
+
 ## 2026-07-24 「V4-Flash 切替の follow-up」計画を obsolete としてクローズ — glm-5.2 移行で前提消滅
 
 **背景**: 2026-06-05 起票の残課題 3 件を点検。(1) Pass1 抽出の call_local_llm 直叩きは
