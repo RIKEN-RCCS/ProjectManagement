@@ -17,9 +17,8 @@ qa デーモン再起動後に有効。opt-out は `ARGUS_DISABLE_FULLCTX=1`、�
    成功したか（ログの total chars/est_tokens/truncated 行と、フォールバック warning の有無）
 2. **数日の品質観察** — /argus-brief・/argus-risk・毎朝 Canvas の体感品質。
    問題があれば `ARGUS_DISABLE_FULLCTX=1` を qa デーモン起動環境と cron に設定して即戻せる
-3. **A/B テスト成果物の後始末** — `data/eval/ctx_ab_report.md`（0600）を目視確認後、
-   `data/eval/ctx_ab.db` / `ctx_ab_report.md` / `ctx_ab_night.log` / `run_ctx_ab_night.sh` を
-   削除（機密の平文蓄積を残さない）。再現は argus_ab.py build-ctx で随時可能
+
+（A/B テスト成果物の平文ファイル 4 点は 2026-07-24 に削除済み。再現は argus_ab.py build-ctx で随時可能）
 
 ### Docling 統合の事後観察（本体は完了 — LOG.md 2026-07-23 参照）
 
@@ -103,18 +102,20 @@ read_document は「呼ばれれば効く」補助として残置。再燃時の
 これで初めて成立する。**会議運用の変更を伴うため、R1+R2の効果を見てから
 PMが着手判断する**（2026-07-05 の抜本見直し時に明示的に見送り）。
 
-### WhisperX 本番採用（保留 — ctranslate2 の Blackwell 対応待ち）
+### WhisperX 既定エンジン切替の事後観察（本体は完了 — LOG.md 2026-07-24 参照）
 
-**ステータス**: テスト完了（2026-07-06、経緯は LOG.md「WhisperX/GB10テスト完了」）。
-`whisper_vad.py --engine whisperx` として実装済み・レビュー済みで、品質重視の会議には
-手動指定で今すぐ使える。話者分離品質は明確に優位だが、ctranslate2 が GB10(Blackwell)
-のカーネル未対応のため転写が旧エンジン比8倍遅く、既定切替は見送り。
+**ステータス**: 2026-07-24 に PM 判断で既定切替・本番投入済み。`pm_from_recording.sh` /
+`/argus-transcribe` とも既定 `WHISPER_ENGINE=whisperx`（whisperx-blackwell.sif +
+whisperx_pyfix オーバーレイ）で動作し、reconcile に決定論的話者名寄せが入る。
+旧エンジンへの緊急ロールバックは環境変数 `WHISPER_ENGINE=transformers`（qa デーモン分は
+起動環境に設定して stop/start qa）。whisper.sif・旧エンジンコードはフォールバックとして維持。
 
-**再開条件**: ctranslate2 の新リリースが Blackwell (sm_120/121) ネイティブ対応したら、
-`whisperx_pyfix/` のソースビルドを更新して5分WAVベンチを再実施（手順・環境変数は
-LOG.md 該当エントリ参照）。転写が旧エンジン同等以下になれば、wrapper
-（pm_from_recording.sh / transcribe_pipeline.py）に `WHISPER_ENGINE` スイッチを追加して
-本番切替を提案する。
+**残作業（観察のみ）**:
+1. **実会議数本での品質観察** — 話者名寄せの確定率（[INFO] 話者名寄せ ログ）、未確定クラスタの
+   LLM 推測品質、所要時間（60分会議で13-15分想定、うち約3分はプロセス初回ウォームアップ固定費）
+2. **Stage 3 空応答ガードの発動頻度観察** — `[WARN] Stage 3 .*集約が空/不正形` の出現率。
+   高頻度なら glm-5.2 の think=True 集約プロンプト側の見直しを検討
+3. 問題なければ本エントリを削除（LOG.md に記録済み）
 
 ### V4-Flash 切替の本番適用と follow-up
 
