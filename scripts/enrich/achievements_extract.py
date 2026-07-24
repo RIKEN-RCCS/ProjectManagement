@@ -135,10 +135,38 @@ def retrieve_candidates(app_name: str, k: int = _DEFAULT_K) -> list[str] | None:
         return None
 
 
+# title 先頭のアプリ名重複除去に許す区切り文字（0〜2文字）。
+_TITLE_APP_PREFIX_SEP_RE = r"[の:：/・\-を\s]"
+
+
+def _strip_app_name_prefix(title: str, app_name: str) -> str:
+    """title が app_name（大文字小文字無視）で始まる場合、先頭の app 名と直後の
+    区切り文字（`の`、`:`、`：`、`/`、`・`、空白、`-`、`を` のいずれか0〜2文字）を除去する。
+
+    除去後の残りが4文字未満になる場合は「app_name」単体のような title を
+    空にしないよう元の title を維持する。app_name が空の場合は正規化をスキップする。
+    抽出時（LLM候補のサニタイズ時）のみに適用し、既存DB行は変更しない。
+    """
+    if not app_name or not title:
+        return title
+    pattern = re.compile(
+        r"^" + re.escape(app_name) + _TITLE_APP_PREFIX_SEP_RE + r"{0,2}",
+        re.IGNORECASE,
+    )
+    m = pattern.match(title)
+    if not m:
+        return title
+    stripped = title[m.end():]
+    if len(stripped) < 4:
+        return title
+    return stripped
+
+
 def _sanitize_achievement(app_name: str, raw: dict) -> dict | None:
     title = str(raw.get("title") or "").strip()
     if not title:
         return None
+    title = _strip_app_name_prefix(title, app_name)
     if len(title) > 40:
         title = title[:39] + "…"
     confidence = str(raw.get("confidence") or "low").strip().lower()

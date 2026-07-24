@@ -228,6 +228,11 @@ class AchievementsIngestPlugin:
                 f"proposed={counts['proposed']}件, skip={counts['skip']}件"
             )
 
+            # アプリ単位でコミット。途中で失敗しても既に処理済みのアプリ分の
+            # upsert が失われないようにする。
+            if not ctx.dry_run:
+                ctx.pm_conn.commit()
+
         if not ctx.dry_run:
             ctx.pm_conn.commit()
 

@@ -222,5 +222,23 @@ echo "================================================================"
 
 "$PYTHON3" "$SCRIPT_DIR/data-pipeline/pm_embed.py" "${EMBED_OPTS[@]}"
 
+# --------------------------------------------------------------------------- #
+# ステップ4: 実績台帳（achievements）週次 populate（月曜のみ、qa_index更新後）
+# --------------------------------------------------------------------------- #
+ACHIEVEMENTS_WEEKLY="${ACHIEVEMENTS_WEEKLY:-1}"
+if [[ "$ACHIEVEMENTS_WEEKLY" == "0" ]]; then
+    echo ""
+    echo "ステップ4: 実績台帳 週次 populate はスキップします (ACHIEVEMENTS_WEEKLY=0)"
+elif [[ "$(date +%u)" == "1" ]]; then
+    echo ""
+    echo "================================================================"
+    echo "ステップ4: 実績台帳 週次 populate (pm_ingest.py achievements)"
+    echo "================================================================"
+    echo "[INFO] 週次 achievements populate 開始"
+    "$PYTHON3" "$SCRIPT_DIR/ingest/pm_ingest.py" achievements \
+        || echo "[WARN] 週次 achievements populate に失敗しました。処理を継続します。"
+    echo "[INFO] 週次 achievements populate 完了"
+fi
+
 echo ""
 echo "✓ pm_box_update.sh 完了"
