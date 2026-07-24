@@ -265,8 +265,103 @@ def _delete_sections_sequential(token: str, canvas_id: str,
 # Canvas 投稿
 # --------------------------------------------------------------------------- #
 
+def _post_via_replace(client: WebClient, canvas_id: str, content: str) -> None:
+    """Canvas の文書全体を1回の replace で置換する。
+
+    id 属性のない <table> 等（セクション削除 API では消せない残骸）も含めて
+    文書ごと置き換わるため確実に消える（使い捨て Canvas での実験で確認済み、2026-07-24）。
+    ratelimited は Retry-After 待ちで _DELETE_MAX_RETRY 回までリトライする。
+    """
+    for _ in range(_DELETE_MAX_RETRY):
+        try:
+            client.canvases_edit(
+                canvas_id=canvas_id,
+                changes=[{
+                    "operation": "replace",
+                    "document_content": {"type": "markdown", "markdown": content},
+                }],
+            )
+            return
+        except SlackApiError as e:
+            if e.response.get("error") == "ratelimited":
+                wait = int(e.response.headers.get("Retry-After", 5))
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("rate limit retry exhausted: replace")
+
+
+def _post_via_delete_insert(client: WebClient, token: str, canvas_id: str, content: str) -> None:
+    """旧方式: 既存セクションを全削除してから新コンテンツを先頭に挿入する。
+
+    Canvas の同時編集ロック（canvas_editing_locked）や、id 属性のないタグの
+    削除不可制約により残骸が残ることがある。_post_via_replace が失敗した場合のみの
+    フォールバックとして温存する。
+    """
+    # Step 1: url_private HTML から全セクション ID を収集して削除
+    section_ids = _collect_section_ids(client, canvas_id)
+    if section_ids:
+        total = len(section_ids)
+        print(f"[INFO] 既存セクション {total} 件を削除中...")
+        ok, failed_ids = _delete_sections_parallel(token, canvas_id, section_ids)
+        if failed_ids:
+            print(f"[INFO] 失敗 {len(failed_ids)} 件を順次リトライ中...")
+            retry_ok, still_failed = _delete_sections_sequential(token, canvas_id, failed_ids)
+            ok += retry_ok
+            fail = len(still_failed)
+        else:
+            fail = 0
+        print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
+
+    # Step 2: 新コンテンツを先頭に挿入
+    client.canvases_edit(
+        canvas_id=canvas_id,
+        changes=[{
+            "operation": "insert_at_start",
+            "document_content": {"type": "markdown", "markdown": content},
+        }],
+    )
+
+
+_REPLACE_CLEANUP_DELAY_SEC = 5  # replace 後の export 反映ラグ対策
+
+
+def _cleanup_stale_sections_after_replace(
+    client: WebClient, token: str, canvas_id: str, old_section_ids: list[str],
+) -> None:
+    """replace 後に旧セクションが稀に生き残ることがあるため、生存確認して掃除する。
+
+    実 Canvas 検証（2026-07-24）で、直前の並列削除で canvas_editing_locked に
+    なっていた個体が replace 後もそのまま残るケースを確認。単独 delete では解消できる
+    ため、並列は使わず _delete_sections_sequential で1件ずつ処理する
+    （並列がロック競合の原因のため）。削除に失敗しても post_to_canvas 全体は成功扱いにし、
+    warning のみ出す。
+    """
+    if not old_section_ids:
+        return
+    time.sleep(_REPLACE_CLEANUP_DELAY_SEC)
+    current_ids = set(_collect_section_ids(client, canvas_id))
+    survivors = [sid for sid in old_section_ids if sid in current_ids]
+    if not survivors:
+        return
+    print(f"[WARN] replace 後に残存セクション {len(survivors)} 件を掃除", file=sys.stderr)
+    _, still_failed = _delete_sections_sequential(token, canvas_id, survivors)
+    if still_failed:
+        print(f"[WARN] 残存セクションの削除に失敗（{len(still_failed)}件）: {still_failed}",
+              file=sys.stderr)
+
+
 def post_to_canvas(canvas_id: str, content: str) -> None:
-    """Canvas の既存コンテンツを全削除し、新コンテンツを先頭に挿入する"""
+    """Canvas の既存コンテンツを文書全体 replace で置換する。
+
+    id 属性のないテーブル等の残骸も含めて1回で確実に消えるため、既定はこちら。
+    replace が SlackApiError（rate limit retry 枯渇時は RuntimeError）で失敗した場合のみ、
+    従来の「全セクション削除 → insert_at_start」方式（_post_via_delete_insert）に
+    フォールバックする。
+    replace 成功後は、稀に生き残る旧セクションがないか確認し、あれば単独削除で掃除する
+    （_cleanup_stale_sections_after_replace）。残存セクションがなければ追加の削除呼び出しは
+    発生しない（通常パスのコストは files_info 2回分のみ）。
+    """
     token = os.getenv("SLACK_USER_TOKEN")
     if not token:
         print("ERROR: SLACK_USER_TOKEN を設定してください", file=sys.stderr)
@@ -274,31 +369,22 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
     print(f"[INFO] Canvas投稿コンテンツ: {len(content)} 文字")
     client = WebClient(token=token)
 
-    try:
-        # Step 1: url_private HTML から全セクション ID を収集して削除
-        section_ids = _collect_section_ids(client, canvas_id)
-        if section_ids:
-            total = len(section_ids)
-            print(f"[INFO] 既存セクション {total} 件を削除中...")
-            ok, failed_ids = _delete_sections_parallel(token, canvas_id, section_ids)
-            if failed_ids:
-                print(f"[INFO] 失敗 {len(failed_ids)} 件を順次リトライ中...")
-                retry_ok, still_failed = _delete_sections_sequential(token, canvas_id, failed_ids)
-                ok += retry_ok
-                fail = len(still_failed)
-            else:
-                fail = 0
-            print(f"[INFO] 削除完了: {ok}件成功 / {fail}件失敗")
+    old_section_ids = _collect_section_ids(client, canvas_id)
 
-        # Step 2: 新コンテンツを先頭に挿入
-        client.canvases_edit(
-            canvas_id=canvas_id,
-            changes=[{
-                "operation": "insert_at_start",
-                "document_content": {"type": "markdown", "markdown": content},
-            }],
-        )
-        print(f"✓ Canvas 更新成功: {canvas_id}")
+    try:
+        _post_via_replace(client, canvas_id, content)
+        print(f"✓ Canvas 更新成功（replace方式）: {canvas_id}")
+        _cleanup_stale_sections_after_replace(client, token, canvas_id, old_section_ids)
+        return
+    except SlackApiError as e:
+        print(f"[WARN] replace方式が失敗（{e.response.get('error')}）。"
+              f"削除+挿入方式にフォールバックします", file=sys.stderr)
+    except RuntimeError as e:
+        print(f"[WARN] replace方式が失敗（{e}）。削除+挿入方式にフォールバックします", file=sys.stderr)
+
+    try:
+        _post_via_delete_insert(client, token, canvas_id, content)
+        print(f"✓ Canvas 更新成功（削除+挿入方式）: {canvas_id}")
     except SlackApiError as e:
         print(f"Slack API エラー: {e.response['error']}", file=sys.stderr)
         print(f"レスポンス詳細: {e.response}", file=sys.stderr)

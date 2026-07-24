@@ -34,6 +34,29 @@ python3 scripts/canvas_debug.py -c CHANNEL_ID --show-bookmarks
 
 ---
 
+### 全文置換（最重要 — 2026-07-24 追記）
+
+**Canvas 全体の更新は `operation: "replace"` を section_id なしで呼ぶのが正**。文書全体が
+1 回の API 呼び出しでアトミックに置換され、id なし `<table>` の残骸も残らない:
+
+```python
+client.canvases_edit(
+    canvas_id=canvas_id,
+    changes=[{"operation": "replace",
+              "document_content": {"type": "markdown", "markdown": content}}],
+)
+```
+
+旧方式（全セクション ID 収集 → 並列個別削除 → insert_at_start）は以下の 2 つの理由で
+不完全であり、`canvas_utils.post_to_canvas` は 2026-07-24 に全文 replace 方式へ移行した
+（旧方式は replace 失敗時のフォールバックとして温存）:
+1. **並列削除は `canvas_editing_locked` で大量失敗する**（Canvas は同時編集をロック。
+   順次リトライも `canvas_editing_failed` になる場合がある）
+2. id 属性のない `<table>` はセクション API で削除不可 → 表の残骸が蓄積する
+
+以下のセクション削除の知見は、部分編集（特定セクションのみの差し替え）や
+フォールバック経路のメンテナンス時に参照する。
+
 ### Canvas セクション構造
 
 - セクションIDは HTML の `id='...'` 属性（`h1`/`p`/`div`/`table` 等のタグ上）

@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-07-24 Canvas 更新を全文 replace 方式へ移行（表の残骸・前日コンテンツ残存の解消）
+
+**背景**: brief/risk Canvas に旧コンテンツ（前日見出し・id なし `<table>` 10 個）が残存。原因は
+post_to_canvas の「全セクション 8 並列削除 → insert_at_start」方式で、(1) 並列削除が
+`canvas_editing_locked` で大量失敗（Canvas は同時編集ロック）、(2) id なし `<table>` は
+セクション API で削除不可、の 2 点が構造的。
+**決定**: `canvases.edit` の `operation:replace`（section_id なし = 文書全体を 1 呼び出しで
+アトミック置換）へ移行。使い捨て Canvas で検証後に本番適用し、両 Canvas クリーン化を確認。
+replace が稀にセクションを取り残す事象を 1 件観測（ロック障害を経た個体）→ replace 後に
+旧 ID の生存確認 + 逐次削除の自己修復ステップを追加。旧方式は replace 失敗時の
+フォールバックとして温存。知見は docs/canvas_api.md と slack-canvas-api Skill に反映済み。
+
 ## 2026-07-23 brief/risk を全文脈 single-shot に統一（PM 判断で本番適用）
 
 **背景**: 下記 A/B の結果、期間サマリー型（brief/risk）は fullctx が互角以上（risk 明確勝ち・
