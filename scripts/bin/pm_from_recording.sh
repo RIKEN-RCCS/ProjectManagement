@@ -17,7 +17,10 @@
 #   --scene-threshold N  ffmpeg scene detect 閾値（デフォルト: 0.25）
 #   --max-frames N       OCR に渡すフレーム数上限。超過時は時系列に均等間引き（デフォルト: 200）
 #   --ocr-workers N      OCR 並列ワーカー数（デフォルト: 8）
-#   --consensus N        Self-consistency サンプリング数（デフォルト 3。--consensus 1 で従来の単発生成に戻す）
+#   --consensus N        Self-consistency サンプリング数（デフォルト 1。--consensus 3 で従来構成に戻す。
+#                        2026-07-26 A/B（盲検2/2で同等以上・コスト1/7）により既定変更）
+#   --chunk-minutes N    マルチステージ時のチャンクサイズ（分単位、デフォルト 90）。
+#                        旧構成は --chunk-minutes 10 --consensus 3 で再現可
 #   --no-triage          抽出候補のトリアージ（2次審査）を無効化
 #
 # 環境変数:
@@ -85,7 +88,10 @@ SLIDE_OCR=1
 SCENE_THRESHOLD="0.25"
 MAX_FRAMES="200"
 OCR_WORKERS="8"
-CONSENSUS_N="3"
+# 2026-07-26 A/B（盲検2/2で同等以上・コスト1/7）により既定変更。旧構成は
+# --chunk-minutes 10 --consensus 3 で再現可
+CONSENSUS_N="1"
+CHUNK_MINUTES="90"
 NO_TRIAGE=0
 FILES=()
 
@@ -101,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --max-frames)   MAX_FRAMES="$2"; shift 2 ;;
     --ocr-workers)  OCR_WORKERS="$2"; shift 2 ;;
     --consensus)    CONSENSUS_N="$2"; shift 2 ;;
+    --chunk-minutes) CHUNK_MINUTES="$2"; shift 2 ;;
     --no-triage)    NO_TRIAGE=1; shift ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
@@ -457,7 +464,7 @@ EOF
     $TOKEN_OPT \
     --output     "$(dirname "$BASENAME")" \
     --max-tokens 16384 \
-    --multi-stage --chunk-minutes 10 \
+    --multi-stage --chunk-minutes "$CHUNK_MINUTES" \
     $VTT_OPT \
     $SLIDE_OPT \
     $CONSENSUS_OPT \

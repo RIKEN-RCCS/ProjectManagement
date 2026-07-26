@@ -491,12 +491,14 @@ python3 '{_RECORDING_DIR}/whisper_vad.py' '{wav_path}' '{transcript_path}' {extr
 
 
 def run_minutes(transcript_path, client, channel_id, thread_ts,
-                vtt_path=None, slide_context_path=None, consensus_n=3):
+                vtt_path=None, slide_context_path=None, consensus_n=1):
     """generate_minutes_local.py をコンテナ外のPythonで実行し、議事録パスを返す。
 
     consensus_n >= 2 の場合は --consensus N を渡して self-consistency サンプリング
     を有効化する（Stage 2 / Stage 3 を N 回サンプリング → embedding クラスタリング
     + LLM 集約）。
+    2026-07-26 A/B（盲検2/2で同等以上・コスト1/7）により既定 N=1・chunk 90 分へ変更。
+    旧構成は consensus_n=3・--chunk-minutes 10 で再現可。
     """
     audio_save_dir = _get_audio_save_dir()
     vllm_api_base = _get_vllm_api_base()
@@ -514,7 +516,7 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
            str(transcript_path),
            "--model", vllm_model,
            "--output", str(minutes_dir),
-           "--multi-stage", "--chunk-minutes", "10",
+           "--multi-stage", "--chunk-minutes", "90",
            "--max-tokens", "16384"]
     # ARGUS_PREFER_RIVAULT=1 かつ RIVAULT_URL/TOKEN が揃っている場合は --url を渡さない
     # (load_local_llm_endpoint() が RIVAULT_URL を返すため --url で上書きすると壊れる)
@@ -610,10 +612,12 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
     return minutes_path
 
 
-def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=3):
+def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=1):
     """ダウンロード → 文字起こし → 議事録生成 → Slack投稿 の全体パイプライン。
 
     consensus_n >= 2 の場合は議事録生成を self-consistency モードで実行する。
+    2026-07-26 A/B（盲検2/2で同等以上・コスト1/7）により既定変更。旧構成は
+    consensus_n=3・--chunk-minutes 10 で再現可。
     """
     audio_path = None
     transcript_path = None

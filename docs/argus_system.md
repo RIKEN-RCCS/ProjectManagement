@@ -139,6 +139,16 @@ pm.db 統計・Slack 生メッセージ・議事録本文を丸ごとプロン�
 で上書き可）。従来の Worker 分割 + 切り詰め方式（`_WORKER_MAX_CHARS=8000`）は
 `ARGUS_DISABLE_FULLCTX=1` 指定時、または全文脈生成が失敗した場合のフォールバックとして残る。
 
+2026-07-26 のレビュー指摘を反映し、`/argus-today`（`generate_daily_summary_report()`）と
+`/argus-draft agenda`/`/argus-draft request`（`generate_draft_report()`）も同じ
+`ARGUS_DISABLE_FULLCTX` ゲート・フォールバック構造で全文脈方式が既定になった
+（`fetch_raw_messages()` のチャンネルあたり20,000字切り詰めを回避）。プロンプト本文
+（`_DAILY_SUMMARY_PROMPT` / `_DRAFT_AGENDA_PROMPT` / `_DRAFT_REQUEST_PROMPT`）は変更せず、
+`{messages}`/`{minutes}` に渡す入力データの取得方法のみを切り替える。
+**`/argus-draft report` は対象外**（Slack 会話を使わず milestone_table/closed_items/
+overdue_list/assignee_table のみで構成されるため、元々チャンネル別切り詰めの影響を
+受けず常に同一ロジックを使う）。
+
 ---
 
 ### `/argus-draft <用途> <件名>` — 文書草案生成

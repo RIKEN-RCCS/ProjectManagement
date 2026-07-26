@@ -309,11 +309,12 @@ Slack チャンネルにアップロードされた音声・動画ファイル�
 /argus-transcribe GMT20260302-032528_Recording.mp4
 /argus-transcribe 2026-04-20_Leader_Meeting.m4a
 /argus-transcribe Recording.mp4 consensus=5    # Self-Consistency サンプル数を増やす
-/argus-transcribe Recording.mp4 consensus=1    # 単発生成（Self-Consistency 無効）
+/argus-transcribe Recording.mp4 consensus=3    # 従来の Self-Consistency 構成に戻す
 ```
 
 ファイル名は太字 (`*foo.mp4*`) やコード記法 (`` `foo.mp4` ``) で囲まれていても自動で剥がす。
-`consensus=N` は位置不問（ファイル名の前後どちらでも可）、既定値は **N=3**。
+`consensus=N` は位置不問（ファイル名の前後どちらでも可）、既定値は **N=1**（単発生成。
+2026-07-26 の glm-5.2 盲検 A/B で N=3 と品質同等以上・コスト1/7 と判明したため既定変更）。
 
 ### Self-Consistency（議事録生成の複数サンプリング）
 

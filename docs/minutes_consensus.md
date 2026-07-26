@@ -1,18 +1,22 @@
 # Self-Consistency による議事録生成
 
 > **注記**: 本書のアルゴリズム導入根拠（gemma4 reasoning の出力揺れ）とコスト実測
-> （2026-05-25）は gemma4 時代のものである。2026-07 に glm-5.2 へ移行済みで、N=3 既定の
-> 妥当性は glm-5.2 では未検証（再評価は PLAN.md 参照）。本文中の「gemma4」は現在は
-> `call_argus_llm()` のルーティング先（glm-5.2 等、`llm.routing_priority` に従う）と
-> 読み替えること。
+> （2026-05-25）は gemma4 時代のものである。2026-07 に glm-5.2 へ移行済み。
+> **2026-07-26 の glm-5.2 盲検 A/B により既定は N=1・chunk 90 分へ変更**
+> （品質同等以上・コスト1/7）。本書のアルゴリズムは `--consensus` 2 以上を指定した
+> 場合のみ有効。本文中の「gemma4」は現在は `call_argus_llm()` のルーティング先
+> （glm-5.2 等、`llm.routing_priority` に従う）と読み替えること。
 
-`generate_minutes_local.py` の標準動作。同一プロンプトを N 回サンプリングし、
-embedding クラスタリング + 投票 + LLM 集約によって表現ブレと取捨選択ブレを吸収する。
+`generate_minutes_local.py` の任意機能（`--consensus` 2 以上を指定した場合のみ有効）。
+同一プロンプトを N 回サンプリングし、embedding クラスタリング + 投票 + LLM 集約に
+よって表現ブレと取捨選択ブレを吸収する。
 
-> **2026-05-25 から `--consensus 3` がデフォルト**。同一録画 (65 分会議) で実測した
-> 結果、エンドツーエンドの追加コストは baseline 比 +15〜25% に留まり、表現ブレの
-> 吸収効果に対して許容範囲だったため標準動作に格上げした。単発生成に戻したい場合は
-> `--consensus 1` を明示する。
+> **2026-05-25 に `--consensus 3` を既定化したが、2026-07-26 の glm-5.2 盲検 A/B で
+> N=1（単発生成）が品質同等以上・コスト1/7 と判明したため既定を `--consensus 1`
+> （Self-Consistency 無効）に戻した**。同一録画 (65 分会議) で実測した N=3 導入時の
+> 追加コストは baseline 比 +15〜25% だった。Self-Consistency を使いたい場合は
+> `--consensus 3` 等 N>=2 を明示する（旧構成は `--chunk-minutes 10 --consensus 3`
+> で再現可）。
 
 ## 背景
 
@@ -195,7 +199,7 @@ LLM は文章として自然な形で 1 つに圧縮する。`temperature` は�
 ### generate_minutes_local.py
 
 ```
---consensus N                Self-consistency サンプリング数 (default: 3。--consensus 1 で単発生成)
+--consensus N                Self-consistency サンプリング数 (default: 1。--consensus 3 で従来のSelf-Consistency構成に戻す)
 --consensus-threshold FLOAT  embedding クラスタリング cosine 閾値 (default: 0.78)
 --consensus-min-vote INT     クラスタ採用に必要な最小独立サンプル数 (default: ⌈N/2⌉)
 ```
@@ -209,8 +213,8 @@ LLM は文章として自然な形で 1 つに圧縮する。`temperature` は�
 ### Slack /argus-transcribe
 
 ```
-/argus-transcribe Recording.mp4              # consensus=3 (デフォルト)
-/argus-transcribe Recording.mp4 consensus=1  # 単発生成（従来動作）に戻す
+/argus-transcribe Recording.mp4              # consensus=1 (デフォルト、単発生成)
+/argus-transcribe Recording.mp4 consensus=3  # 従来の Self-Consistency 構成に戻す
 /argus-transcribe Recording.mp4 consensus=5  # サンプル数を増やす
 ```
 
@@ -220,7 +224,7 @@ LLM は文章として自然な形で 1 つに圧縮する。`temperature` は�
 
 ## コスト
 
-| 項目 | 単発 (`--consensus 1`) | Self-Consistency N=3 (デフォルト) |
+| 項目 | 単発 (`--consensus 1`、デフォルト) | Self-Consistency N=3 (`--consensus 3` 明示時) |
 |---|---|---|
 | LLM 呼び出し (Stage 2) | 1 | 3 サンプル + クラスタ数 (~5) 集約 = ~8 |
 | LLM 呼び出し (Stage 3) | 1 | 3 サンプル + 決定 (~3) + AI (~4) 集約 = ~10 |

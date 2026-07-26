@@ -101,6 +101,7 @@ _FULLCTX_BOX_CHAR_CAP = 100_000
 # est_tokens 換算係数。glm-5.2 実測 1.96字/tok (2026-07-23)。
 _FULLCTX_CHARS_PER_TOKEN = 1.96
 # brief/risk の出力上限。出力2千字要件 + 退化暴走幅の抑制（2026-07-23、旧32768から縮小）。
+# today/draft の fullctx LLM 呼び出しにも同じ値を明示する（2026-07-26 レビュー指摘反映）。
 _BRIEF_RISK_MAX_TOKENS = 8192
 
 # /argus-transcribe ジョブ排他制御
@@ -1464,6 +1465,175 @@ def generate_risk_report(
     return _extract_final_answer(result)
 
 
+def generate_daily_summary_report(
+    today: str,
+    *,
+    index_name: str | None = None,
+    no_encrypt: bool = False,
+    pm_db_paths: list[Path] | None = None,
+) -> tuple[str, str]:
+    """日次サマリー本文を生成する（/argus-today の共有ロジック）。
+
+    既定で全文脈方式（検索なし・当日全データ投入）を使う。brief/risk と同じ
+    ARGUS_DISABLE_FULLCTX=1 で従来の切り詰め（チャンネルあたり20,000字）に戻せる。
+    プロンプト本文（_DAILY_SUMMARY_PROMPT）は変更せず、{messages}/{minutes} に渡す
+    入力データの取得方法のみを切り替える。全文脈方式の構築・生成が例外/退化になった場合は
+    logger.warning の上、従来方式で1回だけ再試行する（brief/risk と対称のフォールバック）。
+
+    Returns: (result, messages) — messages はメンション抽出（_filter_mentions_for_user）に
+    そのまま再利用する生 Slack テキスト。実際に使用した方式の raw text を返す
+    （fullctx 時は build_full_context_sections の slack セクション）。
+    """
+    context = load_claude_md_context()
+    resolved_pm_db_paths = pm_db_paths if pm_db_paths is not None else load_pm_db_paths(index_name)
+    since_date = today  # /argus-today は常に当日のみ
+
+    def _run_truncated() -> tuple[str, str]:
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
+            today, since_date, no_encrypt=no_encrypt, pm_db_paths=resolved_pm_db_paths,
+            index_name=index_name,
+        )
+        prompt = _DAILY_SUMMARY_PROMPT.format(
+            today=today,
+            context=context,
+            knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
+            messages=messages or "（本日のメッセージはありません）",
+            minutes=minutes or "（本日の議事録はありません）",
+        )
+        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+        return result, messages
+
+    if os.environ.get("ARGUS_DISABLE_FULLCTX") == "1":
+        result, messages = _run_truncated()
+        result = _ensure_not_degenerate(result, "[argus-today]")
+    else:
+        # today は knowledge_summary のみ使用し web_articles は使わないため、
+        # _fetch_knowledge_and_web_articles（両方取得）は使わず knowledge のみ取得する
+        # （取得して捨てる無駄を解消。2026-07-26 レビュー指摘）
+        try:
+            knowledge_summary = fetch_background_knowledge(
+                pm_db_paths=resolved_pm_db_paths, no_encrypt=no_encrypt,
+            )
+        except Exception as e:
+            logger.warning(f"[argus-today] fetch_background_knowledge 失敗"
+                            f"（{type(e).__name__}: {e}）。空文字で継続")
+            knowledge_summary = ""
+        try:
+            sections, ctx_meta = build_full_context_sections(
+                since_date, today, index_name=index_name, no_encrypt=no_encrypt,
+                # today は当日・直近の会話が主材料であり Box 本文は過大なため除外
+                pm_db_paths=resolved_pm_db_paths, include_box=False,
+            )
+            _log_fullctx_meta("[argus-today]", ctx_meta)
+            prompt = _DAILY_SUMMARY_PROMPT.format(
+                today=today,
+                context=context,
+                knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
+                messages=sections["slack"],
+                minutes=sections["minutes"],
+            )
+            result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。",
+                                     max_tokens=_BRIEF_RISK_MAX_TOKENS, timeout=600)
+            if _is_degenerate_output(result):
+                logger.warning(f"[argus-today] fullctx 出力が退化、truncated 方式へフォールバック: "
+                                f"{result[:100]!r}")
+                result, messages = _run_truncated()
+                result = _ensure_not_degenerate(result, "[argus-today]")
+            else:
+                messages = sections["slack"]
+        except Exception as e:
+            logger.warning(f"[argus-today] 全文脈方式が失敗（{type(e).__name__}: {e}）。"
+                            f"従来の切り詰めプロンプトで1回だけ再試行します")
+            result, messages = _run_truncated()
+            result = _ensure_not_degenerate(result, "[argus-today]")
+
+    return result, messages
+
+
+def generate_draft_report(
+    purpose: str,
+    subject: str,
+    today: str,
+    since_date: str,
+    *,
+    index_name: str | None = None,
+    no_encrypt: bool = False,
+    pm_db_paths: list[Path] | None = None,
+) -> str:
+    """草案本文を生成する（/argus-draft の共有ロジック）。
+
+    purpose in ("agenda", "request") は {messages}（Slack 会話）を使うため、
+    brief/risk/today と同じ全文脈方式（ARGUS_DISABLE_FULLCTX でopt-out）を適用する。
+    purpose == "report" は milestone_table/closed_items/overdue_list/assignee_table のみで
+    Slack 会話（{messages}）を使わず、元々チャンネルあたり20,000字切り詰めの影響を受けない
+    ため常に同一ロジックを使う（フォールバック分岐そのものが不要）。
+    プロンプト本文（_DRAFT_AGENDA_PROMPT / _DRAFT_REQUEST_PROMPT 等）は変更せず、
+    {messages} に渡す入力データの取得方法のみを切り替える。
+
+    fullctx 経路（既定）では stats のみ _fetch_single_pm_stats + merge_pm_stats で
+    軽量取得し、Slack/議事録/知識/Web を含む重い _collect_all_data は
+    実際に truncated 方式（ARGUS_DISABLE_FULLCTX=1・report purpose・フォールバック時）を
+    使う場合のみ呼ぶ（brief/risk と同型。二重収集の解消。2026-07-26 レビュー指摘）。
+    """
+    context = load_claude_md_context()
+    resolved_pm_db_paths = pm_db_paths if pm_db_paths is not None else load_pm_db_paths(index_name)
+    uses_messages = purpose in ("agenda", "request")
+
+    # report 用途では build_draft_prompt が pm.db への接続を必要とする（完了アイテム取得）。
+    # 他の用途では None で良い。
+    conns = None
+    if purpose == "report":
+        conns = [open_pm_db(p, no_encrypt=no_encrypt) for p in resolved_pm_db_paths]
+
+    def _run_truncated() -> str:
+        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
+            today, since_date, no_encrypt=no_encrypt, pm_db_paths=resolved_pm_db_paths,
+            index_name=index_name,
+        )
+        prompt = build_draft_prompt(purpose, subject, messages, stats, context,
+                                    conns=conns, today=today)
+        return call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
+
+    try:
+        if not uses_messages or os.environ.get("ARGUS_DISABLE_FULLCTX") == "1":
+            result = _run_truncated()
+            result = _ensure_not_degenerate(result, f"[argus-draft:{purpose}]")
+        else:
+            try:
+                channel_ids = _load_channel_ids(index_name)
+                minutes_names = _load_minutes_names(index_name)
+                stats_list = [
+                    _fetch_single_pm_stats(p, today, since_date, no_encrypt,
+                                           channel_ids=channel_ids, minutes_names=minutes_names)
+                    for p in resolved_pm_db_paths
+                ]
+                stats = merge_pm_stats(stats_list)
+                sections, ctx_meta = build_full_context_sections(
+                    since_date, today, index_name=index_name, no_encrypt=no_encrypt,
+                    # draft は直近の会話が主材料であり Box 本文は過大なため除外
+                    pm_db_paths=resolved_pm_db_paths, include_box=False,
+                )
+                _log_fullctx_meta(f"[argus-draft:{purpose}]", ctx_meta)
+                prompt = build_draft_prompt(purpose, subject, sections["slack"], stats, context,
+                                            conns=conns, today=today)
+                result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。",
+                                         max_tokens=_BRIEF_RISK_MAX_TOKENS, timeout=600)
+                if _is_degenerate_output(result):
+                    logger.warning(f"[argus-draft:{purpose}] fullctx 出力が退化、"
+                                    f"truncated 方式へフォールバック: {result[:100]!r}")
+                    result = _ensure_not_degenerate(_run_truncated(), f"[argus-draft:{purpose}]")
+            except Exception as e:
+                logger.warning(f"[argus-draft:{purpose}] 全文脈方式が失敗（{type(e).__name__}: {e}）。"
+                                f"従来の切り詰めプロンプトで1回だけ再試行します")
+                result = _ensure_not_degenerate(_run_truncated(), f"[argus-draft:{purpose}]")
+    finally:
+        if conns:
+            for c in conns:
+                c.close()
+
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # Slack コマンドのバックグラウンド処理
 # --------------------------------------------------------------------------- #
@@ -1553,7 +1723,8 @@ def _build_stats_section(stats: dict, s: dict, today: str) -> str:
 
 
 def _run_draft(respond, command, *, no_encrypt: bool = False):
-    """Slack /argus-draft のバックグラウンド処理"""
+    """Slack /argus-draft のバックグラウンド処理 — agenda/request は全文脈方式
+    （ARGUS_DISABLE_FULLCTX でopt-out）、report は元々切り詰めの影響を受けないため従来のまま"""
     import logging
     logger = logging.getLogger("pm_argus")
     try:
@@ -1579,26 +1750,9 @@ def _run_draft(respond, command, *, no_encrypt: bool = False):
         index_name = resolve_index_name(command.get("channel_id") or None)
         logger.info(f"[argus-draft] purpose={purpose} subject={subject} index={index_name}")
 
-        context = load_claude_md_context()
-        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
+        result = generate_draft_report(
+            purpose, subject, today, since_date, index_name=index_name, no_encrypt=no_encrypt,
         )
-
-        # report 用途では build_draft_prompt が pm.db への接続を必要とする
-        # (完了アイテム取得)。他の用途では None で良い。
-        conns = None
-        if purpose == "report":
-            conns = [open_pm_db(p, no_encrypt=no_encrypt)
-                     for p in load_pm_db_paths(index_name)]
-        try:
-            prompt = build_draft_prompt(purpose, subject, messages, stats, context,
-                                        conns=conns, today=today)
-        finally:
-            if conns:
-                for c in conns:
-                    c.close()
-        logger.info("[argus-draft] LLM 呼び出し中...")
-        result = call_argus_llm(prompt, system="あなたはAIインテリジェンスシステムArgusです。")
         full_text = _to_slack_mrkdwn(f"*Argus 草案 ({purpose}: {subject})*\n\n{result}")
         blocks = _split_mrkdwn_to_blocks(full_text)
         logger.info(f"[argus-draft] respond text={len(full_text)} chars, blocks={len(blocks)}")
@@ -1885,18 +2039,17 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         user_id = command.get("user_id") or ""
         requester = user_name
 
-        # 2. 今日のデータを収集
+        # 2. 今日のデータを収集・LLM呼び出し（全文脈方式。ARGUS_DISABLE_FULLCTX でopt-out）
         today = date.today().isoformat()
-        since_date = today  # --today-only 相当
-        days = 0
 
         index_name = resolve_index_name(command.get("channel_id") or None)
         logger.info(f"[argus-today] requester={requester} user_id={user_id} index={index_name}")
 
-        context = load_claude_md_context()
-        messages, minutes, stats, knowledge_summary, web_articles = _collect_all_data(
-            today, since_date, no_encrypt=no_encrypt, index_name=index_name,
+        logger.info("[argus-today] LLM 呼び出し中...")
+        result, messages = generate_daily_summary_report(
+            today, index_name=index_name, no_encrypt=no_encrypt,
         )
+
         # 3. ユーザーIDマップを構築（テキスト内のID展開用）
         # 優先順位: argus_config.yaml の user_names: > slack.db の messages.user_name
 
@@ -1916,13 +2069,13 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
                         text_uids.update(uid_pattern.findall(row[0]))
                 # yaml で未解決の user_id だけ slack.db から引く
                 for uid in text_uids - user_id_map.keys():
-                    result = conn.execute(
+                    row = conn.execute(
                         "SELECT user_name FROM messages WHERE user_id = ?"
                         " AND user_name IS NOT NULL AND user_name != ? AND user_name NOT LIKE 'U0%' LIMIT 1",
                         (uid, uid),
                     ).fetchone()
-                    if result and result[0]:
-                        user_id_map[uid] = result[0]
+                    if row and row[0]:
+                        user_id_map[uid] = row[0]
                 conn.close()
             except Exception:
                 pass
@@ -1933,32 +2086,18 @@ def _run_today_only(respond, command, *, no_encrypt: bool = False):
         channel_names = _build_channel_name_map()
         _, mention_section = _filter_mentions_for_user(messages, user_name, user_id, channel_names, user_id_map)
 
-        # 5. プロンプト構築
-        prompt = build_brief_prompt(
-            messages, minutes, stats, context, today, days,
-            assignee=None, topic=None, requester=requester,
-            knowledge_summary=knowledge_summary,
-        )
-
-        # 6. LLM呼び出し (日次サマリープロンプト使用)
-        logger.info("[argus-today] LLM 呼び出し中...")
-        result = call_argus_llm(
-            prompt,
-            system="あなたはAIインテリジェンスシステムArgusです。",
-        )
-
-        # 7. メンションセクションを追加
+        # 5. メンションセクションを追加
         if mention_section:
             result += f"\n\n---\n\n{mention_section}"
 
-        # 8. ephemeral 応答 (Block Kit で mrkdwn 有効化)
+        # 6. ephemeral 応答 (Block Kit で mrkdwn 有効化)
         header = f":memo: *Argus 今日の活動サマリー ({today})*"
         full_text = _to_slack_mrkdwn(f"{header}\n\n{result}")
         blocks = _split_mrkdwn_to_blocks(full_text)
         logger.info(f"[argus-today] respond text={len(full_text)} chars, blocks={len(blocks)}")
         respond(blocks=blocks)
 
-        # 9. 音声版 (mp3) を生成して実行者の DM にアップロード
+        # 7. 音声版 (mp3) を生成して実行者の DM にアップロード
         from argus.narrate import _post_today_voice
         _post_today_voice(command, today, result)
 
@@ -1992,13 +2131,14 @@ def _run_transcribe(respond, command):
     text = (command.get("text") or "").strip()
 
     # `consensus=N` を空白区切りトークンとして抽出（位置不問）。残りをファイル名扱い。
-    consensus_n = 3
+    # 2026-07-26 A/B（盲検2/2で同等以上・コスト1/7）により既定変更。旧構成は consensus=3 で再現可
+    consensus_n = 1
     consensus_match = re.search(r"(?:^|\s)consensus=(\d+)(?:\s|$)", text)
     if consensus_match:
         try:
             consensus_n = max(1, int(consensus_match.group(1)))
         except ValueError:
-            consensus_n = 3
+            consensus_n = 1
         text = (text[: consensus_match.start()] + " " + text[consensus_match.end():]).strip()
 
     filename = text
@@ -2162,12 +2302,23 @@ def main() -> None:
           f"index: {args.index_name or '(default)'}", file=sys.stderr)
 
     if args.brief_to_canvas:
-        print("[INFO] ブリーフィング生成中（全文脈方式。ARGUS_DISABLE_FULLCTX=1で従来方式）...",
-              file=sys.stderr)
-        result = generate_brief_report(
-            today, since_date, index_name=args.index_name, no_encrypt=args.no_encrypt,
-            assignee=args.assignee, topic=args.topic, pm_db_paths=pm_db_paths_cli,
-        )
+        if args.today_only:
+            # /argus-today と同じ generate_daily_summary_report を使う（外形=Canvasタイトル等は
+            # 不変のまま、中身を実際の日次サマリープロンプトへ揃える。2026-07-26 レビュー指摘 C1）。
+            # today は assignee/topic フォーカスに未対応（Slack /argus-today と同様）。
+            print("[INFO] 日次活動サマリー生成中（全文脈方式。ARGUS_DISABLE_FULLCTX=1で従来方式）...",
+                  file=sys.stderr)
+            result, _messages = generate_daily_summary_report(
+                today, index_name=args.index_name, no_encrypt=args.no_encrypt,
+                pm_db_paths=pm_db_paths_cli,
+            )
+        else:
+            print("[INFO] ブリーフィング生成中（全文脈方式。ARGUS_DISABLE_FULLCTX=1で従来方式）...",
+                  file=sys.stderr)
+            result = generate_brief_report(
+                today, since_date, index_name=args.index_name, no_encrypt=args.no_encrypt,
+                assignee=args.assignee, topic=args.topic, pm_db_paths=pm_db_paths_cli,
+            )
 
         title = "Argus 日次活動サマリー" if days == 0 else "Argus ブリーフィング"
         canvas_content = f"# {title} ({today})\n\n{result}\n\n_生成: {today} JST_"

@@ -320,7 +320,7 @@ CRITICAL: Never write "SPEAKER_00", "SPEAKER_01", "SPEAKER_02" or any "SPEAKER_"
 ## Transcript ({time_range})
 {chunk_text}
 
-Write a thorough Japanese prose summary (600-800 characters):
+Write a thorough Japanese prose summary (approximately {target_chars} characters):
 """
 
 
@@ -336,8 +336,13 @@ def extract_from_chunk(
     temperature: float | None = None,
     max_tokens: int = 4096,
     slide_context_block: str = "",
+    target_chars: int = 700,
 ) -> str:
-    """1チャンクから事実を抽出する（Stage 1）"""
+    """1チャンクから事実を抽出する（Stage 1）。
+
+    target_chars: 出力字数目標（チャンク長に比例させる。呼び出し側で
+    min(6000, max(800, chunk_minutes * 60)) 程度を算出して渡す想定）。
+    """
     prompt = CHUNK_EXTRACTION_TEMPLATE.format(
         chunk_idx=chunk_idx,
         total_chunks=total_chunks,
@@ -345,6 +350,7 @@ def extract_from_chunk(
         claude_md_context=claude_md_context,
         chunk_text=chunk_text,
         slide_context_block=slide_context_block,
+        target_chars=target_chars,
     )
     system = "You are a Japanese meeting minutes assistant. Output Japanese prose only, no bullet points."
     # thinking / reasoning-既定モデルは reasoning に多くのトークンを消費するため
@@ -918,13 +924,13 @@ def generate_minutes(
     think: bool = False,
     max_tokens: int = 8192,
     multi_stage: bool = False,
-    chunk_minutes: int = 30,
+    chunk_minutes: int = 90,
     no_chat_template_kwargs: bool = False,
     from_combined: str | None = None,
     temperature: float | None = None,
     vtt_path: str | None = None,
     slide_context: str | None = None,
-    consensus_n: int = 3,
+    consensus_n: int = 1,
     consensus_threshold: float = 0.78,
     consensus_min_vote: int | None = None,
     enable_triage: bool = True,
@@ -940,6 +946,13 @@ def generate_minutes(
     consensus_n >= 2 の場合は Stage 2 / Stage 3 をそれぞれ N 回サンプリングし
     embedding クラスタリング + LLM 集約で表現ブレを吸収する（self-consistency）。
     consensus_n == 1（デフォルト）は完全に従来動作。
+
+    chunk_minutes の既定は 90 分（2026-07-26 A/B・レビュー指摘 R1/R2 反映。旧構成は
+    --chunk-minutes 10 --consensus 3 で再現可）。multi_stage=True かつ
+    chunk_transcript() の結果が 1 チャンクに収まる場合は Stage 1（チャンク抽出）を
+    スキップし全文をそのまま Stage 2/3 に投入する（全文→要約→展開のボトルネック解消）。
+    複数チャンクになる場合は Stage 1 の出力字数目標・タイムアウトをチャンク長に
+    比例してスケールする。
     """
     consensus_enabled = consensus_n is not None and consensus_n >= 2
     if consensus_enabled and consensus_min_vote is None:
@@ -1040,51 +1053,72 @@ def generate_minutes(
         chunk_duration_sec = chunk_minutes * 60
         chunks = chunk_transcript(segments, chunk_duration_sec)
         total = len(chunks)
-        print(f"[INFO] マルチステージモード: {total} チャンクに分割（各約 {chunk_minutes} 分）")
 
-        extractions: list[str] = []
-        for i, chunk_segs in enumerate(chunks, 1):
-            chunk_text = format_transcript(chunk_segs)
-            h0, r0 = divmod(chunk_segs[0]["start"], 3600)
-            m0, s0 = divmod(r0, 60)
-            h1, r1 = divmod(chunk_segs[-1]["end"], 3600)
-            m1, s1 = divmod(r1, 60)
-            time_range = f"{h0:02d}:{m0:02d}:{s0:02d}〜{h1:02d}:{m1:02d}:{s1:02d}"
-            print(f"[INFO] チャンク {i}/{total} を抽出中... ({time_range})")
-            try:
-                extraction = extract_from_chunk(
-                    chunk_text, i, total, time_range,
-                    claude_md_context, timeout,
-                    think=think,
-                    no_chat_template_kwargs=no_chat_template_kwargs,
-                    temperature=temperature, max_tokens=max_tokens,
-                    slide_context_block=slide_context_block,
-                )
-                # 空チャンクのリトライ（call_argus_llm の fallback 後でも空の場合）
-                if not extraction:
-                    print(f"[WARN] チャンク {i} が空のためリトライ...")
+        if total <= 1:
+            # 1チャンクに収まる会議は Stage 1（要約→展開）のボトルネックを避け、
+            # 全文トランスクリプトをそのまま Stage 2/3 に投入する
+            print("[INFO] 1チャンクに収まるため Stage 1 をスキップし全文を投入")
+            combined = format_transcript(segments)
+        else:
+            print(f"[INFO] マルチステージモード: {total} チャンクに分割（各約 {chunk_minutes} 分）")
+            # Stage 1 の出力字数目標・タイムアウトをチャンク長に比例させる
+            # （90分チャンク→5400字目標。従来の30分固定チャンクでは 1800 字相当）
+            target_chars = min(6000, max(800, chunk_minutes * 60))
+            chunk_timeout = timeout * max(1, chunk_minutes // 30)
+
+            extractions: list[str] = []
+            for i, chunk_segs in enumerate(chunks, 1):
+                chunk_text = format_transcript(chunk_segs)
+                h0, r0 = divmod(chunk_segs[0]["start"], 3600)
+                m0, s0 = divmod(r0, 60)
+                h1, r1 = divmod(chunk_segs[-1]["end"], 3600)
+                m1, s1 = divmod(r1, 60)
+                time_range = f"{h0:02d}:{m0:02d}:{s0:02d}〜{h1:02d}:{m1:02d}:{s1:02d}"
+                print(f"[INFO] チャンク {i}/{total} を抽出中... ({time_range})")
+                try:
                     extraction = extract_from_chunk(
                         chunk_text, i, total, time_range,
-                        claude_md_context, timeout,
+                        claude_md_context, chunk_timeout,
                         think=think,
                         no_chat_template_kwargs=no_chat_template_kwargs,
                         temperature=temperature, max_tokens=max_tokens,
                         slide_context_block=slide_context_block,
+                        target_chars=target_chars,
                     )
-            except Exception as e:
-                print(f"[WARN] チャンク {i} 抽出失敗（{e}）、空文字で続行")
-                extraction = ""
-            extractions.append(f"=== 第{i}部（{time_range}）===\n{extraction}")
-            print(f"[INFO] チャンク {i}/{total} 抽出完了（{len(extraction)} 字）")
+                    # 空チャンクのリトライ（call_argus_llm の fallback 後でも空の場合）
+                    if not extraction:
+                        print(f"[WARN] チャンク {i} が空のためリトライ...")
+                        extraction = extract_from_chunk(
+                            chunk_text, i, total, time_range,
+                            claude_md_context, chunk_timeout,
+                            think=think,
+                            no_chat_template_kwargs=no_chat_template_kwargs,
+                            temperature=temperature, max_tokens=max_tokens,
+                            slide_context_block=slide_context_block,
+                            target_chars=target_chars,
+                        )
+                except Exception as e:
+                    print(f"[WARN] チャンク {i} 抽出失敗（{e}）、空文字で続行")
+                    extraction = ""
+                extractions.append(f"=== 第{i}部（{time_range}）===\n{extraction}")
+                print(f"[INFO] チャンク {i}/{total} 抽出完了（{len(extraction)} 字）")
 
-        combined = "\n\n".join(extractions)
-        print(f"[INFO] 全チャンク抽出完了。統合テキスト: {len(combined)} 字")
+            combined = "\n\n".join(extractions)
+            print(f"[INFO] 全チャンク抽出完了。統合テキスト: {len(combined)} 字")
 
         # combined をキャッシュファイルとして保存（Stage 3 の再実行・デバッグ用）
         combined_filename = now.strftime("%Y-%m-%d-%H%M%S") + f"-{basename}-combined.txt"
         combined_path = output_dir_path / combined_filename
         combined_path.write_text(combined, encoding="utf-8")
         print(f"[INFO] combined キャッシュを保存しました: {combined_path}")
+
+        # 全滅ガード: 全チャンクが空/ほぼ空で返ってきた場合、空議事録を防ぐため中断する
+        # （従来は空のまま Stage 2/3 が走り空議事録が DB に入っていた）
+        if len(combined.strip()) < 200:
+            raise RuntimeError(
+                f"空議事録を防ぐため中断: combined の実効長が {len(combined.strip())} 字"
+                "（200字未満）です。文字起こし・チャンク抽出の失敗を確認してください"
+            )
 
         print("[INFO] call_argus_llm で議事録を統合生成中...")
         prompt = PROMPT_TEMPLATE.format(
@@ -1336,7 +1370,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=600, help="LLM呼び出しタイムアウト秒数（デフォルト: 600）")
     parser.add_argument("--max-tokens", type=int, default=8192, help="最大出力トークン数（デフォルト: 8192）")
     parser.add_argument("--multi-stage", action="store_true", help="マルチステージ（分割→抽出→統合）モードを有効化")
-    parser.add_argument("--chunk-minutes", type=int, default=30, help="マルチステージ時のチャンクサイズ（分単位、デフォルト: 30）")
+    parser.add_argument("--chunk-minutes", type=int, default=90, help="マルチステージ時のチャンクサイズ（分単位、デフォルト: 90。2026-07-26 A/B・レビュー指摘 R1/R2 反映。旧構成は --chunk-minutes 10 --consensus 3）")
     parser.add_argument("--no-stream", action="store_true", help="ストリーミングを無効化（LiteLLM プロキシ経由等で streaming が動作しない場合に使用）")
     parser.add_argument("--temperature", type=float, default=None, help="サンプリング温度（デフォルト: think=True 時 0.6、それ以外 0.8）。Kimi-K2-Thinking は 1.0 推奨")
     parser.add_argument(
@@ -1362,12 +1396,12 @@ def main() -> int:
     parser.add_argument(
         "--consensus",
         type=int,
-        default=3,
+        default=1,
         metavar="N",
-        help="Self-consistency サンプリング数。N>=2 で Stage 2 / Stage 3 を N 回サンプリング → "
-             "embedding クラスタリング + LLM 集約で表現ブレを吸収する。デフォルト 3。"
-             "実測では baseline 比 +15〜25% 程度の追加コストで採用率が改善する。"
-             "従来の単発生成に戻したい場合は --consensus 1 を指定",
+        help="Self-consistency サンプリング数。既定 1。glm-5.2 の A/B で N=3 と品質同等・"
+             "コスト 1/7 を確認（2026-07-26）。N>=2 で Self-Consistency 有効になり、"
+             "Stage 2 / Stage 3 を N 回サンプリング → embedding クラスタリング + LLM 集約で"
+             "表現ブレを吸収する（旧構成は --consensus 3 で再現可）",
     )
     parser.add_argument(
         "--consensus-threshold",

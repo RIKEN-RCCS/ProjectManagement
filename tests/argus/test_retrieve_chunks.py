@@ -559,3 +559,217 @@ class TestDegenerateOutputGuard:
         assert len(calls) == 2
         assert "## 構造化データ" in calls[0]
         assert "## pm.db 統計" in calls[1] and "## 構造化データ" not in calls[1]
+
+
+# --------------------------------------------------------------------------- #
+# today (日次サマリー) の全文脈トグル
+# --------------------------------------------------------------------------- #
+
+class TestGenerateDailySummaryReportFullctxToggle:
+    """ARGUS_DISABLE_FULLCTX=1 で generate_daily_summary_report が従来（切り詰め）プロンプトを
+    使うことを検証する（call_argus_llm はモック）。プロンプト本文は _DAILY_SUMMARY_PROMPT の
+    まま変更されないため、入力データ（messages/minutes）の中身の違いで判定する。"""
+
+    def test_disable_fullctx_uses_truncated_prompt(self, monkeypatch):
+        import argus.pm_argus as pm_argus
+        monkeypatch.setenv("ARGUS_DISABLE_FULLCTX", "1")
+
+        captured = {}
+
+        def fake_call_argus_llm(prompt, **kwargs):
+            captured["prompt"] = prompt
+            return "truncated result"
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", fake_call_argus_llm)
+        monkeypatch.setattr(pm_argus, "load_claude_md_context", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(
+            pm_argus, "_collect_all_data",
+            lambda *a, **kw: ("切り詰めメッセージ", "切り詰め議事録", {"stats": {}}, "knowledge", "web"),
+        )
+
+        result, messages = pm_argus.generate_daily_summary_report("2026-07-26")
+
+        assert result == "truncated result"
+        assert messages == "切り詰めメッセージ"
+        assert "本日 2026-07-26 のプロジェクト活動記録" in captured["prompt"]
+        assert "切り詰めメッセージ" in captured["prompt"]
+        assert "切り詰め議事録" in captured["prompt"]
+
+    def test_fullctx_enabled_by_default_uses_full_sections(self, monkeypatch):
+        """既定（ARGUS_DISABLE_FULLCTX 未設定）では build_full_context_sections の
+        slack/minutes セクション（切り詰めなし・見出し込み）がそのまま使われる。
+        fullctx LLM 呼び出しには max_tokens/timeout が明示され（M2）、
+        web 記事は取得しない（M2 の無駄解消。2026-07-26 レビュー指摘）。"""
+        import argus.pm_argus as pm_argus
+        monkeypatch.delenv("ARGUS_DISABLE_FULLCTX", raising=False)
+
+        captured = {}
+
+        def fake_call_argus_llm(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return "fullctx result"
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", fake_call_argus_llm)
+        monkeypatch.setattr(pm_argus, "load_claude_md_context", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(pm_argus, "fetch_background_knowledge", lambda **kw: "knowledge")
+
+        def fail_if_called(*a, **kw):
+            raise AssertionError("today は web 記事を取得しないはず")
+        monkeypatch.setattr(pm_argus, "fetch_recent_web_articles", fail_if_called)
+
+        fake_sections = {
+            "pm_stats": "## 構造化データ\n\nダミー",
+            "minutes": "## 議事録（切り詰めなし）\n\n全文議事録",
+            "slack": "## Slack 会話（期間: 2026-07-26〜2026-07-26, 切り詰めなし）\n\n全文Slack",
+            "box": "## Box 資料\n\n（除外設定により省略）",
+        }
+        fake_meta = {"total_chars": 100, "total_est_tokens": 62,
+                     "sections": {k: {"chars": len(v), "truncated": False} for k, v in fake_sections.items()}}
+        monkeypatch.setattr(
+            pm_argus, "build_full_context_sections", lambda *a, **kw: (fake_sections, fake_meta),
+        )
+
+        result, messages = pm_argus.generate_daily_summary_report("2026-07-26")
+
+        assert result == "fullctx result"
+        assert messages == fake_sections["slack"]
+        assert "全文Slack" in captured["prompt"]
+        assert "全文議事録" in captured["prompt"]
+        assert "切り詰めメッセージ" not in captured["prompt"]
+        assert captured["kwargs"]["max_tokens"] == pm_argus._BRIEF_RISK_MAX_TOKENS
+        assert captured["kwargs"]["timeout"] == 600
+
+
+# --------------------------------------------------------------------------- #
+# draft (草案生成) の全文脈トグル
+# --------------------------------------------------------------------------- #
+
+class TestGenerateDraftReportFullctxToggle:
+    """agenda/request purpose は {messages}（Slack 会話）を使うため
+    ARGUS_DISABLE_FULLCTX の影響を受ける。report purpose は Slack 会話を使わないため
+    影響を受けないことも合わせて検証する。"""
+
+    _FAKE_STATS = {
+        "stats": {}, "milestones": [], "assignee_workload": [],
+        "overdue_items": [], "unacknowledged_decisions": [], "weekly_trends": [],
+        "unlinked_count": 0, "no_assignee_count": 0,
+    }
+
+    def test_disable_fullctx_uses_truncated_prompt(self, monkeypatch):
+        import argus.pm_argus as pm_argus
+        monkeypatch.setenv("ARGUS_DISABLE_FULLCTX", "1")
+
+        captured = {}
+
+        def fake_call_argus_llm(prompt, **kwargs):
+            captured["prompt"] = prompt
+            return "truncated draft"
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", fake_call_argus_llm)
+        monkeypatch.setattr(pm_argus, "load_claude_md_context", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(
+            pm_argus, "_collect_all_data",
+            lambda *a, **kw: ("切り詰めメッセージ", "minutes", dict(self._FAKE_STATS), "knowledge", "web"),
+        )
+
+        result = pm_argus.generate_draft_report(
+            "agenda", "次回リーダー会議", "2026-07-26", "2026-07-12",
+        )
+
+        assert result == "truncated draft"
+        assert "切り詰めメッセージ" in captured["prompt"]
+
+    def test_fullctx_enabled_by_default_uses_full_slack_section(self, monkeypatch):
+        """fullctx 経路（既定）は重い _collect_all_data を呼ばず、stats のみ
+        _fetch_single_pm_stats 経由で軽量取得する（二重収集の解消。2026-07-26 レビュー指摘 M1）。
+        fullctx LLM 呼び出しには max_tokens/timeout が明示される（M2）。"""
+        import argus.pm_argus as pm_argus
+        monkeypatch.delenv("ARGUS_DISABLE_FULLCTX", raising=False)
+
+        captured = {}
+
+        def fake_call_argus_llm(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return "fullctx draft"
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", fake_call_argus_llm)
+        monkeypatch.setattr(pm_argus, "load_claude_md_context", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(pm_argus, "_load_channel_ids", lambda index_name=None: ["C111"])
+        monkeypatch.setattr(pm_argus, "_load_minutes_names", lambda index_name=None: ["kind1"])
+
+        def fail_if_called(*a, **kw):
+            raise AssertionError("fullctx 経路は _collect_all_data を呼ばないはず（二重収集）")
+        monkeypatch.setattr(pm_argus, "_collect_all_data", fail_if_called)
+
+        fake_sections = {
+            "pm_stats": "## 構造化データ\n\nダミー",
+            "minutes": "## 議事録\n\nダミー",
+            "slack": "## Slack 会話（切り詰めなし）\n\n全文メッセージ",
+            "box": "## Box 資料\n\n（除外設定により省略）",
+        }
+        fake_meta = {"total_chars": 100, "total_est_tokens": 62,
+                     "sections": {k: {"chars": len(v), "truncated": False} for k, v in fake_sections.items()}}
+        monkeypatch.setattr(
+            pm_argus, "build_full_context_sections", lambda *a, **kw: (fake_sections, fake_meta),
+        )
+
+        result = pm_argus.generate_draft_report(
+            "agenda", "次回リーダー会議", "2026-07-26", "2026-07-12",
+        )
+
+        assert result == "fullctx draft"
+        assert "全文メッセージ" in captured["prompt"]
+        assert "切り詰めメッセージ" not in captured["prompt"]
+        assert captured["kwargs"]["max_tokens"] == pm_argus._BRIEF_RISK_MAX_TOKENS
+        assert captured["kwargs"]["timeout"] == 600
+
+    def test_report_purpose_ignores_fullctx_flag(self, monkeypatch):
+        """report purpose は Slack 会話を使わないため build_full_context_sections を
+        呼ばず、ARGUS_DISABLE_FULLCTX の値に関わらず同じロジックで生成される。"""
+        import argus.pm_argus as pm_argus
+        monkeypatch.delenv("ARGUS_DISABLE_FULLCTX", raising=False)
+
+        def fail_if_called(*a, **kw):
+            raise AssertionError("report purpose では build_full_context_sections を呼ばないはず")
+
+        monkeypatch.setattr(pm_argus, "build_full_context_sections", fail_if_called)
+        monkeypatch.setattr(pm_argus, "call_argus_llm", lambda prompt, **kw: "report result")
+        monkeypatch.setattr(pm_argus, "load_claude_md_context", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(
+            pm_argus, "_collect_all_data",
+            lambda *a, **kw: ("messages", "minutes", dict(self._FAKE_STATS), "knowledge", "web"),
+        )
+
+        result = pm_argus.generate_draft_report(
+            "report", "月次進捗報告", "2026-07-26", "2026-07-12",
+        )
+
+        assert result == "report result"
+
+    def test_report_purpose_degenerate_output_is_sanitized(self, monkeypatch):
+        """report purpose にも _ensure_not_degenerate が無条件適用される
+        （純サニタイズなので安全。2026-07-26 レビュー指摘 m4）。"""
+        import argus.pm_argus as pm_argus
+        monkeypatch.delenv("ARGUS_DISABLE_FULLCTX", raising=False)
+
+        monkeypatch.setattr(pm_argus, "call_argus_llm", lambda prompt, **kw: "!" * 32768)
+        monkeypatch.setattr(pm_argus, "load_claude_md_context", lambda: "context")
+        monkeypatch.setattr(pm_argus, "load_pm_db_paths", lambda index_name=None: [])
+        monkeypatch.setattr(
+            pm_argus, "_collect_all_data",
+            lambda *a, **kw: ("messages", "minutes", dict(self._FAKE_STATS), "knowledge", "web"),
+        )
+
+        result = pm_argus.generate_draft_report(
+            "report", "月次進捗報告", "2026-07-26", "2026-07-12",
+        )
+
+        assert result != "!" * 32768
+        assert "出力生成に失敗しました" in result

@@ -361,6 +361,27 @@ class TestGenerateMinutesLocal:
         finally:
             import os as _os
             _os.unlink(tmp)
+
+    def test_argparse_defaults_consensus_1_chunk_minutes_90(self, monkeypatch, tmp_path):
+        """既定値の回帰: --consensus=1・--chunk-minutes=90（2026-07-26 A/B・R1/R2 反映）。"""
+        import recording.generate_minutes_local as gml
+
+        captured = {}
+
+        def fake_generate_minutes(*args, **kwargs):
+            captured.update(kwargs)
+            return "dummy_output.md"
+
+        monkeypatch.setattr(gml, "generate_minutes", fake_generate_minutes)
+        transcript = tmp_path / "t.md"
+        transcript.write_text("dummy", encoding="utf-8")
+        with patch.object(sys, "argv", ["prog", str(transcript)]):
+            rc = gml.main()
+        assert rc == 0
+        assert captured["consensus_n"] == 1
+        assert captured["chunk_minutes"] == 90
+
+
 class TestGenerateMinutesCore:
 
     def _make_transcript_md(self, tmp_path, segments=None):
@@ -426,6 +447,7 @@ class TestGenerateMinutesCore:
         from cli_utils import call_argus_llm as _orig
         monkeypatch.setattr("cli_utils.call_argus_llm", fake_llm)
         import importlib
+
         import recording.generate_minutes_local
         importlib.reload(recording.generate_minutes_local)
         from recording.generate_minutes_local import generate_minutes
@@ -433,3 +455,103 @@ class TestGenerateMinutesCore:
                                multi_stage=False, consensus_n=1,
                                slide_context="")
         assert (tmp_path / out).exists()
+
+    def test_generate_minutes_multistage_single_chunk_skips_stage1(self, monkeypatch, tmp_path):
+        """1チャンクに収まる場合は Stage 1（extract_from_chunk）を呼ばず全文を投入する。"""
+        def fake_llm(prompt, **kw):
+            return "### テスト\n\n本文"
+        monkeypatch.setattr("cli_utils.call_argus_llm", fake_llm)
+        import importlib
+
+        import recording.generate_minutes_local
+        importlib.reload(recording.generate_minutes_local)
+
+        def fail_if_called(*a, **kw):
+            raise AssertionError("1チャンクに収まる場合は extract_from_chunk を呼ばないはず")
+        monkeypatch.setattr(recording.generate_minutes_local, "extract_from_chunk", fail_if_called)
+
+        # 全滅ガード（実効長200字未満で中断）に引っかからないよう十分な長さの発言にする
+        long_segments = [
+            "#### [00:01:00 - 00:02:00] SPEAKER_00\n" + "テスト発言1です。" * 15,
+            "#### [00:02:00 - 00:03:00] SPEAKER_01\n" + "テスト発言2です。" * 15,
+        ]
+        out = recording.generate_minutes_local.generate_minutes(
+            self._make_transcript_md(tmp_path, long_segments), str(tmp_path), 30,
+            multi_stage=True, chunk_minutes=90, consensus_n=1,
+            slide_context="", enable_triage=False,
+        )
+        assert (tmp_path / out).exists()
+        combined_files = list(tmp_path.glob("*-combined.txt"))
+        assert len(combined_files) == 1
+        combined_text = combined_files[0].read_text(encoding="utf-8")
+        assert "テスト発言1です" in combined_text and "テスト発言2です" in combined_text
+
+    def test_generate_minutes_multistage_multi_chunk_scales_target_chars_and_timeout(
+        self, monkeypatch, tmp_path,
+    ):
+        """複数チャンク時は Stage 1 の target_chars・timeout をチャンク長に比例させる
+        （90分チャンク・timeout=30 → target_chars=5400, timeout=90）。"""
+        def fake_llm(prompt, **kw):
+            return "### テスト\n\n本文"
+        monkeypatch.setattr("cli_utils.call_argus_llm", fake_llm)
+        import importlib
+
+        import recording.generate_minutes_local
+        importlib.reload(recording.generate_minutes_local)
+
+        fake_chunks = [
+            [{"start": 0, "end": 60, "speaker": "SPEAKER_00", "text": "発言A"}],
+            [{"start": 60, "end": 120, "speaker": "SPEAKER_01", "text": "発言B"}],
+        ]
+        monkeypatch.setattr(
+            recording.generate_minutes_local, "chunk_transcript",
+            lambda segments, chunk_duration_sec: fake_chunks,
+        )
+
+        calls = []
+
+        def fake_extract(chunk_text, chunk_idx, total_chunks, time_range, claude_md_context,
+                         timeout, **kw):
+            calls.append({"timeout": timeout, "target_chars": kw.get("target_chars")})
+            # 全滅ガード（実効長200字未満で中断）に引っかからないよう十分な長さにする
+            return "抽出結果テキストです。" * 15
+        monkeypatch.setattr(recording.generate_minutes_local, "extract_from_chunk", fake_extract)
+
+        out = recording.generate_minutes_local.generate_minutes(
+            self._make_transcript_md(tmp_path), str(tmp_path), 30,
+            multi_stage=True, chunk_minutes=90, consensus_n=1,
+            slide_context="", enable_triage=False,
+        )
+        assert (tmp_path / out).exists()
+        assert len(calls) == 2  # 2チャンク分（各1回、リトライなし）
+        for c in calls:
+            assert c["timeout"] == 30 * max(1, 90 // 30)  # == 90
+            assert c["target_chars"] == min(6000, max(800, 90 * 60))  # == 5400
+
+    def test_generate_minutes_multistage_all_empty_extraction_raises(self, monkeypatch, tmp_path):
+        """全チャンク抽出が空（全滅）の場合、空議事録を防ぐため非ゼロ終了（例外）になる。"""
+        def fake_llm(prompt, **kw):
+            return "### テスト\n\n本文"
+        monkeypatch.setattr("cli_utils.call_argus_llm", fake_llm)
+        import importlib
+
+        import recording.generate_minutes_local
+        importlib.reload(recording.generate_minutes_local)
+
+        fake_chunks = [
+            [{"start": 0, "end": 60, "speaker": "SPEAKER_00", "text": "発言A"}],
+            [{"start": 60, "end": 120, "speaker": "SPEAKER_01", "text": "発言B"}],
+        ]
+        monkeypatch.setattr(
+            recording.generate_minutes_local, "chunk_transcript",
+            lambda segments, chunk_duration_sec: fake_chunks,
+        )
+        monkeypatch.setattr(recording.generate_minutes_local, "extract_from_chunk",
+                            lambda *a, **kw: "")
+
+        with pytest.raises(RuntimeError, match="空議事録を防ぐため中断"):
+            recording.generate_minutes_local.generate_minutes(
+                self._make_transcript_md(tmp_path), str(tmp_path), 30,
+                multi_stage=True, chunk_minutes=90, consensus_n=1,
+                slide_context="", enable_triage=False,
+            )
