@@ -293,7 +293,7 @@ Canvas同期（`pm_sync_canvas.py`）およびマイルストーン紐づけ変�
 | `content_hash` | TEXT | `content_md` のハッシュ（差分判定用。同一ハッシュなら再変換スキップ） |
 | `page_count` | INTEGER | ページ数（pptx のスライド数 / pdf のページ数等。形式に依存） |
 | `char_count` | INTEGER | `content_md` の文字数 |
-| `convert_method` | TEXT | 変換経路（`libreoffice_html` / `pdftotext` / `gemma4_multimodal` / `boxnote_json` / `text` 等） |
+| `convert_method` | TEXT | 変換経路（`libreoffice_html` / `pdftotext` / `multimodal_ocr` / `boxnote_json` / `text` / `docling` 系（`docling+figures` 等）） |
 | `extracted_at` | TEXT | 変換日時（UTC ISO8601） |
 
 `box_files` と `doc_content` は `box_file_id` で 1:1。`pm_box_crawl.py --remove` は両テーブルから削除する。

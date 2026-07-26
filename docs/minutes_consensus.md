@@ -1,5 +1,11 @@
 # Self-Consistency による議事録生成
 
+> **注記**: 本書のアルゴリズム導入根拠（gemma4 reasoning の出力揺れ）とコスト実測
+> （2026-05-25）は gemma4 時代のものである。2026-07 に glm-5.2 へ移行済みで、N=3 既定の
+> 妥当性は glm-5.2 では未検証（再評価は PLAN.md 参照）。本文中の「gemma4」は現在は
+> `call_argus_llm()` のルーティング先（glm-5.2 等、`llm.routing_priority` に従う）と
+> 読み替えること。
+
 `generate_minutes_local.py` の標準動作。同一プロンプトを N 回サンプリングし、
 embedding クラスタリング + 投票 + LLM 集約によって表現ブレと取捨選択ブレを吸収する。
 
@@ -167,24 +173,22 @@ LLM は文章として自然な形で 1 つに圧縮する。`temperature` は�
 
 ## 環境変数の役割分担
 
-このアルゴリズムは **ローカル vLLM (gemma4)** と **RiVault (bge-m3 embedding)**
-の 2 つのバックエンドを併用する。混同を避けるため環境変数を厳密に分離する。
+このアルゴリズムは **`call_argus_llm()` がルーティングするテキスト生成バックエンド
+（`llm.routing_priority` に従い rivault/local）** と **RiVault (bge-m3 embedding)**
+の 2 系統を併用する。混同を避けるため環境変数を厳密に分離する。
 
-| 環境変数 | 用途 | デフォルト値 |
+| 環境変数 | 用途 | 備考 |
 |---|---|---|
-| `OPENAI_API_BASE` / `OPENAI_API_KEY` | ローカル vLLM gemma4（議事録生成・slide_ocr 等） | `http://localhost:8000/v1` / `dummy` |
-| `RIVAULT_URL` / `RIVAULT_TOKEN` | RiVault（Argus 応答 + bge-m3 embedding） | RiVault エンドポイント |
-| `EMBED_API_BASE` / `EMBED_API_KEY` | embedding 専用の上書き（任意） | デフォルトは RIVAULT_URL |
+| `LOCAL_LLM_URL` / `LOCAL_LLM_TOKEN` | ローカル LLM ルート（議事録生成・slide_ocr 等） | `~/.secrets/localLLM.sh` で設定 |
+| `RIVAULT_URL` / `RIVAULT_TOKEN` / `RIVAULT_MODEL` | RiVault ルート（テキスト生成 + bge-m3 embedding） | `~/.secrets/rivault_tokens.sh` で設定 |
+| `EMBED_API_BASE` / `EMBED_API_KEY` | embedding 専用の上書き（任意） | 未設定時は `RIVAULT_URL` を使用 |
 
-`generate_minutes_local.py` は `--url` / `--token` 引数および
-`OPENAI_API_BASE` / `OPENAI_API_KEY` 環境変数のみで vLLM を指定する。
-`embed_utils.py` は `EMBED_API_BASE` → `RIVAULT_URL` の優先順で embedding
-エンドポイントを解決する。
-
-**注意**: 過去には `generate_minutes_local.py` が `RIVAULT_URL` を vLLM
-エンドポイント名として流用していた歴史がある。これにより `embed_utils` が
-`RIVAULT_URL` を読むと vLLM (`/v1/embeddings` 未提供) に向かい 404 になる
-バグがあった。2026-05-25 に環境変数を分離してこの干渉を解消した。
+`generate_minutes_local.py` は `--url` / `--token` 引数（または `LOCAL_LLM_URL` /
+`LOCAL_LLM_TOKEN` 環境変数）でローカル LLM を明示指定できるが、実際の呼び出しは
+`call_argus_llm()` を経由し、`data/argus_config.yaml` の `llm.routing_priority` に
+従って rivault/local のどちらを使うか決まる。`embed_utils.py` は `EMBED_API_BASE` →
+`RIVAULT_URL` の優先順で embedding エンドポイントを解決する（テキスト生成とは
+別経路）。
 
 ## CLI
 

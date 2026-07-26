@@ -17,7 +17,7 @@ pm_qa_server.py（常駐デーモン）
         ├─ Slack 生メッセージ収集    ← argus_config.yaml の channels
         ├─ 議事録本文収集            ← data/minutes/{kind}.db
         ├─ pm.db 統計収集            ← マイルストーン・期限超過AI・担当者負荷
-        ├─ call_argus_llm()         ← gemma4 優先、未起動なら RiVault にフォールバック
+        ├─ call_argus_llm()         ← argus_config.yaml の llm.routing_priority に従いルーティング
         └─ ephemeral 返信            ← 本人のみ見える回答
 ```
 
@@ -27,9 +27,10 @@ pm_qa_server.py（常駐デーモン）
 - pm.db 統計（マイルストーン進捗・期限超過AI・担当者別負荷・未確認決定事項）
 - FTS5 検索インデックス（議事録・Slack生メッセージ・ドキュメント・Web記事）
 
-**LLM 優先順位**:
-1. gemma4（`localhost:8000`）— ヘルスチェック OK なら優先使用（128K context）
-2. RiVault（`zai-org/GLM-4.7-Flash`）— gemma4 未起動時のフォールバック（200K context）
+**LLM ルーティング**: `call_argus_llm()` が `data/argus_config.yaml` の `llm.routing_priority`
+（`rivault`/`local` の順序リスト）に従い、環境変数で利用可能なルートを先頭から順に試す
+（詳細な優先順は `pm-argus-config-schema` Skill 参照）。現行構成では RIKYU（RiVault）を
+テキスト生成の主経路とし、ローカル LLM は主に embedding（bge-m3）用途。
 
 ---
 
@@ -88,8 +89,11 @@ tail -f logs/pm_qa_server.log
 
 `pm_daemon.sh start qa` は起動時に以下を自動で行う:
 - `~/.secrets/slack_tokens.sh`（`SLACK_BOT_TOKEN`・`SLACK_APP_TOKEN`・`SLACK_USER_TOKEN`）の読み込み
-- `~/.secrets/rivault_tokens.sh`（`RIVAULT_URL`・`RIVAULT_TOKEN`）の読み込み
-- `OPENAI_API_BASE=http://localhost:8000/v1`（gemma4）のデフォルト設定
+- `~/.secrets/rivault_tokens.sh`（`RIVAULT_URL`・`RIVAULT_TOKEN`・`RIVAULT_MODEL`）の読み込み
+- `~/.secrets/localLLM.sh`（`LOCAL_LLM_URL`・`LOCAL_LLM_TOKEN`）の読み込み
+
+実際にどちらのルートが使われるかは `call_argus_llm()` が `argus_config.yaml` の
+`llm.routing_priority` で決定する（固定の優先順位ではない）。
 
 ---
 
@@ -128,6 +132,12 @@ tail -f logs/pm_qa_server.log
 プロンプトに常時同梱する。`index_name` 等のチャンネル別フィルタは適用しない
 （プロジェクト全体に共通）。2026-06-16 に旧 `knowledge.db` 由来の
 `fetch_knowledge_summary()` を置き換えた（経緯は LOG.md「knowledge.db 全廃」参照）。
+
+**全文脈方式（既定）**: `/argus-brief` / `/argus-risk` は検索を介さず、指定期間内の
+pm.db 統計・Slack 生メッセージ・議事録本文を丸ごとプロンプトに投入する single-shot
+方式が既定（`_FULLCTX_CHAR_BUDGET_DEFAULT=350,000` 字、`ARGUS_FULLCTX_CHAR_BUDGET`
+で上書き可）。従来の Worker 分割 + 切り詰め方式（`_WORKER_MAX_CHARS=8000`）は
+`ARGUS_DISABLE_FULLCTX=1` 指定時、または全文脈生成が失敗した場合のフォールバックとして残る。
 
 ---
 
@@ -291,7 +301,7 @@ Whisper による文字起こし → LLM による議事録生成 を実行し�
 
 **VTT 話者情報の活用**: 音声ファイルと同名の Zoom VTT ファイル（例: `2026-04-28_Leader_Meeting.m4a` → `2026-04-28_Leader_Meeting.transcript.vtt` または `2026-04-28_Leader_Meeting.vtt`）がチャンネルにアップロードされている場合、自動的にダウンロードして議事録生成に活用する。VTT の正確な話者名を用いてアクションアイテムの担当者推定精度が向上する。
 
-**スライドOCRの活用**: mp4/mov/mkv/webm/avi 等の動画ファイルに対しては、文字起こしの前段で `scripts/recording/slide_ocr.py` が自動実行される。ffmpeg scene detect でスライド切り替わりのフレームを抽出し、マルチモーダルLLM（`OPENAI_API_BASE`）で Markdown 化する。抽出された固有名詞リストは Whisper の `initial_prompt` に追加され、スライド文脈は `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱されて固有名詞・数値の誤変換を抑制する。スライドなしの動画や `OPENAI_API_BASE` 未設定時は自動スキップされ既存動作にフォールバックする。
+**スライドOCRの活用**: mp4/mov/mkv/webm/avi 等の動画ファイルに対しては、文字起こしの前段で `scripts/recording/slide_ocr.py` が自動実行される。ffmpeg scene detect でスライド切り替わりのフレームを抽出し、マルチモーダル対応のローカル LLM（`LOCAL_LLM_URL`、失敗時は `RIVAULT_OCR_MODEL` 設定済みの RiVault へフォールバック）で Markdown 化する。抽出された固有名詞リストは Whisper の `initial_prompt` に追加され、スライド文脈は `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱されて固有名詞・数値の誤変換を抑制する。スライドなしの動画や `LOCAL_LLM_URL` 未設定時は自動スキップされ既存動作にフォールバックする。
 
 **進捗通知**:
 - 処理開始・ダウンロード完了・文字起こし完了・Stage 1/2/3 進捗をスレッドに随時投稿（チャンネル全員に可視）
@@ -324,7 +334,7 @@ LLM が自律的にツール（DB検索・全文検索・Slackメッセージ取
 1. シードデータ収集（プロジェクト概況・マイルストーン進捗・担当者負荷）
 2. LLM がシードデータを分析し、深掘りすべきツールを `<tool_call>` タグで指定
 3. ツール実行結果を LLM にフィードバック → さらなる深掘りまたは `<final_answer>` で回答完了
-4. 最大5ステップ（180秒タイムアウト）
+4. 最大20ステップ（480秒タイムアウト、`_DEFAULT_MAX_STEPS` / `_DEFAULT_TIMEOUT`）
 
 **利用可能なツール**:
 | ツール | 用途 |
@@ -336,7 +346,7 @@ LLM が自律的にツール（DB検索・全文検索・Slackメッセージ取
 | `get_unacknowledged_decisions` | 未確認決定事項 |
 | `search_action_items` | AI条件検索 |
 | `search_decisions` | 決定事項キーワード検索 |
-| `search_text` | 議事録・Slack全文検索（FTS5 + embedding、re-rankingは現在無効。後述） |
+| `search_text` | 議事録・Slack全文検索（FTS5 + embedding、LLM re-ranking既定有効。後述） |
 | `get_slack_messages` | 特定チャンネルの生メッセージ |
 
 **CLI モード**:
@@ -860,19 +870,16 @@ Step 5: 最新日付レコード（それでも0件の場合）
 SudachiPy形態素解析が主検索。trigramは「性能」「評価」などの2文字名詞がヒットしない
 ため補助的な位置づけ。
 
-### LLM re-ranking（現在無効）
+### LLM re-ranking（既定有効）
 
-`scripts/argus/retrieval.py` の `rerank_chunks()` はFTS+embedding検索結果をLLMで
-関連度判定し上位5件に絞り込む**設計**だが、**現在は無効化されている**。
-`rerank_chunks(question, chunks, openai_base="", ...)` は `openai_base` 引数が
-空文字だと即座に `chunks[:top_k]` を返す実装（L526-527）で、呼び出し元
-`mcp_tools.py`（`search_text`）・`cli_utils.py` のどちらも `openai_base` を渡していない
-ため、常にこのショートサーキットに落ちる。2026-06-19 の責務別モジュール分割
-（`2e3fe68`）で `rerank_chunks` を移設した際、ゲートをモジュールグローバルの
-接続設定フラグから引数化したが呼び出し元の更新が漏れた配線ミスであり、
-意図的な無効化ではない。
+`scripts/argus/retrieval.py` の `rerank_chunks(question, chunks, *, use_llm=False, ...)`
+はFTS+embedding検索結果をLLMで関連度判定し上位 `top_k`（既定5件）に絞り込む。
+呼び出し元（`mcp_tools.py::search_text`、`cli_utils.py` のナレッジ検索）は
+`use_llm=os.environ.get("ARGUS_DISABLE_LLM_RERANK") != "1"` を渡しており、**既定で有効**。
+無効化したい場合は qa デーモンの起動環境に `ARGUS_DISABLE_LLM_RERANK=1` を設定して
+再起動する（`bash scripts/pm_daemon.sh stop qa && start qa`）。
 
-**現状の実効フロー**（LLM re-rankをスキップした場合の並び順）:
+**実効フロー**:
 
 ```
 FTS5検索 + embeddingベクトル検索（RRF融合）
@@ -880,15 +887,21 @@ FTS5検索 + embeddingベクトル検索（RRF融合）
 _combined_score = (1 - 鮮度重み0.4) × BM25正規化スコア + 鮮度重み0.4 × 鮮度スコア
   （鮮度スコアは指数減衰、half-life 180日）
   ↓
-_combined_score 降順で先頭 top_k（既定5件）をそのまま回答生成へ渡す
+_combined_score 降順で上位候補（TOP_K_RETRIEVE=30 件程度）を LLM re-rank に提示
+  （プロンプトに各チャンク先頭400字を提示し、番号選択で関連チャンクを選抜。
+  call_argus_llm(max_tokens=4096, timeout=30) — rivault フォールバック先が
+  Kimi-K2-Thinking の場合の thinking 消費を見込んだ設定）
+  ↓
+LLM選抜結果（無効時・失敗時は _combined_score 降順の先頭 top_k へ静かに退化）
+  を回答生成へ渡す
 ```
 
-LLMによる「質問との関連度」の最終判定は行われないため、BM25/鮮度スコアが高くても
-質問と無関係なチャンクが上位に残るケースがある（precisionの取りこぼし）。
-再有効化するかどうかは、recall/precision評価ハーネス（`scripts/eval/recall_eval.py`、
-baseline構築中）でbefore/afterを測定してから判断する方針（2026-07-13時点、
-詳細は `LOG.md` 参照）。再有効化時は呼び出し元2箇所（`mcp_tools.py:163`,
-`cli_utils.py:418`）で `openai_base` を明示的に渡す必要がある。
+**測定結果（2026-07-24、詳細は `LOG.md` 参照）**: recall_eval（gold 28クエリ）で
+literal hit@5 が 0.231→0.692（最大3倍）に改善、hit@30/60 の悪化はゼロ。
+knowledge_ab（実スレッド30件、Slack抽出時のナレッジ検索）では rerank 有り 24勝/2敗/2分（92.9%）。
+両側の評価ハーネスで合格したため既定有効化した。修理前は
+`rerank_chunks` を移設した際にゲートをモジュールグローバルの接続設定フラグから
+引数化したが呼び出し元の更新が漏れており、事実上 no-op だった（配線漏れ、経緯は LOG.md）。
 
 ### チャンネル→インデックスの解決
 
@@ -938,7 +951,7 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
   ├─ respond("Argus 調査中...")       ← 即時表示
   └─ executor.submit(_run_investigate) ← バックグラウンドスレッドへ
          ├─ シードデータ収集
-         ├─ LLM → tool_call → 実行 → LLM（最大5ステップ）
+         ├─ LLM → tool_call → 実行 → LLM（最大20ステップ・480秒タイムアウト）
          └─ respond(回答, replace_original=True)
 ```
 
@@ -946,16 +959,15 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 
 | パラメータ | 値 | 説明 |
 |---|---|---|
-| `TOP_K_RETRIEVE` | 30 | FTS検索で取得する件数 |
-| `TOP_K_RERANK` | 5 | **re-rank無効化中**（下記参照）のため実質は `_combined_score` 降順の先頭件数 |
-| `rerank preview` | 400文字 | re-rankプロンプトでの各チャンク提示長（**無効化中のため未使用**） |
-| `MAX_TOKENS` | 1024 | 回答生成の最大トークン数 |
-| `LLM_TIMEOUT` | 120秒 | 回答生成のタイムアウト |
-| `RERANK_TIMEOUT` | 60秒 | re-rankのタイムアウト（コード実値。**re-rank自体が無効化中のため到達しない**） |
+| `TOP_K_RETRIEVE` | 30 | FTS検索で取得する件数（`retrieval.py`） |
+| `TOP_K_RERANK` | 5 | re-rank後に回答生成へ渡す件数（`retrieval.py`） |
+| `rerank preview` | 400文字 | re-rankプロンプトでの各チャンク提示長 |
+| `rerank max_tokens` | 4096 | re-rank呼び出しの上限トークン数（rivaultフォールバック先がKimi-K2-Thinkingの場合のthinking消費を見込んだ設定） |
+| `rerank timeout` | 30秒 | re-rank呼び出しのタイムアウト（`search_text`は高頻度ツールのためinvestigateの480秒予算を守る） |
 | `CHUNK_MAX_CHARS` | 1000 | チャンク最大文字数 |
 | `CHUNK_OVERLAP_CHARS` | 100 | チャンクオーバーラップ文字数 |
 
-上記のうち re-rank 関連パラメータは「LLM re-ranking（現在無効）」節参照。
+上記のうち re-rank 関連パラメータは「LLM re-ranking（既定有効）」節参照。
 
 ### pm_embed.py のオプション
 
@@ -1006,14 +1018,19 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 | `SLACK_BOT_TOKEN` | 必須 | — | Bot Token（`xoxb-`）— `/argus-*` の返信に使用 |
 | `SLACK_APP_TOKEN` | 必須 | — | App-Level Token（`xapp-`）— Socket Mode 接続 |
 | `SLACK_USER_TOKEN` | 必須 | — | User Token（`xoxp-`）— Canvas 投稿に使用 |
-| `OPENAI_API_BASE` | 推奨 | `http://localhost:8000/v1` | gemma4 vLLM エンドポイント |
-| `OPENAI_API_KEY` | 任意 | `"dummy"` | gemma4 API キー |
-| （モデル名） | — | 自動取得 | vLLM `/v1/models` から自動検出 |
-| `RIVAULT_URL` | 任意 | — | RiVault エンドポイント（gemma4 未起動時のフォールバック） |
+| `LOCAL_LLM_URL` | `llm.routing_priority` に応じ | — | ローカル LLM ルートのエンドポイント（`~/.secrets/localLLM.sh`） |
+| `LOCAL_LLM_TOKEN` | 任意 | `"dummy"` | ローカル LLM の API トークン |
+| （モデル名） | — | 自動取得 | ローカル LLM の `/v1/models` から自動検出（`LOCAL_LLM_MODEL` で上書き可） |
+| `RIVAULT_URL` | `llm.routing_priority` に応じ | — | RiVault エンドポイント（`~/.secrets/rivault_tokens.sh`） |
 | `RIVAULT_TOKEN` | 任意 | — | RiVault API トークン |
+| `RIVAULT_MODEL` | 任意 | — | RiVault 呼び出し時のモデル名 |
 | `ARGUS_CONFIG` | 任意 | `data/argus_config.yaml` | 設定ファイルパス |
 
-`pm_daemon.sh start qa` が `~/.secrets/slack_tokens.sh` と `~/.secrets/rivault_tokens.sh` を自動 source するため、デーモン起動時は手動設定不要。CLI 直接実行時は `source ~/.secrets/slack_tokens.sh` が必要。
+`call_argus_llm()` は `data/argus_config.yaml` の `llm.routing_priority`（`rivault`/`local` の順序リスト）に
+従ってルートを選び、環境変数で利用可能なルートのみを試す（先頭から順にフォールバック）。
+`pm_daemon.sh start qa` が `~/.secrets/slack_tokens.sh` と `~/.secrets/rivault_tokens.sh`（および
+`SET_DEFAULT_LLM=1` 指定時は `~/.secrets/localLLM.sh`）を自動 source するため、デーモン起動時は
+手動設定不要。CLI 直接実行時は該当する secrets ファイルを `source` する必要がある。
 
 ---
 
@@ -1081,9 +1098,13 @@ crontab -l | grep argus
 3. `bash scripts/pm_daemon.sh start qa` で再起動
 
 **「LLMエラー」が返ってくる:**
-- `curl http://localhost:8000/v1/models` で gemma4 の起動確認
-- gemma4 が落ちていれば RiVault にフォールバックするはずなので `RIVAULT_URL` が設定されているか確認: `echo $RIVAULT_URL`
-- ログで `ローカル LLM に接続できません。RiVault にフォールバック` が出ているか確認
+- 現行構成では RiVault（RIKYU）がテキスト生成の主経路、ローカル LLM は主に embedding
+  （bge-m3）用途。`echo $RIVAULT_URL` で RiVault 側の設定を確認
+- `data/argus_config.yaml` の `llm.routing_priority` に列挙されたルートのうち、
+  環境変数が設定されているものだけが試行される（`RIVAULT_URL` / `LOCAL_LLM_URL`）
+- ログの `[INFO] call_argus_llm: route_order=...` でどのルートが試行されたか確認できる
+- ローカル LLM ルートを使う場合、`call_argus_llm` は `$LOCAL_LLM_URL`（`/v1` サフィックス除去）配下の
+  `/health` に疎通確認するため、同様に `curl` で確認できる
 
 **プロンプトが大きすぎてエラー:**
 - `_MAX_CHARS_PER_CHANNEL = 20000`（`pm_argus.py`）でチャンネルあたりの上限を調整
@@ -1107,11 +1128,12 @@ crontab -l | grep argus
 - `pm_embed.py --full-rebuild --index-name <name>` で再構築
 
 **re-rankエラーがログに出る:**
-- 現状 `rerank_chunks()` は呼び出し元が `openai_base` を渡さないため常にショートサーキット
-  （`chunks[:top_k]` を即返す）しており、LLM呼び出し自体が発生しない。したがって
-  `re-rankエラー: ...` ログは通常発生しない（詳細は「LLM re-ranking（現在無効）」節）
-- もし再有効化後にこのエラーが出た場合は、LLMのコンテキスト長超過の可能性がある。
+- re-rank は既定有効のため、LLM呼び出し失敗時（タイムアウト・接続不可等）にこのログが出る。
+  失敗時は例外を握りつぶして `_combined_score` 降順の先頭 `top_k` へ静かに退化するため、
+  コマンド自体は失敗しない（詳細は「LLM re-ranking（既定有効）」節）
+- 頻発する場合はLLMのコンテキスト長超過の可能性がある。
   `TOP_K_RETRIEVE` を減らすか、`rerank preview` の文字数（`retrieval.py` の400）を下げる
+- 一時的に切り分けたい場合は `ARGUS_DISABLE_LLM_RERANK=1` を qa デーモン起動環境に設定して再起動
 
 **SudachiPyが利用不可とログに出る:**
 - `~/.venv_aarch64/bin/pip install sudachipy sudachidict_core` を実行
@@ -1163,9 +1185,8 @@ crontab -l | grep argus
 
 ### P3: Re-rankingの改善
 
-前提: LLM re-ranking自体が現在無効化中（配線漏れ、詳細は「LLM re-ranking（現在無効）」節）。
-以下は元々の設計を前提にした改善候補であり、着手前にまず re-ranking を再有効化するか
-（recall/precision評価ハーネスでの判断待ち）を先に決める必要がある。
+前提: LLM re-ranking自体は既定有効（2026-07-24 修理・詳細は「LLM re-ranking（既定有効）」節）。
+以下は現行の「番号選択」方式を前提にしたさらなる改善候補。
 
 - **スコアリング方式**: 現在の「番号選択」から「各チャンクに0〜10点のスコアをつけよ」に変更することで判定精度が向上
 - **Cross-Encoderモデル**: ms-marco等の小型モデルで質問とチャンクのペアを直接スコアリング（LLM呼び出し不要）

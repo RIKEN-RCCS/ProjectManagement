@@ -126,12 +126,12 @@ Zoom 会議の録画動画から、音声・テキスト・映像の複数チャ
 - VTT が同梱されない外部ツール録画では Whisper + pyannote の話者分離で `Speaker N` ラベルになり、人手で実名化する運用が残る（VTT 取得経路の整備が解決策。画像 OCR は迂回手段にならない）
 
 **スライド・資料 OCR による専門用語補正**:
-- `scripts/recording/slide_ocr.py` が ffmpeg scene detect でスライド切り替わりのフレームを抽出し、マルチモーダル LLM（`OPENAI_API_BASE`）で Markdown 化する
+- `scripts/recording/slide_ocr.py` が ffmpeg scene detect でスライド切り替わりのフレームを抽出し、マルチモーダル対応LLM（`LOCAL_LLM_URL`、未設定/失敗時は `RIVAULT_URL`＋`RIVAULT_OCR_MODEL`）で Markdown 化する
 - 得られた結果は 2 系統で議事録品質に反映:
   - 固有名詞リスト（terminology.txt）を `whisper_vad.py` の `--initial-prompt-extra` に渡し ASR 段階で誤変換を抑制
   - スライド文脈（slide_context.md）を `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱し、LLM に固有名詞の ground truth を与える
 - `pm_from_recording.sh`（ローカル版）と `transcribe_pipeline.py`（Slack 経由）の両方で有効化済み
-- スライドなしの会議（frames=0）や mp4 以外、`OPENAI_API_BASE` 未設定時は自動スキップで既存動作にフォールバック
+- スライドなしの会議（frames=0）や mp4 以外、LLMルートがいずれも未設定時は自動スキップで既存動作にフォールバック
 - `--no-slide-ocr` で無効化可能（`pm_from_recording.sh`）
 
 **実装上の考慮**:

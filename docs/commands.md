@@ -83,7 +83,7 @@ sbatch scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4
 
 **VTT 話者情報の活用**: Zoom の自動文字起こし VTT ファイルが存在する場合、VTT の正確な話者名を Whisper の高品質日本語文字起こしと統合する。議事録 Stage 3（決定事項・アクションアイテム抽出）で話者名をもとに担当者を推定する。VTT ファイルの検索は同名のみ（フォールバックなし）: `{stem}.transcript.vtt` → `{stem}.vtt` の順で検索し、先に見つかった方を使用する。
 
-**スライドOCRの活用**: mp4 には発表スライドが写っていることが多く、スライド上の固有名詞・技術用語・数値を OCR で抽出することで Whisper の誤変換を補える。`scripts/recording/slide_ocr.py` が ffmpeg の scene detect でスライド切り替わりのフレームを抽出し、マルチモーダルLLM（`OPENAI_API_BASE`）で Markdown に変換する。得られた結果は (1) 固有名詞リストを Whisper の `initial_prompt` に追加、(2) スライド文脈を `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱、の 2 系統で議事録品質に反映される。スライドなしの会議（frames=0）や mp4 以外の拡張子、OPENAI_API_BASE 未設定時はスキップされ既存動作にフォールバックする。VTT × Slides × Whisper の 3 系統はそれぞれ独立して有効/無効化でき、共存する。
+**スライドOCRの活用**: mp4 には発表スライドが写っていることが多く、スライド上の固有名詞・技術用語・数値を OCR で抽出することで Whisper の誤変換を補える。`scripts/recording/slide_ocr.py` が ffmpeg の scene detect でスライド切り替わりのフレームを抽出し、マルチモーダル対応のローカル LLM（`LOCAL_LLM_URL`、未設定/失敗時は `RIVAULT_OCR_MODEL` 設定済みの RiVault へフォールバック）で Markdown に変換する。得られた結果は (1) 固有名詞リストを Whisper の `initial_prompt` に追加、(2) スライド文脈を `generate_minutes_local.py` の Stage 1/2/3 プロンプトに同梱、の 2 系統で議事録品質に反映される。スライドなしの会議（frames=0）や mp4 以外の拡張子、いずれのLLMルートも未設定時はスキップされ既存動作にフォールバックする。VTT × Slides × Whisper の 3 系統はそれぞれ独立して有効/無効化でき、共存する。
 
 `--meeting-name` 指定時の追加フロー: 文字起こし完了 → `generate_minutes_local.py`（VTTあれば `--vtt` 付き）で議事録生成 → `pm_minutes_import.py` で議事録DBに保存 → `pm_ingest.py minutes` で pm.db に転記 → .md 削除
 
@@ -618,7 +618,7 @@ python3 scripts/pm_slack_box_links.py --post-to-canvas --canvas-id F0XXXXXX --in
 | `--post-to-canvas` | - | ドキュメント一覧を Canvas に投稿 |
 | `--canvas-id ID` | - | 投稿先 Canvas ID（`--post-to-canvas` 時に必須） |
 
-**セキュリティ注意**: ローカルLLM（`OPENAI_API_BASE`）のみを使用。外部APIには情報を送出しない。`OPENAI_API_BASE` 未設定時はエラーで停止する。
+**LLM呼び出し**: `call_argus_llm()` 経由（`data/argus_config.yaml` の `llm.routing_priority` に従い rivault/local をルーティング）。利用可能なルートが1つも無い場合はエラーで停止する。
 
 **抽出済み管理**: `extract_state` テーブルで処理済み `thread_ts` を記録し、再実行時に重複処理を防止する。
 
@@ -706,20 +706,23 @@ python3 scripts/pm_box_crawl.py --remove --folder-pattern "アーカイブ/*"
 | md / txt | そのまま読み込み | — |
 | docx | LibreOffice → HTML → Markdown | — |
 | xlsx | LibreOffice → HTML → Markdown（テーブル整形） | — |
-| pptx | LibreOffice → HTML → Markdown | gemma4 マルチモーダル OCR（`OPENAI_API_BASE`）|
+| pptx | LibreOffice → HTML → Markdown | マルチモーダルOCR（`LOCAL_LLM_URL` → 未設定/失敗時 `RIVAULT_URL`）|
 | pdf | `pdftotext` でテキスト抽出 | テキスト無しのスキャンPDFはマルチモーダルOCR |
 | boxnote | JSON 抽出（`_extract_boxnote_text`）| — |
 
-**マルチモーダル変換**: 文字情報を持たないPPTXやスキャンPDFは ffmpeg 等で画像化したうえで `OPENAI_API_BASE` のマルチモーダルLLMに投げて Markdown 化する。`OPENAI_API_BASE` 未設定の場合はテキスト抽出のみで進む。
+**マルチモーダル変換**: 文字情報を持たないPPTXやスキャンPDFは ffmpeg 等で画像化したうえでマルチモーダル対応LLMに投げて Markdown 化する。エンドポイントは `LOCAL_LLM_URL` を優先し、未設定または非対応時は `RIVAULT_URL`（`RIVAULT_OCR_MODEL` 設定時）にフォールバックする。いずれも未設定の場合はテキスト抽出のみで進む。
 
-**Docling 変換経路（優先経路、環境変数ゲート）**:
+**Docling 変換経路（実質の主経路、環境変数ゲート）**:
 
-上記は `DOCLING_SERVE_URL` 未設定時（既定）の変換チェーン。設定時は pdf/docx/xlsx/pptx の変換が
-docling-serve（`pm_daemon.sh start docling` で常駐する HTTP API、`POST /v1/convert/file`）経由に切り替わる。
+pdf/docx/xlsx/pptx の変換は docling-serve（`pm_daemon.sh start docling` で常駐する HTTP API、
+`POST /v1/convert/file`）が既定の主経路。夜間クロール `pm_box_update.sh` は
+`DOCLING_SERVE_URL=http://127.0.0.1:5001` を自動設定して起動時に health チェックするため、
+定期実行では常時 Docling 経由になる。上記の表は `DOCLING_SERVE_URL` が未設定（CLI単体実行等）の
+場合、または docling-serve 不通時のフォールバック経路。
 
 | 環境変数 | デフォルト | 説明 |
 |---|---|---|
-| `DOCLING_SERVE_URL` | 未設定（Docling無効） | docling-serve のベースURL（例 `http://127.0.0.1:5001`）|
+| `DOCLING_SERVE_URL` | コード上は未設定＝Docling無効。`pm_box_update.sh`（夜間クロール）は自動的に `http://127.0.0.1:5001` を設定するため運用上は既定で有効 | docling-serve のベースURL |
 | `DOCLING_TIMEOUT` | `600`（秒） | 変換リクエストのタイムアウト |
 | `DOCLING_OCR_PRESET` | `easyocr` | OCRエンジン。rapidocr は同梱モデルが中国語/英語/ラテンのみで日本語かな非対応のため既定は easyocr |
 | `DOCLING_OCR_LANG` | `ja,en` | OCR対象言語（カンマ区切り） |

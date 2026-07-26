@@ -36,7 +36,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 スクリプトはファイルシステムから直接読むため、Claude が読まなくても運用に支障はない。
 
 - **`docs/project.md`** — ステークホルダー氏名・メールアドレス・Slack user_id・組織体制（理研 / 富士通 / NVIDIA の役職と意思決定権限）等
-  - ローカル LLM（vLLM gemma4 / Whisper 議事録生成）のみが `cli_utils.py: load_claude_md_context()` 経由で直接読む
+  - スクリプトのみが `cli_utils.py: load_claude_md_context()` 経由で直接読む（議事録生成・エンリッチメント・ブリーフィング/リスク生成等）。呼び出し先の LLM は `call_argus_llm()` のルーティング先（ローカル/RiVault 問わず）であり、Claude Code / Claude API がこの内容を目にすることはない
 - **`data/argus_config.yaml`** — Slack channel_id / Canvas ID / Box folder_id 等
   - スクリプトは `yaml.safe_load()` で直接読む（cli_utils / pm_minutes_catalog / pm_api 等）
   - キー構造のみ必要な場合は `pm-argus-config-schema` Skill を参照する

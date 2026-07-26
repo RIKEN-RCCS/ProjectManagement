@@ -296,8 +296,9 @@ pm_qa_server.py (Socket Mode デーモン)
   ├── 鮮度スコアリング (指数減衰, half-life 180日)
   ├── 重複排除 + マージ
   │
-  └── _combined_score (BM25 0.6 + 鮮度 0.4) 降順 → top-5 → generate_answer
-      ※ LLM re-rank は現在無効（配線漏れ、詳細は docs/argus_system.md「LLM re-ranking」）
+  ├── _combined_score (BM25 0.6 + 鮮度 0.4) 降順で上位候補を LLM re-rank
+  │   （既定有効、退避は ARGUS_DISABLE_LLM_RERANK=1。詳細は docs/argus_system.md「LLM re-ranking」）
+  └── 上位 top-5 → 回答生成
 ```
 
 ---

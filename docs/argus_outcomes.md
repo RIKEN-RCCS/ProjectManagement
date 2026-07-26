@@ -178,7 +178,7 @@ ephemeral 本文に加えて、グラフ画像を `files_upload_v2` でチャン
 ## 6. `/argus-investigate` — マルチステップ調査（Agent）
 
 LLM が自律的にツール（DB検索・FTS全文検索・Slackメッセージ取得・出力系）を選択しながら
-最大 **5 ステップ**（timeout 480秒）で調査する。単発のキーワード検索から因果分析まで対応。
+最大 **20 ステップ**（timeout 480秒）で調査する。単発のキーワード検索から因果分析まで対応。
 第一報は ephemeral。
 
 ### 使い方
@@ -293,7 +293,7 @@ map-reduce の独立パスであり、決定論ピン＋ツール封鎖という
 - 質問例: 「Claude Code のAPIの配布を希望する方々のリストは？」
 - ドキュメント本文: 「富岳太郎 / 富岳花子 / 富岳次郎 …」（名前の羅列のみで「配布」「希望」が無い）
 
-このギャップを埋めるため、LLM が元クエリから「本文に出てきそうな別表現」を 2 パターン生成し、**計 3 クエリで並列検索→重複排除→マージ** してから `_combined_score`（BM25 + 鮮度）降順で上位を選ぶ（LLMによる re-rank は現在無効化中。詳細は `docs/argus_system.md`「LLM re-ranking（現在無効）」を参照）。従来はファイル名や周辺メタを指定しないとヒットしなかった情報も、直接質問するだけで拾えるようになった。
+このギャップを埋めるため、LLM が元クエリから「本文に出てきそうな別表現」を 2 パターン生成し、**計 3 クエリで並列検索→重複排除→マージ** してから `_combined_score`（BM25 + 鮮度）降順で上位候補を LLM re-rank にかけ、関連度上位を選ぶ（re-rank は既定有効、退避は `ARGUS_DISABLE_LLM_RERANK=1`。詳細は `docs/argus_system.md`「LLM re-ranking」を参照）。従来はファイル名や周辺メタを指定しないとヒットしなかった情報も、直接質問するだけで拾えるようになった。
 
 同じ仕組みは `/argus-brief` / `/argus-risk` / エンリッチメント（判断者・根拠の補完）にも適用されており、質問語彙と記載語彙が違うケースで検索精度が改善される。
 
@@ -326,8 +326,8 @@ Slack チャンネルにアップロードされた音声・動画ファイル�
 2. 動画（mp4 等）の場合は **スライドOCR** 実行（ffmpeg scene detect + マルチモーダルLLM、
    抽出した固有名詞を initial_prompt / slide-context として注入）
 3. Whisper large-v3 で文字起こし（Singularity SIF ＋ VAD）
-4. ローカルLLM（gemma4）で議事録生成（マルチステージ: 抽出 → 統合 → 決定事項・AI 抽出、
-   Self-Consistency 有効時は複数サンプルを統合）
+4. `call_argus_llm()` 経由（`llm.routing_priority` に従いルーティング）で議事録生成
+   （マルチステージ: 抽出 → 統合 → 決定事項・AI 抽出、Self-Consistency 有効時は複数サンプルを統合）
 5. スレッドに議事録ファイル（Markdown）をアップロード
 
 ### 品質向上の3系統（独立ON/OFF・共存可）
@@ -406,7 +406,7 @@ PYTHONPATH=scripts ~/.venv_x86_64/bin/python3 scripts/argus/pm_argus_agent.py \
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--investigate TEXT` | 必須 | 調査内容 |
-| `--max-steps N` | `5` | 最大ステップ数 |
+| `--max-steps N` | `20` | 最大ステップ数 |
 | `--timeout SEC` | `480` | タイムアウト（秒） |
 | `--days N` | `30` | 直近何日分を対象にするか |
 | `--since` | - | 開始日を明示指定 |
