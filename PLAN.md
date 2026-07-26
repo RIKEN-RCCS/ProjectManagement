@@ -58,12 +58,14 @@ Stage 1 の 1024 撤廃・LOCAL_OCR_ prefix・docs 近代化）を実施中。
 1. **パッケージ B（PM 判断）** — Patrol 検出器 3 種（期限超過リマインド/期限接近警告/停滞検出）を
    有効化するか。実装は完全、patrol_config.yaml の enabled 3 行のみ。有効化すると
    リーダーチャンネル/DM への通知が増える
-2. **パッケージ C（評価駆動）** — 前半 3 項目は 2026-07-26 完了（LOG.md 参照:
-   today/draft 全文脈化、consensus 既定 N=1、議事録 Stage 1 スキップ = チャンク撤廃相当。
-   90 分超会議のみ比例スケールの Stage 1 が残る）。**残り**: トリアージ 1 パス統合 A/B →
-   検索 top-5/400字 拡大 A/B → --file QA 窓拡大（24k→150k 級）。測定基盤は整備済み。
-   観察: 次回 17:00 cron の today が全文脈経路で成功するか（[argus-today] の total chars ログ）、
-   次回議事録処理で「Stage 1 をスキップ」ログと品質を確認
+2. **パッケージ C（評価駆動）** — 4/6 項目完了（2026-07-26、LOG.md 参照: today/draft 全文脈化、
+   議事録 consensus N=1 + Stage 1 スキップ、Slack 抽出 consensus N=1）。
+   **残り 2 項目**（それぞれ半日級の A/B 設計が必要）:
+   - トリアージ 1 パス統合 A/B（抽出+3ゲートを 1 呼び出しに統合できるか。knowledge_ab の
+     extraction モードを拡張して測定可能）
+   - 検索 top-5/400字 拡大 + --file QA 窓拡大（investigate の end-to-end 品質判定ハーネスが必要）
+   観察: 次回 17:00 cron の today 全文脈経路、次回議事録処理の「Stage 1 をスキップ」ログ、
+   次回 Slack ingest の抽出品質
 3. **パッケージ D（小粒清掃）** — 孤立関数の配線 or 削除（build_risk_prompt 等）、
    Web の terminology/glossary 削除ボタン、飾り引数の整理、screen ジョブの --semantic 配線
 
