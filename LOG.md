@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-07-25 休眠パス+gemma4残滓の全体監査とパッケージA実施 — 「実装済みだが動かない」を系統的に掃除
+
+**背景**: re-rank no-op の発見を受け「同型の休眠バグ」と「gemma4 前提の設計残滓」を全 scripts/ で
+監査（vulture + 呼び出し元全数 grep）。休眠パス 15 件・gemma4 残滓 11 系統を特定
+（一覧は docs/audit_20260724.md、対応は A〜D パッケージに分割し PLAN 管理）。
+**決定（パッケージA=即日低リスク実施分）**: --dry-run の no-op 実装（付けても DB に書く危険バグ）、
+think が rivault ルートで伝播しない件の明示化（実挙動: kimi 系=常時 thinking、非 kimi=disabled
+強制 — 当初の「常時 thinking」認識はレビューで訂正）、reasoning 系で空応答になる小 max_tokens
+8 箇所の 4096 化（_rewrite_query 含む）、議事録 Stage 1 の 1024 分岐撤廃（Stage 3 修正と同型）、
+LOCAL_OCR_ prefix 欠落修正（web デーモン経由の図 OCR 無言スキップ解消）、要約系の暴走ガード、
+docs の LLM 記述近代化（gemma4 優先/OPENAI_API_BASE/re-rank無効の記述は実装と真逆だった）。
+**残**: B=Patrol 3 検出器の有効化（PM 判断）、C=評価駆動の近代化（consensus N=3 ほか）、D=小粒清掃。
+
 ## 2026-07-24 LLM re-rank を修理し既定有効化 — investigate hit@5 最大3倍、extraction A/B 92.9%
 
 **背景**: rerank_chunks が本番全経路（investigate の search_text / Slack 抽出）で no-op と判明

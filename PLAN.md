@@ -48,6 +48,22 @@ read_document は「呼ばれれば効く」補助として残置。再燃時の
 別文書×別質問型の検証スイープを実施。観測ログ（窓別応答字数・所要・エンティティ）は
 整備済みで、実運用で問題が出れば診断は即可能。
 
+### 休眠パス + gemma4 残滓監査への対応（詳細は docs/audit_20260724.md）
+
+**ステータス**: 監査完了（2026-07-24、休眠パス 15 件 + gemma4 残滓 11 系統を特定）。
+パッケージ A（即日低リスク: --dry-run 実装・think 無視の明示化・max_tokens 群 4096 化・
+Stage 1 の 1024 撤廃・LOCAL_OCR_ prefix・docs 近代化）を実施中。
+
+**残作業**:
+1. **パッケージ B（PM 判断）** — Patrol 検出器 3 種（期限超過リマインド/期限接近警告/停滞検出）を
+   有効化するか。実装は完全、patrol_config.yaml の enabled 3 行のみ。有効化すると
+   リーダーチャンネル/DM への通知が増える
+2. **パッケージ C（評価駆動）** — 優先順: today/draft の全文脈化 → consensus N=1 A/B →
+   議事録 chunk-minutes 撤廃 → トリアージ 1 パス統合 A/B → 検索 top-5/400字 拡大 A/B →
+   --file QA 窓拡大。測定基盤（recall_eval / knowledge_ab / argus_ab）は整備済み
+3. **パッケージ D（小粒清掃）** — 孤立関数の配線 or 削除（build_risk_prompt 等）、
+   Web の terminology/glossary 削除ボタン、飾り引数の整理、screen ジョブの --semantic 配線
+
 ### 検索品質改善 2 件（LLM 第一段 + LLM re-rank）の事後観察（本体は完了 — LOG.md 2026-07-24 参照）
 
 **ステータス**: 両方とも測定合格・既定有効で本番投入済み（2026-07-24）。
