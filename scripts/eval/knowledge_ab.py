@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
-"""knowledge_ab.py — Slack抽出ナレッジ検索 A/B評価（keywords / rerank 比較モード）
+"""knowledge_ab.py — Slack抽出ナレッジ検索 A/B評価（keywords / rerank / extraction 比較モード）
 
 retrieve_knowledge_for_extraction() の抽出される背景資料
-（decisions/action_items 抽出プロンプトへの注入テキスト）の質を
-LLM-as-a-judge で比較する。--compare で比較軸を切り替える:
+（decisions/action_items 抽出プロンプトへの注入テキスト）の質、および
+extract_from_thread() 自体の抽出結果の質を LLM-as-a-judge で比較する。
+--compare で比較軸を切り替える:
 
 - keywords（既定）: 第一段トピックキーワード抽出を keyword_mode="llm" / "sudachi" の
   両方で実行して比較する（method 名は "llm" / "sudachi"）
 - rerank: keyword_mode="llm" 固定で、re-rank を llm_rerank=False / True の
   両方で実行して比較する（method 名は "norerank" / "rerank"）
+- extraction: ingest.slack.extract_from_thread() を consensus_n=3（本番既定） /
+  consensus_n=1（単発）の両方で実行し、抽出された decisions/action_items の質を
+  比較する（method 名は "consensus3" / "consensus1"）。pm.db は milestones 取得の
+  読み取りのみに使い、is_already_extracted/mark_extracted/save_slack_items 等の
+  書き込み系関数は一切呼ばない
 
 - Slack スレッドは data/slack.db から scripts/ingest/slack.py の
   open_slack_db / fetch_threads 経由で取得する（直 sqlite3 接続はしない）
 - judge は scripts/eval/argus_ab_judge.py の call_judge / parse_judge_output を
   import 流用する（判定ロジックの重複実装を避ける）
 - 両出力が同一、または両方とも「該当なし」相当の場合は judge を呼ばず auto-tie とする
-- 出力 JSONL にはスレッド本文を保存しない（thread_ts / 両手法のキーワード / identical /
-  swap / prefer_method / rationale のみ）
+- 出力 JSONL にはスレッド本文を保存しない（keywords/rerank: thread_ts / 両手法の
+  キーワード / identical / swap / prefer_method / rationale のみ。extraction:
+  キーワードの代わりに件数のみの items_consensus3/items_consensus1（d=N,a=M形式）
+  で抽出結果全文は保存しない）
 
 例:
     source ~/.secrets/rivault_tokens.sh
     ~/.venv_aarch64/bin/python3 scripts/eval/knowledge_ab.py run --limit 30
     ~/.venv_aarch64/bin/python3 scripts/eval/knowledge_ab.py run --compare rerank --limit 30
+    ~/.venv_aarch64/bin/python3 scripts/eval/knowledge_ab.py run --compare extraction
     ~/.venv_aarch64/bin/python3 scripts/eval/knowledge_ab.py report
 """
 from __future__ import annotations
@@ -42,15 +51,28 @@ for _p in (_SCRIPTS_DIR, _EVAL_DIR):
 
 import argus_ab_judge  # noqa: E402 — scripts/eval 内の同居モジュールを流用
 from cli_utils import retrieve_knowledge_for_extraction  # noqa: E402
-from ingest.slack import fetch_threads, open_slack_db  # noqa: E402
+from db_utils import open_pm_db  # noqa: E402
+from ingest.slack import (  # noqa: E402
+    extract_from_thread,
+    fetch_milestones,
+    fetch_threads,
+    load_context_from_claude_md,
+    open_slack_db,
+)
 
 DEFAULT_SLACK_DB = REPO_ROOT / "data" / "slack.db"
 DEFAULT_QA_DB = REPO_ROOT / "data" / "qa_index.db"
+DEFAULT_PM_DB = REPO_ROOT / "data" / "pm.db"
 DEFAULT_JSONL = REPO_ROOT / "data" / "eval" / "knowledge_ab.jsonl"
 
 _WIN_TIE_THRESHOLD = 0.60
+# --compare extraction 時の --limit 既定（未指定時）。他モードより LLM コストが高いため
+# 抑える（スレッド毎に最大 consensus3 サンプル + triage、consensus1 + triage、judge の合計呼び出し）。
+_EXTRACTION_LIMIT_DEFAULT = 15
+_DEFAULT_LIMIT = 30
 
-# --compare モード → (method名, retrieve_knowledge_for_extraction への追加kwargs) のペア
+# --compare モード → (method名, retrieve_knowledge_for_extraction への追加kwargs) のペア。
+# extraction モードのみ extract_from_thread() への kwargs（別シグネチャ）を保持する。
 _COMPARE_VARIANTS: dict[str, list[tuple[str, dict]]] = {
     "keywords": [
         ("sudachi", {"keyword_mode": "sudachi"}),
@@ -60,6 +82,10 @@ _COMPARE_VARIANTS: dict[str, list[tuple[str, dict]]] = {
         ("norerank", {"keyword_mode": "llm", "llm_rerank": False}),
         ("rerank", {"keyword_mode": "llm", "llm_rerank": True}),
     ],
+    "extraction": [
+        ("consensus3", {"consensus_n": 3, "enable_triage": True}),
+        ("consensus1", {"consensus_n": 1, "enable_triage": True}),
+    ],
 }
 
 JUDGE_SYSTEM = (
@@ -67,6 +93,21 @@ JUDGE_SYSTEM = (
     "背景資料（過去ナレッジ検索結果）の質を審査する厳格な評価者です。"
     "評価観点は「decisions/アクションアイテム抽出の背景資料としての関連性」のみです。"
     "無関係なナレッジを注入するくらいなら『該当する過去議論なし』のほうが望ましいと判断してください。"
+    "prefer は 'A' / 'B' / 'tie' のいずれかとし、短い rationale を付けてください。"
+    "出力は JSON オブジェクトのみ。コードフェンス不要。スキーマ: "
+    "{prefer:'A'|'B'|'tie', rationale:str}"
+)
+
+JUDGE_SYSTEM_EXTRACTION = (
+    "あなたは Slack スレッドから抽出された決定事項・アクションアイテムの品質を審査する"
+    "厳格な評価者です。評価観点は次の4点です: "
+    "(1) 実在性 — スレッド本文に根拠がある項目か、"
+    "(2) 重要度 — 些末な事項でないか、"
+    "(3) 粒度 — 抽象的すぎたり細かすぎたりしないか、"
+    "(4) 過不足 — スレッドの重要な決定事項・アクションアイテムを漏らしていないか。"
+    "スレッドに根拠のない項目や些末な項目を過剰に抽出している側は減点してください"
+    "（過剰抽出は減点）。両方とも decisions/action_items が0件で、"
+    "それがスレッドの内容として妥当な場合は tie としてください。"
     "prefer は 'A' / 'B' / 'tie' のいずれかとし、短い rationale を付けてください。"
     "出力は JSON オブジェクトのみ。コードフェンス不要。スキーマ: "
     "{prefer:'A'|'B'|'tie', rationale:str}"
@@ -102,6 +143,18 @@ def _is_effectively_empty(text: str) -> bool:
     return t == "" or t == "（該当する過去議論なし）"
 
 
+def _is_effectively_empty_extraction(extracted: dict) -> bool:
+    """extract_from_thread() の返り値が decisions/action_items とも0件か判定する。"""
+    return not (extracted.get("decisions") or []) and not (extracted.get("action_items") or [])
+
+
+def _format_item_counts(extracted: dict) -> str:
+    """JSONL 保存用に件数のみを 'd=N,a=M' 形式で返す（内容全文は保存しない）。"""
+    d = len(extracted.get("decisions") or [])
+    a = len(extracted.get("action_items") or [])
+    return f"d={d},a={a}"
+
+
 # --------------------------------------------------------------------------- #
 # サンプル収集
 # --------------------------------------------------------------------------- #
@@ -129,6 +182,14 @@ def _collect_candidate_threads(
 # --------------------------------------------------------------------------- #
 
 def cmd_run(args: argparse.Namespace) -> int:
+    # --limit 未指定時は compare モードごとの既定値を適用する
+    # （extraction は LLM コストが高いため既定を下げる）
+    if args.limit is None:
+        args.limit = _EXTRACTION_LIMIT_DEFAULT if args.compare == "extraction" else _DEFAULT_LIMIT
+
+    if args.compare == "extraction":
+        return _run_extraction_compare(args)
+
     slack_db_path = Path(args.slack_db)
     qa_db_path = Path(args.qa_db)
     jsonl_path = Path(args.jsonl)
@@ -225,24 +286,143 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_extraction_compare(args: argparse.Namespace) -> int:
+    """--compare extraction: ingest.slack.extract_from_thread() の
+    consensus_n=3（本番既定）vs consensus_n=1（単発）を比較する。
+
+    pm.db は fetch_milestones() による読み取りのみに使い、接続は取得後すぐ閉じる。
+    is_already_extracted/mark_extracted/save_slack_items 等の書き込み系関数は
+    一切呼ばない（extract_from_thread 自体は読み取り・LLM呼び出しのみで副作用なし）。
+    """
+    slack_db_path = Path(args.slack_db)
+    pm_db_path = Path(args.pm_db)
+    jsonl_path = Path(args.jsonl)
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    slack_conn = open_slack_db(slack_db_path, no_encrypt=args.no_encrypt)
+    try:
+        candidates = _collect_candidate_threads(slack_conn, args.since_days, args.min_chars)
+    finally:
+        slack_conn.close()
+
+    print(f"候補スレッド: {len(candidates)} 件 (直近{args.since_days}日, "
+          f"{args.min_chars}字以上)", file=sys.stderr)
+
+    rng = random.Random(args.seed)
+    rng.shuffle(candidates)
+    sampled = candidates[: args.limit] if args.limit else candidates
+    print(f"サンプリング: {len(sampled)} 件 (seed={args.seed}, compare=extraction)",
+          file=sys.stderr)
+
+    context = load_context_from_claude_md()
+    pm_conn = open_pm_db(pm_db_path, no_encrypt=args.no_encrypt)
+    try:
+        milestones = fetch_milestones(pm_conn)
+    finally:
+        pm_conn.close()
+    print(f"マイルストーン: {len(milestones)} 件（読み取りのみ、pm.db への書き込みなし）",
+          file=sys.stderr)
+
+    (name_0, kwargs_0), (name_1, kwargs_1) = _COMPARE_VARIANTS["extraction"]
+
+    with open(jsonl_path, "a", encoding="utf-8") as out_f:
+        for i, thread in enumerate(sampled, 1):
+            thread_ts = thread["thread_ts"]
+            thread_text = thread["thread_text"]
+            print(f"  [{i}/{len(sampled)}] thread_ts={thread_ts} "
+                  f"({len(thread_text)}字) ...", file=sys.stderr, flush=True)
+
+            out_0 = extract_from_thread(thread, context, milestones, REPO_ROOT, **kwargs_0)
+            out_1 = extract_from_thread(thread, context, milestones, REPO_ROOT, **kwargs_1)
+
+            record = {
+                "thread_ts": thread_ts,
+                "channel_id": thread.get("channel_id"),
+                f"items_{name_0}": _format_item_counts(out_0),
+                f"items_{name_1}": _format_item_counts(out_1),
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+            if out_0 == out_1:
+                record.update(identical=True, swap=None,
+                              prefer_method="tie", rationale="identical_output")
+            elif _is_effectively_empty_extraction(out_0) and _is_effectively_empty_extraction(out_1):
+                record.update(identical=False, swap=None,
+                              prefer_method="tie", rationale="both_empty")
+            else:
+                swap = rng.randint(0, 1)
+                methods = [(name_0, out_0), (name_1, out_1)]
+                if swap:
+                    methods = methods[::-1]
+                (method_a, out_a), (method_b, out_b) = methods
+                prompt = (
+                    f"# Slackスレッド（抜粋）\n{thread_text[:4000]}\n\n"
+                    f"# 抽出結果 A\n"
+                    f"{json.dumps(out_a, ensure_ascii=False, indent=2)}\n\n"
+                    f"# 抽出結果 B\n"
+                    f"{json.dumps(out_b, ensure_ascii=False, indent=2)}\n\n"
+                    "候補 A と B のどちらが decisions/アクションアイテムの抽出結果として"
+                    "より適切か判定し、JSON で答えてください。"
+                )
+                raw, _latency_ms, err = argus_ab_judge.call_judge(
+                    args.judge_model, JUDGE_SYSTEM_EXTRACTION, prompt,
+                    max_tokens=args.judge_max_tokens, timeout=args.judge_timeout,
+                )
+                parsed = argus_ab_judge.parse_judge_output(raw) if raw else None
+                if not parsed:
+                    record.update(identical=False, swap=bool(swap),
+                                  prefer_method="parse_failed",
+                                  rationale=err or "parse_failed")
+                else:
+                    prefer = parsed.get("prefer", "tie")
+                    if prefer == "A":
+                        prefer_method = method_a
+                    elif prefer == "B":
+                        prefer_method = method_b
+                    else:
+                        prefer_method = "tie"
+                    record.update(identical=False, swap=bool(swap),
+                                  prefer_method=prefer_method,
+                                  rationale=parsed.get("rationale", ""))
+
+            out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            out_f.flush()
+            print(f"    -> prefer_method={record['prefer_method']}", file=sys.stderr)
+
+    print(f"完了: {jsonl_path} に追記", file=sys.stderr)
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------------- #
 
-# compare モードごとの「新方式」「既定（ベースライン）方式」の method 名。
-# JSONL のレコードは keywords_{name_0}/keywords_{name_1} キーの有無で
-# どの compare モードのレコードかを判別する（複数 compare モードの
-# レコードが同じ JSONL に混在していても集計を分離できる）。
-_COMPARE_NEW_METHOD = {"keywords": "llm", "rerank": "rerank"}
-_COMPARE_BASELINE_METHOD = {"keywords": "sudachi", "rerank": "norerank"}
-# 不合格時に案内する退避用 env（両機能とも既定有効・opt-out 方式）
-_FALLBACK_ENV = {"keywords": "ARGUS_DISABLE_LLM_KEYWORDS=1", "rerank": "ARGUS_DISABLE_LLM_RERANK=1"}
+# compare モードごとの「新方式（挑戦者）」「既定（ベースライン）方式」の method 名。
+# extraction は「N=1 でも品質が落ちないか」を測るのが目的のため、
+# consensus1（挑戦者）/ consensus3（本番既定・ベースライン）とする。
+_COMPARE_NEW_METHOD = {"keywords": "llm", "rerank": "rerank", "extraction": "consensus1"}
+_COMPARE_BASELINE_METHOD = {"keywords": "sudachi", "rerank": "norerank", "extraction": "consensus3"}
+# 不合格時に案内する退避策（keywords/rerank は既定有効・opt-out env、
+# extraction は CLI 引数で --slack-consensus 3 に戻す）
+_FALLBACK_ENV = {
+    "keywords": "ARGUS_DISABLE_LLM_KEYWORDS=1",
+    "rerank": "ARGUS_DISABLE_LLM_RERANK=1",
+    "extraction": "--slack-consensus 3 を明示指定",
+}
+
+# compare モードごとの JSONL レコードキーの接頭辞。keywords/rerank はキーワード行
+# （keywords_{name}）、extraction は件数のみ（items_{name}）を保存する。
+_RECORD_PREFIX = {"keywords": "keywords", "rerank": "keywords", "extraction": "items"}
 
 
 def _detect_compare_mode(rec: dict) -> str | None:
+    # JSONL のレコードは {prefix}_{name_0}/{prefix}_{name_1} キーの有無で
+    # どの compare モードのレコードかを判別する（複数 compare モードの
+    # レコードが同じ JSONL に混在していても集計を分離できる）。
     for mode, variants in _COMPARE_VARIANTS.items():
+        prefix = _RECORD_PREFIX.get(mode, "keywords")
         name_0, name_1 = variants[0][0], variants[1][0]
-        if f"keywords_{name_0}" in rec and f"keywords_{name_1}" in rec:
+        if f"{prefix}_{name_0}" in rec and f"{prefix}_{name_1}" in rec:
             return mode
     return None
 
@@ -310,18 +490,25 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Slack抽出ナレッジ検索 A/B評価（keywords: LLM vs SudachiPy / rerank: LLM re-rank有無）",
+        description="Slack抽出ナレッジ検索 A/B評価（keywords: LLM vs SudachiPy / "
+                     "rerank: LLM re-rank有無 / extraction: 抽出consensus_n=3 vs 1）",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="サンプリング→両手法実行→judge→JSONL追記")
     r.add_argument("--compare", choices=sorted(_COMPARE_VARIANTS), default="keywords",
                    help="比較軸: keywords=キーワード抽出(sudachi/llm)、"
-                        "rerank=re-rank有無(norerank/rerank、keyword_modeはllm固定)")
+                        "rerank=re-rank有無(norerank/rerank、keyword_modeはllm固定)、"
+                        "extraction=extract_from_thread()のconsensus_n(3=本番既定/1=単発)")
     r.add_argument("--slack-db", default=str(DEFAULT_SLACK_DB), metavar="PATH")
     r.add_argument("--qa-db", default=str(DEFAULT_QA_DB), metavar="PATH")
+    r.add_argument("--pm-db", default=str(DEFAULT_PM_DB), metavar="PATH",
+                   help="pm.db のパス（--compare extraction 時のみ使用。"
+                        "milestones 取得の読み取り専用、書き込みは一切行わない）")
     r.add_argument("--jsonl", default=str(DEFAULT_JSONL), metavar="PATH")
-    r.add_argument("--limit", type=int, default=30)
+    r.add_argument("--limit", type=int, default=None,
+                   help=f"サンプル数上限（省略時: keywords/rerank={_DEFAULT_LIMIT}、"
+                        f"extraction={_EXTRACTION_LIMIT_DEFAULT}）")
     r.add_argument("--seed", type=int, default=7)
     r.add_argument("--since-days", type=int, default=180)
     r.add_argument("--min-chars", type=int, default=200)

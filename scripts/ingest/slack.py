@@ -842,8 +842,14 @@ class SlackIngestPlugin:
             help="抽出済みスレッドの一覧を表示して終了（slack ソース用）",
         )
         parser.add_argument(
-            "--slack-consensus", type=int, default=3, metavar="N",
-            help="Self-Consistency サンプリング数（デフォルト: 3。1 で従来動作の単発抽出）",
+            # 既定 1。2026-07-26 A/B（ランダム15件全一致・狙い撃ち10件で N=1 が
+            # 100% 勝ち+引き分け、N=3 は実在アイテムを多数決で落とす事例あり）により変更。
+            # 旧構成は --slack-consensus 3
+            "--slack-consensus", type=int, default=1, metavar="N",
+            help="Self-Consistency サンプリング数（既定 1。2026-07-26 A/B（ランダム15件"
+                 "全一致・狙い撃ち10件で N=1 が100%勝ち+引き分け、N=3 は実在アイテムを"
+                 "多数決で落とす事例あり）により変更。旧構成は --slack-consensus 3。"
+                 "N>=2 で Self-Consistency 有効）",
         )
         parser.add_argument(
             "--slack-consensus-threshold", type=float, default=0.78, metavar="FLOAT",
@@ -887,7 +893,8 @@ class SlackIngestPlugin:
 
         total_d = total_a = skipped = 0
         force_reextract = ctx.force or getattr(args, "slack_force_reextract", False)
-        consensus_n = getattr(args, "slack_consensus", 3)
+        # 既定 1（2026-07-26 A/B により 3→1。旧構成は --slack-consensus 3）
+        consensus_n = getattr(args, "slack_consensus", 1)
         consensus_threshold = getattr(args, "slack_consensus_threshold", 0.78)
         consensus_min_vote = getattr(args, "slack_consensus_min_vote", None)
         no_triage = getattr(args, "slack_no_triage", False)
