@@ -83,7 +83,8 @@ def parse_args():
                         help="DB内のスレッド一覧を表示して終了（--since 併用可）")
     add_no_encrypt_arg(parser)
     parser.add_argument("--dry-run", action="store_true", default=False,
-                        help="Slack API 取得のみ実行（DB書き込みなし）")
+                        help="Slack API 取得のみ実行（DB書き込みなし。"
+                             "既存DBが無い場合、DBファイルの初期化のみは行われる）")
     return parser.parse_args()
 
 
@@ -306,6 +307,7 @@ def fetch_and_store(
     limit: int,
     since_date: datetime | None,
     fetch_permalink: bool,
+    dry_run: bool = False,
 ) -> int:
     """
     Slack から履歴を取得してDBに保存する。取得したスレッド数を返す。
@@ -315,6 +317,9 @@ def fetch_and_store(
     - DBに存在する thread_ts:
         - conversations_history の latest_reply > DB保存済み max(replies.msg_ts) → 更新あり
         - 変化なし → スキップ（API呼び出しなし）
+
+    dry_run=True の場合、Slack API 取得（履歴・返信・パーマリンク等）は通常どおり実行するが、
+    slack.db への UPSERT / commit は一切行わない（件数集計のみ行いログ出力する）。
     """
     client = _make_client()
     oldest_ts = str(since_date.timestamp()) if since_date else None
@@ -364,6 +369,8 @@ def fetch_and_store(
     print(f"処理対象の親メッセージ: {len(parent_messages)}件", file=sys.stderr)
 
     stats = {"new": 0, "updated": 0, "skipped": 0}
+    dry_run_messages = 0
+    dry_run_replies = 0
 
     for msg in parent_messages:
         ts = msg["ts"]
@@ -386,14 +393,15 @@ def fetch_and_store(
             stats["skipped"] += 1
             continue
 
-        # 親メッセージを整形してDBに保存
+        # 親メッセージを整形してDBに保存（dry_run 時は取得のみで書き込みしない）
         fmt_parent = format_message(
             client, msg, channel_id,
             is_reply=False, fetch_permalink=fetch_permalink,
         )
-        db_upsert_message(conn, channel_id, fmt_parent)
+        if not dry_run:
+            db_upsert_message(conn, channel_id, fmt_parent)
 
-        # 返信を取得してDBに保存
+        # 返信を取得してDBに保存（dry_run 時は取得のみで書き込みしない）
         reply_msgs = fetch_thread_replies(client, channel_id, thread_ts)
         for r_msg in reply_msgs:
             fmt_reply = format_message(
@@ -401,9 +409,14 @@ def fetch_and_store(
                 is_reply=True, fetch_permalink=fetch_permalink,
                 parent_thread_ts=thread_ts,
             )
-            db_upsert_reply(conn, channel_id, thread_ts, fmt_reply)
+            if not dry_run:
+                db_upsert_reply(conn, channel_id, thread_ts, fmt_reply)
 
-        conn.commit()
+        if dry_run:
+            dry_run_messages += 1
+            dry_run_replies += len(reply_msgs)
+        else:
+            conn.commit()
 
         if is_new:
             stats["new"] += 1
@@ -423,6 +436,12 @@ def fetch_and_store(
         f"スキップ={stats['skipped']}",
         file=sys.stderr,
     )
+    if dry_run:
+        print(
+            f"[DRY-RUN] messages: {dry_run_messages}件, replies: {dry_run_replies}件"
+            f"（DB未書き込み）",
+            file=sys.stderr,
+        )
 
     return stats["new"] + stats["updated"]
 
@@ -498,8 +517,10 @@ def main():
             limit=args.limit,
             since_date=args.since,
             fetch_permalink=not args.no_permalink,
+            dry_run=args.dry_run,
         )
-        print(f"\n取得・保存: {fetched} スレッド")
+        dry_run_note = "（dry-run: 未保存）" if args.dry_run else ""
+        print(f"\n取得・保存: {fetched} スレッド{dry_run_note}")
     else:
         print("\nスキップ（DB のみ使用）")
 

@@ -187,7 +187,8 @@ def extract_buckets(app_name: str, md_text: str) -> dict:
     prompt = _EXTRACT_PROMPT.format(app=app_name, report=md_text)
     for attempt in range(2):
         try:
-            raw = call_argus_llm(prompt, timeout=180, max_tokens=1024, temperature=0.2)
+            # reasoning系が思考で消費するため。上限であり通常の消費は不変
+            raw = call_argus_llm(prompt, timeout=180, max_tokens=4096, temperature=0.2)
             return _sanitize_buckets(extract_json(raw))
         except Exception as e:  # noqa: BLE001 — 1件の失敗で全体を止めない
             print(f"[WARN] {app_name}: 抽出失敗 (試行{attempt + 1}/2): {e}", file=sys.stderr)

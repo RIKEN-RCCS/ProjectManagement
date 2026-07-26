@@ -385,7 +385,8 @@ def _rewrite_query(question: str) -> dict | None:
     prompt = _QUERY_REWRITE_PROMPT.format(question=question.strip())
     try:
         t0 = time.time()
-        response = call_argus_llm(prompt, max_tokens=512, timeout=30, think=False)
+        # reasoning系が思考で消費するため。上限であり通常の消費は不変
+        response = call_argus_llm(prompt, max_tokens=4096, timeout=30, think=False)
         elapsed = time.time() - t0
         logger.info(f"[rewrite] LLM応答 {len(response)} chars, {elapsed:.1f}s")
         # JSON 抽出（前後の余計な文字を許容）

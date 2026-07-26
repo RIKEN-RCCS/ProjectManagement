@@ -347,9 +347,10 @@ def extract_from_chunk(
         slide_context_block=slide_context_block,
     )
     system = "You are a Japanese meeting minutes assistant. Output Japanese prose only, no bullet points."
-    # thinking モデルは思考トークン分を考慮して max_tokens をそのまま使用
-    # 非 thinking モデルは 1024 で十分
-    chunk_max_tokens = max_tokens if (think or no_chat_template_kwargs) else 1024
+    # thinking / reasoning-既定モデルは reasoning に多くのトークンを消費するため
+    # 非think指定でも max_tokens をそのまま使う（1024 に絞ると RIKYU glm-5.2 等が
+    # reasoning で使い切り本文が空になりセクションごと消える不具合を防ぐ）。
+    chunk_max_tokens = max_tokens
     result = call_argus_llm(
         prompt, timeout=timeout, max_tokens=chunk_max_tokens, system=system,
         think=think, temperature=temperature,
@@ -1068,6 +1069,7 @@ def generate_minutes(
                         think=think,
                         no_chat_template_kwargs=no_chat_template_kwargs,
                         temperature=temperature, max_tokens=max_tokens,
+                        slide_context_block=slide_context_block,
                     )
             except Exception as e:
                 print(f"[WARN] チャンク {i} 抽出失敗（{e}）、空文字で続行")

@@ -5,10 +5,11 @@ from pathlib import Path
 
 import pytest
 
-# Ensure scripts/ and scripts/argus/ are on sys.path
+# Ensure scripts/ and scripts/argus/, scripts/data-pipeline/ are on sys.path
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 _SCRIPTS_ARGUS = _SCRIPTS / "argus"
-for _p in (_SCRIPTS_ARGUS, _SCRIPTS):
+_SCRIPTS_DATA_PIPELINE = _SCRIPTS / "data-pipeline"
+for _p in (_SCRIPTS_ARGUS, _SCRIPTS_DATA_PIPELINE, _SCRIPTS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

@@ -365,7 +365,9 @@ def _summarize_with_llm(
         raw = call_argus_llm(
             prompt,
             system=_SUMMARIZE_SYSTEM,
-            max_tokens=512,
+            # reasoning系が思考で消費するため。上限であり通常の消費は不変
+            # （出力長はプロンプトの max_sentences/max_chars 指示で制御済み）
+            max_tokens=4096,
             timeout=timeout,
         )
         out = strip_think_blocks(raw).strip()
@@ -375,6 +377,8 @@ def _summarize_with_llm(
 
     # よくある余計な前置き行を 1 行だけ落とす
     out = re.sub(r"^(要約[::]\s*|出力[::]\s*)", "", out)
+    # プロンプト指示（max_chars 以内）を無視した暴走出力に対する最後の砦
+    out = out[:max_chars * 2]
     return out.strip() or (f"{title}は、{plain_body}" if title else plain_body)
 
 

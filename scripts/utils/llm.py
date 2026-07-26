@@ -5,17 +5,20 @@ cli_utils.py から移動済み（後方互換のため cli_utils.py は `from u
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # secrets 読み込み
 # --------------------------------------------------------------------------- #
 
 _LLM_SECRET_FILES = (Path.home() / ".secrets/localLLM.sh", Path.home() / ".secrets/rivault_tokens.sh")
-_LLM_ENV_PREFIXES = ("LOCAL_LLM_", "RIVAULT_", "EMBED_", "ARGUS_PREFER_RIVAULT")
+_LLM_ENV_PREFIXES = ("LOCAL_LLM_", "LOCAL_OCR_", "RIVAULT_", "EMBED_", "ARGUS_PREFER_RIVAULT")
 
 _llm_secrets_mtime_cache: tuple | None = None
 
@@ -455,10 +458,18 @@ def call_argus_llm(
 
     argus_config.yaml の llm.routing_priority に従ってルーティングする。
     利用可能なルート: rivault, local。claude_code ルートは廃止。
+
+    think は local ルートのみ有効。rivault ルートでは think は call_rivault に伝播せず、
+    thinking の有無は RIVAULT_MODEL 依存（kimi 系＝常時 ON・無効化不可、それ以外＝
+    thinking:disabled を強制）。
     """
     load_llm_secrets()
 
     def _try_rivault() -> str:
+        if think:
+            logger.debug("think=True は rivault ルートには伝播しません"
+                         "（thinking の有無は RIVAULT_MODEL 依存: kimi系=常時ON・無効化不可、"
+                         "それ以外=thinking:disabled を強制）")
         return call_rivault(
             prompt, timeout=timeout, max_tokens=max_tokens, system=system,
             temperature=temperature,

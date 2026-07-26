@@ -322,7 +322,8 @@ def extract_search_keywords(query: str, timeout: int = 30) -> str:
     )
     try:
         from cli_utils import call_argus_llm
-        response = call_argus_llm(prompt, max_tokens=100, timeout=timeout)
+        # reasoning系が思考で消費するため。上限であり通常の消費は不変
+        response = call_argus_llm(prompt, max_tokens=4096, timeout=timeout)
         line = response.strip().splitlines()[0].strip() if response.strip() else ""
         line = re.sub(r"^[-*\d.）)\s]+", "", line).strip()
         if not line or len(line) < 2:
@@ -384,7 +385,8 @@ def expand_query_hyde(query: str, n_extra: int = 2, timeout: int = 30) -> list[s
     )
     try:
         from cli_utils import call_argus_llm
-        response = call_argus_llm(prompt, max_tokens=200, timeout=timeout)
+        # reasoning系が思考で消費するため。上限であり通常の消費は不変
+        response = call_argus_llm(prompt, max_tokens=4096, timeout=timeout)
         extras = [ln.strip() for ln in response.splitlines() if ln.strip()]
         extras = [re.sub(r"^[-*\d.）)\s]+", "", ln).strip() for ln in extras]
         extras = [e for e in extras if e and e != query][:n_extra]

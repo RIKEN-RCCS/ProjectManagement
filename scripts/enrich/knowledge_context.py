@@ -101,7 +101,8 @@ def extract_topic_keywords_llm(
 
     try:
         from utils.llm import call_argus_llm, strip_think_blocks
-        response = call_argus_llm(prompt, max_tokens=100, timeout=timeout, temperature=0.0)
+        # reasoning系が思考で消費するため。上限であり通常の消費は不変
+        response = call_argus_llm(prompt, max_tokens=4096, timeout=timeout, temperature=0.0)
     except Exception as e:
         logger.warning(f"[KeywordExtractLLM] 失敗: {e}")
         return None

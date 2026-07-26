@@ -177,6 +177,40 @@ class TestCallRivault:
 
 
 # --------------------------------------------------------------------------- #
+# load_llm_secrets — _LLM_ENV_PREFIXES
+# --------------------------------------------------------------------------- #
+
+class TestLoadLlmSecretsPrefixes:
+    def test_local_ocr_prefix_included(self):
+        from utils.llm import _LLM_ENV_PREFIXES
+        assert "LOCAL_OCR_" in _LLM_ENV_PREFIXES
+
+    def test_load_llm_secrets_propagates_local_ocr_vars(self, monkeypatch):
+        """web デーモン経由のジョブで LOCAL_OCR_MODEL が復旧されない問題の回帰防止。
+        source した env に LOCAL_OCR_ プレフィックスの変数があれば os.environ に反映される。"""
+        import os
+        import subprocess
+
+        from utils import llm as llm_mod
+
+        monkeypatch.setenv("ARGUS_SKIP_LLM_SECRETS", "0")
+        monkeypatch.setattr(llm_mod, "_llm_secrets_mtime_cache", None)
+        monkeypatch.delenv("LOCAL_OCR_MODEL", raising=False)
+
+        class _FakeResult:
+            stdout = b"LOCAL_OCR_MODEL=test-ocr-model\x00IRRELEVANT_VAR=ignored\x00"
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeResult())
+
+        try:
+            llm_mod.load_llm_secrets()
+            assert os.environ.get("LOCAL_OCR_MODEL") == "test-ocr-model"
+            assert "IRRELEVANT_VAR" not in os.environ
+        finally:
+            os.environ.pop("LOCAL_OCR_MODEL", None)
+
+
+# --------------------------------------------------------------------------- #
 # call_argus_llm — routing logic
 # --------------------------------------------------------------------------- #
 
@@ -187,6 +221,23 @@ class TestCallArgusLlm:
         """_load_llm_routing_priority を monkeypatch で差し替え。"""
         from utils import llm as cli_utils
         monkeypatch.setattr(cli_utils, "_load_llm_routing_priority", lambda: priority)
+
+    def test_think_true_on_rivault_route_is_logged_as_debug(self, monkeypatch, caplog):
+        """think は local ルートのみ有効。rivault ルートに think=True を渡しても
+        call_rivault には think 引数が渡らず、debug ログで無視される旨のみ記録される。"""
+        import logging as _logging
+
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        self._patch_config(monkeypatch, ["rivault"])
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "call_rivault", lambda *a, **kw: "rivault result")
+
+        with caplog.at_level(_logging.DEBUG, logger="utils.llm"):
+            result = cli_utils.call_argus_llm("test", think=True)
+
+        assert result == "rivault result"
+        assert any("think=True" in r.message for r in caplog.records)
 
     def test_config_priority_respected(self, monkeypatch):
         """config priority が [local, rivault] → local が先に呼ばれる。"""

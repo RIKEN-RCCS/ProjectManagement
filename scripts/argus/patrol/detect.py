@@ -663,7 +663,8 @@ def _llm_judge_external_signal(
     )
 
     try:
-        result = call_argus_llm(prompt, timeout=30, max_tokens=200).strip()
+        # thinking で数千トークンを消費するため max_tokens は多めに確保する。
+        result = call_argus_llm(prompt, timeout=30, max_tokens=4096).strip()
         for verdict in ("CONFIRMS", "CONTRADICTS", "NEUTRAL"):
             if result.upper().startswith(verdict):
                 reason = result[len(verdict):].strip(": 　").strip() or "(根拠なし)"

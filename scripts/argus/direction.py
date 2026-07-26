@@ -378,7 +378,8 @@ def summarize_cluster_with_llm(cluster: dict, goal_name: str) -> dict | None:
     prompt = _NAME_CLUSTER_PROMPT.format(goal_name=goal_name, decisions_text=decisions_text)
 
     try:
-        result = call_argus_llm(prompt, timeout=30, max_tokens=200).strip()
+        # reasoning系が思考で消費するため。上限であり通常の消費は不変
+        result = call_argus_llm(prompt, timeout=30, max_tokens=4096).strip()
     except Exception:
         return None
     if not result:

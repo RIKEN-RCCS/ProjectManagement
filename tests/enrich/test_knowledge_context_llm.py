@@ -159,5 +159,5 @@ def test_call_kwargs_temperature_zero_and_max_tokens(monkeypatch):
 
     extract_topic_keywords_llm("スレッド本文", timeout=45)
     assert captured.get("temperature") == 0.0
-    assert captured.get("max_tokens") == 100
+    assert captured.get("max_tokens") == 4096
     assert captured.get("timeout") == 45
