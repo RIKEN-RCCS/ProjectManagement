@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-07-27 xlsx_sync 巻き戻り再発 → シート鮮度ガード導入（緩和策は PATH 欠落で 7/24 から死んでいた）
+
+**背景**: patrol が 17:00 に根拠付き自動クローズした 3 件を、16:00 cron 由来の pm_xlsx_sync が
+16:45 時点の古いシートで open に巻き戻し note も消去（7/24 に対策したはずの衝突の再発）。
+調査の結果、緩和策「クローズ後の XLSX 再エクスポート」は pm_argus_patrol.sh だけ box CLI の
+PATH 補正行が無く、導入以来毎回 FileNotFoundError で失敗していた（warning 止まりで無音）。
+**決定**: (1) PATH 補正を追加（18:00 サイクルで再エクスポート成功を実証）。(2) 構造的対策として
+pm_xlsx_sync に**シート鮮度ガード**を新設 — シートのエクスポート打刻（XLSX docProps created、
+フォールバック Box modified_at → mtime）より新しい pm.db 変更がある**フィールド**は同期せず
+WARN、--force で明示上書き。行単位でなくフィールド単位にしたのは、無関係な note 追記で
+シートの人手編集（担当者変更等）が巻き添え破棄されるのを防ぐため。巻き戻された 3 件は
+audit_log の old_value から note ごと復元・再クローズ。教訓: **warning 止まりのフェイルセーフは
+発動確認をタスク化しないと死んでいることに気づけない**。
+
+## 2026-07-27 自動クローズの日付逆転バグ（AI #3056）— 発生日より古い証拠は完了の証拠にならない
+
+**背景**: patrol が extracted_at=2026-06-09 のアイテムを 2026-05-18 の Box 文書を根拠に自動
+クローズ（PM 指摘）。evidence_since_extracted ガードは存在したが、(a) hybrid 検索の vector 経路が
+since_date を無視、(b) FTS 側も box_document を日付フィルタから免除（検索用途の意図的仕様）の
+合わせ技で両経路とも素通りだった。掃討調査で同パターンの誤クローズを追加 14 件特定
+（note 内の根拠日付 vs extracted_at の突合）、計 15 件を audit_log 付きで再オープン。
+**決定**: 3 層防御（0c63176）— vector 経路に since_date 実装 + `exempt_box` フラグ新設、
+patrol 側は exempt_box=False で box も発生日で絞り検索実装非依存の held_at post-filter を主防御に、
+LLM 判定プロンプトへ「発生日より前の情報は証拠にならない（アイテム化時点で既知）」を明記。
+スレッド返信も max(60日窓, 発生日) でカット。残存リスク: box の held_at は Box 側 modified_at
+のため「古い内容の文書が発生後に更新された」ケースは通過し得る（日付粒度は日単位）。
+副次影響: vector 修正により Slack 抽出の背景知識検索（since_days=90）が実質 90 日窓化
+（従来は vector 経由で古い knowledge が混入していた。precision 向きの変化と判断、要観察）。
+
 ## 2026-07-27 パッケージB完結: Patrol 検出器 3 種を有効化（cooldown バグを修正してから）
 
 **背景**: 監査対応の最終項目。有効化前の通知量見積もりで、cooldown の**キー名不一致バグ**を発見
