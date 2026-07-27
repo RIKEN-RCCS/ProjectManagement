@@ -26,7 +26,8 @@ logger = logging.getLogger("pm_mcp_tools")
 _DATA_DIR = _REPO_ROOT / "data"
 _QA_INDEX = _DATA_DIR / "qa_index.db"
 
-_SEARCH_EXCERPT_CHARS_DEFAULT = 400  # search_text の抜粋文字数（既定値）
+# 2026-07-27 A/B（investigate_ab search 6問 66.7%）で gemma4 期の 400 から昇格
+_SEARCH_EXCERPT_CHARS_DEFAULT = 1200  # search_text の抜粋文字数（既定値）
 
 
 # =========================================================================== #
@@ -239,7 +240,7 @@ def _resolve_box_file_ids(
 def _excerpt(content: str) -> str:
     """チャンク本文の抜粋を返す。図言語化チャンク（[図: を含む）は数値節が
     後半にあり切り詰めで欠落するため全文を返し、それ以外は ARGUS_SEARCH_EXCERPT_CHARS
-    （既定400字）で切り詰める。"""
+    （既定1200字）で切り詰める。"""
     content = content.strip()
     if "[図:" in content:
         return content

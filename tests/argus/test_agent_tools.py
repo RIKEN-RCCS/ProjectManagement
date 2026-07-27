@@ -157,11 +157,11 @@ class TestToolSearchDecisions:
 # --------------------------------------------------------------------------- #
 
 class TestExcerptEnvOverride:
-    def test_default_400_chars(self, monkeypatch):
+    def test_default_1200_chars(self, monkeypatch):
         import argus.mcp_tools as mt
         monkeypatch.delenv("ARGUS_SEARCH_EXCERPT_CHARS", raising=False)
-        content = "あ" * 500
-        assert len(mt._excerpt(content)) == 400
+        content = "あ" * 1500
+        assert len(mt._excerpt(content)) == 1200
 
     def test_overridden_length(self, monkeypatch):
         import argus.mcp_tools as mt
@@ -169,17 +169,17 @@ class TestExcerptEnvOverride:
         content = "あ" * 1500
         assert len(mt._excerpt(content)) == 1200
 
-    def test_invalid_value_falls_back_to_400(self, monkeypatch):
+    def test_invalid_value_falls_back_to_1200(self, monkeypatch):
         import argus.mcp_tools as mt
         monkeypatch.setenv("ARGUS_SEARCH_EXCERPT_CHARS", "invalid")
-        content = "あ" * 500
-        assert len(mt._excerpt(content)) == 400
+        content = "あ" * 1500
+        assert len(mt._excerpt(content)) == 1200
 
-    def test_zero_or_negative_falls_back_to_400(self, monkeypatch):
+    def test_zero_or_negative_falls_back_to_1200(self, monkeypatch):
         import argus.mcp_tools as mt
         monkeypatch.setenv("ARGUS_SEARCH_EXCERPT_CHARS", "-1")
-        content = "あ" * 500
-        assert len(mt._excerpt(content)) == 400
+        content = "あ" * 1500
+        assert len(mt._excerpt(content)) == 1200
 
     def test_zu_marker_content_returns_full_text_regardless_of_env(self, monkeypatch):
         """[図: を含むチャンクは env の値に関わらず全文を返す（既存の分岐は現行維持）。"""

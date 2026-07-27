@@ -298,7 +298,7 @@ pm_qa_server.py (Socket Mode デーモン)
   │
   ├── _combined_score (BM25 0.6 + 鮮度 0.4) 降順で上位候補を LLM re-rank
   │   （既定有効、退避は ARGUS_DISABLE_LLM_RERANK=1。詳細は docs/argus_system.md「LLM re-ranking」）
-  └── 上位 top-5 → 回答生成
+  └── 上位 top-10 → 回答生成
 ```
 
 ---

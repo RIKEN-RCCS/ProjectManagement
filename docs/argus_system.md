@@ -883,7 +883,7 @@ SudachiPy形態素解析が主検索。trigramは「性能」「評価」など�
 ### LLM re-ranking（既定有効）
 
 `scripts/argus/retrieval.py` の `rerank_chunks(question, chunks, *, use_llm=False, ...)`
-はFTS+embedding検索結果をLLMで関連度判定し上位 `top_k`（既定5件）に絞り込む。
+はFTS+embedding検索結果をLLMで関連度判定し上位 `top_k`（既定10件）に絞り込む。
 呼び出し元（`mcp_tools.py::search_text`、`cli_utils.py` のナレッジ検索）は
 `use_llm=os.environ.get("ARGUS_DISABLE_LLM_RERANK") != "1"` を渡しており、**既定で有効**。
 無効化したい場合は qa デーモンの起動環境に `ARGUS_DISABLE_LLM_RERANK=1` を設定して
@@ -898,7 +898,7 @@ _combined_score = (1 - 鮮度重み0.4) × BM25正規化スコア + 鮮度重み
   （鮮度スコアは指数減衰、half-life 180日）
   ↓
 _combined_score 降順で上位候補（TOP_K_RETRIEVE=30 件程度）を LLM re-rank に提示
-  （プロンプトに各チャンク先頭400字を提示し、番号選択で関連チャンクを選抜。
+  （プロンプトに各チャンク先頭800字を提示し、番号選択で関連チャンクを選抜。
   call_argus_llm(max_tokens=4096, timeout=30) — rivault フォールバック先が
   Kimi-K2-Thinking の場合の thinking 消費を見込んだ設定）
   ↓
@@ -970,9 +970,9 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 | パラメータ | 値 | 説明 |
 |---|---|---|
 | `TOP_K_RETRIEVE` | 30 | FTS検索で取得する件数（`retrieval.py`） |
-| `TOP_K_RERANK` | 5 | re-rank後に回答生成へ渡す件数（`retrieval.py`）。env `ARGUS_TOP_K_RERANK` で上書き可 |
-| `rerank preview` | 400文字 | re-rankプロンプトでの各チャンク提示長。env `ARGUS_RERANK_PREVIEW_CHARS` で上書き可 |
-| `search_text 抜粋` | 400文字 | investigate へ返す各チャンク抜粋長（`mcp_tools._excerpt`、`[図:` チャンクは全文）。env `ARGUS_SEARCH_EXCERPT_CHARS` で上書き可 |
+| `TOP_K_RERANK` | 10 | re-rank後に回答生成へ渡す件数（`retrieval.py`）。env `ARGUS_TOP_K_RERANK` で上書き可 |
+| `rerank preview` | 800文字 | re-rankプロンプトでの各チャンク提示長。env `ARGUS_RERANK_PREVIEW_CHARS` で上書き可 |
+| `search_text 抜粋` | 1200文字 | investigate へ返す各チャンク抜粋長（`mcp_tools._excerpt`、`[図:` チャンクは全文）。env `ARGUS_SEARCH_EXCERPT_CHARS` で上書き可 |
 | `rerank max_tokens` | 4096 | re-rank呼び出しの上限トークン数（rivaultフォールバック先がKimi-K2-Thinkingの場合のthinking消費を見込んだ設定） |
 | `rerank timeout` | 30秒 | re-rank呼び出しのタイムアウト（`search_text`は高頻度ツールのためinvestigateの480秒予算を守る） |
 | `CHUNK_MAX_CHARS` | 1000 | チャンク最大文字数 |
@@ -1147,7 +1147,7 @@ crontab -l | grep argus
   失敗時は例外を握りつぶして `_combined_score` 降順の先頭 `top_k` へ静かに退化するため、
   コマンド自体は失敗しない（詳細は「LLM re-ranking（既定有効）」節）
 - 頻発する場合はLLMのコンテキスト長超過の可能性がある。
-  `TOP_K_RETRIEVE` を減らすか、`rerank preview` の文字数（`retrieval.py` の400）を下げる
+  `TOP_K_RETRIEVE` を減らすか、`rerank preview` の文字数（`retrieval.py` の800）を下げる
 - 一時的に切り分けたい場合は `ARGUS_DISABLE_LLM_RERANK=1` を qa デーモン起動環境に設定して再起動
 
 **SudachiPyが利用不可とログに出る:**
