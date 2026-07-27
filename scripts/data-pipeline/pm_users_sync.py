@@ -263,11 +263,8 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description="Slack users.list を叩いて argus_config.yaml の user_names: を更新",
     )
-    src = p.add_mutually_exclusive_group()
-    src.add_argument("--from-db", action="store_true",
-                     help="API を使わず slack.db から解決済み user_name を読み込む")
-    src.add_argument("--from-api", action="store_true",
-                     help="API のみ使う（デフォルト）")
+    p.add_argument("--from-db", action="store_true",
+                   help="API を使わず slack.db から解決済み user_name を読み込む")
     p.add_argument("--force", action="store_true",
                    help="既存値を上書きする（デフォルトは保護）")
     p.add_argument("--dry-run", action="store_true",

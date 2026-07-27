@@ -676,7 +676,7 @@ def synthesize_markdown(
     summarize_mode: str = "auto",
     max_sentences: int = 2,
     max_chars: int = 120,
-    chunk_limit: int = VOICEVOX_TEXT_LIMIT,
+    chunk_limit: int | None = None,
     quiet: bool = False,
 ) -> Path:
     """Markdown 文字列から MP3 を生成する。
@@ -689,6 +689,8 @@ def synthesize_markdown(
         summarize: True ならセクション単位で LLM 要約してから合成
         summarize_mode: "auto" or "minutes"。議事録なら "minutes"
         max_sentences/max_chars: 要約 1 セクションあたりの上限
+        chunk_limit: 1 チャンクの最大文字数。省略時は default_text_limit()
+                     （バックエンドに応じて自動決定: fish 疎通可なら400 / それ以外200）
     Returns:
         output_mp3 と同じ Path
     """
@@ -702,6 +704,8 @@ def synthesize_markdown(
     else:
         plain = strip_markdown(markdown)
 
+    if chunk_limit is None:
+        chunk_limit = default_text_limit()
     chunks = split_into_sentences(plain, limit=chunk_limit)
     if not chunks:
         raise ValueError("読み上げる本文がありません")
@@ -737,7 +741,9 @@ def main() -> int:
     ap.add_argument("-o", "--output", type=Path, default=None, help="出力 MP3 パス（既定: 入力と同じ basename .mp3）")
     ap.add_argument("--speaker", type=int, default=DEFAULT_SPEAKER, help=f"VOICEVOX speaker ID (default: {DEFAULT_SPEAKER}=琴詠ニア)")
     ap.add_argument("--speed", type=float, default=DEFAULT_SPEED, help=f"再生速度倍率 (default: {DEFAULT_SPEED})")
-    ap.add_argument("--limit", type=int, default=VOICEVOX_TEXT_LIMIT, help=f"1 チャンクの最大文字数 (default: {VOICEVOX_TEXT_LIMIT})")
+    ap.add_argument("--limit", type=int, default=None,
+                     help="1 チャンクの最大文字数（省略時: バックエンドに応じて自動決定。"
+                          f"fish 疎通可なら{FISH_TEXT_LIMIT} / それ以外{VOICEVOX_TEXT_LIMIT}）")
     ap.add_argument("--summarize", action="store_true", help="セクション単位で LLM 要約してから合成（argus-today 等の長文向け）")
     ap.add_argument("--mode", choices=["auto", "minutes", "priority"], default="auto", help="要約モード。minutes=議事録 / priority=argus-brief・argus-risk の優先度項目単位")
     ap.add_argument("--max-sentences", type=int, default=2, help="--summarize 時、1 セクションあたりの最大文数 (default: 2)")
@@ -749,6 +755,8 @@ def main() -> int:
     if not args.input.is_file():
         print(f"入力が存在しません: {args.input}", file=sys.stderr)
         return 1
+
+    limit = args.limit if args.limit is not None else default_text_limit()
 
     raw = args.input.read_text(encoding="utf-8")
 
@@ -762,13 +770,13 @@ def main() -> int:
     else:
         plain = strip_markdown(raw)
 
-    chunks = split_into_sentences(plain, limit=args.limit)
+    chunks = split_into_sentences(plain, limit=limit)
     if not chunks:
         print("読み上げる本文がありません", file=sys.stderr)
         return 1
 
     if args.dry_run:
-        print(f"# {len(chunks)} chunks (limit={args.limit}, summarize={args.summarize})")
+        print(f"# {len(chunks)} chunks (limit={limit}, summarize={args.summarize})")
         for i, c in enumerate(chunks, 1):
             print(f"--- [{i}] ({len(c)} chars) ---")
             print(c)

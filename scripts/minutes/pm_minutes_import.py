@@ -231,18 +231,6 @@ def _extract_section(text: str, heading: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def _parse_bullets(section_text: str) -> list[str]:
-    """箇条書き行（- または * で始まる）を抽出してリストで返す"""
-    items = []
-    for line in section_text.splitlines():
-        line = line.strip()
-        if re.match(r"^[-*]\s+", line):
-            content = re.sub(r"^[-*]\s+", "", line).strip()
-            if content and content not in ("（なし）", "(なし)"):
-                items.append(content)
-    return items
-
-
 # 決定事項の付帯情報タグ: [出典: ...] [根拠: ...] [捨てた案: ...] [覆す条件: ...]
 # 順序不問・0個以上。Argus 垂直軸「流入」（設計書 §4）で 出典 以外の3タグを追加。
 _DECISION_TAG_RE = re.compile(r"\[(出典|根拠|捨てた案|覆す条件):\s*(.+?)\]")

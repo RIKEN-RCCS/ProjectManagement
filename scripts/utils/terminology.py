@@ -138,25 +138,6 @@ def load_top_k(
     return result
 
 
-def get_aliases(term: str, db_path: Path | None = None) -> list[str]:
-    """指定した term の aliases リストを返す。"""
-    conn = _open_pm(db_path)
-    if conn is None:
-        return []
-    try:
-        row = conn.execute(
-            "SELECT aliases FROM terminology WHERE term = ?", (term,)
-        ).fetchone()
-    finally:
-        conn.close()
-    if row and row["aliases"]:
-        try:
-            return json.loads(row["aliases"])
-        except Exception:
-            pass
-    return []
-
-
 def load_all_terms(db_path: Path | None = None) -> list[dict]:
     """terminology テーブルの全行を dict リストで返す（reconcile_transcript 用）。"""
     conn = _open_pm(db_path)

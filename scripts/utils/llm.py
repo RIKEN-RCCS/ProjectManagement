@@ -409,7 +409,7 @@ def call_rivault(
 
 def _load_llm_routing_priority() -> list[str] | None:
     """argus_config.yaml の llm.routing_priority を読み込む。
-    設定がない / 空リスト → None（後方互換モード）。
+    設定がない / 空リスト → None（呼び出し元 call_argus_llm() は即 RuntimeError）。
     """
     import yaml
     cfg_path = Path(__file__).resolve().parent.parent.parent / "data" / "argus_config.yaml"

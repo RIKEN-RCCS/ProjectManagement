@@ -50,25 +50,19 @@ read_document は「呼ばれれば効く」補助として残置。再燃時の
 
 ### 休眠パス + gemma4 残滓監査への対応（詳細は docs/audit_20260724.md）
 
-**ステータス**: 監査完了（2026-07-24、休眠パス 15 件 + gemma4 残滓 11 系統を特定）。
-パッケージ A（即日低リスク: --dry-run 実装・think 無視の明示化・max_tokens 群 4096 化・
-Stage 1 の 1024 撤廃・LOCAL_OCR_ prefix・docs 近代化）を実施中。
+**ステータス**: A（2026-07-24）・C（6/6、2026-07-27）・D（2026-07-27）完了。経緯は LOG.md、
+監査記録の総括は docs/audit_20260724.md 冒頭を参照。
 
 **残作業**:
 1. **パッケージ B（PM 判断）** — Patrol 検出器 3 種（期限超過リマインド/期限接近警告/停滞検出）を
    有効化するか。実装は完全、patrol_config.yaml の enabled 3 行のみ。有効化すると
    リーダーチャンネル/DM への通知が増える
-2. **パッケージ C（評価駆動）** — **6/6 完了**（LOG.md 2026-07-26〜27 参照: today/draft 全文脈化、
-   議事録 consensus N=1 + Stage 1 スキップ、Slack 抽出 consensus N=1、トリアージ 1 パス統合、
-   検索パラメータ拡大既定化 top10/1200字/800字。--file 窓 24k は A/B 却下で据え置き）。
-   **観察のみ残**: 次回 17:00 cron の today 全文脈経路、次回議事録処理の「Stage 1 をスキップ」
-   ログ、次回 Slack ingest の抽出品質（トリアージ統合で `[TRIAGE]` DROP ログが消え 1 呼になる）、
-   investigate/メンション応答の体感品質とレイテンシ（top10/1200字化の影響。
-   退避: env `ARGUS_TOP_K_RERANK=5` `ARGUS_SEARCH_EXCERPT_CHARS=400`
+2. **パッケージ C の事後観察** — 次回 17:00 cron の today 全文脈経路、次回議事録処理の
+   「Stage 1 をスキップ」ログ、次回 Slack ingest の抽出品質（トリアージ統合で `[TRIAGE]` DROP
+   ログが消え 1 呼になる）、investigate/メンション応答の体感品質とレイテンシ
+   （top10/1200字化の影響。退避: env `ARGUS_TOP_K_RERANK=5` `ARGUS_SEARCH_EXCERPT_CHARS=400`
    `ARGUS_RERANK_PREVIEW_CHARS=400` を qa 起動環境に設定して stop/start qa）。
    再測定はいつでも `scripts/eval/investigate_ab.py run`（gold 8 問・約 12 分）で可能
-3. **パッケージ D（小粒清掃）** — 孤立関数の配線 or 削除（build_risk_prompt 等）、
-   Web の terminology/glossary 削除ボタン、飾り引数の整理、screen ジョブの --semantic 配線
 
 ### 検索品質改善 2 件（LLM 第一段 + LLM re-rank）の事後観察（本体は完了 — LOG.md 2026-07-24 参照）
 

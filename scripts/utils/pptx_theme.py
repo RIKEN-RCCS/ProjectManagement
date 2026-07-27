@@ -81,51 +81,6 @@ def add_text(slide, x, y, w, h, text, *, size=16, bold=False, color=DARK,
     return tb
 
 
-def add_paragraph_text(slide, x, y, w, h, text, *, size=12, color=DARK,
-                       font=BODY_FONT, line_spacing=1.25,
-                       paragraph_gap_pt=6, heading_color=None,
-                       heading_pattern=r"【([^】]+)】"):
-    """長い段落テキストを読みやすくレイアウトする。
-
-    - 改行ごとに段落分け
-    - paragraph_gap_pt で段落間にスペース
-    - 行内に【見出し】があれば heading_color で太字化
-    - line_spacing は単位なしの相対倍率（pptx の Paragraph.line_spacing 仕様）
-    """
-    import re as _re
-    heading_color = heading_color or NAVY
-    tb = slide.shapes.add_textbox(x, y, w, h)
-    tf = tb.text_frame
-    tf.word_wrap = True
-    tf.margin_left = Inches(0.10); tf.margin_right = Inches(0.10)
-    tf.margin_top = Inches(0.05); tf.margin_bottom = Inches(0.05)
-    pat = _re.compile(heading_pattern)
-
-    paragraphs = [p for p in (text or "").split("\n") if p.strip()]
-    for i, line in enumerate(paragraphs):
-        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-        p.alignment = PP_ALIGN.LEFT
-        p.space_after = Pt(paragraph_gap_pt)
-        try:
-            p.line_spacing = line_spacing
-        except Exception:
-            pass
-        m = pat.match(line.strip())
-        if m:
-            head = m.group(0)
-            rest = line.strip()[len(head):]
-            r1 = p.add_run(); r1.text = head
-            r1.font.name = font; r1.font.size = Pt(size); r1.font.bold = True
-            r1.font.color.rgb = heading_color
-            if rest:
-                r2 = p.add_run(); r2.text = rest
-                r2.font.name = font; r2.font.size = Pt(size); r2.font.color.rgb = color
-        else:
-            r = p.add_run(); r.text = line
-            r.font.name = font; r.font.size = Pt(size); r.font.color.rgb = color
-    return tb
-
-
 def add_bullets(slide, x, y, w, h, items, *, size=14, color=DARK,
                 bullet_color=None, gap=4, marker="▸ "):
     bullet_color = bullet_color or TEAL
@@ -199,35 +154,9 @@ def section_title(slide, x, y, w, text):
              color=TEAL, font=HEADER_FONT)
 
 
-def callout(slide, x, y, w, h, label, text, *,
-            bg=RGBColor(0xFF, 0xF6, 0xE5), border=GOLD,
-            label_color=RGBColor(0x8A, 0x5A, 0x00), text_size=12):
-    add_rect(slide, x, y, w, h, bg, line=border, rounded=True, radius=0.06)
-    add_text(slide, x + Inches(0.2), y + Inches(0.12), w - Inches(0.4), Inches(0.35),
-             label, size=12, bold=True, color=label_color)
-    add_text(slide, x + Inches(0.2), y + Inches(0.48), w - Inches(0.4), h - Inches(0.55),
-             text, size=text_size, color=DARK)
-
-
 def footer(slide, sw, sh, text="", page=None, total=None):
     add_text(slide, Inches(0.55), sh - Inches(0.35), Inches(8), Inches(0.25),
              text, size=9, color=MUTED)
     if page is not None:
         add_text(slide, sw - Inches(1.2), sh - Inches(0.35), Inches(0.8), Inches(0.25),
                  f"{page} / {total}", size=9, color=MUTED, align=PP_ALIGN.RIGHT)
-
-
-def progress_bar(slide, x, y, w, h, ratio, *, fill_color=None, bg_color=None):
-    """0.0〜1.0 の達成率バー。fill_color は ratio に応じて自動選択も可。"""
-    bg_color = bg_color or RGBColor(0xE6, 0xEC, 0xF2)
-    if fill_color is None:
-        if ratio >= 0.7:
-            fill_color = SUCCESS
-        elif ratio >= 0.4:
-            fill_color = GOLD
-        else:
-            fill_color = CORAL
-    add_rect(slide, x, y, w, h, bg_color, rounded=True, radius=0.5)
-    fw = max(int(w * max(0.0, min(1.0, ratio))), 1)
-    if fw > 0:
-        add_rect(slide, x, y, fw, h, fill_color, rounded=True, radius=0.5)

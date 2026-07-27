@@ -311,14 +311,6 @@ def add_terminology(req: NewActionItemRequest):
     return {"ok": True}
 
 
-@app.post("/api/terminology/delete")
-def delete_terminology(req: NewActionItemRequest):
-    conn = _get_conn()
-    conn.execute("DELETE FROM terminology WHERE term = ?", (req.content.strip(),))
-    conn.commit()
-    return {"ok": True}
-
-
 # --- Glossary endpoints --- #
 
 @app.get("/api/glossary")
@@ -354,17 +346,6 @@ def add_glossary(req: NewGlossaryItemRequest):
     conn = _get_conn()
     gid = add(title=req.title.strip(), content=req.content, category=req.category, conn=conn)
     return {"ok": True, "id": gid}
-
-
-@app.post("/api/glossary/delete")
-def delete_glossary(req: NewGlossaryItemRequest):
-    from utils.glossary import delete
-    conn = _get_conn()
-    try:
-        delete(int(req.title.strip()), conn=conn)
-    except ValueError:
-        pass
-    return {"ok": True}
 
 
 # --- Decision endpoints --- #

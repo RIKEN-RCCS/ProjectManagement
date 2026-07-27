@@ -514,7 +514,6 @@ def run_minutes(transcript_path, client, channel_id, thread_ts,
 
     cmd = [sys.executable, str(_RECORDING_DIR / "generate_minutes_local.py"),
            str(transcript_path),
-           "--model", vllm_model,
            "--output", str(minutes_dir),
            "--multi-stage", "--chunk-minutes", "90",
            "--max-tokens", "16384"]

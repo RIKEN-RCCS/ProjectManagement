@@ -237,7 +237,7 @@ class AdminJobQueue:
             return cmd
 
         if kind == "screen":
-            cmd = [py, str(self.scripts_dir / "pm_screen.py")]
+            cmd = [py, str(self.scripts_dir / "pm_screen.py"), "--semantic"]
             if params.get("include_decisions"):
                 cmd += ["--include-decisions"]
             if params.get("export"):

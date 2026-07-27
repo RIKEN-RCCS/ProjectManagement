@@ -236,27 +236,3 @@ def run_explorer(
     return header + analysis
 
 
-def run_explorer_suite(
-    query: str,
-    emotions: list[str] | None = None,
-    data_types: list[str] | None = None,
-    index_db: Path | None = None,
-) -> dict[str, str]:
-    """複数のデータ種別×エモーションの組み合わせを実行し、結果辞書を返す。
-
-    Returns:
-        {"pm_data+conservative": "分析結果...", ...}
-    """
-    if emotions is None:
-        emotions = list(EMOTION_CONFIG.keys())
-    if data_types is None:
-        data_types = list(_DATA_TYPE_NAMES.keys())
-    results = {}
-    for dt in data_types:
-        for em in emotions:
-            key = f"{dt}+{em}"
-            try:
-                results[key] = run_explorer(query, dt, em, index_db)
-            except Exception as e:
-                results[key] = f"エラー: {e}"
-    return results

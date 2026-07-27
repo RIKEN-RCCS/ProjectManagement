@@ -68,13 +68,11 @@ from format_utils import (
 )
 from utils.slack_post import _split_mrkdwn_to_blocks, _to_slack_mrkdwn
 
-from argus.prompts import (  # noqa: F401 — 後方互換のため全プロンプト定数を再 export
-    _BRIEF_PROMPT,
+from argus.prompts import (
     _DAILY_SUMMARY_PROMPT,
     _DRAFT_AGENDA_PROMPT,
     _DRAFT_REPORT_PROMPT,
     _DRAFT_REQUEST_PROMPT,
-    _RISK_PROMPT,
 )
 from argus.qa_engine import _query_action_items, _query_decisions
 
@@ -801,79 +799,6 @@ def _parse_command_args(text: str) -> tuple[int | None, str | None, str | None]:
     return days, assignee, topic
 
 
-def _format_period_description(days: int) -> str:
-    """日数に応じた期間表示文字列を返す。"""
-    if days == 0:
-        return "本日のデータ"
-    else:
-        return f"過去{days}日間のデータ"
-
-
-def build_brief_prompt(
-    messages: str,
-    minutes: str,
-    stats: dict,
-    context: str,
-    today: str,
-    days: int = _DEFAULT_SINCE_DAYS,
-    assignee: str | None = None,
-    topic: str | None = None,
-    requester: str = "プロジェクトメンバー",
-    knowledge_summary: str = "",
-) -> str:
-    # days == 0 の場合は日次活動サマリープロンプトを使用
-    if days == 0:
-        return _DAILY_SUMMARY_PROMPT.format(
-            today=today,
-            context=context,
-            knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
-            messages=messages or "（本日のメッセージはありません）",
-            minutes=minutes or "（本日の議事録はありません）",
-        )
-
-    # 既存のロジック（days > 0）
-    s = stats["stats"]
-    focus_lines = []
-    if assignee:
-        focus_lines.append(
-            f"**担当者フォーカス**: 「{assignee}」に関する事項を特に重点的に分析してください。"
-        )
-    if topic:
-        focus_lines.append(
-            f"**話題フォーカス**: 「{topic}」に関連する情報を特に重点的に分析してください。"
-        )
-    focus_section = ("\n\n## フォーカス指定\n\n" + "\n".join(focus_lines)) if focus_lines else ""
-
-    period_desc = _format_period_description(days)
-
-    prompt = _BRIEF_PROMPT.format(
-        today=today,
-        period_desc=period_desc,
-        context=context,
-        knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
-        total_open=s["total_open"],
-        total_closed=s["total_closed"],
-        overdue_count=s["overdue_count"],
-        unacknowledged_decisions=s["unacknowledged_decisions"],
-        unlinked_count=stats["unlinked_count"],
-        no_assignee_count=stats["no_assignee_count"],
-        milestone_table=format_milestone_table(stats["milestones"], today),
-        overdue_list=format_overdue_list(stats["overdue_items"]),
-        assignee_table=format_assignee_table(stats["assignee_workload"]),
-        decisions_list=format_decisions_list(stats["unacknowledged_decisions"]),
-        weekly_trends=format_trends_table(stats["weekly_trends"]),
-        messages=messages or "（データなし）",
-        minutes=minutes or "（データなし）",
-    )
-    if focus_section:
-        # 末尾の「上記データを踏まえ...」の前にフォーカスセクションを挿入
-        prompt = prompt.replace(
-            "\n---\n\n上記データを踏まえ、",
-            f"{focus_section}\n\n---\n\n上記データを踏まえ、",
-        )
-    return prompt
-
-
 def build_draft_prompt(
     purpose: str,
     subject: str,
@@ -914,58 +839,6 @@ def build_draft_prompt(
             messages=messages or "（データなし）",
             today=today,
         )
-
-
-def build_risk_prompt(
-    messages: str,
-    minutes: str,
-    stats: dict,
-    context: str,
-    today: str,
-    days: int = _DEFAULT_SINCE_DAYS,
-    assignee: str | None = None,
-    topic: str | None = None,
-    knowledge_summary: str = "",
-) -> str:
-    s = stats["stats"]
-    focus_lines = []
-    if assignee:
-        focus_lines.append(
-            f"**担当者フォーカス**: 「{assignee}」に関するリスクを特に重点的に分析してください。"
-        )
-    if topic:
-        focus_lines.append(
-            f"**話題フォーカス**: 「{topic}」に関連するリスクを特に重点的に分析してください。"
-        )
-    focus_section = ("\n\n## フォーカス指定\n\n" + "\n".join(focus_lines)) if focus_lines else ""
-
-    period_desc = _format_period_description(days)
-
-    prompt = _RISK_PROMPT.format(
-        today=today,
-        period_desc=period_desc,
-        context=context,
-        knowledge_summary=knowledge_summary or "（蒸留ナレッジなし）",
-        total_open=s["total_open"],
-        total_closed=s["total_closed"],
-        overdue_count=s["overdue_count"],
-        unacknowledged_decisions=s["unacknowledged_decisions"],
-        unlinked_count=stats["unlinked_count"],
-        no_assignee_count=stats["no_assignee_count"],
-        milestone_table=format_milestone_table(stats["milestones"], today),
-        overdue_list=format_overdue_list(stats["overdue_items"], limit=15),
-        assignee_table=format_assignee_table(stats["assignee_workload"]),
-        decisions_list=format_decisions_list(stats["unacknowledged_decisions"]),
-        weekly_trends=format_trends_table(stats["weekly_trends"]),
-        messages=messages or "（データなし）",
-        minutes=minutes or "（データなし）",
-    )
-    if focus_section:
-        prompt = prompt.replace(
-            "\n---\n\n定量データと会話の文脈から、",
-            f"{focus_section}\n\n---\n\n定量データと会話の文脈から、",
-        )
-    return prompt
 
 
 # --------------------------------------------------------------------------- #

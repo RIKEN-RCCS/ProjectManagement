@@ -8,6 +8,11 @@
 
 ### 1. `pm_argus.py` の修正
 
+> **注（2026-07-27）**: 本節は導入当時の実装記録。その後 brief/today は全文脈 single-shot 方式へ
+> 移行し（LOG.md 2026-07-23〜26）、下記の `_format_period_description()` /
+> `build_brief_prompt()` / `build_risk_prompt()` は孤立したため削除済み。
+> 現行の `--today-only` 経路は `generate_daily_summary_report()`。cron 手順は引き続き有効。
+
 - **`--today-only` フラグ追加**: 今日のデータのみ収集する新しいオプション
 - **期間表示ヘルパー関数**: `_format_period_description(days)` を追加
   - `days == 0` → "本日のデータ"

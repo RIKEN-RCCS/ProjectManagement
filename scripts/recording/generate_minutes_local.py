@@ -8,10 +8,9 @@ generate_minutes.py のローカルLLM版。
 Claude CLIが自動で読み込むCLAUDE.mdのプロジェクト文脈を明示的にプロンプトに埋め込む。
 
 使い方:
-  python generate_minutes_local.py TRANSCRIPT_FILE --model MODEL [options]
+  python generate_minutes_local.py TRANSCRIPT_FILE [options]
 
 Options:
-  --model MODEL       使用するモデル名（必須）
   --think             思考モードを有効化（デフォルト: 無効）
   --output DIR        議事録の出力ディレクトリ（デフォルト: minutes）
   --url URL           ローカルLLMのURL（LOCAL_LLM_URL 環境変数でも可）。
@@ -1350,7 +1349,6 @@ def main() -> int:
         description="ローカルLLMを使用して文字起こしから議事録を生成する"
     )
     parser.add_argument("transcript", help="文字起こし .md/.txt ファイルのパス")
-    parser.add_argument("--model", default=None, help="使用するモデル名（省略時は vLLM /v1/models から自動取得）")
     parser.add_argument(
         "--output", "-o",
         default="minutes",

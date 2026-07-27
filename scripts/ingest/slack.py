@@ -908,7 +908,7 @@ class SlackIngestPlugin:
             # 旧構成は --slack-consensus 3
             "--slack-consensus", type=int, default=1, metavar="N",
             help="Self-Consistency サンプリング数（既定 1。2026-07-26 A/B（ランダム15件"
-                 "全一致・狙い撃ち10件で N=1 が100%勝ち+引き分け、N=3 は実在アイテムを"
+                 "全一致・狙い撃ち10件で N=1 が100%%勝ち+引き分け、N=3 は実在アイテムを"
                  "多数決で落とす事例あり）により変更。旧構成は --slack-consensus 3。"
                  "N>=2 で Self-Consistency 有効）",
         )

@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-07-27 パッケージD完結: 休眠パスは「配線より削除」、ただし監査前提の誤り 2 件は残置
+
+**背景**: 監査の小粒清掃。孤立関数 11 個（build_risk_prompt/build_brief_prompt 含む）・
+goals_print.py・飾り引数 2 件・.bak 2 件は全数 grep + crontab + vulture で参照ゼロを確認し削除
+（機能は git から復元可能、brief/risk の assignee/topic フォーカスは現行経路が自前処理済みで
+機能喪失なし）。screen ジョブに --semantic を配線（ただしジョブ経路自体はフロント未参照の休眠。
+プレビュー API と既定を揃えるための整合修正）。pm_ingest --help の ValueError（help 内の生 %）、
+llm.py docstring、スキルの claude_code 残記述も修正。
+**決定（監査前提の訂正 2 件）**: (1) 「Web の terminology/glossary 削除不可」は誤り — save フローの
+deleted フラグで削除 UI 実装済みだったため、フロントは無変更とし孤立していた単発 /delete
+エンドポイント 2 本を削除。(2) 「fish TTS は移行残骸」も誤り — /argus-narrate の英語話者クローンが
+依存する現役設計（不通時自動フォールバック）のため残置し、未配線だった default_text_limit() のみ
+配線（fish 疎通時 400 字上限が有効に）。
+
 ## 2026-07-27 パッケージC完結: investigate 検索パラメータを拡大既定化、--file 窓は据え置き
 
 **背景**: gemma4 期の固定値（top5 / 抜粋400字 / プレビュー400字 / --file窓24k字）を env 化し、

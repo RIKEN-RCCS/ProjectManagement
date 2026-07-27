@@ -17,19 +17,6 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 # --------------------------------------------------------------------------- #
-# Slack クライアント初期化
-# --------------------------------------------------------------------------- #
-
-def get_slack_client() -> WebClient:
-    """SLACK_USER_TOKEN チェック付きで WebClient を返す"""
-    token = os.getenv("SLACK_USER_TOKEN")
-    if not token:
-        print("ERROR: SLACK_USER_TOKEN を設定してください", file=sys.stderr)
-        sys.exit(1)
-    return WebClient(token=token)
-
-
-# --------------------------------------------------------------------------- #
 # Canvas 向けテキスト整形
 # --------------------------------------------------------------------------- #
 

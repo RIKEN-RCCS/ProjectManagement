@@ -567,46 +567,6 @@ def format_knowledge_for_prompt(
 
 
 # ---------------------------------------------------------------------------
-# 統合: 1バッチ分のナレッジを一括取得
-# ---------------------------------------------------------------------------
-
-def gather_knowledge(
-    pm_conn: sqlite3.Connection,
-    items_content: list[str],
-    *,
-    since_days: int = 90,
-    max_chars: int = 30000,
-    config_path: Path | None = None,
-) -> dict:
-    """複数アイテムの content からキーワードを抽出し、ナレッジを一括取得する。
-
-    Returns:
-        format_knowledge_for_prompt() に渡せる dict
-    """
-    all_keywords: list[str] = []
-    seen: set[str] = set()
-    for content in items_content:
-        for kw in extract_topic_keywords(content):
-            if kw not in seen:
-                seen.add(kw)
-                all_keywords.append(kw)
-
-    # 上位20キーワードに絞る
-    all_keywords = all_keywords[:20]
-
-    structured = fetch_recent_knowledge(pm_conn, all_keywords, since_days=since_days)
-    fts_chunks = fetch_fts_context(all_keywords, config_path=config_path)
-    patterns = fetch_participant_patterns(pm_conn, since_days=since_days * 2)
-
-    return {
-        "decisions": structured["decisions"],
-        "action_items": structured["action_items"],
-        "fts_chunks": fts_chunks,
-        "participant_patterns": patterns,
-    }
-
-
-# ---------------------------------------------------------------------------
 # チャンク → プロンプト注入文字列 整形
 # ---------------------------------------------------------------------------
 
