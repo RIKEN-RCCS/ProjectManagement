@@ -21,7 +21,10 @@
 #                        2026-07-26 A/B（盲検2/2で同等以上・コスト1/7）により既定変更）
 #   --chunk-minutes N    マルチステージ時のチャンクサイズ（分単位、デフォルト 90）。
 #                        旧構成は --chunk-minutes 10 --consensus 3 で再現可
-#   --no-triage          抽出候補のトリアージ（2次審査）を無効化
+#   --no-triage          抽出候補のトリアージ（2次審査）を無効化。
+#                        generate_minutes_local.py の生成時トリアージに加え、
+#                        pm_ingest.py minutes への --minutes-no-triage（転記時
+#                        トリアージ）も同時に無効化する
 #
 # 環境変数:
 #   ARGUS_PREFER_RIVAULT=1  LLM バックエンドを RiVault に切替（デフォルト: ローカル vLLM）
@@ -523,10 +526,15 @@ print(infer_date_from_filename(Path('$(basename "$INPUT_ABS")')))
   # Step 3: pm.db へ転記
   # --------------------------------------------------------------------------- #
   echo "[INFO] pm.db へ転記中: $MEETING_NAME ($DATE_TO_USE)"
+  MINUTES_NO_TRIAGE_OPT=""
+  if [[ "$NO_TRIAGE" -eq 1 ]]; then
+    MINUTES_NO_TRIAGE_OPT="--minutes-no-triage"
+  fi
   "$PYTHON3" "$PM_INGEST" minutes \
     --minutes-name "$MEETING_NAME" \
     --since "$DATE_TO_USE" \
-    --db "${DB_PATH:-data/pm.db}"
+    --db "${DB_PATH:-data/pm.db}" \
+    $MINUTES_NO_TRIAGE_OPT
 
   if [[ $? -eq 0 ]]; then
     rm -f "$BASENAME.md" "$MINUTES_MD"

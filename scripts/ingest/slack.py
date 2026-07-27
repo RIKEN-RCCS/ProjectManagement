@@ -16,6 +16,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cli_utils import (
@@ -417,6 +418,7 @@ TRIAGE_PROMPT = """
 
 ## 入力
 
+{context_note}
 ### マイルストーン一覧
 {milestones}
 
@@ -454,7 +456,7 @@ TRIAGE_PROMPT = """
 **重要**:
 - 元の候補リストの全項目について必ず判定すること（漏れがないように）
 - content, assignee, due_date, milestone_id, decided_at は元の値をそのままコピーすること（変更しない）
-- KEEP と判定された項目のみが後段で pm.db に書き込まれる
+- KEEP と判定された項目のみが有効なレコードとして扱われる
 - **すべての候補が DROP になることもあり得る** — その場合は全項目空配列を返す
 """
 
@@ -475,6 +477,10 @@ def extract_json(text: str) -> dict:
 def triage_items(
     extracted: dict,
     milestones: list[dict],
+    *,
+    context_note: str = "",
+    return_verdicts: bool = False,
+    missing_verdict: str = "DROP",
 ) -> dict:
     """Extractor が抽出した候補を 3 ゲートで審査し、マイルストーン達成に
     実質的に必要な項目だけを残す。
@@ -482,13 +488,26 @@ def triage_items(
     ゲート1: マイルストーン関連性
     ゲート2: 代替可能性（他項目の付随作業でないか）
     ゲート3: 影響範囲（完了しなくても後続に影響しないなら DROP）
+
+    return_verdicts=True の場合、返り値に "verdicts" キーを追加し、
+    元の候補全件（KEEP/DROP 双方）について {"content", "verdict", "reason"} を含む
+    一覧を返す（呼び出し元が個別の DROP 理由を audit_log 等に記録したい場合用）。
+
+    missing_verdict: LLM応答に候補が欠落していた場合の扱い（"DROP" または "KEEP"）。
+    Slack 抽出経路（既定 "DROP"）は誤抽出が多いため保守的に除外するが、
+    minutes 転記時トリアージ・pm_screen --triage の既存データ審査では
+    判定不能を DROP にすると出力打ち切り等で実在項目を失いかねないため
+    呼び出し元は "KEEP" を渡す。
     """
     a_items = extracted.get("action_items", []) or []
     d_items = extracted.get("decisions", []) or []
     if not a_items and not d_items:
+        if return_verdicts:
+            return {**extracted, "verdicts": {"decisions": [], "action_items": []}}
         return extracted
 
     prompt = TRIAGE_PROMPT.format(
+        context_note=context_note,
         milestones=format_milestones_for_prompt(milestones),
         action_items_json=json.dumps(a_items, ensure_ascii=False, indent=2),
         decisions_json=json.dumps(d_items, ensure_ascii=False, indent=2),
@@ -501,37 +520,66 @@ def triage_items(
         triaged = extract_json(raw)
     except Exception as e:
         print(f"[WARN] Slack triage JSON パース失敗、トリアージをスキップ: {e}", file=sys.stderr)
+        if return_verdicts:
+            return {
+                **extracted,
+                "verdicts": {
+                    "decisions": [{"content": d.get("content"), "verdict": "KEEP", "reason": ""} for d in d_items],
+                    "action_items": [{"content": a.get("content"), "verdict": "KEEP", "reason": ""} for a in a_items],
+                },
+            }
         return extracted
 
     # --- action_items: KEEP のみ残す ---
     kept_a = []
+    verdicts_a = []
     triaged_a = {item.get("content"): item for item in triaged.get("action_items", []) or []}
     for item in a_items:
-        t = triaged_a.get(item.get("content"))
+        content = item.get("content")
+        t = triaged_a.get(content)
         if t and t.get("verdict") == "DROP":
-            print(f"[TRIAGE] DROP action_item: {(item.get('content') or '')[:80]}… — 理由: {t.get('reason', '不明')}", file=sys.stderr)
+            reason = t.get("reason", "不明")
+            print(f"[TRIAGE] DROP action_item: {(content or '')[:80]}… — 理由: {reason}", file=sys.stderr)
+            verdicts_a.append({"content": content, "verdict": "DROP", "reason": reason})
         elif t and t.get("verdict") == "KEEP":
             kept_a.append(item)
+            verdicts_a.append({"content": content, "verdict": "KEEP", "reason": ""})
         elif t is None:
-            # レスポンスに欠落 → DROP 扱い（保守的）
-            print(f"[TRIAGE] DROP action_item: {(item.get('content') or '')[:80]}… — 理由: 候補がレスポンスに欠落", file=sys.stderr)
+            # レスポンスに欠落 → missing_verdict に従う（Slack既定は保守的にDROP、
+            # minutes/pm_screen 経路は判定不能を落とさないよう KEEP を渡す）
+            reason = "候補がレスポンスに欠落"
+            print(f"[TRIAGE] {missing_verdict} action_item: {(content or '')[:80]}… — 理由: {reason}", file=sys.stderr)
+            verdicts_a.append({"content": content, "verdict": missing_verdict, "reason": reason})
+            if missing_verdict == "KEEP":
+                kept_a.append(item)
         else:
             # verdict が不明 → KEEP（保守的フェイルセーフ）
             kept_a.append(item)
+            verdicts_a.append({"content": content, "verdict": "KEEP", "reason": ""})
 
     # --- decisions: KEEP のみ残す ---
     kept_d = []
+    verdicts_d = []
     triaged_d = {item.get("content"): item for item in triaged.get("decisions", []) or []}
     for item in d_items:
-        t = triaged_d.get(item.get("content"))
+        content = item.get("content")
+        t = triaged_d.get(content)
         if t and t.get("verdict") == "DROP":
-            print(f"[TRIAGE] DROP decision: {(item.get('content') or '')[:80]}… — 理由: {t.get('reason', '不明')}", file=sys.stderr)
+            reason = t.get("reason", "不明")
+            print(f"[TRIAGE] DROP decision: {(content or '')[:80]}… — 理由: {reason}", file=sys.stderr)
+            verdicts_d.append({"content": content, "verdict": "DROP", "reason": reason})
         elif t and t.get("verdict") == "KEEP":
             kept_d.append(item)
+            verdicts_d.append({"content": content, "verdict": "KEEP", "reason": ""})
         elif t is None:
-            print(f"[TRIAGE] DROP decision: {(item.get('content') or '')[:80]}… — 理由: 候補がレスポンスに欠落", file=sys.stderr)
+            reason = "候補がレスポンスに欠落"
+            print(f"[TRIAGE] {missing_verdict} decision: {(content or '')[:80]}… — 理由: {reason}", file=sys.stderr)
+            verdicts_d.append({"content": content, "verdict": missing_verdict, "reason": reason})
+            if missing_verdict == "KEEP":
+                kept_d.append(item)
         else:
             kept_d.append(item)
+            verdicts_d.append({"content": content, "verdict": "KEEP", "reason": ""})
 
     print(
         f"[INFO] Slack triage: action_items {len(a_items)}→{len(kept_a)}, "
@@ -539,7 +587,101 @@ def triage_items(
         file=sys.stderr,
     )
 
-    return {"decisions": kept_d, "action_items": kept_a}
+    result: dict[str, Any] = {"decisions": kept_d, "action_items": kept_a}
+    if return_verdicts:
+        result["verdicts"] = {"decisions": verdicts_d, "action_items": verdicts_a}
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# バッチ分割トリアージ（minutes 転記時トリアージ・pm_screen --triage が共用）
+# --------------------------------------------------------------------------- #
+_TRIAGE_BATCH_SIZE = 20
+
+
+def _chunk_or_placeholder(items: list, size: int = _TRIAGE_BATCH_SIZE) -> list[list]:
+    """items を size 件ごとに分割する。空リストの場合は [[]] を返す
+    （呼び出し側で action_items/decisions のチャンク数を揃えて zip しやすくするため）。"""
+    if not items:
+        return [[]]
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _default_batch_log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def triage_items_batched(
+    action_items: list[dict],
+    decisions: list[dict],
+    milestones: list[dict],
+    *,
+    context_note: str = "",
+    missing_verdict: str = "KEEP",
+    batch_size: int = _TRIAGE_BATCH_SIZE,
+    log=None,
+    group_label: str = "",
+) -> dict:
+    """action_items / decisions を batch_size 件ずつに分割して triage_items を呼び、
+    結果を結合して返す（1回のLLM呼び出しに大量の候補を投げると出力打ち切りで
+    後半候補が「レスポンス欠落」判定になる問題への対策。minutes 転記時トリアージ・
+    pm_screen --triage が共用する）。
+
+    1チャンクの呼び出しが例外を投げた場合はそのチャンクのみスキップして
+    log に [WARN] を出力し、他チャンクの結果は保持したまま処理を継続する
+    （1件の障害でグループ全体の結果を捨てない）。
+
+    戻り値:
+      {
+        "action_items": [(item, verdict, reason), ...],  # 元の入力順
+        "decisions": [(item, verdict, reason), ...],
+        "n_chunks": int,          # 実際に呼び出したチャンク数
+        "n_skipped_chunks": int,  # 例外でスキップしたチャンク数
+      }
+    """
+    log = log or _default_batch_log
+
+    ai_chunks = _chunk_or_placeholder(action_items, batch_size)
+    dec_chunks = _chunk_or_placeholder(decisions, batch_size)
+    n_calls = max(len(ai_chunks), len(dec_chunks))
+
+    ai_results: list[tuple[dict, str, str]] = []
+    dec_results: list[tuple[dict, str, str]] = []
+    n_chunks = 0
+    n_skipped = 0
+
+    for i in range(n_calls):
+        ai_part = ai_chunks[i] if i < len(ai_chunks) else []
+        dec_part = dec_chunks[i] if i < len(dec_chunks) else []
+        if not ai_part and not dec_part:
+            continue
+        n_chunks += 1
+        try:
+            result = triage_items(
+                {"decisions": dec_part, "action_items": ai_part},
+                milestones,
+                context_note=context_note,
+                return_verdicts=True,
+                missing_verdict=missing_verdict,
+            )
+        except Exception as e:
+            n_skipped += 1
+            prefix = f"{group_label}: " if group_label else ""
+            log(f"[WARN] {prefix}チャンク{i + 1}/{n_calls} のトリアージ呼び出しに失敗、"
+                f"このチャンクのみスキップします: {e}")
+            continue
+
+        for orig, v in zip(ai_part, result["verdicts"]["action_items"], strict=True):
+            ai_results.append((orig, v["verdict"], v.get("reason") or ""))
+        for orig, v in zip(dec_part, result["verdicts"]["decisions"], strict=True):
+            dec_results.append((orig, v["verdict"], v.get("reason") or ""))
+
+    return {
+        "action_items": ai_results,
+        "decisions": dec_results,
+        "n_chunks": n_chunks,
+        "n_skipped_chunks": n_skipped,
+    }
 
 
 def _sample_extractions(prompt: str, n: int) -> list[dict]:

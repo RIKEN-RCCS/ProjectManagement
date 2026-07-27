@@ -196,6 +196,7 @@ def main():
             pm_conn, minutes_conn,
             args.meeting_id, args.held_at, args.kind, args.file_path,
             force=True, dry_run=False, log=log,
+            triage=False,
         )
         log(f"  Sync result: {result}")
 

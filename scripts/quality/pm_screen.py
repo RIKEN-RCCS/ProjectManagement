@@ -33,6 +33,12 @@ Usage:
 
     # 意味的重複検出（embedding + ローカルLLM境界審査）も含める
     python3 scripts/pm_screen.py --semantic --export
+
+    # 既存データの一括トリアージ（3ゲート審査。重複検出とは独立したモード）
+    python3 scripts/pm_screen.py --triage --output triage.csv
+
+    # closed の action_items も対象に含める（非推奨。完了実績を誤って抹消しうる）
+    python3 scripts/pm_screen.py --triage --triage-include-closed --output triage.csv
 """
 
 import argparse
@@ -78,6 +84,7 @@ def fetch_active_action_items(conn, since: str | None = None) -> list[dict]:
         SELECT a.id, a.content, a.assignee, a.due_date, a.milestone_id,
                a.status, a.extracted_at, a.source, a.source_ref, a.note,
                a.rationale, a.requested_by, a.source_context, a.related_ids,
+               a.meeting_id,
                COALESCE(a.deleted,0) AS deleted
         FROM action_items a
         {where}
@@ -94,7 +101,7 @@ def fetch_active_decisions(conn, since: str | None = None) -> list[dict]:
         params.append(since)
     where = "WHERE " + " AND ".join(conds)
     rows = conn.execute(f"""
-        SELECT id, content, decided_at, source, source_ref,
+        SELECT id, content, decided_at, source, source_ref, meeting_id,
                COALESCE(deleted,0) AS deleted
         FROM decisions
         {where}
@@ -590,6 +597,196 @@ def screen_for_web(
     return result
 
 
+# --------------------------------------------------------------------------- #
+# --triage: 既存データの一括トリアージ（3ゲート審査、重複検出とは独立したモード）
+# --------------------------------------------------------------------------- #
+def _fetch_meeting_context(conn, meeting_id: str) -> tuple[str, str, str]:
+    row = conn.execute(
+        "SELECT kind, held_at, summary FROM meetings WHERE meeting_id = ?", (meeting_id,)
+    ).fetchone()
+    if not row:
+        return "不明", "不明", ""
+    return row["kind"] or "不明", row["held_at"] or "不明", row["summary"] or ""
+
+
+def run_triage(conn, since: str | None, include_closed: bool, output_path: str, log) -> None:
+    """既存の action_items / decisions を meeting_id 単位（+ slack由来はバッチ）で
+    ingest.slack.triage_items_batched にかけ、DROP判定の項目のみを CSV に出力する。
+
+    バッチ分割・チャンク単位の障害フェイルオープン（missing_verdict="KEEP"）は
+    ingest.slack.triage_items_batched に委譲する（minutes 転記時トリアージと共用）。
+    """
+    from ingest.slack import fetch_milestones, triage_items_batched
+
+    ais = fetch_active_action_items(conn, since=since)
+    if not include_closed:
+        ais = [a for a in ais if (a.get("status") or "open") == "open"]
+    decs = fetch_active_decisions(conn, since=since)
+
+    log(f"対象: アクションアイテム {len(ais)} 件, 決定事項 {len(decs)} 件")
+
+    milestones = fetch_milestones(conn)
+    if not milestones:
+        log("[WARN] マイルストーン未登録のためトリアージをスキップします（全件 KEEP 扱い）")
+        log(f"合計: アクションアイテム KEEP={len(ais)} / DROP=0")
+        log(f"合計: 決定事項       KEEP={len(decs)} / DROP=0")
+        export_triage_csv([], [], output_path, log)
+        return
+
+    ai_by_meeting: dict[str, list[dict]] = defaultdict(list)
+    ai_slack: list[dict] = []
+    for a in ais:
+        mid = a.get("meeting_id")
+        if mid:
+            ai_by_meeting[mid].append(a)
+        else:
+            ai_slack.append(a)
+
+    dec_by_meeting: dict[str, list[dict]] = defaultdict(list)
+    dec_slack: list[dict] = []
+    for d in decs:
+        mid = d.get("meeting_id")
+        if mid:
+            dec_by_meeting[mid].append(d)
+        else:
+            dec_slack.append(d)
+
+    meeting_ids = sorted(set(ai_by_meeting) | set(dec_by_meeting))
+    n_groups = len(meeting_ids) + (1 if (ai_slack or dec_slack) else 0)
+
+    dropped_ai: list[tuple[dict, str]] = []
+    dropped_dec: list[tuple[dict, str]] = []
+    n_processed = 0
+    n_chunks_total = n_chunks_skipped = 0
+
+    def _apply(batched: dict) -> None:
+        nonlocal n_chunks_total, n_chunks_skipped
+        n_chunks_total += batched["n_chunks"]
+        n_chunks_skipped += batched["n_skipped_chunks"]
+        for item, verdict, reason in batched["action_items"]:
+            if verdict == "DROP":
+                dropped_ai.append((item, reason))
+        for item, verdict, reason in batched["decisions"]:
+            if verdict == "DROP":
+                dropped_dec.append((item, reason))
+
+    def _skip_note(batched: dict) -> str:
+        if not batched["n_skipped_chunks"]:
+            return ""
+        return f"（スキップ {batched['n_skipped_chunks']}/{batched['n_chunks']} チャンク）"
+
+    for mid in meeting_ids:
+        n_processed += 1
+        kind, held_at, summary = _fetch_meeting_context(conn, mid)
+        context_note = (
+            "### 会議コンテキスト\n"
+            f"会議種別: {kind} / 開催日: {held_at}\n"
+            f"議事概要: {summary[:1500]}"
+        )
+        batched = triage_items_batched(
+            ai_by_meeting.get(mid, []), dec_by_meeting.get(mid, []), milestones,
+            context_note=context_note, missing_verdict="KEEP", log=log,
+            group_label=f"meeting={mid}",
+        )
+        _apply(batched)
+        log(f"[{n_processed}/{n_groups}] meeting={mid}: 完了"
+            f"（AI {len(batched['action_items'])}件, 決定 {len(batched['decisions'])}件）"
+            f"{_skip_note(batched)}")
+
+    if ai_slack or dec_slack:
+        n_processed += 1
+        context_note = (
+            "### 会議コンテキスト\n"
+            "Slackスレッド由来の抽出項目（特定の会議に紐づかない候補のバッチ審査）\n"
+        )
+        batched = triage_items_batched(
+            ai_slack, dec_slack, milestones,
+            context_note=context_note, missing_verdict="KEEP", log=log,
+            group_label="slackバッチ",
+        )
+        _apply(batched)
+        log(f"[{n_processed}/{n_groups}] slackバッチ: 完了"
+            f"（AI {len(batched['action_items'])}件, 決定 {len(batched['decisions'])}件）"
+            f"{_skip_note(batched)}")
+
+    # KEEP 件数は「対象件数 - DROP件数」で計算する（チャンク障害でスキップされた
+    # 項目は KEEP/DROP いずれの判定もされないが、既存レコードに変更を加えない
+    # という意味で実質 KEEP と同義のため、この引き算で正しく数えられる）。
+    n_keep_ai = len(ais) - len(dropped_ai)
+    n_keep_dec = len(decs) - len(dropped_dec)
+
+    log("")
+    log(f"合計: アクションアイテム KEEP={n_keep_ai} / DROP={len(dropped_ai)}")
+    log(f"合計: 決定事項       KEEP={n_keep_dec} / DROP={len(dropped_dec)}")
+    if n_chunks_skipped:
+        log(f"[WARN] {n_chunks_skipped}/{n_chunks_total} チャンクがLLM障害等でスキップされました"
+            "（該当項目は KEEP 扱い）")
+
+    export_triage_csv(dropped_ai, dropped_dec, output_path, log)
+
+
+def _flatten_reason(reason: str) -> str:
+    """reason 内の改行を空白に正規化する（pm_relink.py の splitlines 行パーサが
+    改行入りセルで壊れるのを防ぐ。S4）。"""
+    return (reason or "").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+
+def export_triage_csv(
+    dropped_ai: list[tuple[dict, str]],
+    dropped_dec: list[tuple[dict, str]],
+    output_path: str,
+    log,
+) -> None:
+    buf = io.StringIO()
+    buf.write("# LLM 判定の一括審査結果。pm_relink.py --import --dry-run で確認してから適用すること\n")
+
+    buf.write(_SECTION_ACTIONS + "\n")
+    ai_cols = ["id", "assignee", "due_date", "milestone_id", "status", "content",
+               "source", "extracted_at", "note", "deleted", "reason"]
+    writer = csv.DictWriter(buf, fieldnames=ai_cols, extrasaction="ignore")
+    writer.writeheader()
+    for a, reason in dropped_ai:
+        writer.writerow({
+            "id": a["id"],
+            "assignee": a.get("assignee") or "",
+            "due_date": a.get("due_date") or "",
+            "milestone_id": a.get("milestone_id") or "",
+            "status": a.get("status") or "",
+            "content": a["content"],
+            "source": a.get("source") or "",
+            "extracted_at": a.get("extracted_at") or "",
+            "note": a.get("note") or "",
+            "deleted": "1",
+            "reason": _flatten_reason(reason),
+        })
+
+    buf.write("\n" + _SECTION_DECISIONS + "\n")
+    dec_cols = ["id", "content", "decided_at", "source", "deleted", "reason"]
+    writer2 = csv.DictWriter(buf, fieldnames=dec_cols, extrasaction="ignore")
+    writer2.writeheader()
+    for d, reason in dropped_dec:
+        writer2.writerow({
+            "id": d["id"],
+            "content": d["content"],
+            "decided_at": d.get("decided_at") or "",
+            "source": d.get("source") or "",
+            "deleted": "1",
+            "reason": _flatten_reason(reason),
+        })
+
+    text = buf.getvalue()
+    Path(output_path).write_text(text, encoding="utf-8")
+    log(f"\nCSV 出力: {output_path}")
+    log(f"  DROP判定 アクションアイテム: {len(dropped_ai)} 件")
+    log(f"  DROP判定 決定事項: {len(dropped_dec)} 件")
+    log()
+    log("使い方:")
+    log("  1. LLM 判定の一括審査結果。内容を確認してから適用すること")
+    log("  2. pm_relink.py --import でDB反映:")
+    log(f"     python3 scripts/pm_relink.py --import {output_path} --dry-run")
+    log(f"     python3 scripts/pm_relink.py --import {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="pm.db のアクションアイテム・決定事項をスクリーニング（重複・類似・曖昧を検出）"
@@ -615,12 +812,32 @@ def main():
                         help="意味的重複の境界帯（LLM審査対象）下限コサイン類似度閾値（デフォルト: 0.85）")
     parser.add_argument("--no-llm", action="store_true",
                         help="境界帯のローカルLLM審査を行わない（merge-threshold 以上のみ確定）")
+    parser.add_argument("--triage", action="store_true",
+                        help="既存データの一括トリアージ（3ゲート審査）を実行。"
+                             "重複検出とは独立したモードで、指定時は重複検出をスキップする。"
+                             "この場合 --output は進捗ログではなく出力CSVのパスとして使われる"
+                             "（デフォルト: triage.csv）")
+    parser.add_argument("--triage-include-closed", action="store_true",
+                        help="--triage 時に status='open' 以外（closed 含む）の action_items も"
+                             "対象に含める（デフォルト: open のみ）。"
+                             "警告: closed 項目はゲート3（影響範囲）でほぼ DROP 判定になるため、"
+                             "完了実績を誤って抹消対象にしてしまう恐れがある。通常は指定しないこと")
 
     args = parser.parse_args()
     db_path = resolve_db_path(args.db, REPO_ROOT / "data" / "pm.db")
-    log, close = make_logger(args.output if not args.export else None)
+    # --triage / --export 時は --output が出力CSVのパスとして使われるため、
+    # ログファイルとしては開かない（make_logger の close() で CSV が
+    # 上書きされてしまうバグを防ぐ）。
+    log, close = make_logger(args.output if not (args.export or args.triage) else None)
 
     conn = open_db(db_path, encrypt=not args.no_encrypt)
+
+    if args.triage:
+        output = args.output or "triage.csv"
+        run_triage(conn, args.since, args.triage_include_closed, output, log)
+        conn.close()
+        close()
+        return
 
     ais = fetch_active_action_items(conn, since=args.since)
     decs = fetch_active_decisions(conn, since=args.since) if args.include_decisions else []

@@ -282,6 +282,7 @@ python3 scripts/ingest/pm_ingest.py ledger --ledger-suggest-assumptions
 | `--minutes-list` | - | 転記済み会議の一覧表示 |
 | `--minutes-delete MEETING_ID` | - | 指定 meeting_id を pm.db から削除 |
 | `--minutes-meeting-id MEETING_ID` | - | 特定の meeting_id のみ転記（再生成後の個別修復等に使用） |
+| `--minutes-no-triage` | - | 転記時トリアージ（3ゲート審査。ゲート1: マイルストーン関連性 / ゲート2: 代替可能性 / ゲート3: 影響範囲）を無効化（デフォルト: 有効） |
 
 **重複判定は `meeting_id` 単位**（`held_at`/`kind` 単位ではない）。同じ日付・種別の
 会議を再生成し新しい `meeting_id` で minutes.db に追加した場合、`--force` なしでも
@@ -289,6 +290,22 @@ python3 scripts/ingest/pm_ingest.py ledger --ledger-suggest-assumptions
 発生したため修正。経緯は LOG.md 参照）。転記時、同一日付・種別の別 `meeting_id` が
 残っていて内容が空（decisions/action_items 共に0件）なら自動削除、内容があれば
 `[WARN]` ログを出して手動確認を促す（実データを誤って自動削除しないため）。
+
+**転記時トリアージ**（デフォルト有効）: pm.db への INSERT 前に議事録DBの
+decisions/action_items を `ingest.slack.triage_items_batched`（20件ずつバッチ分割・
+チャンク単位フェイルオープンで `ingest.slack.triage_items` を呼ぶ3ゲート審査）に
+かけ、DROP判定の項目は内容を保持したまま `deleted=1` で INSERT する（audit_log に
+`source='minutes_triage'` で記録）。マイルストーン未登録時はゲート1が機能しないため
+トリアージ自体をスキップし全件 KEEP する。`--dry-run` でもトリアージ自体は実行される
+ため対象会議数ぶんの LLM コールが発生する（`--minutes-no-triage` または環境変数
+`ARGUS_DISABLE_MINUTES_TRIAGE=1` で回避可能）。`--force` 再転記時、人間が Web UI で
+`deleted=0` に復元した項目（audit_log に `source != 'minutes_triage'` の復元履歴が
+ある項目）はトリアージ対象から除外し無条件 KEEP のまま再挿入する（LLMが人間の
+最終判断を覆さないため）。この保護は再挿入直後に `source='minutes_human_kept'` の
+audit_log を新しい record_id に対して書き直すことで、`--force` を繰り返しても
+持続する（force は対象行を DELETE→INSERT するため record_id が変わり、書き直さないと
+2回目の force で保護が失効する）。Web UI からの議事録編集保存（`pm_minutes_publish.py`）は
+`triage=False` で呼ばれ、人間の編集結果を LLM が覆さない。
 
 **goals ソース固有オプション**:
 
@@ -1031,6 +1048,23 @@ python3 scripts/pm_screen.py --include-decisions
 2. CSVを人間が確認し、残す/削除の `deleted` を調整（誤検出を外す・追加削除を立てる）
 3. `pm_relink.py --import screen.csv --dry-run` で差分確認後、本適用で論理削除（`deleted=1`）＋ audit_log 記録
 4. Web UI の Quality タブでも同じ検出・選択・論理削除が可能（`--semantic` 相当は既定 ON）
+
+**`--triage`: 既存データの一括トリアージ**（重複検出とは独立したモード。指定時は重複検出をスキップ）
+
+```sh
+# 既存データを一括トリアージ（3ゲート審査）。DROP判定のみCSV出力
+python3 scripts/pm_screen.py --triage --output triage.csv
+
+# closed の action_items も対象に含める（非推奨。下記警告参照）
+python3 scripts/pm_screen.py --triage --triage-include-closed --output triage.csv
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--triage` | - | 既存の action_items（デフォルト `status='open'` のみ）・decisions 全件を meeting_id 単位（+ meeting_id なしの Slack由来は20件バッチ）で `ingest.slack.triage_items_batched` にかけ、DROP判定のみ CSV 出力する |
+| `--triage-include-closed` | - | `--triage` 時に closed の action_items も対象に含める。**警告**: closed 項目はゲート3（影響範囲）でほぼ DROP 判定になるため、完了実績を誤って抹消対象にしてしまう恐れがある。通常は指定しないこと |
+
+`--triage` 指定時は `--output` が進捗ログではなく出力CSVのパスとして使われる（デフォルト: `triage.csv`）。マイルストーン未登録時はゲート1が機能しないためトリアージ自体をスキップし全件 KEEP 扱いにする。1グループ内のチャンク（最大20件）呼び出しが例外を投げた場合はそのチャンクのみスキップし、他チャンク・他グループの結果は保持したまま処理を継続する。出力CSVは `pm_relink.py --import --dry-run` で確認してから適用する。
 
 ### 16. マイルストーン遡及紐づけ（pm_link_milestones.py）
 

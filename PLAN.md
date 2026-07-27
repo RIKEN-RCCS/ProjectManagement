@@ -144,9 +144,24 @@ pm.db 変更のフィールドは同期せず WARN、--force で明示上書き�
    されていないか。正当な編集が WARN された場合は最新シートで編集をやり直す運用
 4. **Slack 抽出の背景知識 90 日窓化の影響**（since_date 修正の副次効果、LOG 参照）—
    次回 ingest の抽出品質に劣化がないか
-5. **小粒調査**: AI #2583 の `extracted_at=2026-09-10` が未来日付（meeting_id が二重日付
-   `2026-06-10-…-2026-09-10_…` の議事録由来）。議事録取り込みの extracted_at 設定異常の
-   疑いがあり、同種の混入がないか含めて別途確認
+   （旧 5「AI #2583 未来日付」は 2026-07-27 の selfcheck 導入時に原因特定・6 レコード修正済み — LOG.md 参照）
+
+### 議事録転記トリアージの事後観察 + 既存データ精査（本体は 2026-07-28 導入 — LOG.md 参照）
+
+**ステータス**: 転記時 3 ゲートトリアージを既定有効で導入。既存データは pm_screen --triage の
+一括審査 CSV を生成済み（PM の精査・適用待ち）。
+
+**残作業**:
+1. **既存データ精査の適用（PM 実施）** — 一括審査 CSV（DROP 候補 + 理由）を確認し、
+   誤判定を deleted=0 に直してから `pm_relink.py --import <csv> --dry-run` → 本適用。
+   LLM 判定は false positive を含む前提（「共有する」で終わる実質的技術タスク等）
+2. **転記トリアージの品質観察** — 次回以降の `pm_ingest.py minutes` ログの `[TRIAGE]` DROP 行を
+   数回分確認し、正当な項目が落とされていないか（落とされていたら Web UI で deleted=0 に復活
+   させれば以後 human_kept で保護される）。退避: `ARGUS_DISABLE_MINUTES_TRIAGE=1` または
+   `--minutes-no-triage`
+3. **二重トリアージの recall 影響** — 録音経路は生成時（generate_minutes_local）＋転記時の
+   二重審査になる。会議の実項目が痩せすぎる場合は生成時 OFF（--no-triage）+ 転記時 ON への
+   一本化を検討
 
 ### 実績DB（achievements ledger）週次 populate の初回観察
 

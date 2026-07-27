@@ -9,9 +9,10 @@ pm_ingest.py minutes 経由で呼び出される。
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -37,6 +38,125 @@ def init_minutes_db(db_file: Path, no_encrypt: bool = False):
 # --------------------------------------------------------------------------- #
 # 転記コア
 # --------------------------------------------------------------------------- #
+def _write_triage_audit(pm_conn, table_name: str, record_id: int, reason: str) -> None:
+    """minutes_triage による deleted=1 挿入の証跡を audit_log に2行記録する。
+
+    audit_log の changed_at は他の書き手（pm_relink.py 等）と同様に UTC aware で
+    記録する（naive local との混在を避ける）。
+    """
+    now = datetime.now(UTC).isoformat()
+    pm_conn.execute(
+        "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
+        " VALUES (?, ?, 'deleted', '0', '1', ?, 'minutes_triage')",
+        (table_name, str(record_id), now),
+    )
+    pm_conn.execute(
+        "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
+        " VALUES (?, ?, 'triage_reason', NULL, ?, ?, 'minutes_triage')",
+        (table_name, str(record_id), reason, now),
+    )
+
+
+def _write_human_kept_audit(pm_conn, table_name: str, record_id: int) -> None:
+    """force 再転記で human_kept 項目を再INSERTした直後に、新しい record_id に対して
+    「人間による復元」の証跡を audit_log に記録する。
+
+    force 再転記は対象行を DELETE→INSERT するため record_id（連番）が変わる。
+    human_kept セットの収集クエリは audit_log.record_id を旧INSERT行のIDで
+    突合しているため、この記録を打たないと次回の force 再転記時に
+    human_kept として認識されず、人間の復元判断が再び LLM の審査対象に
+    戻ってしまう（= 保護が1回の force しか持続しない）。
+    source は 'minutes_triage' 以外にする必要があるため 'minutes_human_kept' を使う
+    （既存の human_kept 収集クエリの `source != 'minutes_triage'` 条件でそのまま拾われる）。
+    """
+    now = datetime.now(UTC).isoformat()
+    pm_conn.execute(
+        "INSERT INTO audit_log (table_name, record_id, field, old_value, new_value, changed_at, source)"
+        " VALUES (?, ?, 'deleted', '1', '0', ?, 'minutes_human_kept')",
+        (table_name, str(record_id), now),
+    )
+
+
+def _run_minutes_triage(
+    pm_conn,
+    decisions: list,
+    action_items: list,
+    deleted_decisions: set,
+    deleted_actions: set,
+    human_kept_decisions: set,
+    human_kept_actions: set,
+    force: bool,
+    kind: str,
+    held_at: str,
+    mc_row,
+    meeting_id: str,
+    log=print,
+) -> dict[str, dict[str, tuple[str, str]]]:
+    """議事録DBから取得した decisions/action_items を3ゲートでトリアージする。
+
+    force 時は以下をトリアージ対象から除外する（無駄な再審査を避ける・人間の判断を
+    LLM が覆さない）:
+      - deleted セット: 既にユーザーが手動削除済みの候補（再挿入自体もしない）
+      - human_kept セット: 人間が Web UI 等で deleted=0 に復元した候補
+        （再挿入はするが、LLM には諮らず無条件 KEEP とする）
+
+    マイルストーンが未登録の場合、ゲート1（マイルストーン関連性）で理論上
+    ほぼ全件 DROP されてしまうため、トリアージ自体をスキップして全件 KEEP 扱いにする。
+
+    戻り値: {"decisions": {content: (verdict, reason)}, "action_items": {content: (verdict, reason)}}
+    失敗時は空dict（呼び出し側は KEEP フォールバックとして扱う）。
+    """
+    d_candidates = [
+        dict(d) for d in decisions
+        if not (force and (d["content"] in deleted_decisions or d["content"] in human_kept_decisions))
+    ]
+    a_candidates = [
+        dict(a) for a in action_items
+        if not (force and (a["content"] in deleted_actions or a["content"] in human_kept_actions))
+    ]
+    if not d_candidates and not a_candidates:
+        return {"decisions": {}, "action_items": {}}
+
+    try:
+        from ingest.slack import fetch_milestones, triage_items_batched
+
+        milestones = fetch_milestones(pm_conn)
+        if not milestones:
+            log("  [WARN] マイルストーン未登録のためトリアージをスキップします（全件 KEEP 扱い）")
+            return {"decisions": {}, "action_items": {}}
+
+        content_1500 = ((mc_row["content"][:1500] if mc_row else "") or "")
+        context_note = (
+            "### 会議コンテキスト\n"
+            f"会議種別: {kind} / 開催日: {held_at}\n"
+            f"議事概要: {content_1500}"
+        )
+        batched = triage_items_batched(
+            a_candidates, d_candidates, milestones,
+            context_note=context_note,
+            missing_verdict="KEEP",
+            log=log,
+            group_label=f"meeting={meeting_id}",
+        )
+    except Exception as e:
+        log(f"  [WARN] 転記時トリアージに失敗、全件 KEEP で継続します: {e}")
+        return {"decisions": {}, "action_items": {}}
+
+    if batched["n_skipped_chunks"]:
+        log(
+            f"  [WARN] meeting={meeting_id}: {batched['n_skipped_chunks']}/{batched['n_chunks']} "
+            "チャンクがLLM障害でスキップされました（該当項目は KEEP 扱い）"
+        )
+
+    verdicts_d: dict[str, tuple[str, str]] = {
+        item["content"]: (verdict, reason) for item, verdict, reason in batched["decisions"]
+    }
+    verdicts_a: dict[str, tuple[str, str]] = {
+        item["content"]: (verdict, reason) for item, verdict, reason in batched["action_items"]
+    }
+    return {"decisions": verdicts_d, "action_items": verdicts_a}
+
+
 def transfer_meeting(
     pm_conn,
     minutes_conn,
@@ -47,6 +167,8 @@ def transfer_meeting(
     force: bool,
     dry_run: bool,
     log=print,
+    *,
+    triage: bool = True,
 ) -> str:
     """Returns: "ok" | "skipped"
 
@@ -55,6 +177,14 @@ def transfer_meeting(
     (held_at, kind) 単位で判定すると「既にある」と誤ってスキップしてしまい、
     しかもスキップは正常終了扱いのため気付きにくい（2026-07-03 に実際に発生し、
     65件中6件が無言でスキップされていた。LOG.md 参照）。
+
+    triage=True（既定）の場合、pm.db へのINSERT前に3ゲートトリアージ
+    （ingest.slack.triage_items_batched、20件ずつバッチ分割）を実行し、DROP判定の
+    項目は deleted=1 で INSERTする（内容は保持、audit_log に記録）。環境変数
+    ARGUS_DISABLE_MINUTES_TRIAGE=1 で無効化できる。マイルストーン未登録時・
+    トリアージ自体の失敗はフェイルオープン（全件 KEEP）。--force 再転記時は
+    人間が Web UI で deleted=0 に復元した項目もトリアージ対象から除外し
+    無条件 KEEP のまま再挿入する。
     """
     existing = pm_conn.execute(
         "SELECT meeting_id FROM meetings WHERE meeting_id = ?", (meeting_id,)
@@ -75,11 +205,16 @@ def transfer_meeting(
         ).fetchall()
         for stale in stale_rows:
             stale_id = stale["meeting_id"]
+            # COALESCE(deleted,0)=0 の件数のみ数える。トリアージで全件 DROP された
+            # 会議（deleted=1 のみ残る）を「内容を保持したまま残っています」と
+            # 誤警告しないため。
             d_count = pm_conn.execute(
-                "SELECT COUNT(*) c FROM decisions WHERE meeting_id = ?", (stale_id,)
+                "SELECT COUNT(*) c FROM decisions WHERE meeting_id = ? AND COALESCE(deleted,0)=0",
+                (stale_id,),
             ).fetchone()["c"]
             a_count = pm_conn.execute(
-                "SELECT COUNT(*) c FROM action_items WHERE meeting_id = ?", (stale_id,)
+                "SELECT COUNT(*) c FROM action_items WHERE meeting_id = ? AND COALESCE(deleted,0)=0",
+                (stale_id,),
             ).fetchone()["c"]
             if d_count == 0 and a_count == 0:
                 pm_conn.execute("DELETE FROM meetings WHERE meeting_id = ?", (stale_id,))
@@ -124,17 +259,19 @@ def transfer_meeting(
         due = f" (期限: {a['due_date']})" if a["due_date"] else ""
         log(f"    [{assignee}] {a['content']}{due}")
 
-    if dry_run:
-        return "ok"
-
-    now = datetime.now().isoformat()
-    source_ref = file_path or ""
-
+    # 手動削除(deleted=1)されたレコードは残し、それ以外を削除してからINSERTする。
+    # 削除済みレコードの内容を収集しておき、同一内容の再INSERTを防ぐ
+    # （--force 再転記時のみ意味を持つが、トリアージ除外判定にも使うため
+    # dry_run でも force なら先に集めておく）。
+    #
+    # human_kept: 人間が Web UI 等で deleted=0 に復元した（= minutes_triage 以外の
+    # ソースで deleted→0 の変更履歴がある）候補。force 再転記時に再挿入はするが、
+    # LLM には諮らず無条件 KEEP とする（人間の最終判断を LLM が覆さないため。S1）。
+    deleted_decisions: set = set()
+    deleted_actions: set = set()
+    human_kept_decisions: set = set()
+    human_kept_actions: set = set()
     if force:
-        # 手動削除(deleted=1)されたレコードは残し、それ以外を削除してからINSERTする。
-        # 削除済みレコードの内容を収集しておき、同一内容の再INSERTを防ぐ。
-        deleted_decisions = set()
-        deleted_actions = set()
         for row in pm_conn.execute(
             "SELECT content FROM decisions WHERE meeting_id = ? AND COALESCE(deleted,0)=1",
             (meeting_id,),
@@ -146,6 +283,51 @@ def transfer_meeting(
         ).fetchall():
             deleted_actions.add(row["content"])
 
+        for row in pm_conn.execute(
+            "SELECT d.content FROM decisions d"
+            " JOIN audit_log al ON al.table_name='decisions' AND al.record_id = CAST(d.id AS TEXT)"
+            " WHERE d.meeting_id = ? AND al.field='deleted' AND al.new_value='0'"
+            " AND (al.source IS NULL OR al.source != 'minutes_triage')",
+            (meeting_id,),
+        ).fetchall():
+            human_kept_decisions.add(row["content"])
+        for row in pm_conn.execute(
+            "SELECT a.content FROM action_items a"
+            " JOIN audit_log al ON al.table_name='action_items' AND al.record_id = CAST(a.id AS TEXT)"
+            " WHERE a.meeting_id = ? AND al.field='deleted' AND al.new_value='0'"
+            " AND (al.source IS NULL OR al.source != 'minutes_triage')",
+            (meeting_id,),
+        ).fetchall():
+            human_kept_actions.add(row["content"])
+
+    triage_enabled = triage and os.environ.get("ARGUS_DISABLE_MINUTES_TRIAGE") != "1"
+    triage_verdicts: dict[str, dict[str, tuple[str, str]]] = {"decisions": {}, "action_items": {}}
+    if triage_enabled and (decisions or action_items):
+        triage_verdicts = _run_minutes_triage(
+            pm_conn, decisions, action_items, deleted_decisions, deleted_actions,
+            human_kept_decisions, human_kept_actions,
+            force, kind, held_at, mc_row, meeting_id, log=log,
+        )
+
+    if dry_run:
+        for d in decisions:
+            if force and d["content"] in deleted_decisions:
+                continue
+            verdict, reason = triage_verdicts["decisions"].get(d["content"], ("KEEP", ""))
+            if verdict == "DROP":
+                log(f"    [TRIAGE] DROP decision: {d['content'][:80]}… — 理由: {reason}")
+        for a in action_items:
+            if force and a["content"] in deleted_actions:
+                continue
+            verdict, reason = triage_verdicts["action_items"].get(a["content"], ("KEEP", ""))
+            if verdict == "DROP":
+                log(f"    [TRIAGE] DROP action_item: {a['content'][:80]}… — 理由: {reason}")
+        return "ok"
+
+    now = datetime.now().isoformat()
+    source_ref = file_path or ""
+
+    if force:
         pm_conn.execute(
             "DELETE FROM decisions WHERE meeting_id = ? AND COALESCE(deleted,0)=0",
             (meeting_id,),
@@ -165,26 +347,43 @@ def transfer_meeting(
         if force and d["content"] in deleted_decisions:
             log(f"    [SKIP] 削除済みの決定事項をスキップ: {d['content'][:60]}")
             continue
-        pm_conn.execute(
+        verdict, reason = triage_verdicts["decisions"].get(d["content"], ("KEEP", ""))
+        deleted_flag = 1 if verdict == "DROP" else 0
+        cur = pm_conn.execute(
             "INSERT INTO decisions"
             " (meeting_id, content, decided_at, source, source_ref, source_context, extracted_at,"
-            " rationale, trade_off, reversal_condition)"
-            " VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?, ?)",
+            " rationale, trade_off, reversal_condition, deleted)"
+            " VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?, ?, ?)",
             (meeting_id, d["content"], held_at, source_ref, d["source_context"], held_at,
-             d["rationale"], d["trade_off"], d["reversal_condition"]),
+             d["rationale"], d["trade_off"], d["reversal_condition"], deleted_flag),
         )
+        if deleted_flag:
+            log(f"    [TRIAGE] DROP decision（deleted=1で登録): {d['content'][:80]}… — 理由: {reason}")
+            _write_triage_audit(pm_conn, "decisions", cur.lastrowid, reason)
+        elif force and d["content"] in human_kept_decisions:
+            # human_kept 保護を新しい record_id に付け替える（force は DELETE→INSERT
+            # で id が変わるため、旧 id を指した audit_log では次回 force で保護が
+            # 効かなくなる）
+            _write_human_kept_audit(pm_conn, "decisions", cur.lastrowid)
 
     for a in action_items:
         if force and a["content"] in deleted_actions:
             log(f"    [SKIP] 削除済みのアクションアイテムをスキップ: {a['content'][:60]}")
             continue
-        pm_conn.execute(
+        verdict, reason = triage_verdicts["action_items"].get(a["content"], ("KEEP", ""))
+        deleted_flag = 1 if verdict == "DROP" else 0
+        cur = pm_conn.execute(
             "INSERT INTO action_items"
-            " (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at)"
-            " VALUES (?, ?, ?, ?, 'open', 'meeting', ?, ?)",
+            " (meeting_id, content, assignee, due_date, status, source, source_ref, extracted_at, deleted)"
+            " VALUES (?, ?, ?, ?, 'open', 'meeting', ?, ?, ?)",
             (meeting_id, a["content"], normalize_assignee(a["assignee"]), a["due_date"],
-             source_ref, held_at),
+             source_ref, held_at, deleted_flag),
         )
+        if deleted_flag:
+            log(f"    [TRIAGE] DROP action_item（deleted=1で登録): {a['content'][:80]}… — 理由: {reason}")
+            _write_triage_audit(pm_conn, "action_items", cur.lastrowid, reason)
+        elif force and a["content"] in human_kept_actions:
+            _write_human_kept_audit(pm_conn, "action_items", cur.lastrowid)
 
     pm_conn.commit()
     return "ok"
@@ -202,6 +401,7 @@ def process_minutes_db(
     no_encrypt: bool,
     meeting_id_filter: str | None = None,
     log=print,
+    triage: bool = True,
 ) -> tuple[int, int]:
     """Returns: (ok_count, skipped_count)"""
     kind = db_file.stem
@@ -240,6 +440,7 @@ def process_minutes_db(
         status = transfer_meeting(
             pm_conn, minutes_conn, meeting_id, held_at, kind, file_path,
             force=force, dry_run=dry_run, log=log,
+            triage=triage,
         )
         minutes_conn.close()
 
@@ -364,6 +565,10 @@ class MinutesIngestPlugin:
             metavar="MEETING_ID",
             help="特定の meeting_id のみ転記（minutes ソース用）",
         )
+        parser.add_argument(
+            "--minutes-no-triage", action="store_true",
+            help="転記時トリアージ（抽出候補の3ゲート審査）を無効化（デフォルト: 有効）",
+        )
 
     def run(self, args: argparse.Namespace, ctx: IngestContext) -> None:
         minutes_dir = (
@@ -404,10 +609,13 @@ class MinutesIngestPlugin:
             ctx.log("[INFO] --dry-run モード（DB保存なし）")
         force = ctx.force or getattr(args, "minutes_force", False)
         meeting_id_filter = getattr(args, "minutes_meeting_id", None)
+        triage = not getattr(args, "minutes_no_triage", False)
         if force:
             ctx.log("[INFO] --force モード（既存レコードを上書き）")
         if meeting_id_filter:
             ctx.log(f"[INFO] meeting_id: {meeting_id_filter} のみ処理")
+        if not triage:
+            ctx.log("[INFO] トリアージ無効: --minutes-no-triage")
 
         total_ok = total_skipped = 0
         for db_file in db_files:
@@ -419,6 +627,7 @@ class MinutesIngestPlugin:
                 since=ctx.since, force=force, dry_run=ctx.dry_run,
                 no_encrypt=ctx.no_encrypt, log=ctx.log,
                 meeting_id_filter=meeting_id_filter,
+                triage=triage,
             )
             total_ok      += ok
             total_skipped += skipped

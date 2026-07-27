@@ -15,6 +15,9 @@ Usage:
 共通オプション:
     --db PATH           pm.db のパス（デフォルト: data/pm.db）
     --dry-run           DB保存なし・確認のみ
+                        （minutes ソースは transfer_meeting の転記時トリアージが
+                          dry_run でも実行されるため、対象会議数ぶんの LLM コールが
+                          発生する。--minutes-no-triage で回避可能）
     --no-encrypt        平文モード
     --since YYYY-MM-DD  この日付以降のデータのみ対象
     --output PATH       ログをファイルにも保存
