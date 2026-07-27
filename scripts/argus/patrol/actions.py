@@ -191,6 +191,15 @@ def send_obsolete_confirm(ctx, ai_id: int, ai_row: dict, reason: str) -> bool:
 # --------------------------------------------------------------------------- #
 # リマインダー送信
 # --------------------------------------------------------------------------- #
+# detect.py の already_notified 判定キーと一致させること
+# （過去にキー不一致で cooldown が無効化されていた）
+_REMINDER_EVENT_TYPES = {
+    "overdue": "overdue_reminder",
+    "deadline_warning": "deadline_warning",
+    "stale": "stale_alert",
+}
+
+
 def send_reminder(
     ctx, assignee: str, items: list[dict], reminder_type: str
 ) -> bool:
@@ -234,9 +243,10 @@ def send_reminder(
     channel_id, _ = _send_dm_or_fallback(ctx, user_id, assignee, text=text)
 
     if channel_id:
+        event_type = _REMINDER_EVENT_TYPES.get(reminder_type, reminder_type)
         for it in items:
             ctx.state.record_notification(
-                reminder_type, f"ai:{it['id']}", channel_id
+                event_type, f"ai:{it['id']}", channel_id
             )
         return True
     return False
