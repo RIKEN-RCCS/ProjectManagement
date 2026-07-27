@@ -278,6 +278,12 @@ _CONDENSE_PROMPT = """以下は「{app}」の完了実績一覧（時系列）�
 経営層向けサマリーの「完了したこと」欄に載せる項目を最大{max_items}件に凝縮してください。
 
 ## 選定の優先順位（厳守）
+**この優先順位は「どれを選ぶか」の順序であり、出力件数を減らす指示ではない**。
+入力が{max_items}件以上ある場合は**必ず{max_items}件**出力すること。性能評価系の実績
+だけで枠が埋まらない場合、残りの枠は優先順位2→3の種別から**新しい順**に埋めて
+{max_items}件にする。類似統合で件数が減った場合も、残枠は他の実績で埋めて
+{max_items}件にする。
+
 1. **性能評価の実績を最優先**: 性能測定の実施・結果（絶対性能・対富岳比・GPU世代間比較・
    スケーラビリティ等）、実機評価、ベンチマーク測定。入力に存在する限り、枠の過半を
    この種別で埋めること。
@@ -300,6 +306,76 @@ _CONDENSE_PROMPT = """以下は「{app}」の完了実績一覧（時系列）�
 ---
 {numbered_titles}
 """
+
+
+# 日付括弧（半角/全角）とその中身を除去するための正規表現。
+# 例: "契約合意 (2025-09〜2025-12)" / "契約合意（2025-09）" → "契約合意"
+_PAREN_RE = re.compile(r"[（(][^）)]*[）)]")
+
+
+def _normalize_title_for_coverage(title: str) -> str:
+    """カバー済み判定用に、日付括弧の内容と空白を除去したキーを作る。"""
+    s = _PAREN_RE.sub("", title)
+    s = re.sub(r"\s+", "", s)
+    return s
+
+
+def _titles_overlap(a: str, b: str) -> bool:
+    """正規化済みタイトル同士が同一実績を指すとみなせるか（部分一致判定）。
+
+    短い方が6文字未満の場合は誤爆しやすいため不一致扱いとする。
+    """
+    if not a or not b:
+        return False
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) < 6:
+        return False
+    return shorter in longer
+
+
+def _find_original_index(item: str, all_titles: list[str]) -> int | None:
+    """item（selected/backfill いずれかの1件）が all_titles 中のどれに対応するかを返す。
+
+    対応が見つからない場合（LLM が統合・言い換えて元の title のどれとも
+    一致しない場合）は None。
+    """
+    item_norm = _normalize_title_for_coverage(item)
+    if not item_norm:
+        return None
+    for idx, t in enumerate(all_titles):
+        if _titles_overlap(item_norm, _normalize_title_for_coverage(t)):
+            return idx
+    return None
+
+
+def _backfill_condensed(selected: list[str], all_titles: list[str], target: int) -> list[str]:
+    """LLM の凝縮結果が target 件に満たない場合、未カバーの入力 title を
+    新しい順（末尾側から）に補充し、all_titles の出現順（時系列）に整列して返す。
+
+    LLM が独自に言い換え・統合した項目（all_titles のどれとも対応しない）は
+    末尾に置く。
+    """
+    normalized_selected = [_normalize_title_for_coverage(s) for s in selected]
+
+    def _is_covered(title: str) -> bool:
+        norm = _normalize_title_for_coverage(title)
+        return any(_titles_overlap(norm, sel_norm) for sel_norm in normalized_selected)
+
+    uncovered = [t for t in all_titles if not _is_covered(t)]
+    needed = target - len(selected)
+    backfill = uncovered[-needed:] if needed > 0 else []
+
+    combined = list(selected) + backfill
+    indexed: list[tuple[int, str]] = []
+    unmatched: list[str] = []
+    for item in combined:
+        idx = _find_original_index(item, all_titles)
+        if idx is None:
+            unmatched.append(item)
+        else:
+            indexed.append((idx, item))
+    indexed.sort(key=lambda pair: pair[0])
+    return [item for _, item in indexed] + unmatched
 
 
 def condense_confirmed_titles(app_name: str, titles: list[str], max_items: int = 5) -> list[str]:
@@ -331,6 +407,9 @@ def condense_confirmed_titles(app_name: str, titles: list[str], max_items: int =
                 if s:
                     result.append(s)
             if result:
+                expected = min(max_items, len(titles))
+                if len(result) < expected:
+                    result = _backfill_condensed(result, titles, expected)
                 return result
         except Exception as e:  # noqa: BLE001 — 1回の失敗で全体を止めない
             print(f"[WARN] {app_name}: 実績凝縮失敗 (試行{attempt + 1}/3): {e}", file=sys.stderr)
