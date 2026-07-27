@@ -355,13 +355,38 @@ def parse_minutes_output(text: str) -> dict:
 # ファイル名ユーティリティ
 # --------------------------------------------------------------------------- #
 def infer_date_from_filename(file_path: Path) -> str:
+    """ファイル名から開催日 (YYYY-MM-DD) を推定する。
+
+    generate_minutes_local.py の出力ファイル名は
+    "<生成時刻>-<basename>-minutes.md" の形式で、<basename> 自体が別の
+    YYYY-MM-DD を含むことがある（元の録画ファイル名に由来。例:
+    "2026-06-10-132343-2026-09-10_ApplicationDiscussion-minutes.md" は
+    先頭の 2026-06-10 が実際の処理・開催日、末尾の 2026-09-10 は録画ファイルの
+    誤った命名日付で、このケースでは本関数は元々正しく先頭日付を返していた
+    ——実際の held_at 誤設定の混入源は pm_from_recording.sh 側の
+    --held-at 導出ロジックだった、別の問題）。
+
+    GMT 形式（Zoom 録画のタイムスタンプ）が1件でも見つかれば、その中で最も
+    先頭のものを**絶対優先**で採用する（GMT 形式は録画開始時刻由来で最も
+    信頼できるため、出現位置に関わらず汎用形式より優先する）。GMT 形式が
+    無い場合のみ、ハイフン/アンダースコア区切りの汎用形式のうち最も先頭の
+    ものを採用する（「全候補から単純に最先頭」は GMT 形式の実ファイルで
+    収録日でなく処理日を返す回帰を招くため、GMT 族を先に確定してから
+    汎用形式にフォールバックする2段構えにしている）。
+    """
     name = file_path.stem
-    m = re.search(r"GMT(\d{4})(\d{2})(\d{2})", name)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    m = re.search(r"(\d{4})[_\-](\d{2})[_\-](\d{2})", name)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    gmt = [
+        (m.start(), f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+        for m in re.finditer(r"GMT(\d{4})(\d{2})(\d{2})", name)
+    ]
+    if gmt:
+        return min(gmt)[1]
+    plain = [
+        (m.start(), f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+        for m in re.finditer(r"(\d{4})[_\-](\d{2})[_\-](\d{2})", name)
+    ]
+    if plain:
+        return min(plain)[1]
     return datetime.now().strftime("%Y-%m-%d")
 
 

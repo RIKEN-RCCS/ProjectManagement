@@ -10,9 +10,9 @@ repos:
         pass_filenames: false
       - id: pytest
         name: pytest (tests/)
-        entry: /home/users/hikaru.inoue/.venv_aarch64/bin/python3 -m pytest tests/ -x --ignore=tests/argus/test_agent_tools.py
+        entry: /home/users/hikaru.inoue/.venv_aarch64/bin/python3 -m pytest tests/ -x --ignore=tests/argus/test_agent_tools.py -m "not slow"
         language: script
-        types: [python]
+        types_or: [python, shell, yaml]
         stages: [pre-commit]
         pass_filenames: false
       - id: mypy

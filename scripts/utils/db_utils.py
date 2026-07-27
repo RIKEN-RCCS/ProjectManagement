@@ -852,7 +852,7 @@ if __name__ == "__main__":
     import argparse
     import sys
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from cli_utils import make_logger
 
     parser = argparse.ArgumentParser(description="db_utils CLI")

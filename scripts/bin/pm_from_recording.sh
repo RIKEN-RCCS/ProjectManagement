@@ -56,6 +56,12 @@ fi
 
 export SINGULARITY_BIND=/lvs0
 
+# cron 実行時に box CLI (Node 製) が見つかるよう PATH を補う
+# （_lib_sync_canvas.sh 経由の pm_xlsx_sync.py・Box 議事録アップロード・
+#   Box XLSX 更新が box CLI に依存する）
+export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
+command -v box >/dev/null 2>&1 || echo "[WARN] box CLI が PATH に見つかりません（nvm の node バージョン変更を確認）" >&2
+
 if [[ -f ~/.secrets/localLLM.sh ]]; then
   source ~/.secrets/localLLM.sh
 fi
@@ -317,6 +323,9 @@ EOF
 
   # --------------------------------------------------------------------------- #
   # 開催日の決定
+  #   優先順位: GMT収録日（JST変換、最優先）> ファイル名先頭の日付
+  #   （infer_date_from_filename と同じ意味論。GMT絶対優先→汎用形式の最先頭）
+  #   > 処理日（本日、フォールバック）
   # --------------------------------------------------------------------------- #
   if [[ -n "$HELD_AT" ]]; then
     DATE_TO_USE="$HELD_AT"
@@ -327,11 +336,27 @@ EOF
       UTC_STR="${GMT_DATE:0:4}-${GMT_DATE:4:2}-${GMT_DATE:6:2} ${GMT_TIME:0:2}:${GMT_TIME:2:2}:${GMT_TIME:4:2}"
       DATE_TO_USE=$(date -d "$UTC_STR UTC + 9 hours" +%Y-%m-%d 2>/dev/null || true)
     fi
-    if [[ -z "${DATE_TO_USE:-}" ]]; then
-      DATE_TO_USE=$(date +%Y-%m-%d)
-      echo "[INFO] ファイル名から日付を取得できませんでした。本日の日付を使用: $DATE_TO_USE"
-    else
+    if [[ -n "${DATE_TO_USE:-}" ]]; then
       echo "[INFO] GMT タイムスタンプを JST に変換: $DATE_TO_USE"
+    else
+      # GMT 形式でない場合は infer_date_from_filename() を再利用し、
+      # ファイル名先頭の日付（GMT絶対優先→汎用形式の最先頭）を推定する
+      # （見つからなければ本日日付を返すため、常に非空）
+      INFERRED_DATE=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON3" -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from pathlib import Path
+from minutes.pm_minutes_import import infer_date_from_filename
+print(infer_date_from_filename(Path('$(basename "$INPUT_ABS")')))
+" 2>/dev/null || true)
+      TODAY_JST=$(date +%Y-%m-%d)
+      if [[ -n "$INFERRED_DATE" && "$INFERRED_DATE" != "$TODAY_JST" ]]; then
+        DATE_TO_USE="$INFERRED_DATE"
+        echo "[INFO] ファイル名から開催日を推定: $DATE_TO_USE"
+      else
+        DATE_TO_USE="$TODAY_JST"
+        echo "[INFO] ファイル名から日付を取得できませんでした。本日の日付を使用: $DATE_TO_USE"
+      fi
     fi
   fi
 
@@ -526,7 +551,7 @@ EOF
     # -------------------------------------------------------------------- #
     # Step 4: Box 議事録アップロード + Canvas 目録更新（設定ありの場合のみ）
     # -------------------------------------------------------------------- #
-    MEETING_CFG=$(python3 -c "
+    if ! MEETING_CFG=$("$PYTHON3" -c "
 import sys, yaml
 from pathlib import Path
 root = Path('$REPO_ROOT')
@@ -537,7 +562,10 @@ if not cfg_path.exists():
 cfg = yaml.safe_load(cfg_path.read_text())
 m = (cfg.get('meetings') or {}).get('$MEETING_NAME', {})
 print(f\"{1 if m.get('box_folder_id') else 0} {1 if m.get('catalog_canvas_id') else 0}\")
-" 2>/dev/null || echo "0 0")
+"); then
+      echo "[WARN] argus_config.yaml からの meetings 設定取得に失敗しました。Box アップロード/Canvas 目録更新をスキップします" >&2
+      MEETING_CFG="0 0"
+    fi
     HAS_BOX=$(echo "$MEETING_CFG" | cut -d' ' -f1)
     HAS_CANVAS=$(echo "$MEETING_CFG" | cut -d' ' -f2)
     CATALOG_OPTS=""

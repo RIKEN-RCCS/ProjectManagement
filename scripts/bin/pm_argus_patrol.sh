@@ -18,6 +18,7 @@ LOCKFILE="$BASEDIR/data/.pm_argus_patrol.lock"
 # （自動クローズ後の XLSX 再エクスポート = xlsx_sync 巻き戻り防止の生命線。
 #   これが無いと再エクスポートが FileNotFoundError で毎回失敗する）
 export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
+command -v box >/dev/null 2>&1 || echo "[WARN] box CLI が PATH に見つかりません（nvm の node バージョン変更を確認）" >&2
 
 source "$HOME/.secrets/slack_tokens.sh"
 source "$HOME/.secrets/rivault_tokens.sh"

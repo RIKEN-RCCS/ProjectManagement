@@ -5,6 +5,9 @@ addopts = "-v --tb=short"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+markers = [
+    "slow: 実行に数秒〜数十秒かかるテスト（torch 等の重量級 import を含む）。pre-commit では -m \"not slow\" で除外する。",
+]
 
 # --------------------------------------------------------------------------- #
 # vulture: dead code detection

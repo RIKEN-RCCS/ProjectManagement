@@ -43,6 +43,7 @@ fi
 
 # cron 実行時に box CLI (Node 製) が見つかるよう PATH を補う
 export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
+command -v box >/dev/null 2>&1 || echo "[WARN] box CLI が PATH に見つかりません（nvm の node バージョン変更を確認）" >&2
 
 _BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then

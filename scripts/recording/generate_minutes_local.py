@@ -1369,7 +1369,6 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=8192, help="最大出力トークン数（デフォルト: 8192）")
     parser.add_argument("--multi-stage", action="store_true", help="マルチステージ（分割→抽出→統合）モードを有効化")
     parser.add_argument("--chunk-minutes", type=int, default=90, help="マルチステージ時のチャンクサイズ（分単位、デフォルト: 90。2026-07-26 A/B・レビュー指摘 R1/R2 反映。旧構成は --chunk-minutes 10 --consensus 3）")
-    parser.add_argument("--no-stream", action="store_true", help="ストリーミングを無効化（LiteLLM プロキシ経由等で streaming が動作しない場合に使用）")
     parser.add_argument("--temperature", type=float, default=None, help="サンプリング温度（デフォルト: think=True 時 0.6、それ以外 0.8）。Kimi-K2-Thinking は 1.0 推奨")
     parser.add_argument(
         "--from-combined",

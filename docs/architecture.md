@@ -360,7 +360,7 @@ pm_qa_server.py (Socket Mode デーモン)
 | `data/box_docs.db` | BOX ドキュメント本文 (Markdown) | `pm_box_crawl.py` | `pm_embed.py` | ✅ |
 | `data/web_articles.db` | 外部 Web 記事 | `pm_web_fetch.py` | `pm_embed.py` | ✅ |
 | `data/qa_index.db` | FTS5 全文検索 + embedding | `pm_embed.py` | Argus (investigate/ask) | ✅ |
-| `data/patrol_state.db` | Patrol 冪等性・承認待ち | `pm_argus_patrol.py` | `pm_argus_patrol.py` | ✅ |
+| `data/patrol_state.db` | Patrol 冪等性・承認待ち | `pm_argus_patrol.py` | `pm_argus_patrol.py` | -（平文設計。機密情報を含まないため暗号化不要） |
 | `data/voice_uploads.db` | TTS 音声ファイル投稿履歴 | `pm_tts.py` | `pm_tts.py` | ✅ |
 | `data/admin_jobs.db` | 非同期ジョブ管理 | `web_admin.py` | `pm_api.py` | - |
 

@@ -28,6 +28,7 @@ set -euo pipefail
 
 # box CLI の PATH を通す（cron 環境では .bashrc がロードされないため）
 export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
+command -v box >/dev/null 2>&1 || echo "[WARN] box CLI が PATH に見つかりません（nvm の node バージョン変更を確認）" >&2
 
 . ~/.secrets/slack_tokens.sh
 [ -f ~/.secrets/localLLM.sh ] && . ~/.secrets/localLLM.sh

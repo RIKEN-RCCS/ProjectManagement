@@ -1100,3 +1100,26 @@ python3 scripts/pm_relink.py --list --all
 
 **埋め込みサーバが落ちている場合**: `--no-embed` を付けると埋め込みをスキップし、全マイルストーンを LLM に渡す動作にフォールバックする（エラーで止まらない）。
 
+
+---
+
+## pm_selfcheck.py — バグクラス回帰の自己診断（データ不変条件）
+
+過去に発生したバグのクラス（未来日付・発生日より古い証拠での自動クローズ・xlsx_sync の
+未解消巻き戻り・note 消失クローズ・patrol 状態キーのドリフト）を本番 DB の**読み取り専用**
+検査として定期確認する。違反 0 なら exit 0、あれば一覧を出して exit 1。
+
+```sh
+# 手動実行（直近 7 日の変更を検査）
+~/.venv_aarch64/bin/python3 scripts/quality/pm_selfcheck.py --days 7
+
+# JSON 出力
+~/.venv_aarch64/bin/python3 scripts/quality/pm_selfcheck.py --days 7 --json
+
+# cron ラッパー（venv activate + logs/pm_selfcheck.log へ追記）
+bash scripts/bin/pm_selfcheck.sh
+```
+
+静的なバグクラス検査（CLI --help 全数スモーク、cron ラッパーの PATH/venv 契約、
+patrol 状態キーの記録↔判定整合、argparse 飾り引数、patrol config キー整合）は
+`tests/selfcheck/` にあり、**pre-commit の pytest で毎コミット自動実行**される。

@@ -23,6 +23,12 @@ set -euo pipefail
 # RiVault トークン（Self-consistency の embedding 取得に必要）
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
 
+# cron 実行時に box CLI (Node 製) が見つかるよう PATH を補う
+# （_lib_sync_canvas.sh 経由の pm_xlsx_sync.py・pm_minutes_catalog.py の
+#   Box アップロードが box CLI に依存する）
+export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
+command -v box >/dev/null 2>&1 || echo "[WARN] box CLI が PATH に見つかりません（nvm の node バージョン変更を確認）" >&2
+
 _BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
   SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
