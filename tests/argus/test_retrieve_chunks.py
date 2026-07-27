@@ -53,7 +53,12 @@ DIM = 4  # テスト用低次元ベクトル
 
 
 def _make_qa_db(tmp_path: Path, index_name: str = "test") -> Path:
-    """chunk を 3 件持つ qa_index.db を作成して返す。"""
+    """chunk を 4 件持つ qa_index.db を作成して返す。
+
+    r4 は held_at が古い box_document チャンク。box_document は既定
+    （exempt_box=True）で日付フィルタを免除されるため、since_date テストで
+    r3（非box の古いチャンク）とは異なる扱いになることの検証に使う。
+    """
     db_path = tmp_path / "qa_index.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(_QA_INDEX_SCHEMA)
@@ -62,6 +67,7 @@ def _make_qa_db(tmp_path: Path, index_name: str = "test") -> Path:
         ("minutes", "test.db", "r1", "2026-06-01", "スケールアウトネットワーク設計に関する議論"),
         ("slack",   "test.db", "r2", "2026-06-10", "富士通の演算性能ベンチマーク結果報告"),
         ("minutes", "test.db", "r3", "2026-01-01", "古い議事録の内容"),
+        ("box_document", "test.db", "r4", "2026-01-15", "予算配分に関する古いBoxメモ"),
     ]
     for src_type, src_db, rec_id, held_at, content in chunks:
         conn.execute(
@@ -99,6 +105,30 @@ def _make_qa_db(tmp_path: Path, index_name: str = "test") -> Path:
 
 
 # --------------------------------------------------------------------------- #
+# _build_date_filter
+# --------------------------------------------------------------------------- #
+
+class TestBuildDateFilter:
+    def test_since_date_none_returns_passthrough(self):
+        from argus.retrieval import _build_date_filter
+        clause, params = _build_date_filter(None)
+        assert clause == "1=1"
+        assert params == []
+
+    def test_exempt_box_true_default(self):
+        from argus.retrieval import _build_date_filter
+        clause, params = _build_date_filter("2026-06-01")
+        assert clause == "(c.held_at >= ? OR c.source_type = 'box_document')"
+        assert params == ["2026-06-01"]
+
+    def test_exempt_box_false(self):
+        from argus.retrieval import _build_date_filter
+        clause, params = _build_date_filter("2026-06-01", exempt_box=False)
+        assert clause == "c.held_at >= ?"
+        assert params == ["2026-06-01"]
+
+
+# --------------------------------------------------------------------------- #
 # retrieve_chunks (FTS5 trigram path)
 # --------------------------------------------------------------------------- #
 
@@ -117,13 +147,28 @@ class TestRetrieveChunks:
         assert any("スケールアウト" in r["content"] for r in results)
 
     def test_since_date_filters_old_records(self, qa_db, monkeypatch):
-        """since_date を指定すると古いチャンクが除外される。"""
+        """since_date を指定すると古いチャンクが除外される
+        （box_document は既定 exempt_box=True で日付フィルタ免除のため対象外）。"""
         import argus.retrieval as srv
         monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
         from argus.retrieval import retrieve_chunks
         results = retrieve_chunks("議事録", qa_db, since_date="2026-06-01")
-        dates = [r["held_at"] for r in results if r.get("held_at")]
+        dates = [
+            r["held_at"] for r in results
+            if r.get("held_at") and r.get("source_type") != "box_document"
+        ]
         assert all(d >= "2026-06-01" for d in dates)
+
+    def test_since_date_exempt_box_false_also_filters_box(self, qa_db, monkeypatch):
+        """exempt_box=False では box_document も held_at で判定され、
+        since_date より古い box チャンク（r4）も除外される。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        from argus.retrieval import retrieve_chunks
+        results = retrieve_chunks(
+            "予算配分", qa_db, since_date="2026-06-01", exempt_box=False,
+        )
+        assert all(r.get("record_id") != "r4" for r in results)
 
     def test_nonexistent_db_returns_empty(self, tmp_path, monkeypatch):
         """DB ファイルが存在しない場合は空リストを返す。"""
@@ -192,6 +237,64 @@ class TestRetrieveChunksVector:
 
         assert results == []
 
+    def test_since_date_excludes_older_non_box_chunks(self, qa_db, monkeypatch):
+        """since_date 指定時、held_at がそれより古い非box チャンク（r3:
+        2026-01-01）が候補から除外される（FTS 経路 retrieve_chunks と同じ
+        意味論）。box_document（r4）は既定 exempt_box=True で免除され残る。"""
+        import embed_utils
+        fixed_vec = np.ones(DIM, dtype=np.float32)
+        monkeypatch.setattr(embed_utils, "embed_one", lambda q, **kw: fixed_vec)
+
+        conn = sqlite3.connect(str(qa_db))
+        conn.row_factory = sqlite3.Row
+        try:
+            from argus.retrieval import retrieve_chunks_vector
+            results = retrieve_chunks_vector(
+                "test", conn, k=4, index_name="test", since_date="2026-06-01",
+            )
+        finally:
+            conn.close()
+
+        record_ids = {r["record_id"] for r in results}
+        assert record_ids == {"r1", "r2", "r4"}
+
+    def test_since_date_exempt_box_false_excludes_box_too(self, qa_db, monkeypatch):
+        """exempt_box=False では box_document（r4）も held_at で判定され、
+        since_date より古いため除外される。"""
+        import embed_utils
+        fixed_vec = np.ones(DIM, dtype=np.float32)
+        monkeypatch.setattr(embed_utils, "embed_one", lambda q, **kw: fixed_vec)
+
+        conn = sqlite3.connect(str(qa_db))
+        conn.row_factory = sqlite3.Row
+        try:
+            from argus.retrieval import retrieve_chunks_vector
+            results = retrieve_chunks_vector(
+                "test", conn, k=4, index_name="test", since_date="2026-06-01",
+                exempt_box=False,
+            )
+        finally:
+            conn.close()
+
+        record_ids = {r["record_id"] for r in results}
+        assert record_ids == {"r1", "r2"}
+
+    def test_since_date_none_returns_all(self, qa_db, monkeypatch):
+        """since_date=None（既定）では従来どおり全チャンクが候補になる。"""
+        import embed_utils
+        fixed_vec = np.ones(DIM, dtype=np.float32)
+        monkeypatch.setattr(embed_utils, "embed_one", lambda q, **kw: fixed_vec)
+
+        conn = sqlite3.connect(str(qa_db))
+        conn.row_factory = sqlite3.Row
+        try:
+            from argus.retrieval import retrieve_chunks_vector
+            results = retrieve_chunks_vector("test", conn, k=4, index_name="test")
+        finally:
+            conn.close()
+
+        assert len(results) == 4
+
 
 # --------------------------------------------------------------------------- #
 # retrieve_chunks_hybrid (RRF 統合)
@@ -227,8 +330,10 @@ class TestRetrieveChunksHybrid:
             assert "rrf_score" in results[0]
 
     def test_hybrid_since_date_filter(self, qa_db, monkeypatch):
-        """since_date は FTS パスには適用されるが vector パスには適用されない（設計上の挙動）。
-        hybrid 結果が空でないことと、クラッシュしないことを確認する。"""
+        """since_date は FTS パス・vector パスの両方に適用される（retrieve_chunks_vector
+        への伝搬修正後の挙動）。since_date より古い非box チャンク（r3:
+        2026-01-01）は FTS・vector どちらの経路からも混入しない。box_document
+        （r4）は既定 exempt_box=True で免除されるため、残っても許容する。"""
         import argus.retrieval as srv
         import embed_utils
         monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
@@ -236,11 +341,45 @@ class TestRetrieveChunksHybrid:
 
         from argus.retrieval import retrieve_chunks_hybrid
         results = retrieve_chunks_hybrid("議事録", qa_db, since_date="2026-06-01", index_name="test")
-        # vector path は date を無視するため、since_date 以前のチャンクも混入しうる
-        # クラッシュせず結果が返ること、各 chunk に rrf_score があることを確認
         assert isinstance(results, list)
         for r in results:
             assert "content" in r
+            if r.get("source_type") != "box_document":
+                assert r.get("held_at", "") >= "2026-06-01"
+
+    def test_hybrid_exempt_box_false_excludes_old_box_chunk(self, qa_db, monkeypatch):
+        """exempt_box=False を hybrid に伝搬すると、FTS・vector 両経路で
+        box_document（r4）も since_date により除外される。"""
+        import argus.retrieval as srv
+        import embed_utils
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        monkeypatch.setattr(embed_utils, "embed_one", lambda q, **kw: np.ones(DIM, dtype=np.float32))
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid(
+            "予算配分", qa_db, since_date="2026-06-01", index_name="test",
+            exempt_box=False,
+        )
+        assert all(r.get("record_id") != "r4" for r in results)
+
+    def test_hybrid_propagates_since_date_to_vector(self, qa_db, monkeypatch):
+        """retrieve_chunks_hybrid が retrieve_chunks_vector 呼び出しに since_date を
+        伝搬すること（kwargs 捕捉、根本原因の再発防止）。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+
+        captured = {}
+
+        def fake_vector(query, conn, k=srv._VECTOR_K, index_name=None,
+                        record_ids=None, since_date=None, exempt_box=True):
+            captured["since_date"] = since_date
+            return []
+
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", fake_vector)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        retrieve_chunks_hybrid("議事録", qa_db, since_date="2026-06-01", index_name="test")
+        assert captured["since_date"] == "2026-06-01"
 
 
 # --------------------------------------------------------------------------- #

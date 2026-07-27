@@ -112,6 +112,26 @@ def sanitize_fts_query(q: str) -> str:
     return " ".join(tokens)
 
 
+def _build_date_filter(since_date: str | None, exempt_box: bool = True) -> tuple[str, list]:
+    """since_date に基づく SQL WHERE 句フラグメントと params を返す。
+
+    exempt_box=True（既定）: box_document は日付フィルタを免除する
+    （`c.held_at >= ? OR c.source_type = 'box_document'`）。box 文書は
+    held_at が更新日ではなく取得日/版管理日である等の事情により、従来から
+    鮮度フィルタの対象外としている。
+    exempt_box=False: box_document も含め `c.held_at >= ?` のみで判定する。
+    Patrol の完了証拠検索など「アイテム発生後の証拠のみを候補にしたい」用途
+    で使う（box 免除だと発生前の box 文書が候補に残り続けるため）。
+    held_at が NULL のチャンクは exempt_box の値に関わらず除外される
+    （`NULL >= ?` は偽になるため）。
+    """
+    if not since_date:
+        return "1=1", []
+    if exempt_box:
+        return "(c.held_at >= ? OR c.source_type = 'box_document')", [since_date]
+    return "c.held_at >= ?", [since_date]
+
+
 def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
                  date_filter: str = "1=1", date_params: list | None = None,
                  index_name: str | None = None,
@@ -198,7 +218,8 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
 def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
                     since_date: str | None = None,
                     index_name: str | None = None,
-                    record_ids: list[str] | None = None) -> list[dict]:
+                    record_ids: list[str] | None = None,
+                    exempt_box: bool = True) -> list[dict]:
     """統合 qa_index.db から関連チャンクを取得する。
 
     検索戦略（順番に試行）:
@@ -206,6 +227,8 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     2. trigram FTS5 AND検索（段階的トークン削減）
     3. LIKE 検索フォールバック
     4. 最新日付レコードのフォールバック
+
+    exempt_box: `_build_date_filter()` 参照。既定 True で従来挙動を維持。
     """
     if not index_db.exists():
         logger.warning(f"インデックスDBが見つかりません: {index_db}")
@@ -214,10 +237,7 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     conn = sqlite3.connect(str(index_db))
     conn.row_factory = sqlite3.Row
     try:
-        date_filter = (
-            "(c.held_at >= ? OR c.source_type = 'box_document')" if since_date else "1=1"
-        )
-        date_params = [since_date] if since_date else []
+        date_filter, date_params = _build_date_filter(since_date, exempt_box=exempt_box)
 
         if record_ids:
             placeholders = ",".join("?" * len(record_ids))
@@ -451,8 +471,14 @@ def retrieve_chunks_hyde(
 
 def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTOR_K,
                            index_name: str | None = None,
-                           record_ids: list[str] | None = None) -> list[dict]:
-    """chunk_embeddings を使って cosine similarity 検索を行う。"""
+                           record_ids: list[str] | None = None,
+                           since_date: str | None = None,
+                           exempt_box: bool = True) -> list[dict]:
+    """chunk_embeddings を使って cosine similarity 検索を行う。
+
+    since_date / exempt_box: retrieve_chunks（FTS 経路）と同じ意味論の
+    フィルタ。`_build_date_filter()` 参照。
+    """
     try:
         from embed_utils import blob_to_vector, cosine_similarity_matrix, embed_one
     except ImportError:
@@ -464,6 +490,8 @@ def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTO
     except Exception as e:
         logger.warning(f"embedding 取得エラー: {e}")
         return []
+
+    date_filter, date_params = _build_date_filter(since_date, exempt_box=exempt_box)
 
     if record_ids:
         placeholders = ",".join("?" * len(record_ids))
@@ -480,32 +508,37 @@ def retrieve_chunks_vector(query: str, conn: sqlite3.Connection, k: int = _VECTO
             " FROM chunks c"
             " JOIN chunk_embeddings e ON e.chunk_id = c.id"
             " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
-            " WHERE ci.index_name = ?" + record_filter
+            " WHERE ci.index_name = ? AND " + date_filter + record_filter
         )
-        rows = conn.execute(sql, [index_name] + record_params).fetchall()
+        rows = conn.execute(sql, [index_name] + date_params + record_params).fetchall()
     else:
         sql = (
             "SELECT c.id, c.source_type, c.source_db, c.record_id, c.held_at,"
             " c.content, c.source_ref, e.vector, e.dim"
             " FROM chunks c"
             " JOIN chunk_embeddings e ON e.chunk_id = c.id"
-            " WHERE 1=1" + record_filter
+            " WHERE " + date_filter + record_filter
         )
-        rows = conn.execute(sql, record_params).fetchall()
+        rows = conn.execute(sql, date_params + record_params).fetchall()
 
     if not rows:
         return []
 
     import numpy as np
-    chunks = [dict(r) for r in rows]
-    vecs = []
-    for c in chunks:
+    # dim が falsy な行はベクトル化できずスキップするため、chunks と vecs を
+    # ペアで詰め直す（別リストに独立して append すると、スキップされた行の分だけ
+    # 添字がずれて誤ったチャンクにスコアが割り当たる）。
+    paired: list[tuple[dict, object]] = []
+    for r in rows:
+        c = dict(r)
         dim = c.pop("dim")
         vec = blob_to_vector(c.pop("vector"), dim) if dim else None
         if vec is not None:
-            vecs.append(vec)
-    if not vecs:
+            paired.append((c, vec))
+    if not paired:
         return []
+    chunks = [p[0] for p in paired]
+    vecs = [p[1] for p in paired]
     vectors = np.stack(vecs)
     sims = cosine_similarity_matrix(qvec, vectors)
     top_k = np.argsort(-sims)[:k]
@@ -549,17 +582,23 @@ def retrieve_chunks_hybrid(
     question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     since_date: str | None = None, index_name: str | None = None,
     record_ids: list[str] | None = None,
+    exempt_box: bool = True,
 ) -> list[dict]:
-    """FTS5 + vector のハイブリッド検索。RRF で統合する。"""
+    """FTS5 + vector のハイブリッド検索。RRF で統合する。
+
+    exempt_box: `_build_date_filter()` 参照。既定 True で従来挙動を維持。
+    """
     fts_results = retrieve_chunks(question, index_db, k=k+20,
                                   since_date=since_date, index_name=index_name,
-                                  record_ids=record_ids)
+                                  record_ids=record_ids, exempt_box=exempt_box)
     conn = sqlite3.connect(str(index_db))
     conn.row_factory = sqlite3.Row
     try:
         vec_results = retrieve_chunks_vector(question, conn, k=_VECTOR_K,
                                              index_name=index_name,
-                                             record_ids=record_ids)
+                                             record_ids=record_ids,
+                                             since_date=since_date,
+                                             exempt_box=exempt_box)
     finally:
         conn.close()
 

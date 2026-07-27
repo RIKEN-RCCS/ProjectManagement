@@ -60,7 +60,7 @@ def detect_completion_signals(ctx) -> int:
 
     use_llm = cfg.get("use_llm", True)
     max_age = cfg.get("max_reply_age_days", 7)
-    cutoff_date = (date.fromisoformat(ctx.today) - timedelta(days=max_age)).isoformat()
+    base_cutoff_date = (date.fromisoformat(ctx.today) - timedelta(days=max_age)).isoformat()
 
     rows = ctx.conn.execute(
         "SELECT id, content, assignee, due_date, source_ref, source, extracted_at, note"
@@ -91,11 +91,15 @@ def detect_completion_signals(ctx) -> int:
         if row["source"] == "slack" and row["source_ref"]:
             channel_id, thread_ts = _parse_permalink(row["source_ref"])
             if channel_id and thread_ts:
-                replies = _get_recent_replies(ctx.data_dir, channel_id, thread_ts, cutoff_date)
-                for reply_text in replies:
-                    text_lower = reply_text.lower().strip()
+                # アイテム発生前（抽出時に既に存在し、Extractor が見た上で
+                # アイテム化した文脈）の返信は完了証拠にしない（AI #3056 再発防止）。
+                extracted_at = row_dict.get("extracted_at") or ""
+                item_cutoff_date = max(base_cutoff_date, extracted_at[:10]) if extracted_at else base_cutoff_date
+                replies = _get_recent_replies(ctx.data_dir, channel_id, thread_ts, item_cutoff_date)
+                for reply in replies:
+                    text_lower = reply["text"].lower().strip()
                     if any(kw in text_lower for kw in close_kw_lower):
-                        evidence = reply_text[:300]
+                        evidence = reply["text"][:300]
                         send_completion_confirm(ctx, ai_id, row_dict, evidence)
                         detected += 1
                         kw_hit = True
@@ -108,9 +112,9 @@ def detect_completion_signals(ctx) -> int:
                     evidence_list = [
                         {
                             "source_type": "slack_thread",
-                            "held_at": "",
+                            "held_at": r["held_at"],
                             "source_ref": row["source_ref"],
-                            "content": r,
+                            "content": r["text"],
                         }
                         for r in replies[:6]
                     ]
@@ -126,7 +130,7 @@ def detect_completion_signals(ctx) -> int:
         if not evidence_list:
             continue
 
-        judged = _llm_judge_completion(row["content"], evidence_list)
+        judged = _llm_judge_completion(row["content"], evidence_list, row["extracted_at"])
         if judged is None:
             continue
         is_complete, confidence, reason = judged
@@ -783,7 +787,9 @@ def detect_obsolete_items(ctx) -> int:
     recheck_days = cfg.get("recheck_days", 7)
 
     # 本検出器は qa_index 検索が本体のため evidence_from_index の既定を True にする
-    # （_get_activity_evidence 単体の既定は completion 側の段階ロールアウトに合わせ False）
+    # （_get_activity_evidence 単体の既定は completion 側の段階ロールアウトに合わせ False）。
+    # evidence_since_extracted も _get_activity_evidence 側の既定 True がそのまま効き、
+    # 発生日より前の証拠は方針転換の根拠にしない（意味論として妥当なため挙動は維持）。
     evidence_cfg = dict(cfg)
     evidence_cfg.setdefault("evidence_from_index", True)
 
@@ -937,13 +943,13 @@ _LLM_COMPLETION_PROMPT = """\
 このAIが**完了した**と判断できるかを判定してください。
 
 ## アクションアイテム
-{ai_content}
+{extracted_at_line}{ai_content}
 
 ## 証拠（出典付き）
 {evidence_text}
 
 ## 判定基準
-- 同一スレッドの返信に限らず、別の場（会議・別チャンネル・レポート等）での
+{extracted_at_guard}- 同一スレッドの返信に限らず、別の場（会議・別チャンネル・レポート等）での
   成果物提出・完了報告・対応済み報告も完了の根拠として扱ってよい
 - 明示的な完了報告（「完了」「done」等）だけでなく、成果物の提出・報告・対応済みの報告なども完了とみなす
 - 「検討中」「確認します」「対応予定」等は未完了
@@ -994,11 +1000,14 @@ _LLM_NO_RE = re.compile(r"^\s*NO\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def _llm_judge_completion(
-    ai_content: str, evidence: list[dict]
+    ai_content: str, evidence: list[dict], extracted_at: str | None = None
 ) -> tuple[bool, str | None, str] | None:
     """LLM に出典付きの証拠を分析させ、AI が完了したか確信度付きで判定する。
 
     evidence: {"source_type", "held_at", "source_ref", "content"} の辞書のリスト。
+    extracted_at: このアクションアイテムの発生日（ISO文字列、時刻部分は無視）。
+    プロンプトに明記し、発生日より前の情報を完了の証拠としないよう指示する
+    （AI #3056 の誤クローズ再発防止。深層防御の一つ）。
     Returns: (is_complete, confidence, reason) のタプル。confidence は
     完了時のみ "HIGH"|"LOW"、未完了時は None。LLM 利用不可・パース失敗時は
     None（呼び出し側は自動判定なしとして扱う）。
@@ -1018,9 +1027,21 @@ def _llm_judge_completion(
         # キャップ済みのため、12件あれば両ソースが切り捨てられずに収まる。
         for e in evidence[:12]
     )
+    # extracted_at 不明時は「発生日: ?」のような退化した記述をプロンプトに
+    # 出さず、発生日行・ガード文ともに省略する（判定基準は従来どおり他の
+    # 箇条書きのみで機能する）。
+    extracted_date = (extracted_at or "")[:10]
+    extracted_at_line = f"発生日: {extracted_date}\n" if extracted_date else ""
+    extracted_at_guard = (
+        f"- 発生日（{extracted_date}）より前の日付の情報は完了の証拠にならない"
+        "（アイテム化時点で既知の情報）\n"
+        if extracted_date else ""
+    )
     prompt = _LLM_COMPLETION_PROMPT.format(
         ai_content=ai_content[:500],
         evidence_text=evidence_text,
+        extracted_at_line=extracted_at_line,
+        extracted_at_guard=extracted_at_guard,
     )
 
     try:
@@ -1113,6 +1134,12 @@ def _get_activity_evidence(ctx, ai_row: dict, cfg: dict | None = None) -> list[d
                 k=k,
                 since_date=since_date,
                 index_name=cfg.get("evidence_index_name"),
+                # box_document は既定で日付フィルタを免除されるが、完了証拠検索では
+                # 発生日より前の box 文書を候補に残す理由がない（immune のままだと
+                # evidence_k の枠が「どうせ post-filter で捨てる古い box」で埋まり、
+                # 本来上位に来るべき証拠が枠外に漏れる。実測: extracted_at 基準で
+                # box の 96% が下記 post-filter で破棄されていた）。
+                exempt_box=False,
             )
             for q in queries
         ]
@@ -1131,6 +1158,18 @@ def _get_activity_evidence(ctx, ai_row: dict, cfg: dict | None = None) -> list[d
                     continue
                 seen.add(key)
                 merged.append(c)
+
+        # 上記 exempt_box=False + since_date で候補ロード段からほぼ絞り込めているが、
+        # retrieval 内部実装（FTS/vector 経路の日付フィルタ有無）に依存しない
+        # backstop として post-filter も残す（通常は no-op）。AI #3056 の証拠は
+        # box_document で、FTS 側は従来から box 免除で日付フィルタを素通りしていた
+        # ため、本 post-filter が主防御であり、vector 経路への since_date 伝搬は
+        # 従（3056 型自体は上記 exempt_box=False で解消）。extracted_at より古い
+        # 日付・日付不明（held_at 空）の証拠は自動クローズの根拠にしない
+        # （保守的判断）。
+        if since_date:
+            merged = [c for c in merged if (c.get("held_at") or "")[:10] >= since_date]
+
         merged = merged[: 2 * k]
 
         return [
@@ -1164,8 +1203,14 @@ def _parse_permalink(permalink: str) -> tuple[str, str]:
 
 def _get_recent_replies(
     data_dir: Path, channel_id: str, thread_ts: str, cutoff_date: str
-) -> list[str]:
-    """統合 Slack DB (data/slack.db) からスレッドの最新返信テキストを取得する。"""
+) -> list[dict]:
+    """統合 Slack DB (data/slack.db) からスレッドの最新返信を取得する。
+
+    Returns: {"text": str, "held_at": str（日付部分のみ、"YYYY-MM-DD"）} の
+    辞書のリスト（新しい順）。held_at は evidence の日付表示・post-filter の
+    意味論を qa_index 経由の証拠と揃えるために返す（カットオフ済みで実害は
+    無いが、LLM プロンプトへの表示を正確にする）。
+    """
     from db_utils import open_pm_db
 
     db_path = data_dir / "slack.db"
@@ -1175,14 +1220,17 @@ def _get_recent_replies(
     try:
         conn = open_pm_db(db_path)
         rows = conn.execute(
-            "SELECT text FROM replies"
+            "SELECT text, timestamp FROM replies"
             " WHERE thread_ts = ? AND channel_id = ?"
             "   AND timestamp >= ?"
             " ORDER BY msg_ts DESC LIMIT 20",
             (thread_ts, channel_id, cutoff_date),
         ).fetchall()
         conn.close()
-        return [r["text"] for r in rows if r["text"]]
+        return [
+            {"text": r["text"], "held_at": (r["timestamp"] or "")[:10]}
+            for r in rows if r["text"]
+        ]
     except Exception:
         return []
 
