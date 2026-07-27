@@ -36,6 +36,7 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 import yaml
 from cli_utils import call_argus_llm
+from cli_utils import env_int as _env_int
 from db_utils import open_pm_db
 
 logger = logging.getLogger("pm_argus_agent")
@@ -53,7 +54,7 @@ _MAX_INITIAL_SEARCH_QUERIES = 8
 _MAX_ZERO_TOOL_NUDGES = 2
 
 # --file 全文読込 QA (run_document_qa) のパラメータ
-_DOC_QA_WINDOW_SIZE = 24_000
+_DOC_QA_WINDOW_SIZE = 24_000  # 既定値。実効値は _effective_doc_qa_window_size() で動的取得
 _DOC_QA_WINDOW_OVERLAP = 1_000
 _DOC_QA_MAX_TOTAL_CHARS = 400_000
 _DOC_QA_MAX_FILES = 3
@@ -62,6 +63,11 @@ _DOC_QA_NO_INFO_MARK = "関連情報なし"
 _DOC_QA_SUSPICIOUS_LEN = 50  # これ未満の応答は「疑わしい却下」候補（entity一致と併用）
 _DOC_QA_FALLBACK_MIN_CHARS = 5_000  # エンティティ非依存フォールバックの窓文字数下限
 _DOC_QA_MAP_WORKERS = 4  # map 段（窓ごとの抽出）の並列度
+
+
+def _effective_doc_qa_window_size() -> int:
+    """ARGUS_DOC_QA_WINDOW（既定 _DOC_QA_WINDOW_SIZE=24000）の実効値を返す。"""
+    return _env_int("ARGUS_DOC_QA_WINDOW", _DOC_QA_WINDOW_SIZE)
 
 
 # =========================================================================== #
@@ -1147,8 +1153,9 @@ def run_document_qa(
         )
 
     included, excluded_names = _select_doc_qa_sources(docs)
+    window_size = _effective_doc_qa_window_size()
     doc_windows: list[tuple[str, list[str]]] = [
-        (d["name"], _split_document_windows(d["content"])) for d in included
+        (d["name"], _split_document_windows(d["content"], window_size=window_size)) for d in included
     ]
     total_windows = sum(len(w) for _, w in doc_windows)
     names_label = "、".join(d["name"] for d in included)

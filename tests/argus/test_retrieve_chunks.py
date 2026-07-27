@@ -375,6 +375,78 @@ class TestRerankChunksUseLlm:
 
 
 # --------------------------------------------------------------------------- #
+# 環境変数オーバーライド — ARGUS_TOP_K_RERANK / ARGUS_RERANK_PREVIEW_CHARS
+# --------------------------------------------------------------------------- #
+
+class TestRerankEnvOverrides:
+    def test_effective_top_k_rerank_default(self, monkeypatch):
+        import argus.retrieval as srv
+        monkeypatch.delenv("ARGUS_TOP_K_RERANK", raising=False)
+        assert srv._effective_top_k_rerank() == srv.TOP_K_RERANK_DEFAULT
+
+    def test_effective_top_k_rerank_overridden(self, monkeypatch):
+        import argus.retrieval as srv
+        monkeypatch.setenv("ARGUS_TOP_K_RERANK", "10")
+        assert srv._effective_top_k_rerank() == 10
+
+    def test_effective_top_k_rerank_invalid_falls_back(self, monkeypatch):
+        import argus.retrieval as srv
+        monkeypatch.setenv("ARGUS_TOP_K_RERANK", "not-a-number")
+        assert srv._effective_top_k_rerank() == srv.TOP_K_RERANK_DEFAULT
+
+    def test_effective_top_k_rerank_zero_falls_back(self, monkeypatch):
+        import argus.retrieval as srv
+        monkeypatch.setenv("ARGUS_TOP_K_RERANK", "0")
+        assert srv._effective_top_k_rerank() == srv.TOP_K_RERANK_DEFAULT
+
+    def test_rerank_chunks_top_k_none_uses_env_override(self, monkeypatch):
+        """top_k 未指定（None）時、rerank_chunks は ARGUS_TOP_K_RERANK を実効値に使う。"""
+        import cli_utils
+        monkeypatch.setenv("ARGUS_TOP_K_RERANK", "2")
+
+        def fake_call(prompt, **kw):
+            return "0 1"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": f"c{i}"} for i in range(5)]
+        result = rerank_chunks("q", chunks, use_llm=True)
+        assert len(result) == 2
+
+    def test_effective_rerank_preview_chars_default(self, monkeypatch):
+        import argus.retrieval as srv
+        monkeypatch.delenv("ARGUS_RERANK_PREVIEW_CHARS", raising=False)
+        assert srv._effective_rerank_preview_chars() == srv._RERANK_PREVIEW_CHARS_DEFAULT
+
+    def test_effective_rerank_preview_chars_overridden(self, monkeypatch):
+        import argus.retrieval as srv
+        monkeypatch.setenv("ARGUS_RERANK_PREVIEW_CHARS", "800")
+        assert srv._effective_rerank_preview_chars() == 800
+
+    def test_effective_rerank_preview_chars_invalid_falls_back(self, monkeypatch):
+        import argus.retrieval as srv
+        monkeypatch.setenv("ARGUS_RERANK_PREVIEW_CHARS", "-5")
+        assert srv._effective_rerank_preview_chars() == srv._RERANK_PREVIEW_CHARS_DEFAULT
+
+    def test_rerank_chunks_preview_uses_env_override(self, monkeypatch):
+        """re-rank プロンプトのチャンクプレビュー長が ARGUS_RERANK_PREVIEW_CHARS に従う。"""
+        import cli_utils
+        monkeypatch.setenv("ARGUS_RERANK_PREVIEW_CHARS", "5")
+        captured = {}
+
+        def fake_call(prompt, **kw):
+            captured["prompt"] = prompt
+            return "0"
+        monkeypatch.setattr(cli_utils, "call_argus_llm", fake_call)
+
+        from argus.retrieval import rerank_chunks
+        chunks = [{"content": "0123456789"} for _ in range(3)]
+        rerank_chunks("q", chunks, top_k=1, use_llm=True)
+        assert "01234" in captured["prompt"]
+        assert "0123456789" not in captured["prompt"]
+
+
+# --------------------------------------------------------------------------- #
 # build_full_context_sections / generate_brief_report (全文脈方式, call_argus_llm mocked)
 # --------------------------------------------------------------------------- #
 

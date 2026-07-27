@@ -970,14 +970,19 @@ pm_embed.py           → qa_index.db         (chunk_indexes で論理 index に
 | パラメータ | 値 | 説明 |
 |---|---|---|
 | `TOP_K_RETRIEVE` | 30 | FTS検索で取得する件数（`retrieval.py`） |
-| `TOP_K_RERANK` | 5 | re-rank後に回答生成へ渡す件数（`retrieval.py`） |
-| `rerank preview` | 400文字 | re-rankプロンプトでの各チャンク提示長 |
+| `TOP_K_RERANK` | 5 | re-rank後に回答生成へ渡す件数（`retrieval.py`）。env `ARGUS_TOP_K_RERANK` で上書き可 |
+| `rerank preview` | 400文字 | re-rankプロンプトでの各チャンク提示長。env `ARGUS_RERANK_PREVIEW_CHARS` で上書き可 |
+| `search_text 抜粋` | 400文字 | investigate へ返す各チャンク抜粋長（`mcp_tools._excerpt`、`[図:` チャンクは全文）。env `ARGUS_SEARCH_EXCERPT_CHARS` で上書き可 |
 | `rerank max_tokens` | 4096 | re-rank呼び出しの上限トークン数（rivaultフォールバック先がKimi-K2-Thinkingの場合のthinking消費を見込んだ設定） |
 | `rerank timeout` | 30秒 | re-rank呼び出しのタイムアウト（`search_text`は高頻度ツールのためinvestigateの480秒予算を守る） |
 | `CHUNK_MAX_CHARS` | 1000 | チャンク最大文字数 |
 | `CHUNK_OVERLAP_CHARS` | 100 | チャンクオーバーラップ文字数 |
 
 上記のうち re-rank 関連パラメータは「LLM re-ranking（既定有効）」節参照。
+env 上書き（`ARGUS_TOP_K_RERANK` / `ARGUS_RERANK_PREVIEW_CHARS` / `ARGUS_SEARCH_EXCERPT_CHARS` /
+`ARGUS_DOC_QA_WINDOW`）は `scripts/eval/investigate_ab.py` の A/B 測定用に導入したもので、
+既定値は表の値のまま。プロセス全体に効くため、eval 用に export したシェルで
+`pm_ingest.py` 等を回さないこと。
 
 ### pm_embed.py のオプション
 

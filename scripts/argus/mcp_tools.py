@@ -17,10 +17,16 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
+from cli_utils import (
+    env_int as _env_int,  # noqa: E402 — 上記 sys.path 追加後にインポート
+)
+
 logger = logging.getLogger("pm_mcp_tools")
 
 _DATA_DIR = _REPO_ROOT / "data"
 _QA_INDEX = _DATA_DIR / "qa_index.db"
+
+_SEARCH_EXCERPT_CHARS_DEFAULT = 400  # search_text の抜粋文字数（既定値）
 
 
 # =========================================================================== #
@@ -232,11 +238,13 @@ def _resolve_box_file_ids(
 
 def _excerpt(content: str) -> str:
     """チャンク本文の抜粋を返す。図言語化チャンク（[図: を含む）は数値節が
-    後半にあり 400 字切りで欠落するため全文を返し、それ以外は従来どおり 400 字。"""
+    後半にあり切り詰めで欠落するため全文を返し、それ以外は ARGUS_SEARCH_EXCERPT_CHARS
+    （既定400字）で切り詰める。"""
     content = content.strip()
     if "[図:" in content:
         return content
-    return content[:400].strip()
+    chars = _env_int("ARGUS_SEARCH_EXCERPT_CHARS", _SEARCH_EXCERPT_CHARS_DEFAULT)
+    return content[:chars].strip()
 
 
 def search_text(query: str, index_name: str = "pm", since: str | None = None,

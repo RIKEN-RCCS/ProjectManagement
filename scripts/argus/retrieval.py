@@ -12,6 +12,8 @@ import sqlite3
 from datetime import date as _date
 from pathlib import Path
 
+from cli_utils import env_int as _env_int
+
 logger = logging.getLogger("pm_qa_server")
 
 # --------------------------------------------------------------------------- #
@@ -19,7 +21,19 @@ logger = logging.getLogger("pm_qa_server")
 # --------------------------------------------------------------------------- #
 
 TOP_K_RETRIEVE = 30   # FTS 検索で広めに取得する件数
-TOP_K_RERANK = 5      # re-rank 後に回答生成へ渡す件数
+TOP_K_RERANK_DEFAULT = 5      # re-rank 後に回答生成へ渡す件数（既定値）
+TOP_K_RERANK = TOP_K_RERANK_DEFAULT  # 後方互換 alias。実効値は env 経由で動的取得（_effective_top_k_rerank）
+_RERANK_PREVIEW_CHARS_DEFAULT = 400  # re-rank プロンプトのチャンクプレビュー文字数（既定値）
+
+
+def _effective_top_k_rerank() -> int:
+    """ARGUS_TOP_K_RERANK（既定 TOP_K_RERANK_DEFAULT=5）の実効値を返す。"""
+    return _env_int("ARGUS_TOP_K_RERANK", TOP_K_RERANK_DEFAULT)
+
+
+def _effective_rerank_preview_chars() -> int:
+    """ARGUS_RERANK_PREVIEW_CHARS（既定 _RERANK_PREVIEW_CHARS_DEFAULT=400）の実効値を返す。"""
+    return _env_int("ARGUS_RERANK_PREVIEW_CHARS", _RERANK_PREVIEW_CHARS_DEFAULT)
 
 # 鮮度の半減期（日数）。365 日 = 約 1 年で recency_score が 0.5 になる。
 # 以前は 180 日（6ヶ月）と急峻で、関連性の高い歴史的マイルストーン
@@ -559,10 +573,11 @@ def retrieve_chunks_hybrid(
 # --------------------------------------------------------------------------- #
 
 def rerank_chunks(question: str, chunks: list[dict],
-                  openai_base: str = "", top_k: int = TOP_K_RERANK,
+                  openai_base: str = "", top_k: int | None = None,
                   format_source_label=None, use_llm: bool = False) -> list[dict]:
     """LLMを使って質問に最も関連するチャンクを top_k 件に絞り込む。
 
+    top_k: 省略時は _effective_top_k_rerank()（ARGUS_TOP_K_RERANK、既定5）を使用。
     format_source_label: chunk → str のラベル生成関数（省略時は source_ref/source_type を使用）。
     pm_qa_server.py から呼ぶ場合は _format_source_label を渡す。
     openai_base: 歴史的経緯の有効化フラグ（truthy なら re-rank を実行）。
@@ -571,6 +586,9 @@ def rerank_chunks(question: str, chunks: list[dict],
         有効判定は `use_llm or bool(openai_base)`。
     """
     from cli_utils import call_argus_llm
+
+    if top_k is None:
+        top_k = _effective_top_k_rerank()
 
     if not chunks or len(chunks) <= top_k:
         return chunks
@@ -583,10 +601,11 @@ def rerank_chunks(question: str, chunks: list[dict],
 
     _label = format_source_label or _default_label
 
+    preview_chars = _effective_rerank_preview_chars()
     lines = []
     for i, chunk in enumerate(chunks):
         label = _label(chunk)
-        preview = chunk["content"][:400].strip().replace("\n", " ")
+        preview = chunk["content"][:preview_chars].strip().replace("\n", " ")
         lines.append(f"[{i}] {label}\n{preview}")
     context_str = "\n\n".join(lines)
 

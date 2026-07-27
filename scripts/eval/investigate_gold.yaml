@@ -1,0 +1,50 @@
+# investigate_gold.yaml — investigate e2e A/B のゴールド質問セット
+# reference は judge がカバー率を測る「既知の在窓事実」（recall_gold.yaml 由来）
+version: 1
+entries:
+  - id: benchpark-build-status
+    mode: search
+    question: "Benchpark の各環境（富岳・FX700・GH200・Genoa・DGX-Spark）でのビルド対応状況は現在どうなっているか？"
+    reference: "Benchpark のビルド対応状況（富岳/FX700/GH200/Genoa/DGX-Spark）の進捗報告が存在する"
+    since: "2026-03-01"
+  - id: frontflow-blue-nvhpc-bug
+    mode: search
+    question: "FrontFlow/blue の動作に現在問題は発生しているか？あるなら原因と対応状況を教えて"
+    reference: "FrontFlow/blue が NVHPC 26.3 のコンパイラバグにより動作しない障害が発生し、NVIDIA へバグレポート提出中"
+    since: "2026-05-01"
+  - id: genesis-gpu-kernel-bottleneck
+    mode: search
+    question: "GENESIS の GPU カーネル計測の結果、ボトルネックとして何が特定されたか？"
+    reference: "GENESIS で GPU カーネル計測を実施し、ボトルネックとなる主要カーネル3つとそのパラメータを特定"
+    since: "2026-05-01"
+  - id: salmon-build-issues
+    mode: search
+    question: "SALMON の各環境でのビルド・実行で発生している問題を整理して"
+    reference: "SALMON の FX700/Genoa/DGX 各環境での Spack ビルドにおいて、MPI実行エラー・SLURM実行時の問題・NVHPCリンクエラーが個別に発生"
+    since: "2026-05-01"
+  - id: benchkit-copyright-policy
+    mode: search
+    question: "BenchKit への外部コントリビューションの著作権表記ルールはどう決まっているか？"
+    reference: "個別ファイルへの著作権表記は不要、PRコミットは要sign-off というルール"
+    since: "2026-06-01"
+  - id: genesis-license-change
+    mode: search
+    question: "GENESIS のライセンス変更（LGPL→BSD/MIT）は完了しているか？"
+    reference: "ライセンス変更は実際には未完了（AI生成ステータス資料への訂正が存在する）"
+    since: "2026-05-01"
+  # docqa: --file 全文読込 QA の窓拡大（24k→150k）測定用。対象は約36万字の長文報告書
+  # （24k窓では17分割、150k窓では3分割になり、窓分割起因の取りこぼし差が出やすい）。
+  # reference は文書内容の事前知識がないため弱い記述に留める — judge は主に
+  # 根拠性（出典・数値の明示）と質問への直接性で判定する
+  - id: hecbench-report-summary
+    mode: docqa
+    file: "2025年度 HeCBench ベンチマークの性能評価 報告書.pdf"
+    question: "HeCBench ベンチマークの性能評価報告書の要点をまとめて。評価対象の環境と、環境間で性能差（ギャップ）が大きいと報告されたベンチマークがあれば具体的に挙げて"
+    reference: "本文に評価環境の一覧と環境間の性能比較の記述が存在する長文報告書"
+    since: "2026-01-01"
+  - id: hecbench-report-numbers
+    mode: docqa
+    file: "2025年度 HeCBench ベンチマークの性能評価 報告書.pdf"
+    question: "HeCBench 性能評価報告書に記載されている数値結果を横断的に集約し、環境間の性能傾向を整理して"
+    reference: "報告書全体に分散した数値表・測定結果の横断集約（文書後半の数値の取りこぼし有無が品質差になる）"
+    since: "2026-01-01"

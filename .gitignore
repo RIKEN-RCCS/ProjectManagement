@@ -52,5 +52,8 @@ scripts/eval/*
 !scripts/eval/recall_gold.yaml
 !scripts/eval/embedding_duplicate_repro.py
 !scripts/eval/knowledge_ab.py
+!scripts/eval/argus_ab_judge.py
+!scripts/eval/investigate_ab.py
+!scripts/eval/investigate_gold.yaml
 scripts/ingest/*.bak
 scripts/data/voice_uploads.db

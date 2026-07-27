@@ -168,6 +168,11 @@ def mark_extracted(pm_conn, thread_ts: str, channel_id: str) -> None:
 # --------------------------------------------------------------------------- #
 # LLM 抽出
 # --------------------------------------------------------------------------- #
+# トリアージ方式: integrated=抽出プロンプトに3ゲートを統合し1回のLLM呼び出しで完結（既定）、
+# two_stage=Extractor→Triage の2段LLM呼び出し（旧方式。2次審査のレスポンス欠落で
+# 実在アイテムを取りこぼすパスがあり、A/B で integrated が全勝+引き分けだったため退役）。
+DEFAULT_TRIAGE_MODE = "integrated"
+
 EXTRACT_PROMPT = """
 あなたは富岳NEXTプロジェクトのプロジェクトマネージャーです。
 以下のSlackスレッドのメッセージを読み、決定事項とアクションアイテムを抽出してください。
@@ -334,6 +339,48 @@ EXTRACT_PROMPT = """
 }}
 ```
 """
+
+
+# --------------------------------------------------------------------------- #
+# 統合トリアージ（1パス版）: 抽出プロンプトに3ゲートの自己審査を織り込む
+# --------------------------------------------------------------------------- #
+_TRIAGE_GATES_SECTION = """## 出力前の最終審査（3ゲート）
+
+上記の定義に該当する候補を抽出したら、出力する前に各候補を以下の3つのゲートで順番に自己審査し、
+**すべてのゲートを通過した項目だけ**を出力JSONに含めること。
+シニアプロジェクトマネージャーとして「マイルストーン達成に実質的に必要な項目だけ」を残す。
+
+### ゲート1: マイルストーン関連性
+- この項目が完了しない場合、いずれかのマイルストーンの達成に実質的な支障が出るか？
+- どのマイルストーンにも関連づけられない → 除外
+
+### ゲート2: 代替可能性
+- この項目は、他の既存アクションアイテムや決定事項の付随作業に過ぎないか？
+- 「〜を更新する」「〜を確認する」「〜を共有する」「〜を準備する」などの
+  他項目の実行に伴う副次的作業 → 除外
+
+### ゲート3: 影響範囲
+- この項目が完了しない場合、後続の意思決定・他のタスク・スケジュールに影響が出るか？
+- 影響が出ない → 除外
+
+### 審査基準
+- **保守的に判定**: 判定に迷う場合は残すのではなく除外する
+- ただし、プロジェクトの戦略的転換点・リスク顕在化のシグナルとなる項目は迷った場合でも残す
+- 実質的に同じ内容の候補が複数ある場合、より詳細な方のみ残す
+- すべての候補が審査で除外されることもあり得る — その場合は空配列を返す
+
+"""
+
+if EXTRACT_PROMPT.count("## その他の指示") != 1:
+    raise RuntimeError(
+        "EXTRACT_PROMPT のアンカー '## その他の指示' が想定外の出現回数です"
+        f"（{EXTRACT_PROMPT.count('## その他の指示')} 回）。"
+        "EXTRACT_PROMPT_INTEGRATED の合成に失敗する可能性があるため中断します。"
+    )
+
+EXTRACT_PROMPT_INTEGRATED = EXTRACT_PROMPT.replace(
+    "## その他の指示", _TRIAGE_GATES_SECTION + "\n## その他の指示", 1
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -654,16 +701,30 @@ def extract_from_thread(
     consensus_threshold: float = 0.78,
     consensus_min_vote: int | None = None,
     enable_triage: bool = True,
+    triage_mode: str = DEFAULT_TRIAGE_MODE,
+    knowledge_context: str | None = None,
 ) -> dict:
-    # ナレッジ検索（Phase 2追加）— 統合 qa_index.db の pm-all で全件横断
-    knowledge_context = retrieve_knowledge_for_extraction(
-        row["thread_text"],
-        qa_db_path=(repo_root or REPO_ROOT) / "data" / "qa_index.db",
-        top_k=3,
-        index_name="pm-all",
-    )
+    if triage_mode not in ("two_stage", "integrated"):
+        raise ValueError(f"未知の triage_mode: {triage_mode!r}（'two_stage' または 'integrated' のみ）")
 
-    prompt = EXTRACT_PROMPT.format(
+    # two_stage の場合のみ triage_items() を別途呼ぶ。integrated はプロンプト自体に
+    # 3ゲートの自己審査を織り込み済みのため後段の LLM 呼び出しは不要。
+    run_two_stage_triage = enable_triage and triage_mode == "two_stage"
+    use_integrated_prompt = enable_triage and triage_mode == "integrated"
+
+    # ナレッジ検索（Phase 2追加）— 統合 qa_index.db の pm-all で全件横断。
+    # knowledge_context が呼び出し側から渡された場合（A/B 比較で両アームに同一の
+    # ナレッジ文脈を注入したい場合など）は再検索しない。
+    if knowledge_context is None:
+        knowledge_context = retrieve_knowledge_for_extraction(
+            row["thread_text"],
+            qa_db_path=(repo_root or REPO_ROOT) / "data" / "qa_index.db",
+            top_k=3,
+            index_name="pm-all",
+        )
+
+    prompt_template = EXTRACT_PROMPT_INTEGRATED if use_integrated_prompt else EXTRACT_PROMPT
+    prompt = prompt_template.format(
         context=context,
         knowledge_context=knowledge_context,
         timestamp=row.get("timestamp", "不明"),
@@ -676,7 +737,7 @@ def extract_from_thread(
         max_tokens = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "8192"))
         raw = call_argus_llm(prompt, timeout=600, think=True, max_tokens=max_tokens)
         result = extract_json(raw)
-        if enable_triage:
+        if run_two_stage_triage:
             result = triage_items(result, milestones)
         return result
 
@@ -687,7 +748,7 @@ def extract_from_thread(
         # サンプルが 1 件しか得られなかった場合は集約しない（投票不可）
         print(f"[WARN] Slack consensus: ドラフトが {len(drafts)}/{consensus_n} 件のみ。集約せず採用", file=sys.stderr)
         result = drafts[0]
-        if enable_triage:
+        if run_two_stage_triage:
             result = triage_items(result, milestones)
         return result
 
@@ -700,7 +761,7 @@ def extract_from_thread(
         file=sys.stderr,
     )
     result = {"decisions": decisions, "action_items": action_items}
-    if enable_triage:
+    if run_two_stage_triage:
         result = triage_items(result, milestones)
     return result
 
@@ -863,6 +924,12 @@ class SlackIngestPlugin:
             "--slack-no-triage", action="store_true",
             help="トリアージ（抽出候補の2次審査）を無効化（デフォルト: 有効）",
         )
+        parser.add_argument(
+            "--slack-triage-mode", choices=["two_stage", "integrated"],
+            default=DEFAULT_TRIAGE_MODE,
+            help="トリアージ方式: integrated=抽出プロンプトに3ゲートを統合し1回で実行（既定）/ "
+                 "two_stage=抽出後に別LLM呼び出しで審査（旧方式）",
+        )
 
     def run(self, args: argparse.Namespace, ctx: IngestContext) -> None:
         channel_id = args.slack_channel
@@ -898,10 +965,16 @@ class SlackIngestPlugin:
         consensus_threshold = getattr(args, "slack_consensus_threshold", 0.78)
         consensus_min_vote = getattr(args, "slack_consensus_min_vote", None)
         no_triage = getattr(args, "slack_no_triage", False)
+        triage_mode = getattr(args, "slack_triage_mode", DEFAULT_TRIAGE_MODE)
         if not no_triage:
-            ctx.log("[INFO] トリアージ有効: 抽出候補を2次審査します")
+            if triage_mode == "integrated":
+                ctx.log("[INFO] トリアージ有効: 2次審査を integrated（抽出プロンプトに統合）で実行")
+            else:
+                ctx.log("[INFO] トリアージ有効: 2次審査を two_stage で実行")
         else:
             ctx.log("[INFO] トリアージ無効: --slack-no-triage")
+            if triage_mode == "integrated":
+                ctx.log("[WARN] --slack-no-triage 指定のため --slack-triage-mode は無視されます")
         if consensus_n >= 2:
             ctx.log(
                 f"[INFO] Self-Consistency 有効: N={consensus_n}, "
@@ -928,6 +1001,7 @@ class SlackIngestPlugin:
                     consensus_threshold=consensus_threshold,
                     consensus_min_vote=consensus_min_vote,
                     enable_triage=not no_triage,
+                    triage_mode=triage_mode,
                 )
             except Exception as e:
                 ctx.log(f"  [WARN] 抽出失敗: {e}")

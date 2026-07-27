@@ -137,6 +137,74 @@ def test_build_tool_descriptions_empty_tools(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# _effective_doc_qa_window_size — ARGUS_DOC_QA_WINDOW 環境変数オーバーライド
+# --------------------------------------------------------------------------- #
+
+
+def test_effective_doc_qa_window_size_default(monkeypatch):
+    monkeypatch.delenv("ARGUS_DOC_QA_WINDOW", raising=False)
+    assert pm_argus_agent._effective_doc_qa_window_size() == pm_argus_agent._DOC_QA_WINDOW_SIZE
+
+
+def test_effective_doc_qa_window_size_overridden(monkeypatch):
+    monkeypatch.setenv("ARGUS_DOC_QA_WINDOW", "150000")
+    assert pm_argus_agent._effective_doc_qa_window_size() == 150000
+
+
+def test_effective_doc_qa_window_size_invalid_falls_back(monkeypatch):
+    monkeypatch.setenv("ARGUS_DOC_QA_WINDOW", "not-a-number")
+    assert pm_argus_agent._effective_doc_qa_window_size() == pm_argus_agent._DOC_QA_WINDOW_SIZE
+
+
+def test_effective_doc_qa_window_size_zero_falls_back(monkeypatch):
+    monkeypatch.setenv("ARGUS_DOC_QA_WINDOW", "0")
+    assert pm_argus_agent._effective_doc_qa_window_size() == pm_argus_agent._DOC_QA_WINDOW_SIZE
+
+
+def test_split_document_windows_uses_effective_window_size(monkeypatch):
+    """run_document_qa は _split_document_windows へ _effective_doc_qa_window_size() の
+    結果を渡す。ここではその実効値をヘルパ経由で直接検証する（統合実行は不要）。"""
+    content = "あ" * (pm_argus_agent._DOC_QA_WINDOW_SIZE + 1000)
+    monkeypatch.delenv("ARGUS_DOC_QA_WINDOW", raising=False)
+    default_windows = pm_argus_agent._split_document_windows(
+        content, window_size=pm_argus_agent._effective_doc_qa_window_size(),
+    )
+    assert len(default_windows) == 2  # 既定 24000 では収まらず2窓に分割される
+
+    monkeypatch.setenv("ARGUS_DOC_QA_WINDOW", str(pm_argus_agent._DOC_QA_WINDOW_SIZE + 2000))
+    expanded_windows = pm_argus_agent._split_document_windows(
+        content, window_size=pm_argus_agent._effective_doc_qa_window_size(),
+    )
+    assert len(expanded_windows) == 1  # 拡大後は1窓に収まる
+
+
+def test_run_document_qa_passes_effective_window_size_to_split(monkeypatch, agent_context):
+    """run_document_qa が _split_document_windows へ ARGUS_DOC_QA_WINDOW の実効値を
+    window_size= として実際に渡す配線そのものを検証する（_split_document_windows
+    自体をモックし、フル統合実行は行わない）。"""
+    content = "本文サンプル"
+    _patch_single_window_doc(monkeypatch, content)
+    agent_context.record_ids = ["rid1"]
+    agent_context.scoped_file_names = ["報告書.pdf"]
+    monkeypatch.setenv("ARGUS_DOC_QA_WINDOW", "150000")
+
+    captured = {}
+
+    def fake_split(text, window_size=pm_argus_agent._DOC_QA_WINDOW_SIZE,
+                   overlap=pm_argus_agent._DOC_QA_WINDOW_OVERLAP):
+        captured["window_size"] = window_size
+        return [text]
+    monkeypatch.setattr(pm_argus_agent, "_split_document_windows", fake_split)
+
+    fake = _FakeLLM(["抽出結果本文", "reduceによるまとめ"])
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake)
+
+    run_document_qa("質問", None, agent_context)
+
+    assert captured["window_size"] == 150000
+
+
+# --------------------------------------------------------------------------- #
 # run_document_qa — 疑わしい却下（偽の「関連情報なし」）対策
 # --------------------------------------------------------------------------- #
 

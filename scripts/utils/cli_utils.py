@@ -13,6 +13,22 @@ import sys
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
+# 環境変数ヘルパー
+# --------------------------------------------------------------------------- #
+
+def env_int(name: str, default: int) -> int:
+    """環境変数を int として読む。未設定・不正値・0以下は default にフォールバックする。"""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# --------------------------------------------------------------------------- #
 # argparse ヘルパー
 # --------------------------------------------------------------------------- #
 
