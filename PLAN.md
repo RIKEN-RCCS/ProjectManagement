@@ -6,6 +6,20 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 
 ## 現在進行中の計画
 
+### selfcheck 検査ジョブの運用開始（本体は 2026-07-27 実装済み — LOG.md 参照）
+
+**ステータス**: 静的検査（tests/selfcheck/）は pre-commit で毎コミット自動実行中。
+データ不変条件（pm_selfcheck.py）は手動実行で exit 0 を確認済み。
+
+**残作業**:
+1. **cron 登録（PM 実施）** — 以下を `crontab -e` で追加すると平日朝に自動実行される:
+   `30 6 * * 1-5 /lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement/scripts/bin/pm_selfcheck.sh`
+   （違反時は logs/pm_selfcheck.log に一覧が残る。Slack 通知はまだ無い —
+   数日運用して誤検知が無ければ通知配線を検討）
+2. **数日の運用観察** — 静的検査が正当なコミットを誤って弾かないか、
+   pm_selfcheck の誤検知（特に rollback_pattern / date_reversal_close）が無いか。
+   問題なければ本エントリを削除して LOG に一行記録
+
 ### brief/risk 全文脈化の事後観察（本体は適用済み — LOG.md 2026-07-23 参照）
 
 **ステータス**: PM 判断により brief/risk を全文脈 single-shot に統一・本番適用（2026-07-23）。
