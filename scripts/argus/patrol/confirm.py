@@ -74,7 +74,7 @@ def handle_approve_close(
 
             _append_close_note(
                 conn, ai_id, date.today().isoformat(), evidence,
-                label="Patrol承認クローズ",
+                label="Patrol承認クローズ", source="argus_patrol",
             )
 
     state.resolve_pending(pending_id, "approved", user_id)

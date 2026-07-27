@@ -71,6 +71,22 @@ def box_upload_or_version(
     return file_id
 
 
+def box_get_file_modified_at(file_id: str, log: Callable[[str], None]) -> str | None:
+    """Box ファイルの modified_at（ISO8601）を取得する。取得失敗時は None（warning ログ付き）。"""
+    try:
+        info = box_json(
+            ["box", "files:get", file_id, "--json", "--fields", "modified_at"],
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError, json.JSONDecodeError) as e:
+        log(f"  [BOX] modified_at 取得失敗 (file_id={file_id}): {e}")
+        return None
+    if isinstance(info, list):
+        info = info[0] if info else {}
+    return info.get("modified_at")
+
+
 def box_get_or_create_shared_link(file_id: str, log: Callable[[str], None]) -> str:
     """ファイルの共有リンクを取得（なければ作成）。URL を返す。"""
     info = box_json(

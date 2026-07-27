@@ -117,6 +117,13 @@ python3 scripts/pm_insight.py --db data/pm.db --since 2026-04-21 --dry-run --out
 `pm_xlsx_sync.py`（Box XLSX → pm.db 同期）→ `pm_xlsx_report.py`（pm.db → Box XLSX 生成・アップロード）を順次実行する。
 **XLSX 上の編集を pm.db に取り込んでから Box へバージョン更新**するため、会議中の編集を失わない。
 
+**シート鮮度ガード（2026-07-27 導入）**: `pm_xlsx_sync.py` は、シートのエクスポート打刻
+（XLSX docProps、取得不能時は Box modified_at → ローカル mtime にフォールバック）より
+**新しい pm.db 側の変更があるフィールドは同期しない**（patrol 自動クローズ等を古いシートで
+巻き戻さないため）。スキップは WARN ログに出る。シート編集と pm.db 変更が同一フィールドで
+競合した場合はシート側が破棄されるので、WARN を見たら編集を最新シートでやり直す。
+意図的に古いシートで上書きしたい場合のみ `--force`（自動クローズを巻き戻す点に注意）。
+
 ```sh
 # 通常運用
 bash scripts/canvas_report.sh --db data/pm.db --canvas-id <CANVAS_ID>

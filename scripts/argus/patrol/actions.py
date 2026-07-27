@@ -310,7 +310,7 @@ def close_action_item(
         "UPDATE action_items SET status = 'closed' WHERE id = ?", (ai_id,)
     )
     if note:
-        _append_close_note(ctx.conn, ai_id, ctx.today, note)
+        _append_close_note(ctx.conn, ai_id, ctx.today, note, source=resolved_by)
     logger.info("AI #%d を closed に更新 (by %s)", ai_id, resolved_by)
     return True
 
@@ -319,16 +319,24 @@ def close_action_item(
 # 内部ヘルパー
 # --------------------------------------------------------------------------- #
 def _append_close_note(
-    conn, ai_id: int, today: str, evidence_text: str, label: str = "自動クローズ"
+    conn, ai_id: int, today: str, evidence_text: str, label: str = "自動クローズ",
+    source: str = "argus_auto",
 ) -> None:
     """クローズの根拠を note 列（Web UI の「対応状況」）に追記する
-    （既存 note は保持し改行で連結）。"""
+    （既存 note は保持し改行で連結）。
+
+    audit_log にも記録し、pm_xlsx_sync.py の鮮度ガードが note 単独の更新も
+    検知できるようにする。
+    """
+    from pm_sync_canvas import write_audit_log
+
     row = conn.execute(
         "SELECT note FROM action_items WHERE id = ?", (ai_id,)
     ).fetchone()
     existing = (row["note"] if row else "") or ""
     entry = f"{today} {label}: {evidence_text[:200]}"
     new_note = f"{existing}\n{entry}" if existing else entry
+    write_audit_log(conn, ai_id, "note", existing or None, new_note, source)
     conn.execute(
         "UPDATE action_items SET note = ? WHERE id = ?", (new_note, ai_id)
     )

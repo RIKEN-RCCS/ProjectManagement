@@ -286,6 +286,19 @@ CREATE TABLE IF NOT EXISTS achievements (
     deleted         INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_achievements_app ON achievements(app);
+
+-- 変更履歴（pm_relink.py / pm_sync_canvas.py / pm_xlsx_sync.py 等が共有）。
+-- pm_xlsx_sync.py の鮮度ガードが SELECT するため、pm.db 生成時から必ず存在させる。
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    record_id  TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    changed_at TEXT NOT NULL,
+    source     TEXT
+);
 """
 
 
@@ -445,6 +458,13 @@ def open_pm_db(db_path: "Path", no_encrypt: bool = False) -> "_sqlite3.Connectio
                 "created_at TEXT, updated_at TEXT, deleted INTEGER DEFAULT 0)"
             ),
             "CREATE INDEX IF NOT EXISTS idx_achievements_app ON achievements(app)",
+            # 2026-07-27: pm_xlsx_sync.py の鮮度ガードが SELECT するため既存 DB にも保証する
+            (
+                "CREATE TABLE IF NOT EXISTS audit_log ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, "
+                "record_id TEXT NOT NULL, field TEXT NOT NULL, old_value TEXT, "
+                "new_value TEXT, changed_at TEXT NOT NULL, source TEXT)"
+            ),
         ],
     )
 
