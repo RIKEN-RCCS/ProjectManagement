@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-07-27 Slack 抽出トリアージを 2 段 → 1 パス統合に既定変更（LLM 1 呼削減 + 取りこぼしパス除去）
+
+**背景**: Extractor→Triage の 2 段分離は弱モデル（gemma4）前提の設計で、2 段目には「triage
+レスポンスに候補が欠落→保守的 DROP」という構造的な取りこぼしパスがあった。抽出プロンプトに
+3 ゲート自己審査を織り込む integrated 方式を追加し A/B（knowledge_ab --compare triage、
+狙い撃ち item-bearing 10 + ランダム 15、Kimi judge 順序スワップ）で実測。
+**決定**: integrated 勝ち 3・tie 19・**負け 0**（勝ち+引き分け 100%、両層とも）で既定を
+integrated へ（--slack-triage-mode two_stage で復帰可）。勝因はすべて「2 次審査が実在の
+決定・AI を握り潰すのを統合版が回避」— consensus 廃止と同じ「後段の審査が正解を殺す」病理。
+item-bearing スレッドの LLM 呼び出しが 2→1 に半減。狙い撃ちサンプリングは knowledge_ab の
+--item-bearing として恒久化（pm.db source_ref 起点、report は sampling 層別）。
+
 ## 2026-07-26 Slack 抽出の consensus 既定も 3→1 — 多数決が実在アイテムを握り潰す実例を確認
 
 **背景**: 議事録側の N=1 化に続き Slack 抽出側を実測。ランダム 15 スレッドでは両構成とも
