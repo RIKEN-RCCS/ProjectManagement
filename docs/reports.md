@@ -160,10 +160,12 @@ bash scripts/canvas_report.sh --db data/pm.db --canvas-id <CANVAS_ID> --dry-run
 3カテゴリに凝縮し、全アプリを1枚の PowerPoint にまとめる。呼び出し元は
 `scripts/bin/pm_nvidia_collab_update.sh`（週次 cron）。
 
-完了列（completed）は既定で `pm.db.achievements`（`status='confirmed'`）を優先ソースとして使う
-（**性能評価の実績を最優先**し、レポートに存在する限り枠の過半をこの種別で埋める設計）。
-台帳に該当行が無い場合のみレポート md からの LLM 抽出にフォールバックする（件数保証ガード）。
-`--no-completed-search` を指定すると台帳を使わず常に md 抽出のみで completed 列を生成する。
+完了列（completed）は既定で `pm.db.achievements`（`status='confirmed'`）を優先ソースとし、
+6件以上ある場合は LLM で5件に凝縮する。凝縮は**性能評価の実績を最優先**（残枠は協業節目→
+作成・登録系の順）で選定し、LLM が枠を使い切らない場合は台帳から機械補充する件数保証ガード付き。
+台帳に該当行が無い場合は qa_index 検索ベースの抽出（`achievements_extract.py`）→ レポート md
+からの抽出、の順にフォールバックする。`--no-completed-search` を指定すると台帳・検索を使わず
+常に md 抽出のみで completed 列を生成する。
 
 ```sh
 python3 scripts/reporting/pm_exec_summary.py argus_report_A.md argus_report_B.md \
