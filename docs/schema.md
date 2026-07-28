@@ -258,7 +258,26 @@ Canvas同期（`pm_sync_canvas.py`）およびマイルストーン紐づけ変�
 | `old_value` | TEXT | 変更前の値（NULL の場合は NULL） |
 | `new_value` | TEXT | 変更後の値 |
 | `changed_at` | TEXT | 変更日時（UTC ISO8601） |
-| `source` | TEXT | 変更元（`canvas_sync` または `relink`） |
+| `source` | TEXT | 変更元。現行の慣例値は下表参照 |
+
+**`source` 値の慣例**（`scripts/` 実装ベース。新しい書き込み元を追加する場合はここに追記する）:
+
+| 値 | 書き込み元 | 意味 |
+|---|---|---|
+| `canvas_sync` | `pm_sync_canvas.py` | Canvas 上の編集を pm.db へ反映 |
+| `relink` | `pm_relink.py --import` | CSV 一括編集 |
+| `xlsx_sync` | `pm_xlsx_sync.py` | Box XLSX の編集を pm.db へ反映 |
+| `auto_link` | `pm_link_milestones.py` | マイルストーン自動紐づけ |
+| `argus_auto` | `pm_argus_patrol.py`（`patrol/detect.py` → `actions.py::close_action_item`） | Patrol の自律自動クローズ（LLM/キーワード完了シグナル検出） |
+| `argus_patrol` | `pm_argus_patrol.py`（`patrol/confirm.py::handle_approve_close`） | Patrol の Block Kit ボタンで人間が承認したクローズ |
+| `web_ui` | `pm_api.py` / `web_utils.py` | Web UI からの直接編集（実績台帳の起票を含む） |
+| `minutes_triage` | `pm_ingest.py minutes`（`ingest/minutes.py`） | 転記時トリアージの DROP 判定による論理削除（`deleted=1`） |
+| `minutes_human_kept` | `pm_ingest.py minutes --minutes-force`（`ingest/minutes.py`） | 人間が Web UI 等で復元した項目を再トリアージから除外する保護の引き継ぎ |
+| `pm_terminology_update` | `pm_terminology_update.py` | 用語統一の一括置換 |
+
+上記以外に、`manual_restore` / `manual_fix` のようなアドホックな値でDBを直接修復する運用も
+想定されている（`pm_selfcheck.py` の巻き戻りパターン検査は `xlsx_sync` 以外の任意の `source` を
+「解消済み」とみなす設計のため、コード側でこれらの文字列を強制してはいない）。
 
 ### data/box_docs.db（BOX 本文ナレッジ）
 

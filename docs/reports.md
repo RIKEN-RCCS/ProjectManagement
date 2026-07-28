@@ -154,6 +154,40 @@ bash scripts/canvas_report.sh --db data/pm.db --canvas-id <CANVAS_ID> --dry-run
 
 ---
 
+## 4. pm_exec_summary.py — エグゼクティブサマリー（PPTX）
+
+複数アプリの評価レポート（Markdown）を「完了したこと / これからやること / ベンダーとの連携状況」の
+3カテゴリに凝縮し、全アプリを1枚の PowerPoint にまとめる。呼び出し元は
+`scripts/bin/pm_nvidia_collab_update.sh`（週次 cron）。
+
+完了列（completed）は既定で `pm.db.achievements`（`status='confirmed'`）を優先ソースとして使う
+（**性能評価の実績を最優先**し、レポートに存在する限り枠の過半をこの種別で埋める設計）。
+台帳に該当行が無い場合のみレポート md からの LLM 抽出にフォールバックする（件数保証ガード）。
+`--no-completed-search` を指定すると台帳を使わず常に md 抽出のみで completed 列を生成する。
+
+```sh
+python3 scripts/reporting/pm_exec_summary.py argus_report_A.md argus_report_B.md \
+    --lang both --to-box --title "FugakuNEXT アプリ評価 エグゼクティブサマリー"
+
+# 台帳を使わず md 抽出のみで生成
+python3 scripts/reporting/pm_exec_summary.py argus_report_A.md --no-completed-search
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `reports` | — | アプリ評価レポート（.md）を可変長で指定。渡した順にスライドの行になる |
+| `--lang {ja,en,both}` | `both` | 生成する言語 |
+| `--title TEXT` | `FugakuNEXT アプリ評価 エグゼクティブサマリー` | スライドタイトル（日本語。英語版は自動翻訳） |
+| `--date YYYY-MM-DD` | 当日 | 表示日付 |
+| `--to-box` | — | Box にアップロードする（省略時はローカル保存のみ） |
+| `--out-dir DIR` | `/tmp` | ローカル出力先ディレクトリ |
+| `--no-completed-search` | — | 完了列を実績台帳（pm.db）読み取り・検索ベースで生成せず、レポート md からの抽出のみを使う |
+
+出力: `{out_dir}/executive_summary_{date}.pptx`（日本語版）、`--lang en/both` 時は
+`{out_dir}/executive_summary_{date}_EN.pptx` も生成。
+
+---
+
 ## 運用例
 
 ### 月曜朝の週次運用
