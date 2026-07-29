@@ -552,6 +552,17 @@ def run_agent(
     max_steps=0 の場合はツールなしモードで seed_data のみから回答を生成する。
     timeout は LLM 呼び出しの総予算（wall-clock）として消費される。
     context が指定された場合、調査依頼の前に背景情報として注入する（Pass 1 → Pass 2 の引き継ぎ用）。
+
+    ARGUS_PRESERVE_REASONING=1 を設定すると、直前1ステップ分の reasoning_content を
+    `<previous_step_reasoning>` ブロックとして次ステップのプロンプトに埋め込む
+    （2026-07-29, Option B）。これはモデルカードの preserved thinking mode
+    （assistant メッセージへの reasoning_content 復元）の**近似**であり、忠実対応では
+    ない。忠実対応には本 STEP ループをプロンプト文字列の毎回再構築方式から
+    messages API（永続 assistant/tool メッセージ配列）方式へ移行する必要があるが、
+    評価目的に対して過大投資と判断し見送った。未設定時は call_argus_llm に
+    return_reasoning を渡さず、llm.py 側のストリーミング経路も reasoning_content の
+    蓄積自体を行わない（`if return_reasoning:` でガード済み）ため、現行挙動と
+    完全に同一・オーバーヘッドゼロ。
     """
     exclude_tools = _FILE_PINNED_EXCLUDED_TOOLS if ctx.record_ids else None
     tool_desc = _build_tool_descriptions(exclude_tools)
@@ -664,6 +675,13 @@ def run_agent(
     step_think = os.environ.get("ARGUS_STEP_THINK", "0") != "0"
     step_max_tokens = int(os.environ.get("ARGUS_STEP_MAX_TOKENS", "16384"))
 
+    # ARGUS_PRESERVE_REASONING: preserved thinking mode の簡易近似（Option B、2026-07-29）。
+    # 直前1ステップ分の reasoning_content のみをテキストブロックとして次プロンプトに
+    # 埋め込む（全ステップ分は積まない）。未設定時は reasoning_content を取得しない。
+    preserve_reasoning = os.environ.get("ARGUS_PRESERVE_REASONING", "0") != "0"
+    prev_step_reasoning = ""
+    _PREV_REASONING_CHAR_CAP = 4000
+
     # STEP1 でツール呼び出しが0件のまま終わる問題の緩和策。既定で有効。
     # 無効化する場合のみ ARGUS_DISABLE_INITIAL_SEARCH=1 を設定する。
     if os.environ.get("ARGUS_DISABLE_INITIAL_SEARCH") != "1" and rewrite and rewrite.get("search_queries"):
@@ -712,6 +730,18 @@ def run_agent(
         prompt = base_prompt
         if history:
             prompt += "## これまでのツール実行結果\n\n" + _format_tool_history(history) + "\n\n"
+        if preserve_reasoning and prev_step_reasoning:
+            # reasoning 内に閉じタグ文字列がそのまま混入していた場合の境界破壊を防ぐ
+            safe_reasoning = prev_step_reasoning[-_PREV_REASONING_CHAR_CAP:].replace(
+                "</previous_step_reasoning>", ""
+            )
+            prompt += (
+                "<previous_step_reasoning>\n"
+                "これはあなたの前ステップの思考メモである。再利用してよいが最終判断は"
+                "最新のツール結果を優先せよ。\n"
+                f"{safe_reasoning}\n"
+                "</previous_step_reasoning>\n\n"
+            )
         if nudge_notes:
             prompt += "## 修正指示\n\n" + "\n\n".join(nudge_notes) + "\n\n"
         prompt += (
@@ -722,10 +752,23 @@ def run_agent(
         progress(f"[STEP {step}/{max_steps}] LLM 呼び出し中...")
         t0 = time.monotonic()
         try:
-            response = call_argus_llm(
-                prompt, system=system_prompt,
-                max_tokens=step_max_tokens, timeout=remaining_s(), think=step_think,
-            )
+            if preserve_reasoning:
+                llm_result = call_argus_llm(
+                    prompt, system=system_prompt,
+                    max_tokens=step_max_tokens, timeout=remaining_s(), think=step_think,
+                    return_reasoning=True,
+                )
+                # str-unpack の芽を消す（isinstance で明示的に narrowing。
+                # call_argus_llm の overload では return_reasoning=True 時は常に
+                # tuple[str, str] が保証されるが、防御的にフォールバックを残す）
+                response, prev_step_reasoning = (
+                    llm_result if isinstance(llm_result, tuple) else (llm_result, "")
+                )
+            else:
+                response = call_argus_llm(
+                    prompt, system=system_prompt,
+                    max_tokens=step_max_tokens, timeout=remaining_s(), think=step_think,
+                )
         except Exception as e:
             logger.exception(f"[STEP {step}/{max_steps}] LLM error: {e}")
             break

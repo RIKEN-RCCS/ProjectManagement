@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-07-29 RIKYU kimi-k3 を評価（HF 推奨条件での再評価含む）— glm-5.2 継続、見送り
+
+**背景**: RIKYU に kimi-k3 が追加配信され、既存のモデル評価（2026-07-13 の 3 モデル）に加えた。
+初回評価後、HF モデルカード推奨（temp1.0 / reasoning_effort / preserved thinking）との食い違いが
+判明し、補正条件で再評価まで実施。
+**決定**: **補正しても見送り**。k2.6 比では大幅な世代改善（総合 3.15→4.79）だが、brief/risk は
+glm-5.2 に届かず latency 7〜8 倍。決め手は「`reasoning_effort` も thinking 抑制に効かない」こと
+（risk の reasoning 長が low 指定でむしろ増加、truncation 悪化）— kimi 系の思考は 3 手段すべてで
+制御不能。investigate 単発品質のみ一貫して glm 超え（7-0-3 / 7-1-2）だが、初回のループ実走で
+3 問中 1 問が予算枯渇で完全失敗、再評価では全問単発完結で失敗モードが未検証のまま。
+**再訪条件**: tool_call を要する複雑な investigate 質問でのループ安定性検証。評価用 opt-in 機構
+（ARGUS_REASONING_EFFORT / ARGUS_PRESERVE_REASONING、既定 OFF）は本番コードに残置。
+詳細は docs/decisions/rikyu_argus_model_eval.md 追補・再評価節。
+
 ## 2026-07-29 canvases を pm_embed で索引化 — source_type=slack_canvas
 
 **背景**: 同日追加の slack.db canvases テーブルは書き込み専用で、investigate/brief の検索に乗らなかった。

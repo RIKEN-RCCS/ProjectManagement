@@ -113,6 +113,297 @@ class TestCallLocalLlmInnerStreaming:
             _call_local_llm_inner("p", model="m", base_url="http://h/v1", api_key="secret")
         assert captured["headers"].get("Authorization") == "Bearer secret"
 
+    def test_return_reasoning_false_returns_str_default(self):
+        """既定 (return_reasoning=False) は従来通り str のみを返す（回帰防止）。"""
+        mock = _make_sse_response(["hello"])
+        result = self._call(MagicMock(return_value=mock))
+        assert isinstance(result, str)
+        assert result == "hello"
+
+    def test_streaming_return_reasoning_true_returns_tuple(self):
+        lines = [
+            f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': 'thinking...'}}]})}".encode(),
+            f"data: {json.dumps({'choices': [{'delta': {'content': 'final answer'}}]})}".encode(),
+            b"data: [DONE]",
+        ]
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.iter_lines.return_value = iter(lines)
+        result = self._call(MagicMock(return_value=mock), return_reasoning=True)
+        assert result == ("final answer", "thinking...")
+
+    def test_non_streaming_return_reasoning_true_returns_tuple(self):
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.json.return_value = {
+            "choices": [{"message": {"content": "answer", "reasoning_content": "why"}}]
+        }
+        mock.text = "answer"
+        result = self._call(MagicMock(return_value=mock), no_stream=True, return_reasoning=True)
+        assert result == ("answer", "why")
+
+    def test_reasoning_effort_included_in_payload_when_set(self):
+        mock = _make_sse_response(["ok"])
+        captured = {}
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json", {})
+            return mock
+        from utils.llm import _call_local_llm_inner
+        with patch("requests.post", fake_post):
+            _call_local_llm_inner(
+                "p", model="m", base_url="http://h/v1", api_key="k",
+                reasoning_effort="low",
+            )
+        assert captured["json"].get("reasoning_effort") == "low"
+
+    def test_reasoning_effort_omitted_from_payload_when_none(self):
+        """既定 (reasoning_effort=None) では payload に reasoning_effort を含めない（既存挙動維持）。"""
+        mock = _make_sse_response(["ok"])
+        captured = {}
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json", {})
+            return mock
+        from utils.llm import _call_local_llm_inner
+        with patch("requests.post", fake_post):
+            _call_local_llm_inner("p", model="m", base_url="http://h/v1", api_key="k")
+        assert "reasoning_effort" not in captured["json"]
+
+    def test_log_line_includes_reasoning_effort_when_set(self, capsys):
+        mock = _make_sse_response(["ok"])
+        from utils.llm import _call_local_llm_inner
+        with patch("requests.post", MagicMock(return_value=mock)):
+            _call_local_llm_inner(
+                "p", model="m", base_url="http://h/v1", api_key="k",
+                reasoning_effort="low",
+            )
+        captured = capsys.readouterr()
+        assert "reasoning_effort=low" in captured.err
+
+    def test_log_line_omits_reasoning_effort_when_unset(self, capsys):
+        mock = _make_sse_response(["ok"])
+        from utils.llm import _call_local_llm_inner
+        with patch("requests.post", MagicMock(return_value=mock)):
+            _call_local_llm_inner("p", model="m", base_url="http://h/v1", api_key="k")
+        captured = capsys.readouterr()
+        assert "reasoning_effort=" not in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# _call_local_llm_inner — reasoning_content の <think> タグフォールバック / strip / ガード
+# --------------------------------------------------------------------------- #
+
+class TestCallLocalLlmInnerReasoningFallback:
+    def _call(self, mock_post, **kwargs):
+        from utils.llm import _call_local_llm_inner
+        with patch("requests.post", mock_post):
+            return _call_local_llm_inner(
+                "test prompt", model="test-model",
+                base_url="http://localhost:8000/v1", api_key="dummy",
+                **kwargs,
+            )
+
+    def test_streaming_falls_back_to_think_tag_when_reasoning_content_empty(self):
+        mock = _make_sse_response(["<think>fallback reasoning</think>", "final text"])
+        result = self._call(MagicMock(return_value=mock), return_reasoning=True)
+        assert result == ("final text", "fallback reasoning")
+
+    def test_non_streaming_falls_back_to_think_tag_when_reasoning_content_empty(self):
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.json.return_value = {
+            "choices": [{"message": {"content": "<think>fallback text</think>final answer"}}]
+        }
+        mock.text = "answer"
+        result = self._call(MagicMock(return_value=mock), no_stream=True, return_reasoning=True)
+        assert result == ("final answer", "fallback text")
+
+    def test_truncated_think_tag_fallback_stays_empty(self):
+        """閉じタグ欠落（truncation）時はフォールバック抽出も諦めて空のまま。"""
+        mock = _make_sse_response(["<think>partial thinking with no closing tag"])
+        result = self._call(MagicMock(return_value=mock), return_reasoning=True)
+        assert result == ("", "")
+
+    def test_reasoning_content_field_takes_priority_over_think_tag(self):
+        """reasoning_content フィールドが取れていればフォールバックは使わない。"""
+        lines = [
+            f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': ' from field '}}]})}".encode(),
+            f"data: {json.dumps({'choices': [{'delta': {'content': '<think>should not be used</think>final'}}]})}".encode(),
+            b"data: [DONE]",
+        ]
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.iter_lines.return_value = iter(lines)
+        result = self._call(MagicMock(return_value=mock), return_reasoning=True)
+        assert result == ("final", "from field")
+
+    def test_reasoning_content_is_stripped(self):
+        """call_rivault と整合させるため reasoning_content は strip() する。"""
+        lines = [
+            f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': '  padded  '}}]})}".encode(),
+            f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}}]})}".encode(),
+            b"data: [DONE]",
+        ]
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.iter_lines.return_value = iter(lines)
+        result = self._call(MagicMock(return_value=mock), return_reasoning=True)
+        assert result == ("ok", "padded")
+
+    def test_reasoning_content_ignored_when_return_reasoning_false(self):
+        """return_reasoning=False（既定）では reasoning_content が SSE に含まれていても
+        無視され、通常の str 契約のまま返る（不要な蓄積をしないガードの回帰防止）。"""
+        lines = [
+            f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': 'x' * 100}}]})}".encode(),
+            f"data: {json.dumps({'choices': [{'delta': {'content': 'answer'}}]})}".encode(),
+            b"data: [DONE]",
+        ]
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.iter_lines.return_value = iter(lines)
+        result = self._call(MagicMock(return_value=mock))
+        assert result == "answer"
+        assert isinstance(result, str)
+
+
+# --------------------------------------------------------------------------- #
+# ARGUS_REASONING_EFFORT — whitelist 検証
+# --------------------------------------------------------------------------- #
+
+class TestReasoningEffortValidation:
+    def test_invalid_value_ignored_and_warns(self, monkeypatch, capsys):
+        monkeypatch.setenv("ARGUS_REASONING_EFFORT", "bogus")
+        from utils.llm import _resolve_reasoning_effort_env
+        result = _resolve_reasoning_effort_env()
+        assert result is None
+        captured = capsys.readouterr()
+        assert "WARN" in captured.err
+        assert "bogus" in captured.err
+
+    def test_valid_values_pass_through(self, monkeypatch):
+        from utils.llm import _resolve_reasoning_effort_env
+        for v in ("low", "high", "max"):
+            monkeypatch.setenv("ARGUS_REASONING_EFFORT", v)
+            assert _resolve_reasoning_effort_env() == v
+
+    def test_unset_returns_none(self, monkeypatch):
+        monkeypatch.delenv("ARGUS_REASONING_EFFORT", raising=False)
+        from utils.llm import _resolve_reasoning_effort_env
+        assert _resolve_reasoning_effort_env() is None
+
+    def test_invalid_effort_not_propagated_to_local_route(self, monkeypatch):
+        """不正値が送られてサーバ400→静かに別ルートへフォールバックする罠を防ぐ。"""
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        monkeypatch.setenv("ARGUS_REASONING_EFFORT", "invalid_value")
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "_load_llm_routing_priority", lambda: ["local"])
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+        captured = {}
+        def fake_local(*a, **kw):
+            captured.update(kw)
+            return "local result"
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+        cli_utils.call_argus_llm("test")
+        assert captured.get("reasoning_effort") is None
+
+
+# --------------------------------------------------------------------------- #
+# call_argus_llm — reasoning 空のサイレント no-op 対策（WARN ログ）
+# --------------------------------------------------------------------------- #
+
+class TestEmptyReasoningWarnings:
+    def _patch_config(self, monkeypatch, priority: list[str]):
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "_load_llm_routing_priority", lambda: priority)
+
+    def test_rivault_route_returns_empty_reasoning_and_warns(self, monkeypatch, capsys):
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        self._patch_config(monkeypatch, ["rivault"])
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "call_rivault", lambda *a, **kw: "content only")
+
+        result = cli_utils.call_argus_llm("test", return_reasoning=True)
+        assert result == ("content only", "")
+        captured = capsys.readouterr()
+        assert "route=rivault" in captured.err
+
+    def test_local_route_warns_when_reasoning_ends_up_empty(self, monkeypatch, capsys):
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        self._patch_config(monkeypatch, ["local"])
+        from utils import llm as cli_utils
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+        monkeypatch.setattr(cli_utils, "call_local_llm", lambda *a, **kw: ("content", ""))
+
+        result = cli_utils.call_argus_llm("test", return_reasoning=True)
+        assert result == ("content", "")
+        captured = capsys.readouterr()
+        assert "route=local" in captured.err
+        assert "reasoning_content が空です" in captured.err
+
+    def test_local_route_no_warn_when_reasoning_present(self, monkeypatch, capsys):
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        self._patch_config(monkeypatch, ["local"])
+        from utils import llm as cli_utils
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+        monkeypatch.setattr(
+            cli_utils, "call_local_llm", lambda *a, **kw: ("content", "some reasoning"),
+        )
+
+        result = cli_utils.call_argus_llm("test", return_reasoning=True)
+        assert result == ("content", "some reasoning")
+        captured = capsys.readouterr()
+        assert "reasoning_content が空です" not in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# call_argus_llm — ARGUS_REASONING_EFFORT 伝播 (local ルート)
+# --------------------------------------------------------------------------- #
+
+class TestArgusReasoningEffortPropagation:
+    def _patch_config(self, monkeypatch, priority: list[str]):
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "_load_llm_routing_priority", lambda: priority)
+
+    def test_argus_reasoning_effort_env_propagates_to_local_route(self, monkeypatch):
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        monkeypatch.setenv("ARGUS_REASONING_EFFORT", "max")
+        self._patch_config(monkeypatch, ["local"])
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        captured = {}
+        def fake_local(*a, **kw):
+            captured.update(kw)
+            return "local result"
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+
+        result = cli_utils.call_argus_llm("test")
+        assert result == "local result"
+        assert captured.get("reasoning_effort") == "max"
+
+    def test_argus_reasoning_effort_unset_defaults_to_none(self, monkeypatch):
+        """未設定時は None のまま渡され、既存挙動と同一（payload に送られない）。"""
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        monkeypatch.delenv("ARGUS_REASONING_EFFORT", raising=False)
+        self._patch_config(monkeypatch, ["local"])
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        captured = {}
+        def fake_local(*a, **kw):
+            captured.update(kw)
+            return "local result"
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+
+        cli_utils.call_argus_llm("test")
+        assert captured.get("reasoning_effort") is None
+
 
 # --------------------------------------------------------------------------- #
 # call_rivault

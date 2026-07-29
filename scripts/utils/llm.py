@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Literal, overload
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,18 @@ def strip_think_blocks(text: str) -> str:
     return text
 
 
+_THINK_TAG_RE = re.compile(r"<think>([\s\S]*?)</think>")
+
+
+def _extract_think_fallback(content: str) -> str:
+    """reasoning_content が空だったときに、strip 前の raw content 内の
+    <think>...</think> ブロックからフォールバック抽出する。
+    閉じタグ欠落（truncation で思考ブロックが途中で切れた場合）は諦めて空文字列を返す。
+    """
+    m = _THINK_TAG_RE.search(content)
+    return m.group(1).strip() if m else ""
+
+
 # --------------------------------------------------------------------------- #
 # vLLM モデル自動検出
 # --------------------------------------------------------------------------- #
@@ -115,6 +128,7 @@ def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
 # ローカル LLM 呼び出し（OpenAI 互換 API）
 # --------------------------------------------------------------------------- #
 
+@overload
 def _call_local_llm_inner(
     prompt: str,
     model: str,
@@ -127,11 +141,67 @@ def _call_local_llm_inner(
     system: str = "",
     no_chat_template_kwargs: bool = False,
     temperature: float | None = None,
-) -> str:
+    reasoning_effort: str | None = None,
+    return_reasoning: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+def _call_local_llm_inner(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    return_reasoning: Literal[True] = True,
+) -> tuple[str, str]: ...
+
+
+@overload
+def _call_local_llm_inner(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    return_reasoning: bool = False,
+) -> str | tuple[str, str]: ...
+
+
+def _call_local_llm_inner(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    return_reasoning: bool = False,
+) -> str | tuple[str, str]:
     import json as _json
 
     import requests
-    print(f"[INFO] LLM call: backend=local model={model} url={base_url} think={think}",
+    print(f"[INFO] LLM call: backend=local model={model} url={base_url} think={think}"
+          + (f" reasoning_effort={reasoning_effort}" if reasoning_effort is not None else ""),
           file=sys.stderr)
     messages = []
     if system:
@@ -144,6 +214,8 @@ def _call_local_llm_inner(
         "max_tokens": max_tokens,
         "temperature": effective_temp,
     }
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
     if think:
         if not no_chat_template_kwargs:
             payload["chat_template_kwargs"] = {"enable_thinking": True}
@@ -198,7 +270,12 @@ def _call_local_llm_inner(
         print(f"[INFO] 生成トークン数（strip前）: {len(content)} chars, think={think}", file=sys.stderr)
         stripped = strip_think_blocks(content)
         print(f"[INFO] 生成トークン数（strip後）: {len(stripped)} chars", file=sys.stderr)
-        return stripped
+        if not return_reasoning:
+            return stripped
+        reasoning_content = (msg.get("reasoning_content") or "").strip()
+        if not reasoning_content:
+            reasoning_content = _extract_think_fallback(content)
+        return stripped, reasoning_content
 
     # ストリーミング（デフォルト）
     payload["stream"] = True
@@ -230,6 +307,7 @@ def _call_local_llm_inner(
         resp.raise_for_status()
 
     content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     print("[INFO] 生成中 ", end="", flush=True, file=sys.stderr)
     for raw_line in resp.iter_lines():
         if not raw_line:
@@ -252,13 +330,81 @@ def _call_local_llm_inner(
         if token:
             content_parts.append(token)
             print(".", end="", flush=True, file=sys.stderr)
+        if return_reasoning:
+            # 不要時（既定）は reasoning_content を一切蓄積しない
+            # （100KB級の思考トークンを積んで捨てるのを防ぐ）
+            reasoning_token = delta.get("reasoning_content") or ""
+            if reasoning_token:
+                reasoning_parts.append(reasoning_token)
     print(" 完了", flush=True, file=sys.stderr)
 
     content = "".join(content_parts)
     print(f"[INFO] 生成トークン数（strip前）: {len(content)} chars, think={think}", file=sys.stderr)
     stripped = strip_think_blocks(content)
     print(f"[INFO] 生成トークン数（strip後）: {len(stripped)} chars", file=sys.stderr)
-    return stripped
+    if not return_reasoning:
+        return stripped
+    reasoning_content = "".join(reasoning_parts).strip()
+    if not reasoning_content:
+        reasoning_content = _extract_think_fallback(content)
+    return stripped, reasoning_content
+
+
+@overload
+def call_local_llm(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    return_reasoning: Literal[False] = False,
+    _fallback_to_local: bool = True,
+) -> str: ...
+
+
+@overload
+def call_local_llm(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    return_reasoning: Literal[True] = True,
+    _fallback_to_local: bool = True,
+) -> tuple[str, str]: ...
+
+
+@overload
+def call_local_llm(
+    prompt: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    timeout: int = 600,
+    think: bool = False,
+    max_tokens: int = 8192,
+    no_stream: bool = False,
+    system: str = "",
+    no_chat_template_kwargs: bool = False,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    return_reasoning: bool = False,
+    _fallback_to_local: bool = True,
+) -> str | tuple[str, str]: ...
 
 
 def call_local_llm(
@@ -273,9 +419,16 @@ def call_local_llm(
     system: str = "",
     no_chat_template_kwargs: bool = False,
     temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    return_reasoning: bool = False,
     _fallback_to_local: bool = True,
-) -> str:
-    """OpenAI 互換 API を requests で直接呼び出す。"""
+) -> str | tuple[str, str]:
+    """OpenAI 互換 API を requests で直接呼び出す。
+
+    reasoning_effort: None のとき payload に送らない（既存挙動維持）。
+    return_reasoning: True のとき (content, reasoning_content) のタプルを返す。
+        既定 False では従来通り content の文字列のみを返す（既存呼び出し元への影響なし）。
+    """
     rivault_url = os.environ.get("RIVAULT_URL", "").rstrip("/")
     is_rivault = bool(rivault_url) and base_url.rstrip("/") == rivault_url
 
@@ -284,7 +437,8 @@ def call_local_llm(
             prompt, model=model, base_url=base_url, api_key=api_key,
             timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
             system=system, no_chat_template_kwargs=no_chat_template_kwargs,
-            temperature=temperature,
+            temperature=temperature, reasoning_effort=reasoning_effort,
+            return_reasoning=return_reasoning,
         )
     except Exception as exc:
         if not (_fallback_to_local and is_rivault):
@@ -302,7 +456,8 @@ def call_local_llm(
             api_key=os.environ.get("LOCAL_LLM_TOKEN", "dummy"),
             timeout=timeout, think=think, max_tokens=max_tokens, no_stream=no_stream,
             system=system, no_chat_template_kwargs=no_chat_template_kwargs,
-            temperature=temperature,
+            temperature=temperature, reasoning_effort=reasoning_effort,
+            return_reasoning=return_reasoning,
         )
 
 
@@ -443,6 +598,30 @@ def _is_route_available(route: str) -> bool:
         return bool(os.environ.get("LOCAL_LLM_URL", "").strip())
     return False
 
+
+_VALID_REASONING_EFFORTS = {"low", "high", "max"}
+
+
+def _resolve_reasoning_effort_env() -> str | None:
+    """ARGUS_REASONING_EFFORT を whitelist 検証して返す。
+
+    未設定または不正値の場合は None（payload に送らない）。不正値をそのまま
+    送信するとサーバ側 400 を誘発し、call_argus_llm の fallback ロジックが
+    静かに別ルート（≒別モデル）にフォールバックして測るという罠があるため、
+    ここで検証して WARN を出す。
+    """
+    value = os.environ.get("ARGUS_REASONING_EFFORT")
+    if not value:
+        return None
+    if value not in _VALID_REASONING_EFFORTS:
+        print(f"[WARN] ARGUS_REASONING_EFFORT の値 '{value}' は不正です"
+              f"（有効値: {sorted(_VALID_REASONING_EFFORTS)}）。送信しません。",
+              file=sys.stderr)
+        return None
+    return value
+
+
+@overload
 def call_argus_llm(
     prompt: str,
     *,
@@ -453,7 +632,52 @@ def call_argus_llm(
     temperature: float | None = None,
     no_chat_template_kwargs: bool = False,
     fallback: bool = True,
-) -> str:
+    return_reasoning: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+def call_argus_llm(
+    prompt: str,
+    *,
+    timeout: int = 300,
+    max_tokens: int = 4096,
+    system: str = "",
+    think: bool = False,
+    temperature: float | None = None,
+    no_chat_template_kwargs: bool = False,
+    fallback: bool = True,
+    return_reasoning: Literal[True] = True,
+) -> tuple[str, str]: ...
+
+
+@overload
+def call_argus_llm(
+    prompt: str,
+    *,
+    timeout: int = 300,
+    max_tokens: int = 4096,
+    system: str = "",
+    think: bool = False,
+    temperature: float | None = None,
+    no_chat_template_kwargs: bool = False,
+    fallback: bool = True,
+    return_reasoning: bool = False,
+) -> str | tuple[str, str]: ...
+
+
+def call_argus_llm(
+    prompt: str,
+    *,
+    timeout: int = 300,
+    max_tokens: int = 4096,
+    system: str = "",
+    think: bool = False,
+    temperature: float | None = None,
+    no_chat_template_kwargs: bool = False,
+    fallback: bool = True,
+    return_reasoning: bool = False,
+) -> str | tuple[str, str]:
     """Argus 用 LLM 呼び出し。
 
     argus_config.yaml の llm.routing_priority に従ってルーティングする。
@@ -462,20 +686,32 @@ def call_argus_llm(
     think は local ルートのみ有効。rivault ルートでは think は call_rivault に伝播せず、
     thinking の有無は RIVAULT_MODEL 依存（kimi 系＝常時 ON・無効化不可、それ以外＝
     thinking:disabled を強制）。
+
+    return_reasoning: True のとき (content, reasoning_content) のタプルを返す。
+    local ルート限定の対応（call_local_llm の return_reasoning をそのまま利用）。
+    rivault ルートで解決された場合は reasoning_content を取得する経路がないため
+    reasoning_content は常に空文字列 "" になる。既定 False では従来通り str のみを
+    返し、既存呼び出し元への影響はない。
     """
     load_llm_secrets()
 
-    def _try_rivault() -> str:
+    def _try_rivault() -> str | tuple[str, str]:
         if think:
             logger.debug("think=True は rivault ルートには伝播しません"
                          "（thinking の有無は RIVAULT_MODEL 依存: kimi系=常時ON・無効化不可、"
                          "それ以外=thinking:disabled を強制）")
-        return call_rivault(
+        result = call_rivault(
             prompt, timeout=timeout, max_tokens=max_tokens, system=system,
             temperature=temperature,
         )
+        if not return_reasoning:
+            return result
+        print("[WARN] call_argus_llm: reasoning_content は常に空です (route=rivault) "
+              "— rivault ルートには reasoning_content を取得する経路がありません",
+              file=sys.stderr)
+        return (result, "")
 
-    def _try_local() -> str:
+    def _try_local() -> str | tuple[str, str]:
         local_base = os.environ.get("LOCAL_LLM_URL")
         if not local_base:
             raise RuntimeError("LOCAL_LLM_URL 未設定（~/.secrets/localLLM.sh を確認）")
@@ -485,14 +721,23 @@ def call_argus_llm(
         except Exception as exc:
             raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません: {exc}") from exc
         model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
-        return call_local_llm(
+        # ARGUS_REASONING_EFFORT: 未設定/不正値時は None のまま payload に送らない（既存挙動維持）
+        reasoning_effort = _resolve_reasoning_effort_env()
+        result = call_local_llm(
             prompt, model=model, base_url=local_base,
             api_key=os.environ.get("LOCAL_LLM_TOKEN", "dummy"),
             timeout=timeout, max_tokens=max_tokens, system=system,
             no_stream=True, think=think,
             no_chat_template_kwargs=no_chat_template_kwargs,
             temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            return_reasoning=return_reasoning,
         )
+        if return_reasoning and isinstance(result, tuple) and not result[1].strip():
+            print(f"[WARN] call_argus_llm: reasoning_content が空です "
+                  f"(route=local model={model}, <think>タグ抽出も失敗)",
+                  file=sys.stderr)
+        return result
 
     _try_functions = {
         "rivault": _try_rivault,

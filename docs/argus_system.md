@@ -1044,6 +1044,8 @@ env 上書き（`ARGUS_TOP_K_RERANK` / `ARGUS_RERANK_PREVIEW_CHARS` / `ARGUS_SEA
 | `RIVAULT_TOKEN` | 任意 | — | RiVault API トークン |
 | `RIVAULT_MODEL` | 任意 | — | RiVault 呼び出し時のモデル名 |
 | `ARGUS_CONFIG` | 任意 | `data/argus_config.yaml` | 設定ファイルパス |
+| `ARGUS_REASONING_EFFORT` | 任意 | 未設定（送らない） | local ルートの payload の `reasoning_effort`（`low`/`high`/`max`）。kimi-k3 等の評価用 opt-in。whitelist 外の値は WARN を出して無視（送らない） |
+| `ARGUS_PRESERVE_REASONING` | 任意 | `0`（既定 OFF） | `1` で `pm_argus_agent.py` の STEP ループが直前1ステップ分の `reasoning_content` を `<previous_step_reasoning>` ブロックとして次プロンプトに埋め込む（評価用 opt-in、preserved thinking mode の簡易近似）。既定 OFF では reasoning_content の取得自体を行わず現行挙動と完全同一 |
 
 `call_argus_llm()` は `data/argus_config.yaml` の `llm.routing_priority`（`rivault`/`local` の順序リスト）に
 従ってルートを選び、環境変数で利用可能なルートのみを試す（先頭から順にフォールバック）。
