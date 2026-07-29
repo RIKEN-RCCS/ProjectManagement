@@ -16,6 +16,201 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+_URLOPEN_TIMEOUT_SEC = 30
+
+# --------------------------------------------------------------------------- #
+# チャンネル Canvas 取得
+# --------------------------------------------------------------------------- #
+
+def list_channel_canvases(client: WebClient, channel_id: str) -> list[dict]:
+    """チャンネルに紐づく Canvas 一覧を取得する。
+
+    channel.properties.tabs のうち type=="canvas" かつ data.file_id が非空のもの、
+    および properties.meeting_notes（チャンネル固定 Canvas）の file_id を対象にする。
+    Slack List（type=="list"）等の Canvas 以外のタブは file_id が非空でも対象外。
+    file_id で重複排除し [{"file_id": ..., "label": ...}] を返す。
+    """
+    try:
+        resp = client.conversations_info(channel=channel_id)
+        channel_data: dict = resp.get("channel", {})
+        props: dict = channel_data.get("properties", {}) or {}
+    except SlackApiError as e:
+        print(f"[WARN] conversations_info 取得失敗: {e.response.get('error')}", file=sys.stderr)
+        return []
+    except Exception as e:
+        print(f"[WARN] conversations_info 取得失敗: {e}", file=sys.stderr)
+        return []
+
+    seen: set[str] = set()
+    canvases: list[dict] = []
+
+    for tab in props.get("tabs", []) or []:
+        tab_type = tab.get("type", "")
+        file_id = (tab.get("data") or {}).get("file_id", "")
+        if not file_id:
+            continue
+        if tab_type != "canvas":
+            print(f"  スキップ: type={tab_type} のタブ（Canvas以外）", file=sys.stderr)
+            continue
+        if file_id in seen:
+            continue
+        seen.add(file_id)
+        canvases.append({"file_id": file_id, "label": tab.get("label", "")})
+
+    meeting_notes = props.get("meeting_notes", {}) or {}
+    mn_file_id = meeting_notes.get("file_id", "")
+    if mn_file_id and mn_file_id not in seen:
+        seen.add(mn_file_id)
+        canvases.append({"file_id": mn_file_id, "label": "meeting_notes"})
+
+    return canvases
+
+
+def get_canvas_file_info(client: WebClient, canvas_id: str) -> dict:
+    """files_info(file=canvas_id) を呼び、file dict を返す。失敗時は {}。
+
+    updated（unix秒）による差分判定に使う。本文ダウンロードは別途
+    download_canvas_body() で行う（同じ file_info を使い回して files_info の
+    二重呼び出しを避けられる）。
+    """
+    try:
+        resp = client.files_info(file=canvas_id)
+        return resp.get("file", {})
+    except SlackApiError as e:
+        print(f"[WARN] files_info 取得失敗 ({canvas_id}): {e.response.get('error')}", file=sys.stderr)
+        return {}
+    except Exception as e:
+        print(f"[WARN] files_info 取得失敗 ({canvas_id}): {e}", file=sys.stderr)
+        return {}
+
+
+def download_canvas_body(file_info: dict) -> str:
+    """file_info の url_private を Authorization ヘッダ付きでダウンロードする。
+
+    失敗時・url_private 不在時は "" を返す。
+    """
+    token = os.getenv("SLACK_USER_TOKEN", "")
+    url = file_info.get("url_private") or file_info.get("url_private_download", "")
+    if not url:
+        return ""
+    try:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=_URLOPEN_TIMEOUT_SEC) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"[WARN] Canvas 本文ダウンロード失敗: {e}", file=sys.stderr)
+        return ""
+
+
+def download_canvas_raw(client: WebClient, canvas_id: str) -> tuple[str, dict]:
+    """Canvas 本文を取得する。
+
+    files_info(file=canvas_id) で file_info を取得し、url_private を
+    Authorization ヘッダ付きでダウンロードする。戻り値は (生テキスト, file_info dict)。
+    失敗時は ("", {})。
+    """
+    file_info = get_canvas_file_info(client, canvas_id)
+    if not file_info:
+        return "", {}
+    raw = download_canvas_body(file_info)
+    return raw, file_info
+
+
+def canvas_raw_to_text(raw: str) -> str:
+    """Canvas の生データ（quip 形式 HTML であることが多い）を Markdown 風テキストに変換する。
+
+    HTML でなければそのまま返す。見出し・リスト・テーブル・チェックボックスの
+    構造を保ったまま整形し、空行の連続は2連続までに圧縮する。
+    """
+    stripped = raw.lstrip()
+    if not stripped.startswith("<"):
+        return raw
+
+    # 遅延import: bs4欠損時の影響を canvas_utils import 全体に広げない
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(raw, "html.parser")
+    lines: list[str] = []
+
+    _HEADING_LEVELS = {f"h{i}": i for i in range(1, 7)}
+
+    def _is_checked(tag) -> bool | None:
+        # チェックボックス項目のみ class 値に "checked"/"unchecked" を含む。
+        # それ以外の（スタイル用途等の）class 属性を持つ通常の <li> と区別するため、
+        # class 属性の有無ではなく値そのものを見る。"unchecked" は "checked" を
+        # 部分文字列として含むため先に判定する。
+        if tag.has_attr("class"):
+            joined = " ".join(tag.get("class") or [])
+            if "unchecked" in joined:
+                return False
+            if "checked" in joined:
+                return True
+        checkbox = tag.find("input", attrs={"type": "checkbox"})
+        if checkbox is not None:
+            return checkbox.has_attr("checked")
+        return None
+
+    def _table_to_lines(table) -> list[str]:
+        out: list[str] = []
+        for row in table.find_all("tr"):
+            cells = row.find_all(["td", "th"])
+            texts = [c.get_text(strip=True) for c in cells]
+            if texts:
+                out.append("| " + " | ".join(texts) + " |")
+        return out
+
+    # ブロック（見出し・箇条書き・テーブル・段落）間は空行で区切り、pm_embed.py の
+    # 段落分割（`\n\s*\n` 分割）がセクション内で機能するようにする。連続する
+    # 箇条書き項目（li）同士は1つのリストブロックとして扱い、空行を挟まない。
+    prev_type: str | None = None
+
+    for el in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "li", "table", "p"]):
+        # table/li 内の li/p は親要素の get_text() に含まれるため個別処理をスキップ
+        # （入れ子リストや li 内 p による二重出力を防ぐ）
+        if el.name in ("li", "p") and el.find_parent(["table", "li"]) is not None:
+            continue
+        if el.name in _HEADING_LEVELS:
+            level = _HEADING_LEVELS[el.name]
+            text = el.get_text(strip=True)
+            if text:
+                if lines:
+                    lines.append("")
+                lines.append("#" * level + " " + text)
+                prev_type = "heading"
+        elif el.name == "li":
+            checked = _is_checked(el)
+            text = el.get_text(strip=True)
+            if not text:
+                continue
+            if prev_type != "li" and lines:
+                lines.append("")
+            if checked is True:
+                lines.append(f"- [x] {text}")
+            elif checked is False:
+                lines.append(f"- [ ] {text}")
+            else:
+                lines.append(f"- {text}")
+            prev_type = "li"
+        elif el.name == "table":
+            table_lines = _table_to_lines(el)
+            if table_lines:
+                if lines:
+                    lines.append("")
+                lines.extend(table_lines)
+                prev_type = "table"
+        elif el.name == "p":
+            text = el.get_text(strip=True)
+            if text:
+                if lines:
+                    lines.append("")
+                lines.append(text)
+                prev_type = "p"
+
+    result = "\n".join(lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # Canvas 向けテキスト整形
 # --------------------------------------------------------------------------- #

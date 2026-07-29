@@ -42,6 +42,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from canvas_utils import download_canvas_raw
 from cli_utils import (
     add_dry_run_arg,
     add_no_encrypt_arg,
@@ -102,7 +103,7 @@ def fetch_canvas_content(canvas_id: str) -> str:
         url = file_info.get("url_private") or file_info.get("url_private_download", "")
         if url:
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 raw = r.read().decode("utf-8", errors="replace")
             print(f"[DEBUG] url_private download: {len(raw)} bytes, content-type hint from url: {url[:80]}")
             if raw.strip():
@@ -303,19 +304,8 @@ def fetch_canvas_markdown(canvas_id: str) -> str:
     if not token:
         return ""
     client = WebClient(token=token)
-    try:
-        resp = client.files_info(file=canvas_id)
-        file_info = resp.get("file", {})
-        url = file_info.get("url_private") or file_info.get("url_private_download", "")
-        if url:
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req) as r:
-                raw = r.read().decode("utf-8", errors="replace")
-            if raw.strip():
-                return raw
-    except Exception as e:
-        print(f"[DEBUG] fetch_canvas_markdown failed: {e}")
-    return ""
+    raw, _file_info = download_canvas_raw(client, canvas_id)
+    return raw
 
 
 def _extract_li_text(inner_html: str) -> str:

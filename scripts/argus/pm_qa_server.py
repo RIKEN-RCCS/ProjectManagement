@@ -139,6 +139,7 @@ def _format_source_label(chunk: dict) -> str:
         "slack_raw": "Slackメッセージ",
         "document": "資料",
         "box_document": "Box資料",
+        "slack_canvas": "チャンネルCanvas",
         "web": "Web記事",
     }
     label = _src_label.get(chunk["source_type"], chunk["source_type"])
@@ -159,6 +160,21 @@ def _format_source_label(chunk: dict) -> str:
                 title = content[1:end]
         held_at = chunk.get("held_at") or "日付不明"
         return f"{title or 'Box資料'} ({held_at})"
+    if source_type == "slack_canvas":
+        # content 先頭の【Canvasタイトル】からタイトルを抽出
+        content = chunk.get("content") or ""
+        title = ""
+        if content.startswith("【"):
+            end = content.find("】")
+            if end > 0:
+                title = content[1:end]
+        # source_db は "slack.db#canvas#{channel_id}" 形式
+        channel_id = chunk["source_db"].rsplit("#", 1)[-1]
+        if not _channel_names:
+            _ensure_channel_names_loaded()
+        channel_name = _channel_names.get(channel_id, channel_id)
+        held_at = chunk.get("held_at") or "日付不明"
+        return f"{channel_name} / {title or label} ({held_at})"
     db_name = chunk["source_db"].replace("minutes/", "").replace(".db", "")
     # Slack チャンネルIDを人名称に変換
     if source_type == "slack_raw":

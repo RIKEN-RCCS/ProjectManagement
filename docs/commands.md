@@ -26,6 +26,7 @@ python3 scripts/slack_pipeline.py -c CHANNEL_ID --list
 | `--skip-fetch` | - | Slack API取得をスキップ（DBのみ使用） |
 | `--list` | - | DB内のスレッド一覧を表示して終了（`--since` 併用可） |
 | `--no-permalink` | - | パーマリンク取得を無効化 |
+| `--no-canvas` | - | チャンネル Canvas の取得を無効化（デフォルトは取得する） |
 | `--dry-run` | - | Slack API取得のみ実行（DB書き込みなし） |
 
 ### 1b. Slack取得→pm.db抽出 一括実行（pm_from_slack.sh）

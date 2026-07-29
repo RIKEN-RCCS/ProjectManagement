@@ -44,6 +44,47 @@ Slack API の latest_reply  vs  MAX(replies.msg_ts)
   変化なし                                   → スキップ（API呼び出しなし）
 ```
 
+#### canvases（チャンネル紐づき Canvas）
+
+2026-07-29 に追加。チャンネルタブ Canvas（`conversations_info` の
+`channel.properties.tabs` のうち `type=="canvas"` のもの）とチャンネル固定 Canvas
+（`properties.meeting_notes`）の本文を保存する。`bookmarks.list` は Canvas タブを
+返さないため使用しない。`type=="list"`（Slack List）等 Canvas 以外のタブは
+`data.file_id` が非空でも対象外（スキップ時に stderr へ情報ログ、WARN扱いはしない。
+正常系で毎回出るログのため）。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `canvas_id` | TEXT | Canvas の file_id（PK） |
+| `channel_id` | TEXT | SlackチャンネルID（PK） |
+| `title` | TEXT | Canvas タイトル（`files_info` の `title`） |
+| `content` | TEXT | 本文（`canvas_raw_to_text()` で HTML → Markdown 風テキストに変換済み） |
+| `updated` | INTEGER | `files_info` の `file.updated`（unix秒）。欠損時は 0 に正規化する |
+| `fetched_at` | TEXT | DBへの保存日時（ISO8601） |
+
+差分判定ロジック:
+
+```
+files_info(file=canvas_id).updated  vs  DB の canvases.updated
+  新規（canvas_id が DB に存在しない）        → 本文ダウンロード + 変換 + 保存
+  updated が 0（API側で値欠損）               → 差分判定せず常に本文ダウンロード + 変換 + 保存
+  更新（updated が DB の値と異なる）          → 本文ダウンロード + 変換 + 保存
+  変化なし（updated が一致）                  → スキップ（本文ダウンロードなし）
+  本文ダウンロードが空文字（失敗 or 実際に空） → UPSERTせずスキップ（既存値を上書きしない）
+```
+
+取得ロジックは `scripts/utils/canvas_utils.py`（`list_channel_canvases` /
+`get_canvas_file_info` / `download_canvas_body` / `canvas_raw_to_text`）と
+`scripts/data-pipeline/slack_pipeline.py`（`fetch_and_store_canvases`）で共有する。
+
+`pm_embed.py`（`index_slack_canvases()`）が `source_type='slack_canvas'` として
+`qa_index.db` に索引化する（差分更新は `fetched_at` 基準、`held_at` は `updated`
+を JST 変換した値。詳細は「data/qa_index.db」節・`docs/argus_system.md` 参照）。
+`ingest_slack.py` は `canvases` テーブルに未対応（pm.db への転記は今後の課題）。
+`scripts/reporting/pm_sync_canvas.py: fetch_canvas_markdown()` の本文取得も同じ
+`download_canvas_raw()` 経由（アクションアイテム表の読み取り用途で `canvases` テーブルへの
+書き込みはしない）。`slack_pipeline.py --no-canvas` で Canvas 取得自体を無効化できる。
+
 ### pm.db（PM統合データ）
 
 `action_items` / `decisions` / `meetings` / `goals` / `milestones` の唯一の正本。

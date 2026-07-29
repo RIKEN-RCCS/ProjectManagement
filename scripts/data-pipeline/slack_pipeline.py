@@ -9,6 +9,8 @@ Slack差分取得パイプライン
      - 変化のないスレッドはスキップ（API呼び出しなし）
   2. 取得したメッセージを {channel_id}.db に保存
      - pm_ingest.py slack (ingest_slack.py) が生メッセージから決定事項・AIを直接抽出
+  3. チャンネルに紐づく Canvas を取得し canvases テーブルに保存
+     - files_info の updated と DB の updated を比較し、差分がある場合のみ本文を再取得
 """
 
 import os
@@ -19,6 +21,12 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from canvas_utils import (
+    canvas_raw_to_text,
+    download_canvas_body,
+    get_canvas_file_info,
+    list_channel_canvases,
+)
 from cli_utils import add_no_encrypt_arg
 from db_utils import open_db
 from slack_sdk import WebClient
@@ -79,6 +87,8 @@ def parse_args():
                         help="パーマリンク取得を無効化")
     parser.add_argument("--skip-fetch", action="store_true", default=False,
                         help="Slack API 取得をスキップ（DB のみ使用）")
+    parser.add_argument("--no-canvas", action="store_true", default=False,
+                        help="チャンネル Canvas の取得を無効化（デフォルトは取得する）")
     parser.add_argument("--list", action="store_true", default=False,
                         help="DB内のスレッド一覧を表示して終了（--since 併用可）")
     add_no_encrypt_arg(parser)
@@ -116,6 +126,16 @@ CREATE TABLE IF NOT EXISTS replies (
     permalink   TEXT,
     fetched_at  TEXT NOT NULL,
     PRIMARY KEY (msg_ts, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS canvases (
+    canvas_id  TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    title      TEXT,
+    content    TEXT,
+    updated    INTEGER,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (canvas_id, channel_id)
 );
 """
 
@@ -168,6 +188,27 @@ def db_get_max_reply_ts(conn: sqlite3.Connection, channel_id: str,
         (thread_ts, channel_id),
     ).fetchone()
     return row["max_ts"] if row else None
+
+
+def db_get_canvas_updated(conn: sqlite3.Connection, channel_id: str,
+                          canvas_id: str) -> int | None:
+    row = conn.execute(
+        "SELECT updated FROM canvases WHERE canvas_id=? AND channel_id=?",
+        (canvas_id, channel_id),
+    ).fetchone()
+    return row["updated"] if row else None
+
+
+def db_upsert_canvas(conn: sqlite3.Connection, channel_id: str, canvas_id: str,
+                     title: str, content: str, updated: int) -> None:
+    conn.execute(
+        """INSERT INTO canvases (canvas_id, channel_id, title, content, updated, fetched_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(canvas_id, channel_id) DO UPDATE SET
+               title=excluded.title, content=excluded.content,
+               updated=excluded.updated, fetched_at=excluded.fetched_at""",
+        (canvas_id, channel_id, title, content, updated, datetime.now().isoformat()),
+    )
 
 
 # ==================================================================
@@ -447,6 +488,80 @@ def fetch_and_store(
 
 
 # ==================================================================
+# Canvas 取得 & DB保存
+# ==================================================================
+
+def fetch_and_store_canvases(
+    conn: sqlite3.Connection,
+    channel_id: str,
+    dry_run: bool = False,
+) -> int:
+    """
+    チャンネルに紐づく Canvas を取得してDBに保存する。取得（新規+更新）した件数を返す。
+
+    差分ロジック:
+    - files_info(file=canvas_id) の updated（unix秒）と DB の canvases.updated を比較
+    - 同じであれば本文ダウンロードをスキップ
+
+    dry_run=True の場合、取得・変換は通常どおり実行するが DB への UPSERT は行わない。
+    """
+    client = _make_client()
+    canvases = list_channel_canvases(client, channel_id)
+    if not canvases:
+        print("Canvas なし", file=sys.stderr)
+        return 0
+
+    stats = {"new": 0, "updated": 0, "skipped": 0}
+    dry_run_fetched = 0
+
+    for c in canvases:
+        canvas_id = c["file_id"]
+        label = c.get("label", "")
+
+        file_info = get_canvas_file_info(client, canvas_id)
+        if not file_info:
+            continue
+
+        # updated 欠損時は 0 として扱い、差分判定せず常に再取得する
+        updated = int(file_info.get("updated") or 0)
+        db_updated = db_get_canvas_updated(conn, channel_id, canvas_id)
+        is_new = db_updated is None
+
+        if not is_new and updated != 0 and updated == db_updated:
+            stats["skipped"] += 1
+            continue
+
+        title = file_info.get("title", "") or label
+
+        raw = download_canvas_body(file_info)
+        if not raw:
+            print(f"  [WARN] Canvas本文取得失敗のためスキップ: {title}", file=sys.stderr)
+            continue
+        text = canvas_raw_to_text(raw)
+
+        print(f"  Canvas取得: {title} ({len(text)}文字)", file=sys.stderr)
+
+        if not dry_run:
+            db_upsert_canvas(conn, channel_id, canvas_id, title, text, updated)
+            conn.commit()
+        else:
+            dry_run_fetched += 1
+
+        if is_new:
+            stats["new"] += 1
+        else:
+            stats["updated"] += 1
+
+    print(
+        f"Canvas: 新規={stats['new']} 更新={stats['updated']} スキップ={stats['skipped']}",
+        file=sys.stderr,
+    )
+    if dry_run:
+        print(f"[DRY-RUN] Canvas: {dry_run_fetched}件取得（DB未書き込み）", file=sys.stderr)
+    return stats["new"] + stats["updated"]
+
+
+# ==================================================================
 # --list: DB内スレッド一覧
 # ==================================================================
 
@@ -521,6 +636,18 @@ def main():
         )
         dry_run_note = "（dry-run: 未保存）" if args.dry_run else ""
         print(f"\n取得・保存: {fetched} スレッド{dry_run_note}")
+
+        # ---- Canvas 取得 & DB保存 ----
+        # DB層・bs4解析の予期しない例外で後続の pm_ingest.py 呼び出し
+        # （pm_from_slack.sh の set -e）まで丸ごと落とさないよう防御する
+        if not args.no_canvas:
+            print(f"\n{'='*60}")
+            print(f"Canvas取得 (チャンネル: {channel_id})")
+            print(f"{'='*60}")
+            try:
+                fetch_and_store_canvases(conn=conn, channel_id=channel_id, dry_run=args.dry_run)
+            except Exception as e:
+                print(f"[WARN] Canvas取得処理が失敗しました（スキップして続行）: {e}", file=sys.stderr)
     else:
         print("\nスキップ（DB のみ使用）")
 

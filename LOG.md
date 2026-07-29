@@ -7,6 +7,26 @@
 
 ---
 
+## 2026-07-29 canvases を pm_embed で索引化 — source_type=slack_canvas
+
+**背景**: 同日追加の slack.db canvases テーブルは書き込み専用で、investigate/brief の検索に乗らなかった。
+**決定**: pm_embed.py に index_slack_canvases を追加（config の channels 定義を再利用、新設定なし）。
+source_db は `slack.db#canvas#{channel_id}` — slack_raw の `{channel_id}.db` と名前空間を分けたのは、
+delete_source_chunks が source_type を見ず source_db+index_name で消すため、共用すると生メッセージの
+チャンクを巻き込むから。Canvas はストック情報なので purge_stale_record_chunks で旧版チャンクを都度掃除。
+**見送り**: 削除済み Canvas の索引掃除・複数チャンネル同一 Canvas の dedup・鮮度スコアの Canvas 優遇是正は
+運用実測後に判断（Canvas の held_at は常に新しく、一次証拠を押し出す懸念あり）。
+
+## 2026-07-29 チャンネル Canvas の内容を slack_pipeline で取得 → slack.db canvases テーブルへ
+
+**背景**: チャンネルタブの Canvas に会議資料一覧等の恒常情報が置かれるようになり、メッセージ取得だけでは拾えない。
+**決定**: 新規スクリプトは作らず slack_pipeline.py に取得ステップを追加。タブ列挙は `bookmarks.list` でなく
+`conversations.info` → `properties.tabs`（Canvas タブを返すのは後者のみ）。`type=="canvas"` フィルタ必須 —
+Slack List（type=="list"）タブも file_id を持ち、生 JSON が混入する事故をスモークテストで実測。
+差分判定は `files.info` の `updated` 比較（0 は判定不能として常に再取得）、空本文は UPSERT せずスキップ
+（失敗時の空上書きが恒久化する病理を防止）。ダウンロード処理は pm_sync_canvas.py と canvas_utils.py に共通化。
+**既知の制限**: ingest_slack は canvases 未対応（決定事項・AI の抽出元にはならない。索引化は同日対応 — 上記エントリ参照）。
+
 ## 2026-07-28 議事録転記に 3 ゲートトリアージ導入 — 非本質項目（連絡・会議運営）の混入源を封鎖（PM 指摘）
 
 **背景**: 「語尾だけの機械抽出で連絡事項が混入していないか」との PM 指摘を受け pm.db を全数調査。

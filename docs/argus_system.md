@@ -767,6 +767,7 @@ python3 scripts/argus/pm_argus_patrol.py --list-pending
 | `minutes_content` | 議事録本文（段落単位チャンク） | 生の議事内容を参照するため |
 | `slack_raw` | Slack生メッセージ（スレッド単位でまとめたチャンク） | 要約で失われるニュアンス・文脈を保持するため |
 | `document` | BOXドキュメントメタデータ（タイトル・説明・種別） | Slack上で共有された資料の発見可能性向上のため |
+| `slack_canvas` | チャンネル紐づき Slack Canvas 本文（見出し単位チャンク） | Canvas に集約された最新のチーム合意・仕様を検索対象にするため |
 | `web` | 外部Web記事（RIKEN公式・HPC系ニュース・NVIDIAブログ等） | プロジェクト関連の公開情報を検索するため |
 
 LLM抽出の `decisions`・`action_items` は**索引対象外**。
@@ -807,10 +808,12 @@ default_index: pm
 ```sql
 CREATE TABLE chunks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_type TEXT NOT NULL,   -- 'minutes_content' | 'slack_raw' | 'document' | 'web'
+    source_type TEXT NOT NULL,   -- 'minutes_content' | 'slack_raw' | 'document' | 'slack_canvas' | 'web'
     source_db   TEXT NOT NULL,   -- 'minutes/Leader_Meeting.db' | '<channel_id>.db'
                                  -- (※ slack の source_db は互換のため "{channel_id}.db" 形式)
                                  -- 'docs_pm.db' | 'web_articles.db' | 'box_docs.db'
+                                 -- slack_canvas は "slack.db#canvas#{channel_id}" 形式
+                                 -- （slack_raw の "{channel_id}.db" とは別名前空間）
     record_id   TEXT,
     held_at     TEXT,            -- YYYY-MM-DD
     content     TEXT NOT NULL,   -- 原文チャンク（最大1000文字）
@@ -943,6 +946,7 @@ Slack要約の出典はチャンネルIDではなく人が読みやすい名称�
 | `box_docs.db` (本文) | `document` | `split_into_chunks_by_heading()` で `#`〜`###` 見出し単位にセクション分割し、各チャンク先頭に見出しパス（例 `【第2章 性能評価 > GPU実行結果】`）を付与した上でセクション内を `CHUNK_MAX_CHARS=1000` で段落詰め（`pm_box_relevance.py` で `noise` と判定されたファイルは除外）|
 | `data/minutes/{kind}.db` | `minutes_content` | 議題・段落単位（`box_docs.db` と同じ `split_into_chunks_by_heading()` を使用）|
 | `data/slack.db` | `slack_raw` | スレッド単位（親 + 返信を連結、見出し分割は非適用）|
+| `data/slack.db` (`canvases`) | `slack_canvas` | `split_into_chunks_by_heading()` でセクション分割し、各チャンク先頭に Canvas タイトル（例 `【運用ルール】`）を付与。`source_db` は `slack.db#canvas#{channel_id}`（`slack_raw` の `{channel_id}.db` とは別名前空間） |
 | `data/web_articles.db` | `web` | 見出しがあれば `split_into_chunks_by_heading()` でセクション分割、無ければ従来どおり1記事に近い単位 |
 
 ```
@@ -1191,8 +1195,8 @@ crontab -l | grep argus
   従来どおり段落詰め（`CHUNK_MAX_CHARS=1000` / `CHUNK_OVERLAP_CHARS=100`）
 - **見出しの引き継ぎ**: 各チャンク先頭に所属する見出しパスを付与（例:
   `【第2章 性能評価 > GPU実行結果】`）することでLLMの文脈理解が向上。適用対象は
-  box_document / minutes_content / web（slack_raw は従来の段落分割のまま）。見出しの無い
-  文書は従来と完全同一の分割結果になる（後方互換）
+  box_document / minutes_content / web / slack_canvas（slack_raw は従来の段落分割のまま）。
+  見出しの無い文書は従来と完全同一の分割結果になる（後方互換）
 
 未実装のまま残る課題:
 

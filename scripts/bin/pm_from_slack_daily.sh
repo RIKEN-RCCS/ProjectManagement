@@ -115,4 +115,4 @@ $RUN -c C0AS2JKS200 --db-pm $DB >> $LOGFILE 2>&1   # 92_詳細設計1技術報�
 $RUN -c C09JMEA157E --db-pm $DB >> $LOGFILE 2>&1   # 92_詳細設計調達
 
 # --- FTS5 インデックス再構築 ---
-cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && python3 ${BASEDIR}/scripts/data-pipeline/pm_embed.py --data-dir "${BASEDIR}/data" >> $LOGFILE 2>&1
+cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && "$PYTHON3" ${BASEDIR}/scripts/data-pipeline/pm_embed.py --data-dir "${BASEDIR}/data" >> $LOGFILE 2>&1

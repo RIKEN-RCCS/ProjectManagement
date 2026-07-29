@@ -17,7 +17,7 @@ import logging
 import re
 import sqlite3
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -104,6 +104,23 @@ MAX_EMBEDDING_ANOMALY_WARNINGS = 20
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+_JST = timezone(timedelta(hours=9))
+
+
+def _canvas_held_at(updated: int | None, fetched_at: str) -> str | None:
+    """slack.db canvases.updated（unix秒）を JST の YYYY-MM-DD HH:MM:SS 文字列に変換する。
+    updated が 0/None（API側で値欠損）の場合は fetched_at（ISO8601、例:
+    "2026-07-29T12:34:56.789012"）を "YYYY-MM-DD HH:MM:SS" 形式に正規化して使う
+    （他 source_type の held_at と形式を揃えるため）。"""
+    if updated:
+        return (
+            datetime.fromtimestamp(int(updated), tz=UTC)
+            .astimezone(_JST)
+            .strftime("%Y-%m-%d %H:%M:%S")
+        )
+    return fetched_at[:19].replace("T", " ")
 
 
 # --- SudachiPy 形態素解析 ---
@@ -595,6 +612,120 @@ def index_slack_raw(
     return count
 
 
+# --- 統合 slack.db の canvases からの抽出（チャンネル紐づき Canvas 本文）---
+
+def index_slack_canvases(
+    index_conn: sqlite3.Connection,
+    db_path: Path,
+    index_name: str,
+    full_rebuild: bool,
+    dry_run: bool,
+    logger: logging.Logger,
+    channel_id: str,
+) -> int:
+    """統合 Slack DB (data/slack.db) の canvases を、指定チャンネル分だけ索引化する。
+
+    source_db キーは "slack.db#canvas#{channel_id}" 形式。index_slack_raw の
+    "{channel_id}.db" とは別名前空間にすることで、index_state・チャンク削除処理が
+    生メッセージ索引と衝突しないようにする。
+
+    差分更新: index_state の last_indexed より新しい fetched_at を持つ Canvas
+    のみ再処理する（Canvas は新規/更新時のみ upsert されるため、変化のない
+    Canvas は fetched_at も更新されず差分対象から自然に外れる）。Canvas は
+    上書き編集されるストック情報のため、再索引時は canvas_id 単位で
+    purge_stale_record_chunks を呼び旧バージョンのチャンクを取り除く
+    （差分対象外の Canvas には影響しない）。
+
+    注意（cross-index purge）: purge_stale_record_chunks は source_db + record_id
+    単位で古い content のチャンクを index_name に関係なく削除する
+    （index_box_doc_content と同じトレードオフ、pm_embed.py の box_document 側の
+    該当コメント参照）。そのため `--index-name` で単一 index のみを対象に実行した
+    場合、その canvas_id が他 index_name にも属していれば、他 index へのリンクも
+    まとめて消える可能性がある。全 index を回す通常実行（--index-name 省略）では
+    各 index の処理時にチャンクが再挿入されるため自己回復する。
+
+    注意（差分判定の時刻ずれ）: canvases.fetched_at は slack_pipeline.py が
+    `datetime.now().isoformat()`（naive・ローカル/JST 想定）で書き込むのに対し、
+    index_state.last_indexed は本関数が now_iso()（UTC aware）で書き込む。
+    両者を単純な文字列比較 `fetched_at > last_indexed` で突き合わせているため、
+    実際には約 +9h のずれが生じ、直近 9 時間分の Canvas を毎回「差分あり」として
+    再処理する（過剰包含・安全側の誤り。取りこぼしにはならない）。
+    """
+    source_db = f"slack.db#canvas#{channel_id}"
+    last_indexed = None if full_rebuild else get_last_indexed(
+        index_conn, source_db, index_name)
+
+    try:
+        src_conn = open_db(db_path)
+    except Exception as e:
+        logger.warning(f"    {source_db}: 開けませんでした - {e}")
+        return 0
+
+    table_exists = src_conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvases'"
+    ).fetchone()
+    if not table_exists:
+        logger.info(f"    {source_db}: canvases テーブル未作成 — スキップ")
+        src_conn.close()
+        return 0
+
+    query = "SELECT canvas_id, title, content, updated, fetched_at FROM canvases WHERE channel_id = ?"
+    params: list = [channel_id]
+    if last_indexed:
+        query += " AND fetched_at > ?"
+        params.append(last_indexed)
+
+    rows = src_conn.execute(query, params).fetchall()
+    src_conn.close()
+
+    if last_indexed and not rows:
+        logger.info(f"    slack_canvas {source_db}: 差分なし")
+        return 0
+
+    chunk_rows: list[dict] = []
+    now = now_iso()
+    record_current_contents: dict[str, set[str]] = {}
+    n_canvases = 0
+
+    for row in rows:
+        content = row["content"] or ""
+        if not content.strip():
+            continue
+        n_canvases += 1
+        # title 内の【】は見出しプレフィクスの区切りと衝突するため置換する
+        # （pm_qa_server._format_source_label 側の【...】抽出が壊れないように）
+        title = (row["title"] or "").replace("【", "[").replace("】", "]")
+        held_at = _canvas_held_at(row["updated"], row["fetched_at"])
+        record_id = row["canvas_id"]
+        current_set = record_current_contents.setdefault(record_id, set())
+        for chunk in split_into_chunks_by_heading(content):
+            prefixed = f"【{title}】\n{chunk}" if title else chunk
+            current_set.add(prefixed)
+            chunk_rows.append({
+                "source_type": "slack_canvas",
+                "source_db": source_db,
+                "record_id": record_id,
+                "held_at": held_at,
+                "content": prefixed,
+                "tokens": sudachi_tokenize(prefixed),
+                "source_ref": None,
+                "indexed_at": now,
+            })
+
+    logger.info(f"    slack_canvas {source_db} → {index_name}: {len(chunk_rows)} チャンク（{n_canvases} Canvas）")
+
+    if dry_run:
+        return len(chunk_rows)
+
+    for record_id, current_set in record_current_contents.items():
+        purge_stale_record_chunks(index_conn, source_db, "slack_canvas", record_id, current_set)
+
+    if full_rebuild:
+        delete_source_chunks(index_conn, source_db, index_name)
+    count = insert_chunks(index_conn, chunk_rows, index_name)
+    set_last_indexed(index_conn, source_db, index_name, now)
+    return count
+
 
 # --- box_docs.db からの抽出（BOXドキュメント本文）---
 
@@ -998,6 +1129,13 @@ def build_index(
         else:
             for channel_id in channel_ids:
                 total += index_slack_raw(
+                    index_conn, slack_db, index_name,
+                    full_rebuild, dry_run, logger,
+                    channel_id=channel_id,
+                )
+
+            for channel_id in channel_ids:
+                total += index_slack_canvases(
                     index_conn, slack_db, index_name,
                     full_rebuild, dry_run, logger,
                     channel_id=channel_id,

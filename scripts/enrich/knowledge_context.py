@@ -575,6 +575,7 @@ _SOURCE_TYPE_LABEL = {
     "slack_raw": "Slackメッセージ",
     "document": "資料",
     "box_document": "Box資料",
+    "slack_canvas": "チャンネルCanvas",
     "web": "Web記事",
 }
 
@@ -599,6 +600,14 @@ def _simple_source_label(chunk: dict) -> str:
             if end > 0:
                 title = content[1:end]
         return f"{title or 'Box資料'} ({held_at})"
+    if source_type == "slack_canvas":
+        content = chunk.get("content") or ""
+        title = ""
+        if content.startswith("【"):
+            end = content.find("】")
+            if end > 0:
+                title = content[1:end]
+        return f"{title or label} ({held_at})"
     db_name = chunk.get("source_db", "").replace("minutes/", "").replace(".db", "")
     return f"{db_name or source_ref or label} / {label} ({held_at})"
 

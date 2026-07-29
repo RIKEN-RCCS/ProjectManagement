@@ -4,5 +4,8 @@
 # Slack SDK
 slack-sdk
 
+# Canvas HTML → Markdown 変換 (canvas_utils.py: canvas_raw_to_text)
+beautifulsoup4
+
 # claude CLI は別途インストールが必要（npm / pip 経由）
 # https://docs.anthropic.com/en/docs/claude-code
