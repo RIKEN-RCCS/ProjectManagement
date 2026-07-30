@@ -2,7 +2,7 @@
 
 Slack抽出ナレッジ検索の第一段 LLM 化（query rewrite 移植）。実在人名・実在アプリ名は使わない。
 """
-from enrich.knowledge_context import extract_topic_keywords_llm
+from enrich.knowledge_context import extract_topic_keywords_llm, sanitize_fts_query
 
 # --------------------------------------------------------------------------- #
 # 正常系
@@ -161,3 +161,23 @@ def test_call_kwargs_temperature_zero_and_max_tokens(monkeypatch):
     assert captured.get("temperature") == 0.0
     assert captured.get("max_tokens") == 4096
     assert captured.get("timeout") == 45
+
+
+# --------------------------------------------------------------------------- #
+# sanitize_fts_query — argus.retrieval への一本化（重複実装廃止）の回帰確認
+# --------------------------------------------------------------------------- #
+
+
+def test_sanitize_fts_query_splits_fullwidth_parentheses():
+    """全角括弧が空白化され、括弧内外が別トークンとして分割される
+    （argus.retrieval.sanitize_fts_query 一本化により knowledge_context 側にも反映）。"""
+    result = sanitize_fts_query("外部GPU計算リソース（NVL72クラス）の確保方針")
+    tokens = result.split()
+    assert "外部GPU計算リソース（NVL72クラス）の確保方針" not in tokens
+    assert any("NVL72" in t for t in tokens)
+
+
+def test_sanitize_fts_query_choonpu_is_preserved():
+    """長音符「ー」は語の一部として保持される（例: サーバー）。"""
+    result = sanitize_fts_query("サーバーの構成について")
+    assert "サーバー" in result or any("サーバー" in t for t in result.split())

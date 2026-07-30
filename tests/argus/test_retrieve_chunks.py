@@ -129,6 +129,49 @@ class TestBuildDateFilter:
 
 
 # --------------------------------------------------------------------------- #
+# sanitize_fts_query — 全角記号対応
+# --------------------------------------------------------------------------- #
+
+class TestSanitizeFtsQuery:
+    def test_fullwidth_parentheses_are_split(self):
+        """全角括弧が空白化され、括弧内外が別トークンとして分割される
+        （2026-07 k3-loss-analysis: mh-nvl72 で括弧ごと1トークン化していたバグ）。"""
+        from argus.retrieval import sanitize_fts_query
+        result = sanitize_fts_query("外部GPU計算リソース（NVL72クラス）の確保方針")
+        tokens = result.split()
+        assert "外部GPU計算リソース（NVL72クラス）の確保方針" not in tokens
+        assert any("NVL72" in t for t in tokens)
+
+    def test_fullwidth_touten_kuten_are_split(self):
+        """全角読点・句点で分割される。"""
+        from argus.retrieval import sanitize_fts_query
+        result = sanitize_fts_query("GENESIS、ライセンス変更。BSD/MIT")
+        tokens = result.split()
+        assert not any("、" in t or "。" in t for t in tokens)
+
+    def test_choonpu_in_word_is_preserved(self):
+        """長音符「ー」は語の一部として保持される（例: サーバー）。"""
+        from argus.retrieval import sanitize_fts_query
+        result = sanitize_fts_query("サーバーの構成について")
+        assert "サーバー" in result or any("サーバー" in t for t in result.split())
+
+    def test_ascii_parentheses_regression(self):
+        """既存の半角記号除去は従来どおり動作する（回帰確認）。"""
+        from argus.retrieval import sanitize_fts_query
+        result = sanitize_fts_query("benchmark(GH200)result")
+        assert "(" not in result
+        assert ")" not in result
+
+    def test_fullwidth_nakaguro_and_brackets(self):
+        """中黒・角括弧・鍵括弧が空白化される。"""
+        from argus.retrieval import sanitize_fts_query
+        result = sanitize_fts_query("理研・富士通・NVIDIA間の「秘密保持契約」")
+        tokens = result.split()
+        assert not any("・" in t for t in tokens)
+        assert not any("「" in t or "」" in t for t in tokens)
+
+
+# --------------------------------------------------------------------------- #
 # retrieve_chunks (FTS5 trigram path)
 # --------------------------------------------------------------------------- #
 
@@ -191,6 +234,69 @@ class TestRetrieveChunks:
         # "other" インデックスは空
         results_other = retrieve_chunks("スケールアウト", db_path, index_name="other")
         assert results_other == []
+
+
+# --------------------------------------------------------------------------- #
+# retrieve_chunks — return_stage
+# --------------------------------------------------------------------------- #
+
+class TestRetrieveChunksReturnStage:
+    @pytest.fixture
+    def qa_db(self, tmp_path):
+        return _make_qa_db(tmp_path)
+
+    def test_default_return_stage_false_returns_list_only(self, qa_db, monkeypatch):
+        """return_stage 未指定（既定）では従来どおり list のみを返す。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        from argus.retrieval import retrieve_chunks
+        results = retrieve_chunks("スケールアウトネットワーク", qa_db)
+        assert isinstance(results, list)
+
+    def test_return_stage_true_reports_fts_tokens_stage(self, qa_db, monkeypatch):
+        """SudachiPy(fts_tokens) でヒットした場合 stage=STAGE_FTS_TOKENS。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["スケールアウトネットワーク"])
+        monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: [{"id": 1, "content": "dummy"}])
+        from argus.retrieval import STAGE_FTS_TOKENS, retrieve_chunks
+        results, stage = retrieve_chunks(
+            "スケールアウトネットワーク", qa_db, return_stage=True,
+        )
+        assert stage == STAGE_FTS_TOKENS
+        assert len(results) >= 1
+
+    def test_return_stage_true_reports_trigram_stage(self, qa_db, monkeypatch):
+        """fts_tokens が空振り（sudachi無効化）で trigram にヒットした場合 stage=STAGE_TRIGRAM。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        from argus.retrieval import STAGE_TRIGRAM, retrieve_chunks
+        results, stage = retrieve_chunks(
+            "スケールアウトネットワーク", qa_db, return_stage=True,
+        )
+        assert stage == STAGE_TRIGRAM
+        assert len(results) >= 1
+
+    def test_return_stage_true_reports_date_fallback_stage(self, qa_db, monkeypatch):
+        """全段不一致の質問では stage=STAGE_DATE_FALLBACK。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        from argus.retrieval import STAGE_DATE_FALLBACK, retrieve_chunks
+        results, stage = retrieve_chunks(
+            "存在しないキーワードXYZ", qa_db, return_stage=True,
+        )
+        assert stage == STAGE_DATE_FALLBACK
+        assert len(results) >= 1
+
+    def test_return_stage_true_reports_no_index_stage(self, tmp_path, monkeypatch):
+        """DB が存在しない場合 stage=STAGE_NO_INDEX、chunks は空。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        from argus.retrieval import STAGE_NO_INDEX, retrieve_chunks
+        results, stage = retrieve_chunks(
+            "test", tmp_path / "nonexistent.db", return_stage=True,
+        )
+        assert results == []
+        assert stage == STAGE_NO_INDEX
 
 
 # --------------------------------------------------------------------------- #
@@ -380,6 +486,224 @@ class TestRetrieveChunksHybrid:
         from argus.retrieval import retrieve_chunks_hybrid
         retrieve_chunks_hybrid("議事録", qa_db, since_date="2026-06-01", index_name="test")
         assert captured["since_date"] == "2026-06-01"
+
+    def test_vector_k_unspecified_uses_module_default(self, qa_db, monkeypatch):
+        """vector_k 未指定時は retrieve_chunks_vector へ従来どおり k=_VECTOR_K が渡る
+        （one-shot broad-recall 未使用時の既存挙動不変の検証）。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+
+        captured = {}
+
+        def fake_vector(query, conn, k=srv._VECTOR_K, index_name=None,
+                        record_ids=None, since_date=None, exempt_box=True):
+            captured["k"] = k
+            return []
+
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", fake_vector)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        retrieve_chunks_hybrid("議事録", qa_db, index_name="test")
+        assert captured["k"] == srv._VECTOR_K
+
+    def test_vector_k_specified_propagates_to_vector_leg(self, qa_db, monkeypatch):
+        """vector_k=200 を指定すると vector 脚の取得件数として 200 が伝播する
+        （one-shot broad-recall 用の上書き）。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+
+        captured = {}
+
+        def fake_vector(query, conn, k=srv._VECTOR_K, index_name=None,
+                        record_ids=None, since_date=None, exempt_box=True):
+            captured["k"] = k
+            return []
+
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", fake_vector)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        retrieve_chunks_hybrid("議事録", qa_db, index_name="test", vector_k=200)
+        assert captured["k"] == 200
+
+    def test_large_k_and_vector_k_returns_up_to_fixture_size(self, qa_db, monkeypatch):
+        """k・vector_k を大きく指定した場合、_rrf_merge はフィクスチャの範囲
+        （4件）まで結果を返す。"""
+        import argus.retrieval as srv
+        import embed_utils
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        monkeypatch.setattr(embed_utils, "embed_one", lambda q, **kw: np.ones(DIM, dtype=np.float32))
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid(
+            "議事録", qa_db, k=100, index_name="test", vector_k=100,
+        )
+        assert len(results) == 4
+
+
+# --------------------------------------------------------------------------- #
+# retrieve_chunks_hybrid — 日付フォールバック時の RRF 汚染遮断
+# --------------------------------------------------------------------------- #
+
+def _fake_chunk(cid: int, source_type: str = "slack_raw") -> dict:
+    return {"id": cid, "source_type": source_type, "source_db": "test.db",
+            "record_id": f"r{cid}", "held_at": "2026-07-29",
+            "content": f"content{cid}", "source_ref": None, "rank": 0}
+
+
+class TestRetrieveChunksHybridFallbackExclusion:
+    """retrieve_chunks の stage=STAGE_DATE_FALLBACK 時、RRF マージから FTS 脚を
+    除外し vector 脚のみを使うこと（vector 脚が空の場合のみ従来どおりフォール
+    バック結果を最終手段として返す）。"""
+
+    @pytest.fixture
+    def qa_db(self, tmp_path):
+        return _make_qa_db(tmp_path)
+
+    def test_date_fallback_with_vector_present_excludes_fts_from_rrf(self, qa_db, monkeypatch):
+        import argus.retrieval as srv
+        fallback_chunks = [_fake_chunk(i) for i in range(1, 71)]  # 70件（k+20 相当）
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0 - i * 0.01) for i in range(50)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (fallback_chunks, srv.STAGE_DATE_FALLBACK),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+
+        result_ids = {r["id"] for r in results}
+        fallback_ids = {c["id"] for c in fallback_chunks}
+        vector_ids = {c["id"] for c in vector_chunks}
+        # フォールバックの無関係チャンクが混入しない（根本原因の再現テスト）
+        assert result_ids.isdisjoint(fallback_ids)
+        # vector 候補が生き残る
+        assert result_ids <= vector_ids
+        assert len(results) > 0
+
+    def test_date_fallback_with_empty_vector_returns_fallback_as_last_resort(self, qa_db, monkeypatch):
+        import argus.retrieval as srv
+        fallback_chunks = [_fake_chunk(i) for i in range(1, 71)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (fallback_chunks, srv.STAGE_DATE_FALLBACK),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: [])
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+
+        assert len(results) == 50
+        assert {r["id"] for r in results} <= {c["id"] for c in fallback_chunks}
+
+    def test_normal_stage_still_merges_both_legs_via_rrf(self, qa_db, monkeypatch):
+        """stage が STAGE_TRIGRAM 等（フォールバックでない）場合は従来どおり
+        FTS・vector 両脚を RRF マージする。"""
+        import argus.retrieval as srv
+        fts_chunks = [_fake_chunk(i) for i in range(1, 6)]
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0 - i * 0.01) for i in range(5)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (fts_chunks, srv.STAGE_TRIGRAM),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("スケールアウト", qa_db, k=10)
+
+        result_ids = {r["id"] for r in results}
+        fts_ids = {c["id"] for c in fts_chunks}
+        vector_ids = {c["id"] for c in vector_chunks}
+        # 両脚が混ざって出てくる（フォールバックでないため除外されない）
+        assert result_ids & fts_ids
+        assert result_ids & vector_ids
+
+    def test_hybrid_logs_exclusion_message_on_fallback(self, qa_db, monkeypatch, caplog):
+        """フォールバック遮断発動時に評価メトリクスで拾えるログを INFO で出す。"""
+        import logging
+
+        import argus.retrieval as srv
+        fallback_chunks = [_fake_chunk(i) for i in range(1, 71)]
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0) for i in range(5)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (fallback_chunks, srv.STAGE_DATE_FALLBACK),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        with caplog.at_level(logging.INFO, logger="pm_qa_server"):
+            retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+
+        assert any(
+            "FTS date_fallback excluded from RRF" in rec.message for rec in caplog.records
+        )
+
+    def test_like_stage_with_vector_present_excludes_fts_from_rrf(self, qa_db, monkeypatch):
+        """LIKE 段（rank一律0・ORDER BYなし）も date_fallback と同様、vector 存在時は
+        RRF マージから除外される（S1: 遮断条件の対象範囲拡張）。"""
+        import argus.retrieval as srv
+        like_chunks = [_fake_chunk(i) for i in range(1, 71)]  # 70件（k+20 相当）
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0 - i * 0.01) for i in range(50)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (like_chunks, srv.STAGE_LIKE),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+
+        result_ids = {r["id"] for r in results}
+        like_ids = {c["id"] for c in like_chunks}
+        vector_ids = {c["id"] for c in vector_chunks}
+        assert result_ids.isdisjoint(like_ids)
+        assert result_ids <= vector_ids
+        assert len(results) > 0
+
+    def test_like_stage_with_empty_vector_returns_like_as_last_resort(self, qa_db, monkeypatch):
+        """LIKE 段でも vector 脚が空なら従来どおり LIKE 結果を最終手段として返す。"""
+        import argus.retrieval as srv
+        like_chunks = [_fake_chunk(i) for i in range(1, 71)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (like_chunks, srv.STAGE_LIKE),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: [])
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+
+        assert len(results) == 50
+        assert {r["id"] for r in results} <= {c["id"] for c in like_chunks}
+
+    def test_like_stage_logs_exclusion_message_with_stage_name(self, qa_db, monkeypatch, caplog):
+        """LIKE 段の遮断ログにも stage 名（"like"）が含まれる。"""
+        import logging
+
+        import argus.retrieval as srv
+        like_chunks = [_fake_chunk(i) for i in range(1, 71)]
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0) for i in range(5)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (like_chunks, srv.STAGE_LIKE),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        with caplog.at_level(logging.INFO, logger="pm_qa_server"):
+            retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+
+        assert any(
+            "FTS like excluded from RRF" in rec.message for rec in caplog.records
+        )
 
 
 # --------------------------------------------------------------------------- #

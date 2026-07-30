@@ -11,6 +11,7 @@ import re
 import sqlite3
 from datetime import date as _date
 from pathlib import Path
+from typing import Literal, overload
 
 from cli_utils import env_int as _env_int
 
@@ -100,15 +101,25 @@ def sudachi_tokenize_query(question: str) -> list[str]:
 # FTS5 検索
 # --------------------------------------------------------------------------- #
 
+# 全角の区切り記号（括弧類・句読点・中黒等）。長音符「ー」は語の一部
+# （例: サーバー）のため対象外。全角括弧を除去しないと「外部GPU計算リソース
+# （NVL72クラス）」のような文字列が括弧ごと1トークン化し、trigram FTS の
+# AND 検索が全段不成立になる（2026-07 k3-loss-analysis で特定）。
+_FULLWIDTH_PUNCT = r'（）「」『』【】〈〉《》・、。：；？！〜'
+
+
 def sanitize_fts_query(q: str) -> str:
     """FTS5 trigram 用にクエリを変換する。
     ひらがな連続列で分割し、意味のある語句（3文字以上）を AND 条件として返す。
     """
     q = re.sub(r'["\'\*\^\(\)\[\]？?。、,，.．！!\n\r]', " ", q)
+    q = re.sub(f'[{re.escape(_FULLWIDTH_PUNCT)}]', " ", q)
     parts = re.split(r'[ぁ-ん]+', q)
     tokens = [t.strip() for t in parts if len(t.strip()) >= 3]
     if not tokens:
-        return re.sub(r'["\'\*\^\(\)\[\]？?。、！!]', " ", q).strip()
+        # q は上の re.sub 2 本で既に両方の記号クラスを除去済みのため、
+        # ここで再度同じ置換を行うのは no-op（単純に整形して返すだけでよい）。
+        return q.strip()
     return " ".join(tokens)
 
 
@@ -215,11 +226,41 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
     return []
 
 
+# retrieve_chunks が「どの段で結果を得たか」を表す stage 名（return_stage=True 時）。
+# STAGE_DATE_FALLBACK は関連度シグナルを持たない「最新日付順」の最終手段であり、
+# retrieve_chunks_hybrid の RRF マージで通常ヒットと同格に扱ってはならない
+# （2026-07 k3-loss-analysis で mh-nvl72 の vector 候補が押し出される劣化を確認）。
+STAGE_NO_INDEX = "no_index"
+STAGE_FTS_TOKENS = "fts_tokens"
+STAGE_TRIGRAM = "trigram"
+STAGE_LIKE = "like"
+STAGE_DATE_FALLBACK = "date_fallback"
+
+
+@overload
 def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
                     since_date: str | None = None,
                     index_name: str | None = None,
                     record_ids: list[str] | None = None,
-                    exempt_box: bool = True) -> list[dict]:
+                    exempt_box: bool = True,
+                    return_stage: Literal[False] = False) -> list[dict]: ...
+
+
+@overload
+def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
+                    since_date: str | None = None,
+                    index_name: str | None = None,
+                    record_ids: list[str] | None = None,
+                    exempt_box: bool = True,
+                    return_stage: Literal[True] = True) -> tuple[list[dict], str]: ...
+
+
+def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
+                    since_date: str | None = None,
+                    index_name: str | None = None,
+                    record_ids: list[str] | None = None,
+                    exempt_box: bool = True,
+                    return_stage: bool = False) -> list[dict] | tuple[list[dict], str]:
     """統合 qa_index.db から関連チャンクを取得する。
 
     検索戦略（順番に試行）:
@@ -229,10 +270,13 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     4. 最新日付レコードのフォールバック
 
     exempt_box: `_build_date_filter()` 参照。既定 True で従来挙動を維持。
+    return_stage: True の場合 (chunks, stage) を返す。stage は STAGE_* 定数
+        （どの段で結果を得たか）。既定 False は従来どおり chunks のみを返す
+        （後方互換）。
     """
     if not index_db.exists():
         logger.warning(f"インデックスDBが見つかりません: {index_db}")
-        return []
+        return ([], STAGE_NO_INDEX) if return_stage else []
 
     conn = sqlite3.connect(str(index_db))
     conn.row_factory = sqlite3.Row
@@ -275,7 +319,7 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
                     logger.info(
                         f"SudachiPy FTSマッチ ({len(rows)}件): {sudachi_tokens} in {idx_label}"
                     )
-                    return rows
+                    return (rows, STAGE_FTS_TOKENS) if return_stage else rows
                 logger.debug(f"SudachiPy FTS: ヒットなし ({sudachi_tokens})")
 
         # --- Step 2: trigram FTS5 検索 ---
@@ -298,7 +342,7 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
                                record_filter=record_filter, record_params=record_params)
             if rows:
                 logger.info(f"trigram FTSマッチ ({len(rows)}件): [{q}] in {idx_label}")
-                return rows
+                return (rows, STAGE_TRIGRAM) if return_stage else rows
 
         # --- Step 3: LIKE 検索 ---
         keyword = (sudachi_tokens[0] if sudachi_tokens else
@@ -314,7 +358,8 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
             rows = conn.execute(sql, params).fetchall()
             if rows:
                 logger.info(f"LIKE検索フォールバック ({len(rows)}件): [{keyword}]")
-                return [dict(r) for r in rows]
+                result = [dict(r) for r in rows]
+                return (result, STAGE_LIKE) if return_stage else result
 
         # --- Step 4: 最新記録フォールバック ---
         logger.info(f"マッチなし → 最新記録フォールバック (sudachi={sudachi_tokens})")
@@ -327,7 +372,8 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
         )
         params = ci_params + date_params + record_params + [k]
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        return (result, STAGE_DATE_FALLBACK) if return_stage else result
 
     finally:
         conn.close()
@@ -583,24 +629,42 @@ def retrieve_chunks_hybrid(
     since_date: str | None = None, index_name: str | None = None,
     record_ids: list[str] | None = None,
     exempt_box: bool = True,
+    vector_k: int | None = None,
 ) -> list[dict]:
     """FTS5 + vector のハイブリッド検索。RRF で統合する。
 
     exempt_box: `_build_date_filter()` 参照。既定 True で従来挙動を維持。
+    vector_k: one-shot broad-recall 用。既定 None = 従来の _VECTOR_K=50。
+        指定するとベクトル検索脚の取得件数を上書きできる。
     """
-    fts_results = retrieve_chunks(question, index_db, k=k+20,
-                                  since_date=since_date, index_name=index_name,
-                                  record_ids=record_ids, exempt_box=exempt_box)
+    fts_results, fts_stage = retrieve_chunks(question, index_db, k=k+20,
+                                             since_date=since_date, index_name=index_name,
+                                             record_ids=record_ids, exempt_box=exempt_box,
+                                             return_stage=True)
     conn = sqlite3.connect(str(index_db))
     conn.row_factory = sqlite3.Row
     try:
-        vec_results = retrieve_chunks_vector(question, conn, k=_VECTOR_K,
+        vec_results = retrieve_chunks_vector(question, conn,
+                                             k=(vector_k if vector_k is not None else _VECTOR_K),
                                              index_name=index_name,
                                              record_ids=record_ids,
                                              since_date=since_date,
                                              exempt_box=exempt_box)
     finally:
         conn.close()
+
+    # STAGE_DATE_FALLBACK（最新日付順の最終手段）と STAGE_LIKE（rank 一律 0・
+    # ORDER BY なしの LIKE 検索）はどちらも関連度シグナルを持たない。これらを
+    # FTS 脚として RRF に混ぜると、件数（k+20）が vector 側の重み
+    # （_VECTOR_SEARCH_WEIGHT=0.4）を数で上回り、無関係なチャンクが意味的に
+    # 正しい vector 候補を押し出してしまう（RRF 数式上 rank r<90 の FTS 候補が
+    # vector 1位に勝つため、LIKE 段の LIMIT k+20 は容易にこれを満たす）。
+    # 2026-07 k3-loss-analysis: mh-nvl72 で vector 上位50件が全滅した実測
+    # （date_fallback 発生時）。vector 脚が空の場合のみ、従来どおり FTS 結果を
+    # 最終手段として使う。
+    if fts_stage in (STAGE_DATE_FALLBACK, STAGE_LIKE) and vec_results:
+        logger.info(f"[hybrid] FTS {fts_stage} excluded from RRF (vector-only)")
+        return _rrf_merge([], vec_results, k)
 
     if not vec_results:
         return fts_results[:k]

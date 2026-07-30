@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import yaml
@@ -19,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from argus.retrieval import (
+    sanitize_fts_query,  # noqa: E402 — 上記 sys.path 追加後にインポート
+)
 
 # ---------------------------------------------------------------------------
 # SudachiPy (lazy init)
@@ -325,15 +332,6 @@ def _load_index_db_paths(config_path: Path | None = None) -> list[Path]:
     return paths
 
 
-def _sanitize_fts_query(q: str) -> str:
-    q = re.sub(r'["\'\*\^\(\)\[\]？?。、,，.．！!\n\r]', " ", q)
-    parts = re.split(r'[ぁ-ん]+', q)
-    tokens = [t.strip() for t in parts if len(t.strip()) >= 3]
-    if not tokens:
-        return re.sub(r'["\'\*\^\(\)\[\]？?。、！!]', " ", q).strip()
-    return " ".join(tokens)
-
-
 def _fts5_search(conn: sqlite3.Connection, query: str, k: int) -> list[dict]:
     try:
         rows = conn.execute(
@@ -415,7 +413,7 @@ def fetch_fts_context(
                     rows = _fts_tokens_search(conn, sudachi_tokens, per_db_limit)
 
             if not rows:
-                sanitized = _sanitize_fts_query(query_text)
+                sanitized = sanitize_fts_query(query_text)
                 valid_tokens = [t for t in sanitized.split() if len(t) >= 3]
                 if valid_tokens:
                     for tset in [valid_tokens, valid_tokens[:3], valid_tokens[:2], valid_tokens[:1]]:
