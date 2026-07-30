@@ -18,6 +18,29 @@ for _p in (_SCRIPTS_ARGUS, _SCRIPTS_DATA_PIPELINE, _SCRIPTS):
 # Environment: avoid touching production DBs during tests
 # --------------------------------------------------------------------------- #
 
+# 実行環境（qa デーモン起動シェル等）から流入しうる実験・運用フラグ。
+# ~/.claude/settings.json の env 経由で Claude Code セッションのシェルにも展開されるため、
+# テストが one-shot 分岐や再ランキング無効化等の意図しない経路に入らないよう全テスト前に除去する。
+_LEAKY_ENV_VARS = (
+    "ARGUS_ONESHOT",
+    "ARGUS_ONESHOT_TOP_K",
+    "ARGUS_ONESHOT_CHAR_BUDGET",
+    "ARGUS_ONESHOT_MAX_TOKENS",
+    "ARGUS_ONESHOT_LLM_URL",
+    "ARGUS_ONESHOT_LLM_MODEL",
+    "ARGUS_ONESHOT_LLM_TOKEN",
+    "ARGUS_ONESHOT_LLM_TEMPERATURE",
+    "ARGUS_PRESERVE_REASONING",
+    "ARGUS_REASONING_EFFORT",
+    "ARGUS_LLM_TEMPERATURE",
+    "ARGUS_INVESTIGATE_TIMEOUT",
+    "ARGUS_STEP_THINK",
+    "ARGUS_STEP_MAX_TOKENS",
+    "ARGUS_DISABLE_LLM_RERANK",
+    "ARGUS_TOP_K_RERANK",
+)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_env(tmp_path, monkeypatch):
     """Redirect all DB / log paths to a per-test tmp dir.
@@ -25,6 +48,8 @@ def _isolate_env(tmp_path, monkeypatch):
     Many modules read paths from env vars at import time OR at call time.
     We set the common ones defensively here.
     """
+    for _var in _LEAKY_ENV_VARS:
+        monkeypatch.delenv(_var, raising=False)
     monkeypatch.setenv("LOCAL_LLM_URL", "http://127.0.0.1:1/v1")
     monkeypatch.setenv("LOCAL_LLM_TOKEN", "dummy")
     monkeypatch.setenv("LOCAL_LLM_MODEL", "test-model")
