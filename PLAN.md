@@ -60,9 +60,14 @@ one-shot が loop より優位、の 3 点が設計前提に効く）。
    （長時間セッション・優先度 3）の前提として第 1 弾とは分離して設計
 5. **議事録生成ベンチ（メモ ステップ2）** — GLM vs K3、トークン単価・レイテンシ・
    スライド画像込み抽出精度の 3 点。(d) が通ることが前提
-6. **PM 側の確認事項** — RIKYU タイムアウト緩和 / nginx 迂回経路の打診、Kimi K3 License の
-   機関確認、常駐割当・キュー待ちポリシー
-7. コミット（実験実装 + 検索バグ修正一式）+ qa デーモン再起動 → 本エントリを LOG.md へ圧縮
+6. **PM 側の確認事項** — RIKYU タイムアウト緩和 / nginx 迂回経路の打診（600 秒がどの directive
+   かの確認込み）、Kimi K3 License の機関確認、常駐割当・キュー待ちポリシー、
+   ~/.claude/settings.json の GitHub PAT 失効・除去
+7. ~~コミット + qa デーモン再起動~~ **完了（2026-07-30、K3 override 有効化済み）**。
+   残る小課題: (a) recall_eval が _init_sudachi() を呼ばず fts_tokens 段が測定から素通りする
+   計測ギャップの修正、(b) investigate_ab の glm-loop メトリクスは initial_search_calls を
+   参照（tool_calls_total は STEP ループ内のみ）、(c) K3 実運用の観察（品質・レイテンシ・
+   [oneshot][FALLBACK] 率）→ 数日問題なければ本エントリを LOG.md へ圧縮して削除
 
 **ステータス**: 静的検査（tests/selfcheck/）は pre-commit で毎コミット自動実行中。
 データ不変条件（pm_selfcheck.py）は手動実行で exit 0 を確認済み。
