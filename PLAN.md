@@ -6,7 +6,63 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 
 ## 現在進行中の計画
 
-### selfcheck 検査ジョブの運用開始（本体は 2026-07-27 実装済み — LOG.md 参照）
+### Kimi-K3 の実力を引き出す investigate 実装の検証（one-shot 長文脈 2×2 実験）
+
+**ステータス**: 実装完了・レビュー指摘対応中（2026-07-29 着手）。
+詳細計画: `~/.claude/plans/rustling-pondering-starlight.md`、背景は
+docs/decisions/rikyu_argus_model_eval.md（investigate 単発品質のみ K3 が glm 超えという評価事実）。
+
+**仮説**: K3-native な investigate は「補助 LLM 呼び出しゼロ + 決定的 broad-recall +
+太い文脈 1 回渡し（one-shot）」。{現行ループ, one-shot} × {glm-5.2, kimi-k3} の 2×2 を
+盲検 A/B（investigate_ab.py 拡張、4 ペア）で検証する。
+
+**実装済み（全て opt-in・既定挙動不変、未コミット）**:
+- retrieval.py: retrieve_chunks_hybrid の vector_k パラメータ化
+- pm_argus_agent.py: `ARGUS_ONESHOT` one-shot 経路（LLM 1 回、rewrite/HyDE/re-rank バイパス）
+- investigate_ab.py: ARM_PRESETS（glm-loop/glm-oneshot/k3-loop/k3-oneshot）+ stderr メトリクス
+- 多段設問候補 9 問: data/eval/investigate_gold_candidates.yaml（**PM キュレーション待ち**）
+
+**進捗（2026-07-30）**: 実装・レビュー対応・N スイープ・本走 5 ペア × gold 8 問まで完了
+（40 件・error 0）。結果は eval doc 追補と LOG.md 2026-07-30 を参照。要点: search では
+glm-oneshot が現行超え（83.3%・31s）、k3-oneshot はさらに上（66.7%）、docqa は one-shot 不適。
+one-shot N=50 確定（RIKYU nginx 600s timeout 制約）。
+
+**経過（2026-07-30 後半）**: mh- 9 問を gold に追記（計 17 問）し 5 ペア追加実行を開始したが、
+敗因深掘りで検索段バグ 2 件を発見（sanitize の全角括弧未対応 → FTS 全段不成立、日付フォールバックが
+RRF で vector 候補を押し出す）。修正・テスト済み（940+ 件グリーン）。汚染レコード 18 件を
+investigate_k3_pre_sanitize_fix.jsonl に隔離し、11 問 × 5 ペアを修正済みコードで再計測中。
+knowledge_context.py の重複 sanitize も一本化済み。
+
+**方針アップデート**: PM 作成の設計メモ **docs/kimi-k3-migration.md**（2026-07-30）を統合。
+「差し替えでなく役割分担」— K3 は視覚（Pass 1 文書読解）・長時間自律（Pass 3）・
+preserved thinking の 3 軸で活かし、GLM-5.2 は高頻度テキストパスに残す。
+実測との突合注記は同メモ末尾（RIKYU 配信では reasoning_effort 無効、nginx ~600s、
+one-shot が loop より優位、の 3 点が設計前提に効く）。
+
+**残作業**（メモ v2 のステップ0〜2 と整合）:
+1. ~~再計測~~ **完了（2026-07-30）**: 55 エントリ全損ゼロ、バグ修正で隔離 18 件中 9 件の勝敗が
+   反転。最終結論 = 経路は設問型依存（単発→one-shot / 多段→loop）、モデル軸は K3 一貫優位、
+   多段品質首位は k3-loop（71.4%、455s）。eval doc 追補2 に記録済み。
+   残欠陥: glm-loop の tool_calls メトリクス抽出疑義 / K3 の 27 字エラー様応答（answer 非 None で
+   error 記録されない）への最小回答長ガード — investigate_ab.py の小改修 2 件
+2. ~~ステップ0 プローブ~~ **ほぼ完了（2026-07-30、詳細は kimi-k3-migration.md 突合注記）**:
+   (b) reasoning はトークン単位ストリーム確認 / (d) **image_url 受理・視覚動作確認**（優先度 2
+   成立）/ (e) **prefix caching 自動有効**（cached 99.7% 実測）/ (c) 本番 504 実績 6 件（RiVault
+   側）確認。**(a) 600 秒の種類のみ未確定** — 実ケースのストリーミング再現は 393s で完走
+   （弱い正の証拠）。確定は運用側への直接確認（打診項目に追加）に委ね、追加プローブはしない。
+   reasoning_effort は実測が矛盾（不安定扱い、設計で信頼しない）
+3. **K3 配線 第 1 弾（承認済み、ステップ0 の結果を反映して実装）** — investigate one-shot
+   限定の K3 モデル override（`ARGUS_ONESHOT_LLM_*` env、_run_oneshot 内でのみ消費、glm 自動
+   フォールバック付き）。600 秒が無通信型ならこの経路は **stream 受信を既定に**（504 全損対策）。
+   brief/risk/today は glm のまま（役割分担）
+4. **API クライアント層の再設計（メモ v2 優先度 1 の a〜d）** — reasoning_content 往復 /
+   ストリーミング既定 / 逐次永続化 / partial mode 再開 + ツール冪等化。多ターン経路
+   （長時間セッション・優先度 3）の前提として第 1 弾とは分離して設計
+5. **議事録生成ベンチ（メモ ステップ2）** — GLM vs K3、トークン単価・レイテンシ・
+   スライド画像込み抽出精度の 3 点。(d) が通ることが前提
+6. **PM 側の確認事項** — RIKYU タイムアウト緩和 / nginx 迂回経路の打診、Kimi K3 License の
+   機関確認、常駐割当・キュー待ちポリシー
+7. コミット（実験実装 + 検索バグ修正一式）+ qa デーモン再起動 → 本エントリを LOG.md へ圧縮
 
 **ステータス**: 静的検査（tests/selfcheck/）は pre-commit で毎コミット自動実行中。
 データ不変条件（pm_selfcheck.py）は手動実行で exit 0 を確認済み。

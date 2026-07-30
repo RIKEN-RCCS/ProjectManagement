@@ -159,3 +159,137 @@ HuggingFace モデルカード（moonshotai/Kimi-K3）と初回評価の使い�
 - 生成中に `AB_DB` 未指定で条件1の 30 件が `v4flash_ab.db` に誤書き込みされる事故が発生。
   同一サンプル確認の上 `rikyu_ab.db` へ移行し、`v4flash_ab.db` は元状態に復元済み
   （DeepSeek-V4-Flash 60 / gemma-4 30 / GLM-4.7-Flash 30）。以降は AB_DB を明示。
+
+---
+
+# 追補: one-shot 長文脈経路の 2×2 検証（2026-07-29〜30）
+
+上記 2 回の評価は「現状の Argus 実装に適したモデル選定」であり、kimi-k3 の敗因が
+アーキテクチャとのミスマッチ（STEP1 前に最大 24 回の補助 LLM 呼び出し、~20s/call の
+k3 では 30s タイムアウト → 劣化）にある可能性が残った。視点を替え、**「K3 の実力を
+引き出す実装」= 補助 LLM ゼロ + 決定的 broad-recall + 太い文脈 1 回渡し（one-shot）**
+を仮説として {現行ループ, one-shot} × {glm-5.2, kimi-k3} の 2×2 + 直接対決を検証した。
+
+- **実装**: `ARGUS_ONESHOT` opt-in 経路（pm_argus_agent.py、既定 OFF・本番不変）。
+  retrieve_chunks_hybrid(k=vector_k=top_k) 1 回 → RRF 上位を held_at 昇順で全文詰め →
+  call_argus_llm 1 回。全実行で `route_order=` がちょうど 1 回であることを確認済み
+- **ハーネス**: investigate_ab.py の ARM_PRESETS（glm-loop / glm-oneshot / k3-loop /
+  k3-oneshot、k3 は temp1.0 + RIVAULT 封鎖 + EMBED 明示）、gold 8 問、DeepSeek 盲検 judge
+- **記録**: `data/eval/investigate_k3.jsonl`（40 件 = 5 ペア × 8 問、error 0 件）
+
+## N スイープ（本走前、3 問 × N∈{50,200,600}）
+
+- **N=50 で gold reference を完全カバー**。N=200/600 は詳細増のみで正答性向上なし
+- **RIKYU 側 nginx の gateway timeout（600s 固定と推定）を発見**: kimi-k3 は設問依存で
+  生成が長引き（think 抑制不能の帰結）、salmon 問 N=200/600 で 504 全損を 3 回再現
+  （所要 10 分 01〜02 秒でほぼ一定）。client `--timeout` では回避不可。context 量では
+  予測できない → **one-shot top-N は 50 に確定**（本走では 504 ゼロ）
+- glm-5.2 は 208k 字の文脈でも縮小リトライなし・31s 前後で完走
+
+## 本走結果（勝ち+引き分け率、合格ライン 60%）
+
+| 比較（A vs B） | search (n=6) | docqa (n=2) |
+|---|---|---|
+| glm-loop vs **k3-oneshot** | B 66.7% 合格 (4-2) | B 100% 合格 (2-0) |
+| glm-loop vs **glm-oneshot** | B 83.3% 合格 (5-1) | B 0% 未達 (0-2) |
+| glm-loop vs **k3-loop** | B 66.7% 合格 (4-2) | B 50% 未達 (1-1) |
+| k3-loop vs **k3-oneshot** | B 40% 未達 (2-3, 判定不能1) | B 50% (1-1) |
+| glm-oneshot vs **k3-oneshot** | B 66.7% 合格 (4-2) | B 50% (1-1) |
+
+レイテンシ中央値（アーム別・全出現横断）: **glm-oneshot 30.7s** / glm-loop 69.4s /
+k3-oneshot 148.2s（直接対決ペアでは 60.2s — RIKYU 負荷で分散大） / k3-loop 472.1s。
+
+## 主な知見
+
+1. **one-shot 経路自体がモデル非依存に有効（search）**: glm-oneshot は glm-loop に
+   83.3% で勝ち、かつ 31s（loop の半分以下）。品質向上の主因は「経路」
+2. **その上で k3 はモデルとしても上積みする**: k3-oneshot は glm-oneshot に search
+   66.7% で勝ち越し。judge rationale の傾向は「参照事実のカバレッジの広さ・出典の
+   質・矛盾情報への批判的言及」で k3 優位、「結論の直接性・具体性」で glm 優位
+3. **docqa（--file 全文 QA）は one-shot 不適**: glm-oneshot 0-2。既存の専用文書窓
+   （map-reduce）経路を維持する
+4. **再訪条件（k3 ループ安定性）は確証**: forced synthesis 発動 0、全問予算内で自然
+   終了。ただし re-rank フォールバックが k3-loop でのみ 10 件発生 — 「現行ループの
+   補助 LLM は k3 と相性が悪い」の実測裏付け。k3-loop は品質で glm-loop に勝つが
+   レイテンシ 7 倍（中央値 472s）で実用性に難
+5. 品質順（search）: **k3-oneshot > glm-oneshot > glm-loop ≈ k3-loop**、
+   速度順: glm-oneshot ≫ glm-loop > k3-oneshot ≫ k3-loop
+
+## 提案と次のステップ（採否は PM 判断）
+
+- **search 型 investigate の既定を glm-oneshot に切り替える価値が高い**（品質・速度とも
+  現行超え。切替は qa デーモン起動環境に `ARGUS_ONESHOT=1` を設定するだけ）
+- **k3-oneshot は品質優先のオプトイン**（例: `--deep` / 環境切替）として有望。ただし
+  RIKYU nginx 600s 制約下では設問依存の 504 リスクが残るため、`proxy_read_timeout`
+  緩和の可否を RIKYU 運用側に確認してから判断
+- 確定前に **多段設問（mh- 9 問、キュレーション待ち）での追検証**を行う。n=6/ペア・
+  単一 judge・gold 8 問は「1〜2 回の検索で答えられる」設問に偏っており、one-shot に
+  有利なバイアスの可能性を排除できていない
+
+## 制約・注意
+
+- judge は DeepSeek-V4-Flash 単一・盲検 swap（seed 7）。parse_failed 1 件
+  （k3-loop vs k3-oneshot / genesis-gpu-kernel-bottleneck）は集計から除外
+- k3 系アームは HF 推奨 temp 1.0（`ARGUS_LLM_TEMPERATURE`）。top_p は local 経路に
+  引数がなく非対応（think=True 時 0.95 固定）— 前回評価と同じ非対称性
+- one-shot は出典を回答末尾「## 出典」にモデル自身が列挙する方式（`ctx.cited_chunks`
+  は不使用）。全 40 件で出典欠落なし
+
+---
+
+# 追補2: 検索バグ発見・修正後の再計測と多段設問（2026-07-30）
+
+## 経緯
+
+K3 敗因の深掘りで検索段バグ 2 件を発見: (1) `sanitize_fts_query` が全角括弧等を除去せず
+日本語質問で FTS が全段不成立、(2) その「日付降順フォールバック」結果（関連度シグナルなし）が
+RRF で vector 候補 50 件を数学的に押し出す（mh-nvl72 実測: top-50 全件が実行当日の無関係
+チャンク、証跡 0/7）。生の質問文で検索する one-shot アームが系統的に不利になっていた。
+修正（sanitize 全角対応 + 日付フォールバックの RRF 遮断、`knowledge_context.py` の重複実装も
+一本化）の上、影響 18 レコードを隔離し 11 問（mh- 9 + gold 2）× 5 ペアを再計測した。
+
+**バグの影響は甚大**: 隔離 18 件のうち **9 件（50%）で勝敗が反転**。修正前データでは
+信頼できる判定ができていなかった。
+
+## 多段設問（mh- 9 問、変遷・突合型、since 1 年超）の結果
+
+| 比較（A vs B） | 勝敗 | B の勝ち+引分率 | レイテンシ中央値 |
+|---|---|---|---|
+| glm-loop vs k3-oneshot | 5-4 | 44.4% 未達 | 76s / 249s |
+| glm-loop vs glm-oneshot | 7-2 | **22.2% 未達** | 83s / 52s |
+| glm-loop vs **k3-loop** | 2-5（判定不能2） | **71.4% 合格** | 86s / 368s |
+| k3-loop vs k3-oneshot | 5-4 | 44.4% 未達 | 455s / 253s |
+| glm-oneshot vs **k3-oneshot** | 3-5（判定不能1） | **62.5% 合格** | 66s / 139s |
+
+## 最終結論（gold 8 問 + mh- 9 問、バグ修正後）
+
+1. **経路の優劣は設問型に依存する**。単発 search 型（gold）では one-shot が圧勝
+   （glm-oneshot 83.3%）だが、多段変遷型（mh-）では逆転し loop が優位
+   （glm-oneshot 22.2%、k3-oneshot 44.4%）。broad-recall N=50 の 1 回検索では
+   1 年超に分散した変遷の中間段階を拾いきれず、反復検索が recall で勝る
+2. **モデル軸は経路によらず一貫して K3 > GLM**。one-shot 直接対決は gold 62.5% /
+   mh- 62.5% と同率で K3 勝ち越し。loop 対決（mh-）も k3-loop が 71.4% で glm-loop に勝つ
+3. **多段設問の品質首位は k3-loop**（71.4%）。ただしレイテンシ中央値 455s（glm-loop の
+   5 倍超）と rerank フォールバック 18 件（全て k3-loop。補助 LLM と K3 の相性問題は
+   バグ修正後も残存）を代償にする
+4. 勝敗を分ける軸は「参照事実の網羅」と「日付・数値の正確さ」。glm-oneshot は多段設問で
+   日付・数値の取り違えが繰り返し減点された
+
+## 運用への示唆（docs/kimi-k3-migration.md の設計メモと整合）
+
+- 「K3 の強みは長時間自律」というメモの読みを mh- 実測が裏付けた。k3-loop はループ設計が
+  gemma4/glm 向けに調律されたまま（preserved thinking 近似のみ・補助 LLM は glm 想定
+  30s タイムアウト）でも品質首位 — メモ優先度 1 の API クライアント層再設計
+  （reasoning_content 往復・ストリーミング・逐次永続化）後の k3-loop が本命
+- 単発 search 型には one-shot が即戦力（glm-oneshot 31〜66s / k3-oneshot はやや上の品質）。
+  経路の使い分けには設問型の事前判定（rewrite 段の intent 分類の流用等）が新課題
+- 判定に使える実測ノブ: 単発型 → one-shot、変遷・突合・集計型 → loop
+
+## 計測上の残課題
+
+- glm-loop の tool_calls_total / steps_used が全観測で 0 / 3 に張り付き — glm ルートの
+  stderr 形式に対する `_extract_run_metrics` のパース疑義。k3-loop は 0〜9 / 1〜4 と
+  正常に変動しており、mh- 設問が多段を誘発すること自体は k3-loop 側で実証済み
+- K3 の 27 字エラー様応答が 2 件（2026-07-30 15:52〜16:52 の窓に集中、RIKYU 一時不調と
+  推定）。answer 非 None のため error 記録されない — 最小回答長ガードの追加を検討
+- 記録: data/eval/investigate_k3.jsonl（85 件）、隔離分は同 _pre_sanitize_fix.jsonl
