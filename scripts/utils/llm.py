@@ -621,6 +621,25 @@ def _resolve_reasoning_effort_env() -> str | None:
     return value
 
 
+def _resolve_llm_temperature_env() -> float | None:
+    """ARGUS_LLM_TEMPERATURE を local ルート限定で解決する。
+
+    未設定または float 変換に失敗した場合は None（payload には送らず、
+    call_local_llm 側の既定値 0.6/0.8 がそのまま使われる = 現在の挙動と完全同一）。
+    call_argus_llm の temperature 引数が明示された場合はこの env より優先される
+    （呼び出し元でこの関数を参照する前に判定する）。
+    """
+    value = os.environ.get("ARGUS_LLM_TEMPERATURE")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        print(f"[WARN] ARGUS_LLM_TEMPERATURE の値 '{value}' は float に変換できません。"
+              "送信しません。", file=sys.stderr)
+        return None
+
+
 @overload
 def call_argus_llm(
     prompt: str,
@@ -687,6 +706,11 @@ def call_argus_llm(
     thinking の有無は RIVAULT_MODEL 依存（kimi 系＝常時 ON・無効化不可、それ以外＝
     thinking:disabled を強制）。
 
+    temperature 引数を明示しない場合、local ルート限定で ARGUS_LLM_TEMPERATURE
+    env（未設定/不正値時は無視）が適用される（`_resolve_llm_temperature_env`）。
+    top_p は local 経路の呼び出し引数に無いため env 経由の制御はできない
+    （既知の非対称性。think=True 時のみ payload に固定値 0.95 が入る）。
+
     return_reasoning: True のとき (content, reasoning_content) のタプルを返す。
     local ルート限定の対応（call_local_llm の return_reasoning をそのまま利用）。
     rivault ルートで解決された場合は reasoning_content を取得する経路がないため
@@ -723,13 +747,18 @@ def call_argus_llm(
         model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
         # ARGUS_REASONING_EFFORT: 未設定/不正値時は None のまま payload に送らない（既存挙動維持）
         reasoning_effort = _resolve_reasoning_effort_env()
+        # ARGUS_LLM_TEMPERATURE: temperature 引数が明示された場合はそちらを優先し、
+        # 未指定（None）の場合のみ env を参照する（未設定/不正値時は現在の挙動と完全同一）
+        effective_temperature = (
+            temperature if temperature is not None else _resolve_llm_temperature_env()
+        )
         result = call_local_llm(
             prompt, model=model, base_url=local_base,
             api_key=os.environ.get("LOCAL_LLM_TOKEN", "dummy"),
             timeout=timeout, max_tokens=max_tokens, system=system,
             no_stream=True, think=think,
             no_chat_template_kwargs=no_chat_template_kwargs,
-            temperature=temperature,
+            temperature=effective_temperature,
             reasoning_effort=reasoning_effort,
             return_reasoning=return_reasoning,
         )

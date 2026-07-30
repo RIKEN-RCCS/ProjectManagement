@@ -406,6 +406,94 @@ class TestArgusReasoningEffortPropagation:
 
 
 # --------------------------------------------------------------------------- #
+# ARGUS_LLM_TEMPERATURE — float 変換検証 + call_argus_llm 伝播 (local ルート限定)
+# --------------------------------------------------------------------------- #
+
+class TestResolveLlmTemperatureEnv:
+    def test_invalid_value_ignored_and_warns(self, monkeypatch, capsys):
+        monkeypatch.setenv("ARGUS_LLM_TEMPERATURE", "not-a-float")
+        from utils.llm import _resolve_llm_temperature_env
+        result = _resolve_llm_temperature_env()
+        assert result is None
+        captured = capsys.readouterr()
+        assert "WARN" in captured.err
+        assert "not-a-float" in captured.err
+
+    def test_valid_value_converted_to_float(self, monkeypatch):
+        from utils.llm import _resolve_llm_temperature_env
+        monkeypatch.setenv("ARGUS_LLM_TEMPERATURE", "1.0")
+        assert _resolve_llm_temperature_env() == 1.0
+
+    def test_unset_returns_none(self, monkeypatch):
+        monkeypatch.delenv("ARGUS_LLM_TEMPERATURE", raising=False)
+        from utils.llm import _resolve_llm_temperature_env
+        assert _resolve_llm_temperature_env() is None
+
+
+class TestArgusLlmTemperaturePropagation:
+    def _patch_config(self, monkeypatch, priority: list[str]):
+        from utils import llm as cli_utils
+        monkeypatch.setattr(cli_utils, "_load_llm_routing_priority", lambda: priority)
+
+    def test_argus_llm_temperature_env_propagates_to_local_route(self, monkeypatch):
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        monkeypatch.setenv("ARGUS_LLM_TEMPERATURE", "1.0")
+        self._patch_config(monkeypatch, ["local"])
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        captured = {}
+        def fake_local(*a, **kw):
+            captured.update(kw)
+            return "local result"
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+
+        result = cli_utils.call_argus_llm("test")
+        assert result == "local result"
+        assert captured.get("temperature") == 1.0
+
+    def test_argus_llm_temperature_unset_defaults_to_none(self, monkeypatch):
+        """未設定時は None のまま渡され、既存挙動と同一（call_local_llm 側の既定 0.6/0.8 が使われる）。"""
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        monkeypatch.delenv("ARGUS_LLM_TEMPERATURE", raising=False)
+        self._patch_config(monkeypatch, ["local"])
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        captured = {}
+        def fake_local(*a, **kw):
+            captured.update(kw)
+            return "local result"
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+
+        cli_utils.call_argus_llm("test")
+        assert captured.get("temperature") is None
+
+    def test_explicit_temperature_arg_overrides_env(self, monkeypatch):
+        """call_argus_llm の temperature 引数が明示されている場合は env より優先される。"""
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:8000/v1")
+        monkeypatch.setenv("ARGUS_LLM_TEMPERATURE", "1.0")
+        self._patch_config(monkeypatch, ["local"])
+
+        from utils import llm as cli_utils
+        monkeypatch.setattr("requests.get", MagicMock(return_value=MagicMock(status_code=200)))
+        monkeypatch.setattr(cli_utils, "detect_vllm_model", lambda *a, **kw: "test-model")
+
+        captured = {}
+        def fake_local(*a, **kw):
+            captured.update(kw)
+            return "local result"
+        monkeypatch.setattr(cli_utils, "call_local_llm", fake_local)
+
+        cli_utils.call_argus_llm("test", temperature=0.3)
+        assert captured.get("temperature") == 0.3
+
+
+# --------------------------------------------------------------------------- #
 # call_rivault
 # --------------------------------------------------------------------------- #
 
