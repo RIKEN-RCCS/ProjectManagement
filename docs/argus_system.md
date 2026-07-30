@@ -1046,12 +1046,28 @@ env 上書き（`ARGUS_TOP_K_RERANK` / `ARGUS_RERANK_PREVIEW_CHARS` / `ARGUS_SEA
 | `ARGUS_CONFIG` | 任意 | `data/argus_config.yaml` | 設定ファイルパス |
 | `ARGUS_REASONING_EFFORT` | 任意 | 未設定（送らない） | local ルートの payload の `reasoning_effort`（`low`/`high`/`max`）。kimi-k3 等の評価用 opt-in。whitelist 外の値は WARN を出して無視（送らない） |
 | `ARGUS_PRESERVE_REASONING` | 任意 | `0`（既定 OFF） | `1` で `pm_argus_agent.py` の STEP ループが直前1ステップ分の `reasoning_content` を `<previous_step_reasoning>` ブロックとして次プロンプトに埋め込む（評価用 opt-in、preserved thinking mode の簡易近似）。既定 OFF では reasoning_content の取得自体を行わず現行挙動と完全同一 |
+| `ARGUS_LLM_TEMPERATURE` | 任意 | 未設定（送らない、既定 OFF） | local ルート限定で payload の `temperature` を上書きする（kimi-k3 の HF モデルカード推奨値 `1.0` 等の実験用 opt-in）。`call_argus_llm()` の `temperature` 引数が明示された場合はそちらが優先。float 変換失敗時は WARN を出して無視 |
+| `ARGUS_ONESHOT` | 任意 | `0`（既定 OFF、空文字 export も無効側扱い） | `1` で `pm_argus_agent.py` の `run_agent` が query rewrite 等の補助 LLM 呼び出しを一切行わない one-shot 経路（`_run_oneshot`）に早期分岐する（K3-native 検証用の実験用 opt-in、既定挙動は完全不変）。CLI からは `--oneshot` でも指定可。**one-shot は search 型の調査にのみ適用**され、`--file` 指定時（`--file` は上記ツール一覧を経由しない）は本変数の値にかかわらず常に文書QA経路（`run_document_qa`）が使われる（docqa は one-shot 不適、`docs/decisions/rikyu_argus_model_eval.md` 参照） |
+| `ARGUS_ONESHOT_TOP_K` | 任意 | `200`（`ARGUS_ONESHOT` 既定 OFF 時は無効） | one-shot 経路の広域検索取得件数（`retrieve_chunks_hybrid` の `k`/`vector_k` に伝播）。実験用 opt-in。CLI からは `--oneshot-top-k` でも指定可 |
+| `ARGUS_ONESHOT_CHAR_BUDGET` | 任意 | `400000`（`ARGUS_ONESHOT` 既定 OFF 時は無効） | one-shot 経路でプロンプトに詰め込む文字数上限（RRF 下位から切り詰め）。実験用 opt-in |
+| `ARGUS_ONESHOT_MAX_TOKENS` | 任意 | `16384`（`ARGUS_ONESHOT` 既定 OFF 時は無効） | one-shot 経路の LLM 完了呼び出しの `max_tokens`（抑制不能な thinking への保険）。実験用 opt-in |
+| `ARGUS_ONESHOT_LLM_URL` | 任意 | 未設定（override OFF） | 設定時、`_run_oneshot` の完了呼び出しを `call_argus_llm` のルーティングを経由せず `call_local_llm` でこのエンドポイントへ直接切り替える（K3 配線第1弾、実験用 opt-in、既定挙動は完全不変）。デーモンはマルチスレッドのため呼び出し時に動的に `os.environ` を書き換えず、起動時に静的設定された値のみを参照する |
+| `ARGUS_ONESHOT_LLM_TOKEN` | 任意 | `"dummy"` | `ARGUS_ONESHOT_LLM_URL` 有効時の API トークン |
+| `ARGUS_ONESHOT_LLM_MODEL` | `ARGUS_ONESHOT_LLM_URL` 設定時は実質必須 | 未設定 | override 先のモデル名。未設定の場合 override を無効化し WARN を出して従来経路（`call_argus_llm`）にフォールバックする |
+| `ARGUS_ONESHOT_LLM_TEMPERATURE` | 任意 | `1.0`（kimi 系 HF モデルカード推奨値） | override 呼び出しの `temperature`。float 変換失敗時は WARN を出し未指定扱い（`call_local_llm` 側の既定値を使用） |
+| `ARGUS_INVESTIGATE_TIMEOUT` | 任意 | `480`（`run_agent` の既定と同値） | `run_agent` が `timeout` 未指定で呼ばれた場合（Slack `/argus-investigate`・メンション応答経路）の既定タイムアウト（秒）。int 変換失敗時は既定にフォールバック。CLI `--timeout` 等で明示指定された場合はそちらが優先 |
 
 `call_argus_llm()` は `data/argus_config.yaml` の `llm.routing_priority`（`rivault`/`local` の順序リスト）に
 従ってルートを選び、環境変数で利用可能なルートのみを試す（先頭から順にフォールバック）。
 `pm_daemon.sh start qa` が `~/.secrets/slack_tokens.sh` と `~/.secrets/rivault_tokens.sh`（および
 `SET_DEFAULT_LLM=1` 指定時は `~/.secrets/localLLM.sh`）を自動 source するため、デーモン起動時は
 手動設定不要。CLI 直接実行時は該当する secrets ファイルを `source` する必要がある。
+
+**qa デーモンでの one-shot K3 override 有効化手順**: (1) `~/.claude/settings.json` の `env` に
+`ARGUS_ONESHOT=1` / `ARGUS_ONESHOT_LLM_MODEL=<モデル名>` を追加、(2) `~/.secrets/rikyu_token.sh`
+に `export ARGUS_ONESHOT_LLM_URL=...` / `export ARGUS_ONESHOT_LLM_TOKEN=...` を追記（`pm_daemon.sh`
+が qa 起動時にファイル存在時のみ自動 source）、(3) `bash scripts/bin/pm_daemon.sh stop qa &&
+bash scripts/bin/pm_daemon.sh start qa` で反映。
 
 ---
 

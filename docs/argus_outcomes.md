@@ -421,6 +421,8 @@ PYTHONPATH=scripts ~/.venv_x86_64/bin/python3 scripts/argus/pm_argus_agent.py \
 | `--no-intent-header` | - | 意図ヘッダーを省略 |
 | `--context-file` | - | 追加コンテキストファイルを注入 |
 | `--file TEXT` | - | ファイル名の一部を指定し、該当 Box 資料（最大3ファイル）の全文を読み込んで QA する |
+| `--oneshot` | - | one-shot 経路（`ARGUS_ONESHOT=1` 相当）を有効化する。query rewrite 等の補助 LLM 呼び出しを一切行わない K3-native 検証用 opt-in（既定挙動は不変）|
+| `--oneshot-top-k N` | `200` | one-shot 経路の取得件数（`ARGUS_ONESHOT_TOP_K` 相当）。`--oneshot` 未指定時に単独指定すると警告のみで無効 |
 
 ### `/argus-brief` / `/argus-risk` / `/argus-direction` / `/argus-today` 相当（`scripts/argus/pm_argus.py`）
 

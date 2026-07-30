@@ -11,6 +11,8 @@
 #
 # Environment variables:
 #   PM_WEB_PORT  web デーモンのポート番号（デフォルト 8501）
+#   qa 起動時、~/.secrets/rikyu_token.sh が存在すれば source する（K3 override
+#   の ARGUS_ONESHOT_LLM_URL/_TOKEN 等。無ければ黙ってスキップ）
 #
 # サービス定義は SERVICES 配列で管理する。新サービスは1行追加するだけで増やせる。
 
@@ -132,6 +134,10 @@ cmd_start() {
             source "$HOME/.secrets/localLLM.sh"
         fi
         export QA_INDEX_DB="${QA_INDEX_DB:-$REPO_ROOT/data/qa_index.db}"
+    fi
+    if [[ "$name" == "qa" && -f "$HOME/.secrets/rikyu_token.sh" ]]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.secrets/rikyu_token.sh"
     fi
     if [[ "${SVC_FISH:-0}" == "1" && -f "$HOME/.secrets/fish_tts.sh" ]]; then
         # shellcheck disable=SC1091

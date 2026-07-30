@@ -1,7 +1,9 @@
 """Pure-function tests for pm_argus_agent parsers."""
 import logging
 import re
+import time
 
+import pytest
 from argus import pm_argus_agent
 from argus.agent_tools import TOOLS, _build_tool_descriptions
 from argus.pm_argus_agent import (
@@ -524,3 +526,427 @@ def test_run_agent_preserve_reasoning_truncates_to_4000_chars(monkeypatch, agent
     embedded_reasoning = m.group(1)
     assert len(embedded_reasoning) == 4000
     assert embedded_reasoning == long_reasoning[-4000:]
+
+
+# --------------------------------------------------------------------------- #
+# _build_oneshot_context — one-shot 経路のコンテキスト構築（純関数）
+# --------------------------------------------------------------------------- #
+
+
+def _patch_format_source_label(monkeypatch):
+    import argus.pm_qa_server as pm_qa_server
+    monkeypatch.setattr(
+        pm_qa_server, "_format_source_label",
+        lambda c: f"ラベル({c.get('source_type', '')})",
+    )
+
+
+def test_build_oneshot_context_empty_chunks_returns_empty_string(monkeypatch):
+    _patch_format_source_label(monkeypatch)
+    text, selected = pm_argus_agent._build_oneshot_context([], 100_000)
+    assert text == ""
+    assert selected == []
+
+
+def test_build_oneshot_context_char_budget_drops_rrf_lower_ranked(monkeypatch):
+    """RRF順（関連度降順）で渡した chunks のうち、char_budget を超える下位分が落ちる。
+
+    各エントリの概算サイズは約150字（content100 + label/held_at/見出し概算50）。
+    budget=400 では 1件目・2件目の合計約300字は収まるが3件目を足すと超過するため、
+    3件目（最下位ランク）のみが落ちる。budget=150（旧値）だと1件目の概算サイズと
+    ちょうど一致してしまい、「先頭は無条件採用」ガードの検証にしかならないため、
+    2件目以降にも実際の予算判定が効くことを検証できる値に変更した。"""
+    _patch_format_source_label(monkeypatch)
+    chunks = [
+        {"content": "あ" * 100, "held_at": "2026-06-01", "source_type": "minutes_content"},
+        {"content": "い" * 100, "held_at": "2026-06-02", "source_type": "minutes_content"},
+        {"content": "う" * 100, "held_at": "2026-06-03", "source_type": "minutes_content"},
+    ]
+    text, selected = pm_argus_agent._build_oneshot_context(chunks, char_budget=400)
+    assert len(selected) == 2
+    assert selected[0]["content"] == chunks[0]["content"]
+    assert selected[1]["content"] == chunks[1]["content"]
+    assert "う" * 100 not in text
+
+
+def test_build_oneshot_context_sorts_selected_by_held_at_ascending(monkeypatch):
+    """採用分は held_at 昇順に安定ソートされる（RRF入力順とは別）。"""
+    _patch_format_source_label(monkeypatch)
+    chunks = [
+        {"content": "最新の内容", "held_at": "2026-06-03", "source_type": "minutes_content"},
+        {"content": "最古の内容", "held_at": "2026-06-01", "source_type": "minutes_content"},
+        {"content": "中間の内容", "held_at": "2026-06-02", "source_type": "minutes_content"},
+    ]
+    text, selected = pm_argus_agent._build_oneshot_context(chunks, char_budget=1_000_000)
+    assert [c["held_at"] for c in selected] == ["2026-06-01", "2026-06-02", "2026-06-03"]
+    assert text.index("最古の内容") < text.index("中間の内容") < text.index("最新の内容")
+
+
+def test_build_oneshot_context_numbers_and_includes_full_content(monkeypatch):
+    """`[n] 出典: ラベル（held_at）` 形式のヘッダと全文（切り詰めなし）を含む。"""
+    _patch_format_source_label(monkeypatch)
+    long_content = "本文" * 5000  # 1200字抜粋を超える長さ
+    chunks = [{"content": long_content, "held_at": "2026-06-01", "source_type": "minutes_content"}]
+    text, selected = pm_argus_agent._build_oneshot_context(chunks, char_budget=1_000_000)
+    assert "[1] 出典: ラベル(minutes_content)（2026-06-01）" in text
+    assert long_content in text  # 全文（切り詰めなし）
+
+
+# --------------------------------------------------------------------------- #
+# _oneshot_enabled — 空文字 export の誤有効化バグ回避
+# --------------------------------------------------------------------------- #
+
+
+def test_oneshot_enabled_unset_is_false(monkeypatch):
+    monkeypatch.delenv("ARGUS_ONESHOT", raising=False)
+    assert pm_argus_agent._oneshot_enabled() is False
+
+
+def test_oneshot_enabled_zero_is_false(monkeypatch):
+    monkeypatch.setenv("ARGUS_ONESHOT", "0")
+    assert pm_argus_agent._oneshot_enabled() is False
+
+
+def test_oneshot_enabled_empty_string_is_false(monkeypatch):
+    """空文字 export（例: `export ARGUS_ONESHOT=`）は誤って有効判定にならない。"""
+    monkeypatch.setenv("ARGUS_ONESHOT", "")
+    assert pm_argus_agent._oneshot_enabled() is False
+
+
+def test_oneshot_enabled_one_is_true(monkeypatch):
+    monkeypatch.setenv("ARGUS_ONESHOT", "1")
+    assert pm_argus_agent._oneshot_enabled() is True
+
+
+# --------------------------------------------------------------------------- #
+# run_agent — ARGUS_ONESHOT 早期分岐（_rewrite_query バイパス保証）
+# --------------------------------------------------------------------------- #
+
+
+def test_run_agent_oneshot_env_bypasses_rewrite_and_delegates(monkeypatch, agent_context):
+    """ARGUS_ONESHOT=1 のとき、run_agent は _rewrite_query を呼ばず _run_oneshot に委譲する。"""
+    monkeypatch.setenv("ARGUS_ONESHOT", "1")
+
+    rewrite_called = {"n": 0}
+
+    def fake_rewrite(question):
+        rewrite_called["n"] += 1
+        return None
+    monkeypatch.setattr(pm_argus_agent, "_rewrite_query", fake_rewrite)
+
+    captured = {}
+
+    def fake_run_oneshot(question, seed_data, ctx, *, timeout, include_intent_header, context):
+        captured.update(
+            question=question, seed_data=seed_data, ctx=ctx,
+            timeout=timeout, include_intent_header=include_intent_header, context=context,
+        )
+        return "one-shot回答"
+    monkeypatch.setattr(pm_argus_agent, "_run_oneshot", fake_run_oneshot)
+
+    result = pm_argus_agent.run_agent(
+        "テスト質問", "シード", None, agent_context, max_steps=3, timeout=30,
+    )
+
+    assert result == "one-shot回答"
+    assert rewrite_called["n"] == 0
+    assert captured["question"] == "テスト質問"
+    assert captured["seed_data"] == "シード"
+    assert captured["timeout"] == 30
+
+
+def test_run_agent_oneshot_env_unset_does_not_delegate(monkeypatch, agent_context):
+    """既定（ARGUS_ONESHOT 未設定）では one-shot 分岐に入らず、従来の rewrite→ループ経路を通る。"""
+    monkeypatch.delenv("ARGUS_ONESHOT", raising=False)
+    monkeypatch.setattr(pm_argus_agent, "_rewrite_query", lambda q: None)
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("ARGUS_ONESHOT 未設定時は _run_oneshot を呼ばないはず")
+    monkeypatch.setattr(pm_argus_agent, "_run_oneshot", fail_if_called)
+
+    def fake_llm(prompt, **kwargs):
+        return "<final_answer>通常経路の回答</final_answer>"
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_llm)
+
+    result = pm_argus_agent.run_agent(
+        "テスト質問", "", None, agent_context, max_steps=3, timeout=30,
+    )
+    assert "通常経路の回答" in result
+
+
+# --------------------------------------------------------------------------- #
+# one-shot env knob — ARGUS_ONESHOT_TOP_K / _CHAR_BUDGET / _MAX_TOKENS 既定値
+# --------------------------------------------------------------------------- #
+
+
+def test_oneshot_env_knob_defaults(monkeypatch):
+    monkeypatch.delenv("ARGUS_ONESHOT_TOP_K", raising=False)
+    monkeypatch.delenv("ARGUS_ONESHOT_CHAR_BUDGET", raising=False)
+    monkeypatch.delenv("ARGUS_ONESHOT_MAX_TOKENS", raising=False)
+    assert pm_argus_agent._effective_oneshot_top_k() == 200
+    assert pm_argus_agent._effective_oneshot_char_budget() == 400_000
+    assert pm_argus_agent._effective_oneshot_max_tokens() == 16_384
+
+
+# --------------------------------------------------------------------------- #
+# _run_oneshot — LLM 呼び出し1回・補助 LLM 呼び出し全種バイパスの回帰テスト
+# --------------------------------------------------------------------------- #
+
+
+def test_run_oneshot_calls_llm_exactly_once_and_bypasses_auxiliary_llm_calls(monkeypatch, agent_context):
+    """_run_oneshot は retrieve_chunks_hybrid の広域検索1回のみを行い、
+    query rewrite / keyword抽出 / HyDE / re-rank の補助 LLM 呼び出しを一切行わない。
+
+    retrieve_chunks_hybrid は _run_oneshot 内で関数内 import されるため、
+    argus.retrieval モジュール側の属性を patch する。
+    """
+    import argus.retrieval as retrieval_module
+
+    _patch_format_source_label(monkeypatch)
+
+    def fake_retrieve(*a, **kw):
+        return [{"content": "本文", "held_at": "2026-06-01", "source_type": "minutes_content"}]
+    monkeypatch.setattr(retrieval_module, "retrieve_chunks_hybrid", fake_retrieve)
+
+    def _fail(name):
+        def _f(*a, **kw):
+            raise AssertionError(f"{name} が呼ばれてはいけません（one-shot は補助LLM呼び出しをバイパスするはず）")
+        return _f
+
+    monkeypatch.setattr(retrieval_module, "rerank_chunks", _fail("rerank_chunks"))
+    monkeypatch.setattr(retrieval_module, "retrieve_chunks_hyde", _fail("retrieve_chunks_hyde"))
+    monkeypatch.setattr(retrieval_module, "extract_search_keywords", _fail("extract_search_keywords"))
+    monkeypatch.setattr(retrieval_module, "expand_query_hyde", _fail("expand_query_hyde"))
+    monkeypatch.setattr(pm_argus_agent, "_rewrite_query", _fail("_rewrite_query"))
+
+    llm_calls = {"n": 0}
+
+    def fake_llm(prompt, **kwargs):
+        llm_calls["n"] += 1
+        return "<final_answer>調査結果\n\n## 出典\n- [1] foo</final_answer>"
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_llm)
+
+    result = pm_argus_agent._run_oneshot(
+        "質問", "", agent_context, timeout=30, include_intent_header=False, context="",
+    )
+
+    assert llm_calls["n"] == 1
+    assert "調査結果" in result
+
+
+def test_run_oneshot_returns_early_and_skips_llm_when_no_chunks_found(monkeypatch, agent_context, caplog):
+    """retrieve_chunks_hybrid が空を返す場合、LLM を呼ばず定型応答で早期リターンする。
+    [oneshot] retrieved=0 のログは維持される。"""
+    import argus.retrieval as retrieval_module
+
+    monkeypatch.setattr(retrieval_module, "retrieve_chunks_hybrid", lambda *a, **kw: [])
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("chunks 0件時は LLM を呼んではいけません")
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fail_if_called)
+
+    with caplog.at_level(logging.INFO, logger="pm_argus_agent"):
+        result = pm_argus_agent._run_oneshot(
+            "質問", "", agent_context, timeout=30, include_intent_header=False, context="",
+        )
+
+    assert "見つかりませんでした" in result
+    assert any("[oneshot] retrieved=0" in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------------------- #
+# _call_oneshot_llm — one-shot LLM override（K3 配線第1弾、ARGUS_ONESHOT_LLM_URL）
+# --------------------------------------------------------------------------- #
+
+
+def test_call_oneshot_llm_override_unset_uses_call_argus_llm(monkeypatch):
+    """override 未設定（既定）では call_argus_llm が呼ばれ、call_local_llm は呼ばれない。"""
+    monkeypatch.delenv("ARGUS_ONESHOT_LLM_URL", raising=False)
+
+    def fake_argus(prompt, **kwargs):
+        return "通常経路の回答"
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_argus)
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("override 未設定時は call_local_llm を呼んではいけません")
+    monkeypatch.setattr(pm_argus_agent, "call_local_llm", fail_if_called)
+
+    result = pm_argus_agent._call_oneshot_llm(
+        "プロンプト", system="システム", max_tokens=100, deadline=time.monotonic() + 30,
+    )
+    assert result == "通常経路の回答"
+
+
+def test_call_oneshot_llm_override_enabled_calls_call_local_llm(monkeypatch):
+    """URL+MODEL 設定時、call_local_llm が正しい引数（base_url/model/temperature/streaming）で呼ばれる。"""
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_URL", "http://k3-endpoint/v1")
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_MODEL", "kimi-k3")
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_TOKEN", "secret-token")
+    monkeypatch.delenv("ARGUS_ONESHOT_LLM_TEMPERATURE", raising=False)
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("override 有効時は call_argus_llm を呼んではいけません")
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fail_if_called)
+
+    captured = {}
+
+    def fake_local(prompt, **kwargs):
+        captured.update(prompt=prompt, **kwargs)
+        return "override回答"
+    monkeypatch.setattr(pm_argus_agent, "call_local_llm", fake_local)
+
+    result = pm_argus_agent._call_oneshot_llm(
+        "プロンプト", system="システム", max_tokens=100, deadline=time.monotonic() + 30,
+    )
+
+    assert result == "override回答"
+    assert captured["base_url"] == "http://k3-endpoint/v1"
+    assert captured["model"] == "kimi-k3"
+    assert captured["api_key"] == "secret-token"
+    assert captured["temperature"] == 1.0
+    assert captured["think"] is False
+    assert "no_stream" not in captured  # 既定のストリーミング受信を明示的に無効化しない
+
+
+def test_call_oneshot_llm_missing_model_warns_and_falls_back(monkeypatch, caplog):
+    """URL のみ（MODEL 欠落）の場合は WARN を出し、従来経路（call_argus_llm）を使う。"""
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_URL", "http://k3-endpoint/v1")
+    monkeypatch.delenv("ARGUS_ONESHOT_LLM_MODEL", raising=False)
+
+    def fake_argus(prompt, **kwargs):
+        return "通常経路の回答"
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_argus)
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("MODEL 欠落時は call_local_llm を呼んではいけません")
+    monkeypatch.setattr(pm_argus_agent, "call_local_llm", fail_if_called)
+
+    with caplog.at_level(logging.WARNING, logger="pm_argus_agent"):
+        result = pm_argus_agent._call_oneshot_llm(
+            "プロンプト", system="システム", max_tokens=100, deadline=time.monotonic() + 30,
+        )
+
+    assert result == "通常経路の回答"
+    assert any("ARGUS_ONESHOT_LLM_MODEL" in r.message for r in caplog.records)
+
+
+def test_call_oneshot_llm_override_failure_falls_back_to_call_argus_llm(monkeypatch, caplog):
+    """override 呼び出しが例外を送出した場合、call_argus_llm へ1回だけフォールバックする
+    （残り時間が十分にある場合）。"""
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_URL", "http://k3-endpoint/v1")
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_MODEL", "kimi-k3")
+
+    def fake_local(prompt, **kwargs):
+        raise TimeoutError("override timeout")
+    monkeypatch.setattr(pm_argus_agent, "call_local_llm", fake_local)
+
+    def fake_argus(prompt, **kwargs):
+        return "フォールバック回答"
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_argus)
+
+    with caplog.at_level(logging.WARNING, logger="pm_argus_agent"):
+        result = pm_argus_agent._call_oneshot_llm(
+            "プロンプト", system="システム", max_tokens=100, deadline=time.monotonic() + 60,
+        )
+
+    assert result == "フォールバック回答"
+    assert any("FALLBACK" in r.message for r in caplog.records)
+
+
+def test_call_oneshot_llm_both_routes_fail_raises(monkeypatch):
+    """override・従来経路の両方が失敗した場合は例外がそのまま送出される（残り時間十分な場合）。"""
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_URL", "http://k3-endpoint/v1")
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_MODEL", "kimi-k3")
+
+    def fake_local(prompt, **kwargs):
+        raise TimeoutError("override timeout")
+    monkeypatch.setattr(pm_argus_agent, "call_local_llm", fake_local)
+
+    def fake_argus(prompt, **kwargs):
+        raise RuntimeError("fallback also failed")
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_argus)
+
+    with pytest.raises(RuntimeError, match="fallback also failed"):
+        pm_argus_agent._call_oneshot_llm(
+            "プロンプト", system="システム", max_tokens=100, deadline=time.monotonic() + 60,
+        )
+
+
+def test_call_oneshot_llm_low_remaining_skips_fallback_and_raises_original(monkeypatch, caplog):
+    """フォールバック直前の残り時間が _ONESHOT_FALLBACK_MIN_REMAINING_S 未満の場合、
+    フォールバックせず override 呼び出しの元例外をそのまま送出する
+    （wall-clock 二重消費を避けるため）。"""
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_URL", "http://k3-endpoint/v1")
+    monkeypatch.setenv("ARGUS_ONESHOT_LLM_MODEL", "kimi-k3")
+
+    def fake_local(prompt, **kwargs):
+        raise TimeoutError("override timeout")
+    monkeypatch.setattr(pm_argus_agent, "call_local_llm", fake_local)
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("残り時間不足時は call_argus_llm フォールバックを呼んではいけません")
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fail_if_called)
+
+    with caplog.at_level(logging.WARNING, logger="pm_argus_agent"):
+        with pytest.raises(TimeoutError, match="override timeout"):
+            pm_argus_agent._call_oneshot_llm(
+                "プロンプト", system="システム", max_tokens=100,
+                deadline=time.monotonic() + 5,
+            )
+
+    assert any("FALLBACK" in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------------------- #
+# _effective_investigate_timeout — ARGUS_INVESTIGATE_TIMEOUT の実効値解決
+# --------------------------------------------------------------------------- #
+
+
+def test_effective_investigate_timeout_default(monkeypatch):
+    monkeypatch.delenv("ARGUS_INVESTIGATE_TIMEOUT", raising=False)
+    assert pm_argus_agent._effective_investigate_timeout() == 480
+
+
+def test_effective_investigate_timeout_overridden(monkeypatch):
+    monkeypatch.setenv("ARGUS_INVESTIGATE_TIMEOUT", "600")
+    assert pm_argus_agent._effective_investigate_timeout() == 600
+
+
+def test_effective_investigate_timeout_invalid_falls_back(monkeypatch):
+    monkeypatch.setenv("ARGUS_INVESTIGATE_TIMEOUT", "not-a-number")
+    assert pm_argus_agent._effective_investigate_timeout() == 480
+
+
+def test_run_agent_resolves_timeout_from_env_when_unspecified(monkeypatch, agent_context):
+    """run_agent が timeout 未指定で呼ばれた場合、ARGUS_INVESTIGATE_TIMEOUT を解決する。"""
+    monkeypatch.setenv("ARGUS_ONESHOT", "1")
+    monkeypatch.setenv("ARGUS_INVESTIGATE_TIMEOUT", "600")
+
+    captured = {}
+
+    def fake_run_oneshot(question, seed_data, ctx, *, timeout, include_intent_header, context):
+        captured["timeout"] = timeout
+        return "one-shot回答"
+    monkeypatch.setattr(pm_argus_agent, "_run_oneshot", fake_run_oneshot)
+
+    result = pm_argus_agent.run_agent("質問", "シード", None, agent_context)
+
+    assert result == "one-shot回答"
+    assert captured["timeout"] == 600.0
+
+
+def test_run_agent_explicit_timeout_bypasses_env(monkeypatch, agent_context):
+    """run_agent に timeout が明示指定された場合、ARGUS_INVESTIGATE_TIMEOUT より優先される。"""
+    monkeypatch.setenv("ARGUS_ONESHOT", "1")
+    monkeypatch.setenv("ARGUS_INVESTIGATE_TIMEOUT", "600")
+
+    captured = {}
+
+    def fake_run_oneshot(question, seed_data, ctx, *, timeout, include_intent_header, context):
+        captured["timeout"] = timeout
+        return "one-shot回答"
+    monkeypatch.setattr(pm_argus_agent, "_run_oneshot", fake_run_oneshot)
+
+    pm_argus_agent.run_agent("質問", "シード", None, agent_context, timeout=30)
+
+    assert captured["timeout"] == 30

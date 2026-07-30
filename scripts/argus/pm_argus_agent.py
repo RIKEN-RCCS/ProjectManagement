@@ -35,7 +35,7 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import yaml
-from cli_utils import call_argus_llm
+from cli_utils import call_argus_llm, call_local_llm
 from cli_utils import env_int as _env_int
 from db_utils import open_pm_db
 
@@ -53,6 +53,15 @@ _CONTEXT_CHAR_LIMIT = 100_000
 _MAX_INITIAL_SEARCH_QUERIES = 8
 _MAX_ZERO_TOOL_NUDGES = 2
 
+# one-shot 経路（ARGUS_ONESHOT）のパラメータ既定値
+_ONESHOT_TOP_K_DEFAULT = 200
+_ONESHOT_CHAR_BUDGET_DEFAULT = 400_000
+_ONESHOT_MAX_TOKENS_DEFAULT = 16_384
+
+# one-shot 経路の LLM override（ARGUS_ONESHOT_LLM_URL、K3 配線第1弾）のパラメータ既定値
+_ONESHOT_LLM_TOKEN_DEFAULT = "dummy"
+_ONESHOT_LLM_TEMPERATURE_DEFAULT = "1.0"  # kimi 系 HF モデルカード推奨値
+
 # --file 全文読込 QA (run_document_qa) のパラメータ
 _DOC_QA_WINDOW_SIZE = 24_000  # 既定値。実効値は _effective_doc_qa_window_size() で動的取得
 _DOC_QA_WINDOW_OVERLAP = 1_000
@@ -68,6 +77,128 @@ _DOC_QA_MAP_WORKERS = 4  # map 段（窓ごとの抽出）の並列度
 def _effective_doc_qa_window_size() -> int:
     """ARGUS_DOC_QA_WINDOW（既定 _DOC_QA_WINDOW_SIZE=24000）の実効値を返す。"""
     return _env_int("ARGUS_DOC_QA_WINDOW", _DOC_QA_WINDOW_SIZE)
+
+
+def _effective_oneshot_top_k() -> int:
+    """ARGUS_ONESHOT_TOP_K（既定 _ONESHOT_TOP_K_DEFAULT=200）の実効値を返す。"""
+    return _env_int("ARGUS_ONESHOT_TOP_K", _ONESHOT_TOP_K_DEFAULT)
+
+
+def _effective_oneshot_char_budget() -> int:
+    """ARGUS_ONESHOT_CHAR_BUDGET（既定 _ONESHOT_CHAR_BUDGET_DEFAULT=400,000）の実効値を返す。"""
+    return _env_int("ARGUS_ONESHOT_CHAR_BUDGET", _ONESHOT_CHAR_BUDGET_DEFAULT)
+
+
+def _effective_oneshot_max_tokens() -> int:
+    """ARGUS_ONESHOT_MAX_TOKENS（既定 _ONESHOT_MAX_TOKENS_DEFAULT=16,384）の実効値を返す。"""
+    return _env_int("ARGUS_ONESHOT_MAX_TOKENS", _ONESHOT_MAX_TOKENS_DEFAULT)
+
+
+def _effective_oneshot_llm_temperature() -> float | None:
+    """ARGUS_ONESHOT_LLM_TEMPERATURE（既定 "1.0"）の実効値を返す。
+
+    float 変換に失敗した場合は WARN を出して None（call_local_llm への未指定扱い）を返す。
+    """
+    raw = os.environ.get("ARGUS_ONESHOT_LLM_TEMPERATURE", _ONESHOT_LLM_TEMPERATURE_DEFAULT)
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            f"[oneshot] ARGUS_ONESHOT_LLM_TEMPERATURE の値が不正です: {raw!r}"
+            "。未指定扱いにフォールバックします。"
+        )
+        return None
+
+
+def _effective_investigate_timeout() -> int:
+    """ARGUS_INVESTIGATE_TIMEOUT（既定 int(_DEFAULT_TIMEOUT)=480）の実効値を返す。
+
+    run_agent が timeout 未指定（None）で呼ばれた場合の既定値解決に使う。
+    """
+    return _env_int("ARGUS_INVESTIGATE_TIMEOUT", int(_DEFAULT_TIMEOUT))
+
+
+def _oneshot_enabled() -> bool:
+    """ARGUS_ONESHOT が有効かどうかを判定する。
+
+    素朴な `os.environ.get("ARGUS_ONESHOT", "0") != "0"` だと、値を伴わない
+    空文字 export（例: `export ARGUS_ONESHOT=`）が誤って有効判定になる
+    （"" != "0" が True になるため）。本関数は空文字・未設定を無効側に統一する。
+    """
+    return os.environ.get("ARGUS_ONESHOT", "").strip() not in ("", "0")
+
+
+# override 呼び出し失敗時、フォールバックを行うために最低限必要な残り秒数。
+# 未満の場合はフォールバックせず override 呼び出しの元例外をそのまま送出する
+# （フォールバックにも同じ残り時間しか渡せず、二重に消費して意味がないため）。
+_ONESHOT_FALLBACK_MIN_REMAINING_S = 30
+
+
+def _call_oneshot_llm(prompt: str, *, system: str, max_tokens: int, deadline: float) -> str:
+    """_run_oneshot 用の完了呼び出し（K3 配線第1弾、実験的 opt-in）。
+
+    ARGUS_ONESHOT_LLM_URL が設定されている場合のみ、call_argus_llm のルーティングを
+    経由せず call_local_llm でそのエンドポイントを直接叩く override 経路に切り替える。
+    未設定時（既定）は従来どおり call_argus_llm を使い、挙動は完全に不変。
+    override 呼び出しが失敗した場合は call_argus_llm へ1回だけフォールバックする
+    （二重失敗時はそのまま例外を送出する）。ストリーミング受信は RIKYU ゲートウェイの
+    ~600s タイムアウト（無通信型の可能性）対策。詳細 docs/kimi-k3-migration.md。
+
+    deadline: time.monotonic() 基準の絶対デッドライン（呼び出し側から ctx.deadline 相当を
+    渡す）。override 呼び出し・フォールバック呼び出しそれぞれの実行直前に残り時間を
+    再計算して timeout に渡す（同じ timeout を両方に渡すと wall-clock が最大2倍に
+    膨らむ罠を回避する）。フォールバック直前の残り時間が
+    _ONESHOT_FALLBACK_MIN_REMAINING_S 秒未満の場合はフォールバックを行わず、
+    override 呼び出しの元例外をそのまま送出する。
+    """
+    def remaining_s() -> int:
+        return max(1, int(deadline - time.monotonic()))
+
+    override_url = os.environ.get("ARGUS_ONESHOT_LLM_URL")
+    if not override_url:
+        return call_argus_llm(prompt, system=system, max_tokens=max_tokens, timeout=remaining_s(), think=False)
+
+    override_model = os.environ.get("ARGUS_ONESHOT_LLM_MODEL")
+    if not override_model:
+        logger.warning(
+            "[oneshot] ARGUS_ONESHOT_LLM_URL は設定されていますが ARGUS_ONESHOT_LLM_MODEL が"
+            "未設定のため override を無効化し、従来経路（call_argus_llm）を使用します。"
+        )
+        return call_argus_llm(prompt, system=system, max_tokens=max_tokens, timeout=remaining_s(), think=False)
+
+    override_token = os.environ.get("ARGUS_ONESHOT_LLM_TOKEN", _ONESHOT_LLM_TOKEN_DEFAULT)
+    temperature = _effective_oneshot_llm_temperature()
+
+    logger.info(f"[oneshot] llm override: model={override_model}")
+    try:
+        return call_local_llm(
+            prompt,
+            model=override_model,
+            base_url=override_url,
+            api_key=override_token,
+            timeout=remaining_s(),
+            max_tokens=max_tokens,
+            system=system,
+            temperature=temperature,
+            think=False,
+            _fallback_to_local=False,
+        )
+    except Exception as e:
+        remaining = deadline - time.monotonic()
+        if remaining < _ONESHOT_FALLBACK_MIN_REMAINING_S:
+            logger.warning(
+                f"[oneshot][FALLBACK] override LLM failed ({type(e).__name__}) — "
+                f"残り{remaining:.0f}s（<{_ONESHOT_FALLBACK_MIN_REMAINING_S}s）のため"
+                "フォールバックせず元例外を送出します",
+                exc_info=True,
+            )
+            raise
+        logger.warning(
+            f"[oneshot][FALLBACK] override LLM failed ({type(e).__name__}), "
+            "falling back to default route",
+            exc_info=True,
+        )
+        return call_argus_llm(prompt, system=system, max_tokens=max_tokens, timeout=remaining_s(), think=False)
 
 
 # =========================================================================== #
@@ -256,6 +387,24 @@ _FORCED_SYNTHESIS_PROMPT = """\
 - 必ず `<final_answer>...</final_answer>` タグで回答を囲む。
 - ツール結果に含まれない情報は推測しない。「情報なし」と明記してよい。
 - 数値・日付・人名・ID 等の根拠を明示する。
+
+本日: {today} / 対象期間: {since} 〜 {today}
+"""
+
+
+_ONESHOT_SYSTEM_PROMPT = """\
+あなたは富岳NEXTプロジェクトのAIインテリジェンスシステム「Argus」です。
+以下に提示する調査資料 [1]〜[N] のみを根拠として、ユーザーの質問への最終回答を生成してください。
+
+## 厳守事項
+- 提示された資料 [1]〜[N] のみを根拠とすること。資料に含まれない情報は推測しない
+  （推測する場合は「（推測）」と明記する）。
+- 本文中で根拠として使った資料には `[n]` 形式で引用番号を付すこと。
+- 新しいツール呼び出し（`<tool_call>` 等のタグ）は一切使用しないこと。
+- 必ず `<final_answer>...</final_answer>` タグで回答全体を囲むこと。
+- 回答末尾に「## 出典」セクションを置き、本文中で実際に引用した `[n]` とそのラベルのみを
+  列挙すること（提示された資料の全件列挙は禁止）。
+- 数値・日付・人名・会議名・決定事項IDなど具体的根拠を明示すること。
 
 本日: {today} / 対象期間: {since} 〜 {today}
 """
@@ -532,6 +681,136 @@ def _quote_block(label: str, text: str) -> str:
     return quoted + "\n\n"
 
 
+# =========================================================================== #
+#  One-shot 経路（ARGUS_ONESHOT）
+# =========================================================================== #
+
+def _build_oneshot_context(chunks: list[dict], char_budget: int) -> tuple[str, list[dict]]:
+    """RRF順（関連度降順）の chunks から one-shot 用の整形済みコンテキストを構築する。
+
+    char_budget 超過分は末尾（=RRF 下位）から落とす。先頭チャンクは予算超過でも
+    必ず1件採用する（空コンテキスト回避）。採用分は held_at 昇順に安定
+    ソートしてから連結する（変遷型設問の時系列再構成の補助）。各チャンクは
+    `[n] 出典: {ラベル}（{held_at}）\\n{content 全文}` 形式で番号付き連結する
+    （1200字抜粋ではなく全文を使う）。
+
+    戻り値: (整形済みテキスト, 採用チャンクリスト（held_at 昇順）)。
+    """
+    if not chunks:
+        return "", []
+
+    from argus.pm_qa_server import _format_source_label
+
+    labeled: list[tuple[dict, str, str]] = []
+    for c in chunks:
+        label = _format_source_label(c)
+        held_at = c.get("held_at") or "日付不明"
+        labeled.append((c, label, held_at))
+
+    selected: list[tuple[dict, str, str]] = []
+    total = 0
+    for entry in labeled:
+        c, label, held_at = entry
+        content = c.get("content") or ""
+        entry_len = len(content) + len(label) + len(held_at) + 20  # 見出し等の概算
+        if selected and total + entry_len > char_budget:
+            break
+        selected.append(entry)
+        total += entry_len
+
+    selected.sort(key=lambda e: e[2])  # held_at 昇順
+
+    parts = []
+    selected_chunks: list[dict] = []
+    for i, (c, label, held_at) in enumerate(selected, 1):
+        content = c.get("content") or ""
+        parts.append(f"[{i}] 出典: {label}（{held_at}）\n{content}")
+        selected_chunks.append(c)
+    return "\n\n".join(parts), selected_chunks
+
+
+def _run_oneshot(
+    question: str,
+    seed_data: str,
+    ctx: AgentContext,
+    *,
+    timeout: float,
+    include_intent_header: bool,
+    context: str,
+) -> str:
+    """K3-native one-shot 経路。
+
+    補助 LLM 呼び出し（query rewrite / keyword抽出 / HyDE / re-rank）を一切行わず、
+    決定的な broad-recall ハイブリッド検索を 1 回実行してから、LLM 完了呼び出しを
+    1 回だけ行って最終回答を生成する。
+    """
+    from argus.retrieval import retrieve_chunks_hybrid
+
+    deadline = time.monotonic() + timeout
+    ctx.deadline = deadline
+
+    top_k = _effective_oneshot_top_k()
+    char_budget = _effective_oneshot_char_budget()
+    max_tokens = _effective_oneshot_max_tokens()
+
+    chunks = retrieve_chunks_hybrid(
+        question, ctx.index_db, k=top_k, vector_k=top_k,
+        since_date=ctx.since, index_name=ctx.index_name,
+        record_ids=ctx.record_ids or None,
+    )
+
+    intent_header = ""
+    if include_intent_header and question:
+        intent_header = _quote_block("ご質問", _strip_output_flags(question))
+    if include_intent_header and ctx.record_ids:
+        names = "、".join(ctx.scoped_file_names) if ctx.scoped_file_names else "、".join(ctx.record_ids)
+        intent_header += (
+            f"> **対象ファイル**: {names}"
+            "（全文検索・資料検索を対象ファイルに固定。構造化データ・Slack生ログ検索は無効）\n\n"
+        )
+
+    if not chunks:
+        logger.info("[oneshot] retrieved=0 packed=0 context_chars=0 prompt_chars=0")
+        return intent_header + "調査対象期間内に該当する資料が見つかりませんでした。"
+
+    packed_context, selected_chunks = _build_oneshot_context(chunks, char_budget)
+
+    if not any("vector_score" in c for c in chunks):
+        logger.warning("[oneshot][DEGRADED] vector leg empty (EMBED_API_BASE?)")
+
+    system_prompt = _ONESHOT_SYSTEM_PROMPT.format(today=ctx.today, since=ctx.since)
+
+    context_block = f"## アプリケーション背景情報（事前調査済み）\n\n{context}\n\n" if context else ""
+    prompt = (
+        f"{context_block}"
+        f"## 調査依頼\n\n{question}\n\n"
+        f"{seed_data}\n\n"
+        f"## 調査資料（{len(selected_chunks)}件、時系列順）\n\n{packed_context}\n\n"
+        "上記の調査資料のみを根拠に `<final_answer>` で回答してください。"
+    )
+
+    logger.info(
+        f"[oneshot] retrieved={len(chunks)} packed={len(selected_chunks)} "
+        f"context_chars={len(packed_context)} prompt_chars={len(prompt)}"
+    )
+
+    try:
+        resp = _call_oneshot_llm(
+            prompt, system=system_prompt, max_tokens=max_tokens, deadline=deadline,
+        )
+    except Exception as e:
+        logger.exception(f"[oneshot] LLM error: {e}")
+        return intent_header + f"調査中にエラーが発生しました: {e}"
+
+    final = parse_final_answer(resp)
+    answer = final if final else (re.sub(r"<[^>]+>", "", resp).strip() or resp)
+
+    if "## 出典" not in answer:
+        logger.warning("[oneshot][DEGRADED] sources section missing")
+
+    return intent_header + answer
+
+
 def run_agent(
     question: str,
     seed_data: str,
@@ -539,7 +818,7 @@ def run_agent(
     ctx: AgentContext,
     *,
     max_steps: int = _DEFAULT_MAX_STEPS,
-    timeout: float = _DEFAULT_TIMEOUT,
+    timeout: float | None = None,
     include_intent_header: bool = True,
     context: str = "",
 ) -> str:
@@ -551,6 +830,9 @@ def run_agent(
 
     max_steps=0 の場合はツールなしモードで seed_data のみから回答を生成する。
     timeout は LLM 呼び出しの総予算（wall-clock）として消費される。
+    timeout 未指定（None）の場合、ARGUS_INVESTIGATE_TIMEOUT（既定 480）を
+    _effective_investigate_timeout() で解決する。呼び出し元が明示的に timeout を
+    渡した場合はそちらが優先される（既定未設定なら挙動不変）。
     context が指定された場合、調査依頼の前に背景情報として注入する（Pass 1 → Pass 2 の引き継ぎ用）。
 
     ARGUS_PRESERVE_REASONING=1 を設定すると、直前1ステップ分の reasoning_content を
@@ -563,7 +845,23 @@ def run_agent(
     return_reasoning を渡さず、llm.py 側のストリーミング経路も reasoning_content の
     蓄積自体を行わない（`if return_reasoning:` でガード済み）ため、現行挙動と
     完全に同一・オーバーヘッドゼロ。
+
+    ARGUS_ONESHOT=1（既定 0、空文字 export は無効側扱い。`_oneshot_enabled()` 参照）
+    を設定すると、query rewrite を含む一切の補助 LLM 呼び出しを行わない one-shot 経路
+    （`_run_oneshot`）に早期分岐する（opt-in、既定挙動は完全不変）。one-shot は
+    search 型の調査にのみ適用される分岐であり、`--file`（`ctx.record_ids` あり）
+    指定時は本関数を経由せず常に文書QA経路（`run_document_qa`）が使われる
+    （docqa は one-shot 不適、docs/decisions/rikyu_argus_model_eval.md 参照）。
     """
+    if timeout is None:
+        timeout = float(_effective_investigate_timeout())
+
+    if _oneshot_enabled():
+        return _run_oneshot(
+            question, seed_data, ctx, timeout=timeout,
+            include_intent_header=include_intent_header, context=context,
+        )
+
     exclude_tools = _FILE_PINNED_EXCLUDED_TOOLS if ctx.record_ids else None
     tool_desc = _build_tool_descriptions(exclude_tools)
     # terminology / glossary 用語辞書を連結（プロジェクト固有用語の参考情報）
@@ -1702,7 +2000,17 @@ def main():
     parser.add_argument("--no-intent-header", action="store_true", help="ご質問の解釈ヘッダを出力しない（レポートファイル用）")
     parser.add_argument("--context-file", help="事前調査結果等の背景情報ファイル（Pass 1 結果を Pass 2 に渡す際に使用）")
     parser.add_argument("--file", default="", help="Box資料名/フォルダ名の一部で検索範囲をそのファイルのみに固定する")
+    parser.add_argument("--oneshot", action="store_true", help="one-shot 経路（ARGUS_ONESHOT=1 相当）を有効化する")
+    parser.add_argument("--oneshot-top-k", type=int, default=None, help="one-shot 経路の取得件数（ARGUS_ONESHOT_TOP_K 相当、既定200）")
     args = parser.parse_args()
+
+    if args.oneshot:
+        os.environ["ARGUS_ONESHOT"] = "1"
+    if args.oneshot_top_k is not None:
+        if not args.oneshot and not _oneshot_enabled():
+            print("[WARN] --oneshot-top-k は --oneshot（または ARGUS_ONESHOT=1）指定時のみ"
+                  "有効です。one-shot 経路は無効のままです。", file=sys.stderr)
+        os.environ["ARGUS_ONESHOT_TOP_K"] = str(args.oneshot_top_k)
 
     today = date.today().isoformat()
     if args.since:
@@ -1764,6 +2072,9 @@ def main():
         except Exception as e:
             print(f"[WARN] --context-file 読み込み失敗: {e}", file=sys.stderr)
 
+    # --file（record_ids あり）は ARGUS_ONESHOT の有無にかかわらず常に文書QA経路
+    # （run_document_qa）を使う。one-shot は search 型の調査にのみ適用され、docqa
+    # には不適（docs/decisions/rikyu_argus_model_eval.md 参照）。
     if record_ids:
         result = run_document_qa(
             question=args.investigate,
