@@ -776,7 +776,14 @@ def _run_oneshot(
     packed_context, selected_chunks = _build_oneshot_context(chunks, char_budget)
 
     if not any("vector_score" in c for c in chunks):
-        logger.warning("[oneshot][DEGRADED] vector leg empty (EMBED_API_BASE?)")
+        # 最終マージ結果に vector_score 付きチャンクが無いことのみを検出しており、
+        # 「vector 脚が空だった」のか「RRF 選外（FTS 側 crowding）で押し出された」のかは
+        # ここでは区別できない（retrieval.retrieve_chunks_hybrid の
+        # `[hybrid] vector_leg n=` ログで実際の脚サイズを確認すること）。
+        logger.warning(
+            "[oneshot][DEGRADED] vector候補が最終結果に無し"
+            "（vector脚が空、またはRRF選外(crowding)の可能性 — hybridログのvector_leg n=を確認）"
+        )
 
     system_prompt = _ONESHOT_SYSTEM_PROMPT.format(today=ctx.today, since=ctx.since)
 

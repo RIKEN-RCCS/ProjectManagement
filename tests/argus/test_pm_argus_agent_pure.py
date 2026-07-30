@@ -734,6 +734,34 @@ def test_run_oneshot_calls_llm_exactly_once_and_bypasses_auxiliary_llm_calls(mon
     assert "調査結果" in result
 
 
+def test_run_oneshot_degraded_message_does_not_claim_vector_leg_empty(monkeypatch, agent_context, caplog):
+    """vector_score 付きチャンクが最終結果に無い場合の DEGRADED ログは、
+    「vector leg empty」と断定せず、crowding（RRF選外）の可能性も含めた
+    表現に変わっていること（2026-07-30 誤診修正: hybrid ログの vector_leg n=
+    と突き合わせないと実際に空だったか判別できないため）。"""
+    import argus.retrieval as retrieval_module
+
+    _patch_format_source_label(monkeypatch)
+
+    def fake_retrieve(*a, **kw):
+        # vector_score を持たないチャンクのみ（fts 側のみヒットした状態を模す）
+        return [{"content": "本文", "held_at": "2026-06-01", "source_type": "minutes_content"}]
+    monkeypatch.setattr(retrieval_module, "retrieve_chunks_hybrid", fake_retrieve)
+
+    def fake_llm(prompt, **kwargs):
+        return "<final_answer>調査結果\n\n## 出典\n- [1] foo</final_answer>"
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_llm)
+
+    with caplog.at_level(logging.WARNING, logger="pm_argus_agent"):
+        pm_argus_agent._run_oneshot(
+            "質問", "", agent_context, timeout=30, include_intent_header=False, context="",
+        )
+
+    messages = [r.message for r in caplog.records]
+    assert not any("vector leg empty" in m for m in messages)
+    assert any("[oneshot][DEGRADED]" in m and "crowding" in m for m in messages)
+
+
 def test_run_oneshot_returns_early_and_skips_llm_when_no_chunks_found(monkeypatch, agent_context, caplog):
     """retrieve_chunks_hybrid が空を返す場合、LLM を呼ばず定型応答で早期リターンする。
     [oneshot] retrieved=0 のログは維持される。"""

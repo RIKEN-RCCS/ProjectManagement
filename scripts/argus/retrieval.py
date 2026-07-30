@@ -58,6 +58,29 @@ _sudachi_tokenizer = None
 _sudachi_split_mode = None
 _SUDACHI_TARGET_POS = {"名詞", "動詞", "形容詞", "副詞"}
 
+# 機能動詞（辞書形）の除外リスト。検索の選択性に寄与しない一般動詞。
+# 2026-07-30 E-Wave/NVIDIA停滞質問の実測障害を受けて追加（最小限で開始）。
+_FUNCTION_VERB_STOPLIST = {"する", "いる", "ある", "なる", "できる", "行う", "おこなう"}
+
+# 縮退時に真っ先に切り捨てたい時制・汎用語（明示的な降格リスト、最小限）。
+_GENERIC_DEMOTE_TERMS = {
+    "今年度", "理由", "現在", "状況", "経緯", "動向", "推移", "進捗", "検討", "議論", "背景",
+}
+
+# ASCII 複合エンティティ（例: E-Wave, FrontFlow/blue）。区切り記号を挟んだ ASCII 連結語。
+# \b は使わない: Python の Unicode 対応 \b はひらがな等も「単語文字」とみなすため、
+# 「の」+「E-Wave」のような日本語に囲まれた ASCII 語で境界が成立しない
+# （2026-07-30 実測: r"\bE-Wave\b" 相当のパターンが「今年度のE-WaveのNVIDIA...」に
+# マッチしない）。greedy な文字クラスの連続一致だけで最大長トークンを拾えるため
+# 境界指定は不要。
+# 単独 ASCII 語（例: NVIDIA, GB200）は Sudachi 側で既に一形態素として拾えるため、
+# ここでは複合エンティティのみを対象にする（単独語も正規表現で二重抽出していた旧実装は
+# 2026-07-30 recall_eval 実測で撤回: 追加抽出された "AI4S" が Sudachi 由来の "AI" と
+# 別トークン化され、lqcd-dwf-hmc-comm-profiling-progress-202606 で従来成立していた
+# 4 語 AND 一致を壊し、1 語まで縮退して hybrid rank が 1→43 に劣化した）。
+_ASCII_COMPOUND_RE = re.compile(r"[A-Za-z0-9]+(?:[-_./][A-Za-z0-9]+)+")
+_COMPOUND_SPLIT_RE = re.compile(r"[-_./]")
+
 
 def _init_sudachi() -> bool:
     """SudachiPy の初期化。利用可能なら True を返す。"""
@@ -77,24 +100,111 @@ def _init_sudachi() -> bool:
         return False
 
 
+def _extract_ascii_entities(text: str) -> list[str]:
+    """生テキストから ASCII 複合エンティティ（区切り記号を挟んだ ASCII 連結語）を抽出する。
+
+    単独 ASCII 語（例: NVIDIA, GB200）は対象外。Sudachi 側で既に一形態素として
+    拾えるため、ここで追加抽出すると Sudachi 由来の語と別トークン化されて
+    AND 検索の縮退を余計に悪化させる（上の _ASCII_COMPOUND_RE 定義コメント参照）。
+    """
+    entities: list[str] = []
+    seen: set[str] = set()
+    for m in _ASCII_COMPOUND_RE.finditer(text):
+        tok = m.group(0)
+        if tok not in seen:
+            seen.add(tok)
+            entities.append(tok)
+    return entities
+
+
+def _compound_components(entities: list[str]) -> set[str]:
+    """複合エンティティを区切り記号で分解した部分語集合（大文字小文字無視）を返す。
+
+    Sudachi 由来の部分語（例: "E-Wave" 中の "Wave"）除去判定に使う。
+    """
+    components: set[str] = set()
+    for e in entities:
+        if _COMPOUND_SPLIT_RE.search(e):
+            for part in _COMPOUND_SPLIT_RE.split(e):
+                if part:
+                    components.add(part.lower())
+    return components
+
+
+def _token_category(token: str, pos: str) -> int:
+    """縮退時の選択性順位（小さいほど優先して残す）。
+
+    ①ASCII複合エンティティ（区切り記号を含む語。例: E-Wave）を最優先で先頭に、
+    時制・汎用語（_GENERIC_DEMOTE_TERMS）を最後方へ降格する。それ以外の語は
+    Sudachi の形態素出現順（文中の語順）をそのまま選択性の代理指標として使う
+    （2026-07-30 実測: カタカナ・ASCII語を一律優先する4段階の並べ替えでは、
+    元の語順の方が実際に選択的な組み合わせだった既存クエリ
+    （例: benchkit-contribution-copyright-policy）で recall_eval が悪化した
+    ため、カテゴリを3段に簡略化）。
+    """
+    if pos == "ASCII_ENTITY" and _COMPOUND_SPLIT_RE.search(token):
+        return 0
+    if token in _GENERIC_DEMOTE_TERMS:
+        return 2
+    return 1
+
+
 def sudachi_tokenize_query(question: str) -> list[str]:
-    """質問文をSudachiPyで形態素解析し、検索用トークンリストを返す。"""
-    if _sudachi_tokenizer is None:
-        return []
-    try:
-        morphemes = _sudachi_tokenizer.tokenize(question, _sudachi_split_mode)
-        tokens: list[str] = []
-        seen: set[str] = set()
-        for m in morphemes:
-            pos = m.part_of_speech()[0]
-            if pos in _SUDACHI_TARGET_POS:
+    """質問文をSudachiPyで形態素解析し、検索用トークンリストを返す。
+
+    ASCII 複合エンティティ（例: E-Wave）は形態素解析前に正規表現で抽出して
+    先頭カテゴリに加え、機能動詞（する/いる/ある 等）は除外する。返すトークンは
+    段階的縮退（先頭 N 語）で最も選択的な語が残るよう選択性順に並べ替える。
+    """
+    ascii_entities = _extract_ascii_entities(question)
+    components = _compound_components(ascii_entities)
+
+    morpheme_tokens: list[tuple[str, str]] = []
+    if _sudachi_tokenizer is not None:
+        try:
+            morphemes = _sudachi_tokenizer.tokenize(question, _sudachi_split_mode)
+            seen_morph: set[str] = set()
+            for m in morphemes:
+                pos = m.part_of_speech()[0]
+                if pos not in _SUDACHI_TARGET_POS:
+                    continue
                 form = m.dictionary_form()
-                if len(form) >= 2 and form not in seen:
-                    seen.add(form)
-                    tokens.append(form)
-        return tokens
-    except Exception:
+                if len(form) < 2 or form in seen_morph:
+                    continue
+                if pos == "動詞" and form in _FUNCTION_VERB_STOPLIST:
+                    continue
+                if form.lower() in components:
+                    continue
+                seen_morph.add(form)
+                morpheme_tokens.append((form, pos))
+        except Exception:
+            morpheme_tokens = []
+
+    combined: list[tuple[str, str]] = [(e, "ASCII_ENTITY") for e in ascii_entities] + morpheme_tokens
+
+    # 大小文字無視で重複排除する（Sudachi の dictionary_form() は ASCII 語を
+    # 小文字化するため、例えば "BenchKit"（ASCII複合/単独語抽出）と "benchkit"
+    # （Sudachi辞書形）が別トークン扱いのまま残ると、段階的縮退の枠を無駄に
+    # 消費してしまう。2026-07-30 実測: benchkit-contribution-copyright-policy
+    # クエリで発生）。ASCII エンティティを先頭に積んでいるため先勝ちで元の
+    # 大文字小文字表記が残る。
+    tokens: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for tok, pos in combined:
+        key = tok.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tokens.append((tok, pos))
+
+    if not tokens:
         return []
+
+    order = sorted(
+        range(len(tokens)),
+        key=lambda i: (_token_category(tokens[i][0], tokens[i][1]), i),
+    )
+    return [tokens[i][0] for i in order]
 
 
 # --------------------------------------------------------------------------- #
@@ -121,6 +231,25 @@ def sanitize_fts_query(q: str) -> str:
         # ここで再度同じ置換を行うのは no-op（単純に整形して返すだけでよい）。
         return q.strip()
     return " ".join(tokens)
+
+
+# FTS5 MATCH クエリの予約文字。特に "-" はクエリパーサで NOT 演算子として解釈されるため、
+# ハイフンを含むトークン（例: "E-Wave", "GH200-NVL72"）を素の bareword として渡すと
+# sqlite3.OperationalError（例: "no such column: Wave"）が発生する。この例外は
+# _fts_tokens_search / retrieve_chunks の trigram ループで sqlite3.OperationalError として
+# 捕捉され「ヒットなし」に丸められるため、本来ヒットしうる部分一致が silently 握り
+# つぶされ、より弱い（選択性の低い）縮退段まで落ちてしまう
+# （2026-07-30 E-Wave/NVIDIA停滞質問の実測: ASCII複合エンティティ導入に伴い顕在化。
+# sanitize_fts_query 自体はハイフンを除去しないため、複合エンティティ導入前から
+# 潜在していた既存バグでもある）。
+_FTS5_SPECIAL_CHARS_RE = re.compile(r'["\-:^*()]')
+
+
+def _fts5_escape_token(token: str) -> str:
+    """FTS5 予約文字を含むトークンをダブルクォートでフレーズ化して安全に渡す。"""
+    if _FTS5_SPECIAL_CHARS_RE.search(token):
+        return '"' + token.replace('"', '""') + '"'
+    return token
 
 
 def _build_date_filter(since_date: str | None, exempt_box: bool = True) -> tuple[str, list]:
@@ -181,8 +310,13 @@ def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
 def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
                        date_filter: str = "1=1", date_params: list | None = None,
                        index_name: str | None = None,
-                       record_filter: str = "", record_params: list | None = None) -> list[dict]:
-    """fts_tokens（SudachiPy形態素解析）テーブルで段階的AND検索を行う。"""
+                       record_filter: str = "", record_params: list | None = None
+                       ) -> tuple[list[dict], int]:
+    """fts_tokens（SudachiPy形態素解析）テーブルで段階的AND検索を行う。
+
+    戻り値は (rows, tokens_used)。tokens_used はヒットした段で AND 条件に
+    使ったトークン数（縮退の弱さを呼び出し元が判定するため）。
+    """
     date_params = date_params or []
     record_params = record_params or []
     token_sets = [tokens]
@@ -194,7 +328,7 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
         token_sets.append(tokens[:1])
 
     for tset in token_sets:
-        query = " ".join(tset)
+        query = " ".join(_fts5_escape_token(t) for t in tset)
         try:
             if index_name:
                 sql = (
@@ -219,20 +353,32 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
                 params = [query] + date_params + record_params + [k]
             rows = conn.execute(sql, params).fetchall()
             if rows:
-                return [dict(r) for r in rows]
+                return [dict(r) for r in rows], len(tset)
         except sqlite3.OperationalError as e:
             logger.debug(f"fts_tokensクエリエラー: {e} (query={query!r})")
-            return []
-    return []
+            return [], 0
+    return [], 0
 
 
 # retrieve_chunks が「どの段で結果を得たか」を表す stage 名（return_stage=True 時）。
 # STAGE_DATE_FALLBACK は関連度シグナルを持たない「最新日付順」の最終手段であり、
 # retrieve_chunks_hybrid の RRF マージで通常ヒットと同格に扱ってはならない
 # （2026-07 k3-loss-analysis で mh-nvl72 の vector 候補が押し出される劣化を確認）。
+# STAGE_FTS_TOKENS_WEAK / STAGE_TRIGRAM_WEAK は、複数語クエリが段階的縮退で
+# 1 語まで落ちた状態でのヒット（選択性を失った弱いマッチ）を表す。日付・LIKE
+# フォールバックと同じ枠組みで RRF マージから除外対象になる
+# （2026-07-30 E-Wave/NVIDIA停滞質問の実測障害: 190件ヒットの低関連結果が
+# vector候補を押し出した）。1語まで縮退したら語形によらず一律弱段扱いとする
+# （2026-07-30 recall_eval 実測: 語形ベースの「エンティティ級は弱段除外」の
+# 較正を一度試みたが、LQCD がコーパス内では低選択性語だったため hybrid rank が
+# 43→圏外にさらに悪化し撤回。真因は _extract_ascii_entities の単独語抽出が
+# 別トークン "AI4S" を注入し既存の4語AND一致を壊していたことだったため、
+# そちらを是正して対処する）。
 STAGE_NO_INDEX = "no_index"
 STAGE_FTS_TOKENS = "fts_tokens"
+STAGE_FTS_TOKENS_WEAK = "fts_tokens_weak"
 STAGE_TRIGRAM = "trigram"
+STAGE_TRIGRAM_WEAK = "trigram_weak"
 STAGE_LIKE = "like"
 STAGE_DATE_FALLBACK = "date_fallback"
 
@@ -272,7 +418,9 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
     exempt_box: `_build_date_filter()` 参照。既定 True で従来挙動を維持。
     return_stage: True の場合 (chunks, stage) を返す。stage は STAGE_* 定数
         （どの段で結果を得たか）。既定 False は従来どおり chunks のみを返す
-        （後方互換）。
+        （後方互換）。STAGE_FTS_TOKENS_WEAK / STAGE_TRIGRAM_WEAK は、複数語
+        クエリの段階的縮退が 1 語まで落ちた状態でのヒットを表す（選択性を
+        失った弱いマッチ）。
     """
     if not index_db.exists():
         logger.warning(f"インデックスDBが見つかりません: {index_db}")
@@ -310,16 +458,20 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
             ).fetchone() is not None
 
             if has_fts_tokens:
-                rows = _fts_tokens_search(
+                rows, tokens_used = _fts_tokens_search(
                     conn, sudachi_tokens, k,
                     date_filter, date_params, index_name=index_name,
                     record_filter=record_filter, record_params=record_params,
                 )
                 if rows:
+                    weak = tokens_used <= 1 < len(sudachi_tokens)
                     logger.info(
-                        f"SudachiPy FTSマッチ ({len(rows)}件): {sudachi_tokens} in {idx_label}"
+                        f"SudachiPy FTSマッチ ({len(rows)}件): {sudachi_tokens} in {idx_label} "
+                        f"tokens_used={tokens_used}/{len(sudachi_tokens)}"
+                        + (" [WEAK]" if weak else "")
                     )
-                    return (rows, STAGE_FTS_TOKENS) if return_stage else rows
+                    stage = STAGE_FTS_TOKENS_WEAK if weak else STAGE_FTS_TOKENS
+                    return (rows, stage) if return_stage else rows
                 logger.debug(f"SudachiPy FTS: ヒットなし ({sudachi_tokens})")
 
         # --- Step 2: trigram FTS5 検索 ---
@@ -338,11 +490,17 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
 
         for tset in token_sets:
             q = " ".join(tset)
-            rows = _fts5_search(conn, q, k, date_filter, date_params, index_name=index_name,
+            match_q = " ".join(_fts5_escape_token(t) for t in tset)
+            rows = _fts5_search(conn, match_q, k, date_filter, date_params, index_name=index_name,
                                record_filter=record_filter, record_params=record_params)
             if rows:
-                logger.info(f"trigram FTSマッチ ({len(rows)}件): [{q}] in {idx_label}")
-                return (rows, STAGE_TRIGRAM) if return_stage else rows
+                weak = len(tset) <= 1 < len(valid_tokens)
+                logger.info(
+                    f"trigram FTSマッチ ({len(rows)}件): [{q}] in {idx_label} "
+                    f"tokens_used={len(tset)}/{len(valid_tokens)}" + (" [WEAK]" if weak else "")
+                )
+                stage = STAGE_TRIGRAM_WEAK if weak else STAGE_TRIGRAM
+                return (rows, stage) if return_stage else rows
 
         # --- Step 3: LIKE 検索 ---
         keyword = (sudachi_tokens[0] if sudachi_tokens else
@@ -653,16 +811,24 @@ def retrieve_chunks_hybrid(
     finally:
         conn.close()
 
+    if vec_results:
+        logger.info(f"[hybrid] vector_leg n={len(vec_results)}")
+    else:
+        logger.warning("[hybrid] vector_leg n=0")
+
     # STAGE_DATE_FALLBACK（最新日付順の最終手段）と STAGE_LIKE（rank 一律 0・
-    # ORDER BY なしの LIKE 検索）はどちらも関連度シグナルを持たない。これらを
-    # FTS 脚として RRF に混ぜると、件数（k+20）が vector 側の重み
+    # ORDER BY なしの LIKE 検索）はどちらも関連度シグナルを持たない。
+    # STAGE_FTS_TOKENS_WEAK / STAGE_TRIGRAM_WEAK は複数語クエリが 1 語まで
+    # 縮退した弱いマッチで、選択性を失い低関連の大量ヒットになりやすい。
+    # これらを FTS 脚として RRF に混ぜると、件数（k+20）が vector 側の重み
     # （_VECTOR_SEARCH_WEIGHT=0.4）を数で上回り、無関係なチャンクが意味的に
     # 正しい vector 候補を押し出してしまう（RRF 数式上 rank r<90 の FTS 候補が
-    # vector 1位に勝つため、LIKE 段の LIMIT k+20 は容易にこれを満たす）。
+    # vector 1位に勝つため、LIMIT k+20 は容易にこれを満たす）。
     # 2026-07 k3-loss-analysis: mh-nvl72 で vector 上位50件が全滅した実測
-    # （date_fallback 発生時）。vector 脚が空の場合のみ、従来どおり FTS 結果を
-    # 最終手段として使う。
-    if fts_stage in (STAGE_DATE_FALLBACK, STAGE_LIKE) and vec_results:
+    # （date_fallback 発生時）。2026-07-30: E-Wave/NVIDIA停滞質問で
+    # fts_tokens が「今年度」1語まで縮退し同様の押し出しを実測（weak 段追加）。
+    # vector 脚が空の場合のみ、従来どおり FTS 結果を最終手段として使う。
+    if fts_stage in (STAGE_DATE_FALLBACK, STAGE_LIKE, STAGE_FTS_TOKENS_WEAK, STAGE_TRIGRAM_WEAK) and vec_results:
         logger.info(f"[hybrid] FTS {fts_stage} excluded from RRF (vector-only)")
         return _rrf_merge([], vec_results, k)
 

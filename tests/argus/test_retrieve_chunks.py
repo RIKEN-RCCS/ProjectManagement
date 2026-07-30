@@ -172,6 +172,146 @@ class TestSanitizeFtsQuery:
 
 
 # --------------------------------------------------------------------------- #
+# _fts5_escape_token — FTS5 予約文字（特にハイフン=NOT演算子）のクォート
+# 2026-07-30 実測: sanitize_fts_query はハイフンを除去しないため
+# "E-Wave"/"GH200-NVL72" のようなトークンがそのまま MATCH クエリに渡ると
+# ハイフンが NOT 演算子として解釈され sqlite3.OperationalError
+# （"no such column: Wave"）が発生し、_fts_tokens_search / retrieve_chunks の
+# trigram ループで「ヒットなし」に丸められ、本来ヒットしうる部分一致が
+# silently 握りつぶされていた（複合エンティティ導入前から潜在する既存バグ）。
+# --------------------------------------------------------------------------- #
+
+class TestFts5EscapeToken:
+    def test_plain_token_unchanged(self):
+        from argus.retrieval import _fts5_escape_token
+        assert _fts5_escape_token("NVIDIA") == "NVIDIA"
+        assert _fts5_escape_token("スケールアウト") == "スケールアウト"
+
+    def test_hyphenated_token_is_quoted(self):
+        from argus.retrieval import _fts5_escape_token
+        assert _fts5_escape_token("E-Wave") == '"E-Wave"'
+        assert _fts5_escape_token("GH200-NVL72") == '"GH200-NVL72"'
+
+    def test_internal_double_quote_is_escaped(self):
+        from argus.retrieval import _fts5_escape_token
+        assert _fts5_escape_token('foo"bar-baz') == '"foo""bar-baz"'
+
+    def test_query_string_with_hyphenated_token_does_not_raise_operational_error(self, tmp_path):
+        """ハイフンを含むトークンで組み立てた MATCH クエリが構文エラーにならず、
+        実際にヒットすること（'no such column: Wave' の再現・回帰防止）。"""
+        db_path = _make_qa_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            from argus.retrieval import _fts5_escape_token
+            tokens = ["スケールアウト", "E-Wave"]
+            q = " ".join(_fts5_escape_token(t) for t in tokens)
+            # 例外を投げないこと（従来は "no such column: Wave" 相当で落ちていた）
+            rows = conn.execute(
+                "SELECT c.id FROM fts JOIN chunks c ON fts.rowid = c.id WHERE fts MATCH ?", (q,)
+            ).fetchall()
+            assert isinstance(rows, list)
+        finally:
+            conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# sudachi_tokenize_query — トークン品質（ASCII複合エンティティ・機能動詞除去・並べ替え）
+# 2026-07-30 本番実測障害の修正（E-Wave が 'Wave' に縮退、機能動詞混入）。
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(scope="module")
+def real_sudachi():
+    """実 SudachiPy トークナイザを初期化する（未インストール環境ではスキップ）。"""
+    import argus.retrieval as srv
+    if srv._sudachi_tokenizer is None:
+        if not srv._init_sudachi():
+            pytest.skip("sudachipy が利用できない環境")
+    return srv
+
+
+class TestSudachiTokenizeQueryTokenQuality:
+    def test_ascii_compound_entity_preserved_not_degraded_to_partial_word(self, real_sudachi):
+        """「E-Wave」が複合エンティティとして丸ごと保持され、Sudachi由来の
+        部分語 'Wave'（旧バグ: len>=2フィルタが'E'を、品詞フィルタが'-'を除去
+        した結果）には縮退しない。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert "E-Wave" in tokens
+        assert "Wave" not in tokens
+        assert "E" not in tokens
+
+    def test_ascii_compound_entity_slash_separator(self, real_sudachi):
+        """FrontFlow/blue のような '/' 区切り複合エンティティも保持される。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("FrontFlow/blue のライセンス変更について検討している")
+        assert "FrontFlow/blue" in tokens
+
+    def test_function_verbs_are_removed(self, real_sudachi):
+        """「する」「いる」等の機能動詞（辞書形）は検索トークンから除外される。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert "する" not in tokens
+        assert "いる" not in tokens
+
+    def test_generic_demote_terms_pushed_to_back(self, real_sudachi):
+        """時制・汎用語（今年度・理由 等）は他の実質語より後方へ降格される。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert tokens.index("今年度") > tokens.index("E-Wave")
+        assert tokens.index("理由") > tokens.index("NVIDIA")
+
+    def test_ascii_compound_entity_is_most_selective_top_token(self, real_sudachi):
+        """段階的縮退で1語まで落ちた場合に残るのは先頭トークンであり、
+        本番実測障害（'今年度' 1語まで縮退）の再発を防ぐため、複合エンティティが
+        先頭に来ること自体を明示的に確認する。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert tokens[0] == "E-Wave"
+
+    def test_no_compound_entity_preserves_sudachi_natural_order(self, real_sudachi):
+        """複合エンティティ・降格対象語が無い場合、Sudachiの形態素出現順
+        （文中の語順）がそのまま維持される（2026-07-30: カタカナ・ASCII語を
+        一律優先する4段階の並べ替えは既存クエリの selectivity を悪化させた
+        ため、3段の簡易版に変更。自然な語順を無闇に崩さないことを確認）。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("スケールアウトネットワーク設計に関する議論")
+        assert tokens[0] in ("スケールアウト", "ネットワーク")
+
+    def test_single_token_degeneration_keeps_compound_entity_not_generic_term(self, real_sudachi):
+        """先頭1語までの縮退（_fts_tokens_search の最弱段）で残るのが
+        E-Wave であり、'今年度' ではないことを確認する（本番障害の直接再現）。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert tokens[:1] == ["E-Wave"]
+
+    def test_single_ascii_word_entity_does_not_disturb_following_noun_order(self, real_sudachi):
+        """単独ASCII語（複合エンティティではない）は Sudachi の自然な出現順の
+        先頭にとどまり、後続の一般名詞の相対順序を乱さない。
+        （2026-07-30 recall_eval で発見した回帰: カタカナ・ASCII語を一般名詞より
+        一律優先する並べ替えにすると、'BenchKit 外部からのコード貢献ルール確認'
+        で自然語順なら1件に絞り込めていた組み合わせ（BenchKit+外部+コード）が
+        壊れ、選択性の低い組み合わせ（BenchKit+コード+ルール）に縮退し、
+        recall@30/60 が悪化した。3段簡易カテゴリへの変更で自然順を保持する）。
+        単独ASCII語は正規表現での追加抽出を撤回した（下記テスト参照）ため、
+        Sudachi の dictionary_form() 仕様どおり小文字化される。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("BenchKit 外部からのコード貢献ルール確認")
+        assert tokens[:3] == ["benchkit", "外部", "コード"]
+
+    def test_standalone_ascii_word_extraction_removed_relies_on_sudachi(self, real_sudachi):
+        """単独ASCII語（NVIDIA 等）は正規表現での追加抽出をせず、Sudachi の
+        形態素解析結果のみをトークンとして使う（複合エンティティのみ抽出に限定した
+        較正: 2026-07-30 recall_eval 実測で単独語抽出時に注入された "AI4S" が
+        Sudachi 由来の "AI" と別トークン化され、lqcd-dwf-hmc-comm-profiling-progress-202606
+        の4語AND一致を壊し hybrid rank が 1→43 に劣化したため撤回）。"""
+        from argus.retrieval import sudachi_tokenize_query
+        tokens = sudachi_tokenize_query("LQCD 通信 AI4S プロファイリング")
+        assert "AI4S" not in tokens
+        assert tokens.count("AI") <= 1
+
+
+# --------------------------------------------------------------------------- #
 # retrieve_chunks (FTS5 trigram path)
 # --------------------------------------------------------------------------- #
 
@@ -257,7 +397,7 @@ class TestRetrieveChunksReturnStage:
         """SudachiPy(fts_tokens) でヒットした場合 stage=STAGE_FTS_TOKENS。"""
         import argus.retrieval as srv
         monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["スケールアウトネットワーク"])
-        monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: [{"id": 1, "content": "dummy"}])
+        monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: ([{"id": 1, "content": "dummy"}], 1))
         from argus.retrieval import STAGE_FTS_TOKENS, retrieve_chunks
         results, stage = retrieve_chunks(
             "スケールアウトネットワーク", qa_db, return_stage=True,
@@ -297,6 +437,109 @@ class TestRetrieveChunksReturnStage:
         )
         assert results == []
         assert stage == STAGE_NO_INDEX
+
+
+# --------------------------------------------------------------------------- #
+# retrieve_chunks — 弱段（1語まで縮退したヒット）の stage 判定
+# 2026-07-30 本番実測障害の修正: 段階的縮退が1語まで落ちた低選択性のヒットを
+# 通常ヒットと区別できるようにする。
+# --------------------------------------------------------------------------- #
+
+class TestRetrieveChunksWeakStage:
+    @pytest.fixture
+    def qa_db(self, tmp_path):
+        return _make_qa_db(tmp_path)
+
+    def test_trigram_hit_on_hyphenated_content_is_not_swallowed_by_operational_error(
+        self, tmp_path, monkeypatch,
+    ):
+        """ハイフンを含む語（E-Wave）を含む本文が trigram 段で構文エラーに
+        よって silent に握りつぶされず、正しくヒットする（本来2語ヒットする
+        はずが構文エラーで弱段まで過剰縮退していた既存バグの回帰防止）。"""
+        import argus.retrieval as srv
+        db_path = tmp_path / "qa_index.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(_QA_INDEX_SCHEMA)
+        content = "E-Waveのコデザイン管理表にはNVIDIA対応状況の記載がある"
+        conn.execute(
+            "INSERT INTO chunks (source_type, source_db, record_id, held_at, content, indexed_at)"
+            " VALUES (?,?,?,?,?,?)",
+            ("minutes", "test.db", "r1", "2026-06-01", content, "2026-06-19T00:00:00"),
+        )
+        chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("INSERT INTO fts(rowid, content) VALUES (?,?)", (chunk_id, content))
+        conn.execute("INSERT INTO chunk_indexes (chunk_id, index_name) VALUES (?,?)", (chunk_id, "test"))
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        from argus.retrieval import STAGE_TRIGRAM, retrieve_chunks
+        results, stage = retrieve_chunks(
+            "E-WaveのNVIDIA対応状況について", db_path, index_name="test", return_stage=True,
+        )
+        assert stage == STAGE_TRIGRAM
+        assert any("E-Wave" in r["content"] for r in results)
+
+    def test_fts_tokens_weak_when_degenerated_to_one_token(self, qa_db, monkeypatch):
+        """複数語クエリが1語まで縮退してヒットした場合 stage=STAGE_FTS_TOKENS_WEAK。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["今年度", "E-Wave", "NVIDIA"])
+        monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: ([{"id": 1, "content": "dummy"}], 1))
+        from argus.retrieval import STAGE_FTS_TOKENS_WEAK, retrieve_chunks
+        results, stage = retrieve_chunks("dummy", qa_db, return_stage=True)
+        assert stage == STAGE_FTS_TOKENS_WEAK
+        assert len(results) >= 1
+
+    def test_fts_tokens_not_weak_when_multiple_tokens_used(self, qa_db, monkeypatch):
+        """縮退が2語以上で止まった場合は通常段（STAGE_FTS_TOKENS）のまま。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["今年度", "E-Wave", "NVIDIA"])
+        monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: ([{"id": 1, "content": "dummy"}], 2))
+        from argus.retrieval import STAGE_FTS_TOKENS, retrieve_chunks
+        results, stage = retrieve_chunks("dummy", qa_db, return_stage=True)
+        assert stage == STAGE_FTS_TOKENS
+
+    def test_fts_tokens_not_weak_when_query_already_single_token(self, qa_db, monkeypatch):
+        """元のクエリが最初から1語の場合は「縮退」ではないので弱段扱いにしない。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["スケールアウトネットワーク"])
+        monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: ([{"id": 1, "content": "dummy"}], 1))
+        from argus.retrieval import STAGE_FTS_TOKENS, retrieve_chunks
+        results, stage = retrieve_chunks("dummy", qa_db, return_stage=True)
+        assert stage == STAGE_FTS_TOKENS
+
+    def test_trigram_weak_when_degenerated_to_one_token(self, qa_db, monkeypatch):
+        """trigram 段でも複数語クエリが1語まで縮退してヒットした場合 stage=STAGE_TRIGRAM_WEAK。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        monkeypatch.setattr(srv, "sanitize_fts_query", lambda q: "今年度 EWave NVIDIA")
+
+        def fake_fts5_search(conn, q, k, *a, **kw):
+            if q == "今年度":
+                return [{"id": 1, "content": "dummy"}]
+            return []
+        monkeypatch.setattr(srv, "_fts5_search", fake_fts5_search)
+
+        from argus.retrieval import STAGE_TRIGRAM_WEAK, retrieve_chunks
+        results, stage = retrieve_chunks("dummy", qa_db, return_stage=True)
+        assert stage == STAGE_TRIGRAM_WEAK
+        assert len(results) >= 1
+
+    def test_trigram_not_weak_when_full_set_hits(self, qa_db, monkeypatch):
+        """全語のAND検索で一発ヒットした場合は通常段（STAGE_TRIGRAM）のまま。"""
+        import argus.retrieval as srv
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
+        monkeypatch.setattr(srv, "sanitize_fts_query", lambda q: "今年度 EWave NVIDIA")
+
+        def fake_fts5_search(conn, q, k, *a, **kw):
+            if q == "今年度 EWave NVIDIA":
+                return [{"id": 1, "content": "dummy"}]
+            return []
+        monkeypatch.setattr(srv, "_fts5_search", fake_fts5_search)
+
+        from argus.retrieval import STAGE_TRIGRAM, retrieve_chunks
+        results, stage = retrieve_chunks("dummy", qa_db, return_stage=True)
+        assert stage == STAGE_TRIGRAM
 
 
 # --------------------------------------------------------------------------- #
@@ -704,6 +947,109 @@ class TestRetrieveChunksHybridFallbackExclusion:
         assert any(
             "FTS like excluded from RRF" in rec.message for rec in caplog.records
         )
+
+    def test_fts_tokens_weak_stage_with_vector_present_excludes_fts_from_rrf(self, qa_db, monkeypatch):
+        """STAGE_FTS_TOKENS_WEAK（1語まで縮退した弱いヒット）も vector 存在時は
+        RRF マージから除外される（2026-07-30 本番実測障害の修正: 190件ヒットの
+        低関連結果が vector 候補を押し出した）。"""
+        import argus.retrieval as srv
+        weak_chunks = [_fake_chunk(i) for i in range(1, 71)]
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0 - i * 0.01) for i in range(50)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (weak_chunks, srv.STAGE_FTS_TOKENS_WEAK),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
+
+        result_ids = {r["id"] for r in results}
+        weak_ids = {c["id"] for c in weak_chunks}
+        vector_ids = {c["id"] for c in vector_chunks}
+        assert result_ids.isdisjoint(weak_ids)
+        assert result_ids <= vector_ids
+        assert len(results) > 0
+
+    def test_fts_tokens_weak_stage_with_empty_vector_returns_weak_as_last_resort(self, qa_db, monkeypatch):
+        """弱段でも vector 脚が空なら従来どおり最終手段として返す。"""
+        import argus.retrieval as srv
+        weak_chunks = [_fake_chunk(i) for i in range(1, 71)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (weak_chunks, srv.STAGE_FTS_TOKENS_WEAK),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: [])
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
+
+        assert len(results) == 50
+        assert {r["id"] for r in results} <= {c["id"] for c in weak_chunks}
+
+    def test_trigram_weak_stage_with_vector_present_excludes_fts_from_rrf(self, qa_db, monkeypatch):
+        """STAGE_TRIGRAM_WEAK も vector 存在時は RRF マージから除外される。"""
+        import argus.retrieval as srv
+        weak_chunks = [_fake_chunk(i) for i in range(1, 71)]
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0 - i * 0.01) for i in range(50)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (weak_chunks, srv.STAGE_TRIGRAM_WEAK),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        results = retrieve_chunks_hybrid("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
+
+        result_ids = {r["id"] for r in results}
+        weak_ids = {c["id"] for c in weak_chunks}
+        vector_ids = {c["id"] for c in vector_chunks}
+        assert result_ids.isdisjoint(weak_ids)
+        assert result_ids <= vector_ids
+
+    def test_vector_leg_log_reports_nonzero_count(self, qa_db, monkeypatch, caplog):
+        """vector 脚が非空の場合 `[hybrid] vector_leg n=` に実件数を INFO ログする
+        （2026-07-30 誤診修正: _run_oneshot の DEGRADED 誤検知を hybrid ログと
+        突き合わせて判別できるようにする）。"""
+        import logging
+
+        import argus.retrieval as srv
+        fts_chunks = [_fake_chunk(i) for i in range(1, 6)]
+        vector_chunks = [dict(_fake_chunk(1000 + i), vector_score=1.0) for i in range(7)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (fts_chunks, srv.STAGE_TRIGRAM),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        with caplog.at_level(logging.INFO, logger="pm_qa_server"):
+            retrieve_chunks_hybrid("スケールアウト", qa_db, k=10)
+
+        assert any("[hybrid] vector_leg n=7" in rec.message for rec in caplog.records)
+
+    def test_vector_leg_log_warns_when_empty(self, qa_db, monkeypatch, caplog):
+        """vector 脚が空の場合は `[hybrid] vector_leg n=0` を WARNING で出す。"""
+        import logging
+
+        import argus.retrieval as srv
+        fts_chunks = [_fake_chunk(i) for i in range(1, 6)]
+
+        monkeypatch.setattr(
+            srv, "retrieve_chunks",
+            lambda *a, **kw: (fts_chunks, srv.STAGE_TRIGRAM),
+        )
+        monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: [])
+
+        from argus.retrieval import retrieve_chunks_hybrid
+        with caplog.at_level(logging.WARNING, logger="pm_qa_server"):
+            retrieve_chunks_hybrid("スケールアウト", qa_db, k=10)
+
+        assert any("[hybrid] vector_leg n=0" in rec.message for rec in caplog.records)
 
 
 # --------------------------------------------------------------------------- #
