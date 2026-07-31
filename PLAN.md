@@ -28,11 +28,28 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 6. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
    SDK 直叩き 25 箇所の移送が必要**（工数の大半）
 
-**未解決の懸案**:
-- **public リポジトリの履歴に `docs/decisions/` が残る**（2026-07-13 以降 8 コミット）。
-  filter-repo + force-push は組織調整が必要。LOG.md 参照
+**public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
+
+HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0）。再発は pre-commit の
+3 lint（`no-box-open-company-access` / `net-guard-import-required` / `no-slack-id-literals`）が防ぐ。
+
+- **人名 — 当面そのまま（2026-07-31 PM 判断）。** 敬称つきで 18 件 / 7 ファイル。
+  **敬称なしの姓はパターンで検出できない**（例: `patrol/users.py` の docstring）。
+  棚卸しには `docs/project.md` の名簿との突き合わせが必要（Claude は読めないため PM 実行）。
+  **lint も無いので今後も混入しうる**
+- **会議名 — 当面そのまま（2026-07-31 PM 判断）。** `docs/commands.md` 21 / `docs/argus_system.md` 15 /
+  `pm_minutes_import.py` 27 ほか。既定の会議種別としてコード全体に埋まっており設定化は広範囲
+- **公開履歴の除去 — 保留。** 2026-07-13 以降の履歴にアプリ名・Slack ID・`docs/decisions/` 等が残る。
+  除去には `filter-repo`（パス指定＋`--replace-text`）と force-push が必要で、全 SHA が変わるため
+  組織調整が前提。**上記 2 件を保留した結果、今実行しても部分的な除去にしかならない**（人名・
+  会議名は残る）。**後から追加で force-push を繰り返すのは public リポジトリでは悪手**なので、
+  除去範囲が確定してから 1 回で実施する
+
+**その他の懸案**:
 - MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま。investigate ループのみ対応済み
 - `~/.claude/settings.json` の GitHub PAT 失効（PM 作業）
+- `argus_config.yaml` の `indices.pm-all.channels` は 55 件。旧ハードコード（57 件の和集合）との
+  差分 2 件は PM 判断で現状維持
 
 ### 議事録生成への Kimi-K3 視覚入力の組み込み（2026-07-31 着手）
 
