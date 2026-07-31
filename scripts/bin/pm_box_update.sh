@@ -26,6 +26,29 @@
 
 set -euo pipefail
 
+# --------------------------------------------------------------------------- #
+# ログ出力先
+#
+# ★ 冒頭で設定する。以前は docling-serve の起動待ち・box CLI の PATH 確認より
+#   後で tee を張っていたため、**docling を使えたか否か（変換品質を左右する分岐）が
+#   ログに残らなかった**。cron 実行では端末が無いので、その情報はどこにも
+#   残っていなかった。以降の全出力を logs/pm_box_update.log に落とす。
+# --------------------------------------------------------------------------- #
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
+  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
+else
+  SCRIPT_DIR="$_BASH_SELF_DIR"
+fi
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+LOG_DIR="$REPO_ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/pm_box_update.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo ""
+echo "======== pm_box_update.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
+
 # box CLI の PATH を通す（cron 環境では .bashrc がロードされないため）
 export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
 command -v box >/dev/null 2>&1 || echo "[WARN] box CLI が PATH に見つかりません（nvm の node バージョン変更を確認）" >&2
@@ -57,25 +80,8 @@ else
     echo "Unknown architecture: $ARCH"; exit 1
 fi
 
-_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
-  SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"
-else
-  SCRIPT_DIR="$_BASH_SELF_DIR"
-fi
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-
 # LOCAL_LLM_* は ~/.secrets/localLLM.sh で設定（gemma-4 / RiVault 等）
-
-# --------------------------------------------------------------------------- #
-# ログ出力先
-# --------------------------------------------------------------------------- #
-LOG_DIR="$REPO_ROOT/logs"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/pm_box_update.log"
-exec > >(tee -a "$LOG_FILE") 2>&1
-echo ""
-echo "======== pm_box_update.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
+# ログ出力先・SCRIPT_DIR / REPO_ROOT は冒頭で設定済み
 
 # --------------------------------------------------------------------------- #
 # 引数パース
