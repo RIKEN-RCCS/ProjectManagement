@@ -28,6 +28,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
+from utils import net_guard  # noqa: E402, F401 (import 時の install() 副作用のため)
+
 logger = logging.getLogger("pm_argus")
 
 

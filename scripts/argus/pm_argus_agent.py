@@ -235,10 +235,12 @@ def _resolve_index_and_channels(
 
 from argus.agent_tools import (  # noqa: F401 — 後方互換のため再 export
     _TOOL_MAP,
+    EGRESS_TOOL_NAMES,
     TOOLS,
     AgentContext,
     ToolDef,
     _build_tool_descriptions,
+    registry_for,
     # 従来の _tool_* 関数は agent_tools.py 内で mcp_tools 委譲となったため
     # 個別 export は不要（必要なのは AgentContext / TOOLS / _TOOL_MAP のみ）
 )
@@ -491,15 +493,54 @@ _FILE_PINNED_EXCLUDED_TOOLS = frozenset({
 })
 
 
-def execute_tool(name: str, args: dict, ctx: AgentContext) -> str:
-    if name in _FILE_PINNED_EXCLUDED_TOOLS and ctx.record_ids:
-        return (
-            f"エラー: 対象ファイル固定中はツール『{name}』は使用できません"
-            "（全文/資料検索のみ有効）。search_text / search_text_hybrid を使ってください。"
-        )
+def _loop_allowed_tools(ctx: AgentContext, command: str = "investigate_loop") -> frozenset[str]:
+    """investigate ループでモデルに渡してよいツール名の集合を返す（allow-list）。
+
+    registry_for(command) の allow-list（既定 investigate_loop = READ 13、
+    EGRESS 3 は含まない）を起点に、--file 固定時（ctx.record_ids あり）は
+    追加で _FILE_PINNED_EXCLUDED_TOOLS を差し引く
+    （allow-list ∖ file-pinned。docs/security-architecture.md §4.1）。
+    """
+    allowed = {t.name for t in registry_for(command)}
+    if ctx.record_ids:
+        allowed -= _FILE_PINNED_EXCLUDED_TOOLS
+    return frozenset(allowed)
+
+
+def _loop_exclude_tools(ctx: AgentContext, command: str = "investigate_loop") -> frozenset[str]:
+    """investigate ループでモデルに渡さないツール名の集合を返す（allow-list からの導出）。
+
+    TOOLS 全体から _loop_allowed_tools(ctx, command) を差し引いた補集合。
+    EGRESS 3 ツールは常にここに含まれる（allow-list に載っていないため）。
+    """
+    allowed = _loop_allowed_tools(ctx, command)
+    return frozenset(t.name for t in TOOLS) - allowed
+
+
+def execute_tool(name: str, args: dict, ctx: AgentContext, command: str = "investigate_loop") -> str:
+    """コマンドの allow-list に載っているツールだけを実行する（fail-closed）。
+
+    載っていなければ理由を問わず拒否する（deny-list 時代の「EGRESS なら拒否」判定は
+    廃止。載っていなければ拒否、が本質。docs/security-architecture.md §4.1）。
+    """
+    allowed = _loop_allowed_tools(ctx, command)
+    if name not in allowed:
+        if name in EGRESS_TOOL_NAMES:
+            return (
+                f"エラー: ツール『{name}』は investigate ループでは使用できません"
+                "（EGRESS、Write Plane 専用。docs/security-architecture.md §4.1）。"
+            )
+        if name in _FILE_PINNED_EXCLUDED_TOOLS and ctx.record_ids:
+            return (
+                f"エラー: 対象ファイル固定中はツール『{name}』は使用できません"
+                "（全文/資料検索のみ有効）。search_text / search_text_hybrid を使ってください。"
+            )
+        available = ", ".join(sorted(allowed))
+        return f"エラー: ツール「{name}」は存在しません。利用可能なツール: {available}"
     tool = _TOOL_MAP.get(name)
     if tool is None:
-        available = ", ".join(_TOOL_MAP.keys())
+        # allow-list に載っているのに _TOOL_MAP に無い状態は registry_for の不変条件違反
+        available = ", ".join(sorted(allowed))
         return f"エラー: ツール「{name}」は存在しません。利用可能なツール: {available}"
     try:
         return tool.fn(args, ctx)
@@ -869,8 +910,7 @@ def run_agent(
             include_intent_header=include_intent_header, context=context,
         )
 
-    exclude_tools = _FILE_PINNED_EXCLUDED_TOOLS if ctx.record_ids else None
-    tool_desc = _build_tool_descriptions(exclude_tools)
+    tool_desc = _build_tool_descriptions(_loop_exclude_tools(ctx))
     # terminology / glossary 用語辞書を連結（プロジェクト固有用語の参考情報）
     glossary_parts: list[str] = []
     try:
@@ -2067,7 +2107,7 @@ def main():
             print("=== シードデータ ===")
             print(seed_data)
             print(f"\n=== 調査質問 ===\n{args.investigate}")
-            print(f"\n=== ツール一覧 ===\n{_build_tool_descriptions()}")
+            print(f"\n=== ツール一覧 ===\n{_build_tool_descriptions(_loop_exclude_tools(ctx))}")
         for c in conns:
             c.close()
         return

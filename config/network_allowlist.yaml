@@ -1,0 +1,70 @@
+# config/network_allowlist.yaml
+#
+# 外向き通信の宛先 allow-list（層1: ネットワーク層）。
+# 参照: docs/security-architecture.md §4.7 層1、scripts/utils/net_guard.py。
+#
+# ★★★ このリストは warn フェーズの実測で確定させる。現時点は暫定である。 ★★★
+# 環境変数の grep から作った推定値であり、正しい保証はない。例えば Slack
+# Socket Mode は slack.com ではなく wss-*.slack.com のようなホストに接続する。
+#
+# 値はリテラルで書くこと。${ENV_VAR} で定義してはならない（P9）。
+# 接続に使うのと同じ環境変数で許可を定義すると、環境変数を書き換えれば
+# 許可も一緒に動いてしまい、実質的に何も禁止しないことになる。
+#
+# ホスト名はワイルドカード（*.example.com のような接尾辞一致）を許す。
+# ただしワイルドカードを使うエントリには note で理由を必ず書くこと。
+#
+# 実ホスト名（rikyu-*.riken.jp 等）はここではプレースホルダのままにしてある。
+# 実値は PM が argus_config.yaml / ~/.secrets の実値を見て埋める（本ファイルは
+# それらを読まずに作成されているため、実ホスト名はまだ入っていない）。
+#
+# 実値の埋め方:
+#   1. ~/.venv_aarch64/bin/python3 scripts/utils/net_guard.py --print-env-hosts
+#      で環境変数から host:port を出力し、本ファイルのプレースホルダをこれで置換する。
+#   2. しばらく warn モードで運用し、qa/web デーモンのログを
+#      ~/.venv_aarch64/bin/python3 scripts/utils/net_guard.py --summarize-log <ログパス>
+#      で集計する。verdict=deny の頻出先を allow-list に追加する候補として検討する。
+#
+# localhost は一括許可しない。ポートまで含めて明示すること。
+
+read_plane:
+  - host: "api.rikyu.r-ccs.riken.jp"
+    port: 443
+    from_env: [RIKYU_URL, LOCAL_LLM_URL, OPENAI_API_BASE, ARGUS_ONESHOT_LLM_URL]
+  - host: "llm.ai.r-ccs.riken.jp"
+    port: 11434
+    from_env: RIVAULT_URL
+  - host: "localhost"
+    port: 8001
+    from_env: EMBED_API_BASE
+
+ingest_plane:
+  - host: "127.0.0.1"            # プレースホルダ。PM が実値に置換する
+    port: 5001
+    from_env: DOCLING_SERVE_URL
+    note: "Box取込の文書変換サービス。悪性文書が通過する注入経路上のコンポーネント"
+
+broker: []  # 外向き通信なし
+
+write_plane:
+  - host: "slack.com"
+    port: 443
+    note: "Slack Web API"
+  - host: "*.slack.com"
+    port: 443
+    note: "Slack Socket Mode は slack.com ではなく wss-xxx.slack.com のような
+           サブドメインに接続するため、ワイルドカードで接尾辞一致を許可する"
+  - host: "api.box.com"
+    port: 443
+    note: "Box API"
+  - host: "upload.box.com"
+    port: 443
+    note: "Box ファイルアップロード"
+  - host: "127.0.0.1"
+    port: 50021
+    note: "VOICEVOX（TTS の既定バックエンド）"
+  - host: "127.0.0.1"
+    port: 8080
+    from_env: FISH_TTS_HOST
+    note: "fish-speech（FISH_TTS_HOST 設定時のみ使用）。localhost を一括許可しない
+           方針のため、既定バックエンドとは別ポートとして明示する"

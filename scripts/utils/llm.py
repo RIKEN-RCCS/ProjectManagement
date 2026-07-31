@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Literal, overload
 
+from utils import net_guard  # noqa: F401 (import 時の install() 副作用のため)
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #

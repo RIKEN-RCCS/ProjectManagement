@@ -87,8 +87,44 @@ def box_get_file_modified_at(file_id: str, log: Callable[[str], None]) -> str | 
     return info.get("modified_at")
 
 
+# 共有リンクの目標アクセス範囲（招待された collaborator のみ）。
+# セキュリティ上の理由でこの値をマジックストリングとして散らさないこと（docs/security-architecture.md §1.2）。
+BOX_SHARED_LINK_ACCESS = "collaborators"
+
+
+def _box_share(file_id: str, log: Callable[[str], None]) -> str:
+    """`box files:share` を BOX_SHARED_LINK_ACCESS で実行し、shared_link.url を返す。"""
+    try:
+        info = box_json(
+            ["box", "files:share", file_id, "--access", BOX_SHARED_LINK_ACCESS, "--json"],
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"共有リンク作成 (box files:share) に失敗しました: file_id={file_id}: {e}") from e
+    if isinstance(info, list):
+        info = info[0] if info else {}
+    shared = info.get("shared_link") or {}
+    url = shared.get("url")
+    if not url:
+        raise RuntimeError(f"共有リンク作成のレスポンスに url がありません: {info}")
+    access = shared.get("access")
+    effective_access = shared.get("effective_access")
+    if access != BOX_SHARED_LINK_ACCESS:
+        # Box テナントのポリシーにより access が降格されることは正常系でありうるため例外にはしない。
+        log(
+            f"  [BOX][WARN] 共有リンクの access が {BOX_SHARED_LINK_ACCESS} になりませんでした"
+            f" (file_id={file_id}, access={access}, effective_access={effective_access})"
+        )
+    else:
+        log(f"  [BOX] 共有リンク access={access} effective_access={effective_access} (file_id={file_id})")
+    return url
+
+
 def box_get_or_create_shared_link(file_id: str, log: Callable[[str], None]) -> str:
-    """ファイルの共有リンクを取得（なければ作成）。URL を返す。"""
+    """ファイルの共有リンクを取得（なければ作成）。URL を返す。
+
+    既存リンクが見つかった場合でも BOX_SHARED_LINK_ACCESS でなければ貼り直して正規化する。
+    """
     info = box_json(
         ["box", "files:get", file_id, "--json", "--fields", "shared_link"],
         timeout=60,
@@ -97,17 +133,10 @@ def box_get_or_create_shared_link(file_id: str, log: Callable[[str], None]) -> s
         info = info[0] if info else {}
     shared = info.get("shared_link")
     if shared and shared.get("url"):
-        return shared["url"]
+        if shared.get("access") == BOX_SHARED_LINK_ACCESS:
+            return shared["url"]
+        log(f"  [BOX] 既存リンクを {BOX_SHARED_LINK_ACCESS} に正規化: file {file_id}")
+        return _box_share(file_id, log)
 
     log(f"  [BOX] 共有リンクを作成: file {file_id}")
-    info = box_json(
-        ["box", "files:share", file_id, "--access", "open", "--json"],
-        timeout=60,
-    )
-    if isinstance(info, list):
-        info = info[0] if info else {}
-    shared = info.get("shared_link") or {}
-    url = shared.get("url")
-    if not url:
-        raise RuntimeError(f"共有リンク作成のレスポンスに url がありません: {info}")
-    return url
+    return _box_share(file_id, log)

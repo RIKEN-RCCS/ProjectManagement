@@ -5,8 +5,17 @@ import time
 
 import pytest
 from argus import pm_argus_agent
-from argus.agent_tools import TOOLS, _build_tool_descriptions
+from argus.agent_tools import (
+    COMMAND_TOOLS,
+    EGRESS_TOOL_NAMES,
+    READ_TOOL_NAMES,
+    TOOLS,
+    ToolRegistryError,
+    _build_tool_descriptions,
+    registry_for,
+)
 from argus.pm_argus_agent import (
+    execute_tool,
     parse_final_answer,
     parse_tool_calls,
     run_document_qa,
@@ -137,6 +146,143 @@ def test_build_tool_descriptions_empty_tools(monkeypatch):
     monkeypatch.setattr("argus.agent_tools.TOOLS", [])
     desc = _build_tool_descriptions()
     assert desc == ""
+
+
+# --------------------------------------------------------------------------- #
+# EGRESS tool exclusion from investigate loop
+# (docs/security-architecture.md §4.1 — P1 能力分離、deny-list → allow-list)
+# --------------------------------------------------------------------------- #
+
+_EGRESS_TOOL_NAMES = {"box_upload_file", "slack_post_message", "canvas_post_content"}
+_READ_TOOL_NAMES = {
+    "get_app_achievements", "get_assignee_workload", "get_milestone_progress",
+    "get_overdue_items", "get_slack_messages", "read_document",
+    "search_action_items", "search_decisions", "search_entity",
+    "search_mentions", "search_text", "search_text_hybrid", "synthesize_answers",
+}
+
+
+def test_read_tool_names_matches_expected_thirteen():
+    assert READ_TOOL_NAMES == _READ_TOOL_NAMES
+
+
+# --------------------------------------------------------------------------- #
+# COMMAND_TOOLS / registry_for — コマンド別 allow-list、fail-closed
+# --------------------------------------------------------------------------- #
+
+
+def test_registry_for_investigate_loop_returns_read_thirteen_only():
+    names = {t.name for t in registry_for("investigate_loop")}
+    assert names == _READ_TOOL_NAMES
+    assert not (names & _EGRESS_TOOL_NAMES)
+
+
+@pytest.mark.parametrize(
+    "command", ["brief", "risk", "patrol", "narrate", "ingest", "investigate_oneshot"]
+)
+def test_registry_for_non_loop_commands_return_empty(command):
+    assert registry_for(command) == []
+
+
+def test_registry_for_unknown_command_raises():
+    """未宣言のコマンド名は fail-closed（空集合ではなく例外）。"""
+    with pytest.raises(ToolRegistryError):
+        registry_for("no_such_command")
+
+
+def test_registry_for_rejects_egress_in_declaration(monkeypatch):
+    """COMMAND_TOOLS に EGRESS ツールが紛れ込んだら例外（将来の誤設定検出）。"""
+    import argus.agent_tools as agent_tools
+    monkeypatch.setitem(
+        agent_tools.COMMAND_TOOLS, "bogus_egress", frozenset({"box_upload_file"})
+    )
+    with pytest.raises(ToolRegistryError):
+        agent_tools.registry_for("bogus_egress")
+
+
+def test_registry_for_rejects_unknown_tool_name_in_declaration(monkeypatch):
+    """COMMAND_TOOLS に TOOLS 未登録のツール名が紛れ込んだら例外（タイプミス検出）。"""
+    import argus.agent_tools as agent_tools
+    monkeypatch.setitem(
+        agent_tools.COMMAND_TOOLS, "bogus_typo", frozenset({"not_a_real_tool"})
+    )
+    with pytest.raises(ToolRegistryError):
+        agent_tools.registry_for("bogus_typo")
+
+
+def test_all_tools_are_classified_in_command_tools_or_egress():
+    """新ツール追加時に COMMAND_TOOLS / EGRESS_TOOL_NAMES への分類を強制する安全網。
+
+    TOOLS の全ツールは、どこかの COMMAND_TOOLS 値に載っているか EGRESS_TOOL_NAMES に
+    載っているかのいずれかでなければならない。どちらでもないツールが増えたら失敗する。"""
+    declared: set[str] = set()
+    for allowed in COMMAND_TOOLS.values():
+        declared |= allowed
+    all_names = {t.name for t in TOOLS}
+    assert all_names == declared | EGRESS_TOOL_NAMES
+
+
+def test_egress_tool_names_matches_expected_three():
+    assert EGRESS_TOOL_NAMES == _EGRESS_TOOL_NAMES
+
+
+def test_loop_exclude_tools_always_excludes_egress(agent_context):
+    excluded = pm_argus_agent._loop_exclude_tools(agent_context)
+    assert _EGRESS_TOOL_NAMES <= excluded
+
+
+def test_loop_tool_descriptions_omit_egress_tools(agent_context):
+    """モデルに渡るツール一覧・ツール説明文の両方から EGRESS 3 が除外されること。"""
+    desc = _build_tool_descriptions(pm_argus_agent._loop_exclude_tools(agent_context))
+    for name in _EGRESS_TOOL_NAMES:
+        assert name not in desc
+
+
+def test_loop_tool_descriptions_include_all_read_tools(agent_context):
+    """READ 13 ツールは従来どおりツール説明文に含まれること。"""
+    desc = _build_tool_descriptions(pm_argus_agent._loop_exclude_tools(agent_context))
+    for name in _READ_TOOL_NAMES:
+        assert name in desc
+
+
+def test_all_tools_partition_into_read_and_egress():
+    all_names = {t.name for t in TOOLS}
+    assert all_names == _READ_TOOL_NAMES | _EGRESS_TOOL_NAMES
+
+
+@pytest.mark.parametrize("tool_name", sorted(_EGRESS_TOOL_NAMES))
+def test_execute_tool_rejects_egress_tools(agent_context, tool_name):
+    """execute_tool は EGRESS ツールをコードレベルで常に拒否する（プロンプトからの
+    除外だけに頼らない。間接プロンプト注入でツール名を知られても実行させない）。"""
+    result = execute_tool(tool_name, {}, agent_context)
+    assert "エラー" in result
+    assert "使用できません" in result
+
+
+def test_execute_tool_still_runs_read_tools(agent_context, monkeypatch):
+    from argus.agent_tools import _TOOL_MAP, ToolDef
+    fake = ToolDef(name="get_milestone_progress", description="", parameters={},
+                    fn=lambda args, ctx: "OK")
+    monkeypatch.setitem(_TOOL_MAP, "get_milestone_progress", fake)
+    result = execute_tool("get_milestone_progress", {}, agent_context)
+    assert result == "OK"
+
+
+def test_execute_tool_unknown_tool_error_omits_egress_names(agent_context):
+    """未知ツール呼び出し時のエラー文言の「利用可能なツール」一覧に EGRESS 3 が
+    含まれないこと（除外したはずのツール名をモデルに再教示しない）。"""
+    result = execute_tool("no_such_tool_xyz", {}, agent_context)
+    assert "エラー" in result
+    for name in _EGRESS_TOOL_NAMES:
+        assert name not in result
+
+
+def test_loop_exclude_tools_includes_file_pinned_when_record_ids(agent_context):
+    """--file 固定時 (ctx.record_ids あり) は _FILE_PINNED_EXCLUDED_TOOLS も除外集合に含まれる。"""
+    from argus.pm_argus_agent import _FILE_PINNED_EXCLUDED_TOOLS
+    agent_context.record_ids = ["rec-1"]
+    excluded = pm_argus_agent._loop_exclude_tools(agent_context)
+    assert _FILE_PINNED_EXCLUDED_TOOLS <= excluded
 
 
 # --------------------------------------------------------------------------- #

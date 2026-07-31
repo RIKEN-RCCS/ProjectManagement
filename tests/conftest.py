@@ -50,6 +50,10 @@ def _isolate_env(tmp_path, monkeypatch):
     """
     for _var in _LEAKY_ENV_VARS:
         monkeypatch.delenv(_var, raising=False)
+    # net_guard（scripts/utils/net_guard.py）はプロセスグローバルな socket フックなので、
+    # テスト中は無効化する（tests/utils/test_net_guard.py はフックの挙動そのものを
+    # 検証するため、各テスト内で ARGUS_NETGUARD を明示的に上書きしてこの既定を覆す）。
+    monkeypatch.setenv("ARGUS_NETGUARD", "off")
     monkeypatch.setenv("LOCAL_LLM_URL", "http://127.0.0.1:1/v1")
     monkeypatch.setenv("LOCAL_LLM_TOKEN", "dummy")
     monkeypatch.setenv("LOCAL_LLM_MODEL", "test-model")

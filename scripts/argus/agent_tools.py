@@ -8,6 +8,8 @@ pm_mcp_server.py（FastMCP）と同じ関数群を提供するため、挙動は
   - AgentContext（investigate agent の状態）
   - ToolDef（ツール定義データクラス）
   - TOOLS / _TOOL_MAP（ツールレジストリ）
+  - COMMAND_TOOLS / registry_for（コマンド別 allow-list。fail-closed。
+    docs/security-architecture.md §4.1）
   - _tool_search_text, _tool_get_slack_messages, _tool_search_mentions
     （AgentContext の conns/channels に依存するためここに残す）
 """
@@ -20,7 +22,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -535,12 +537,83 @@ TOOLS: list[ToolDef] = [
 
 _TOOL_MAP: dict[str, ToolDef] = {t.name: t for t in TOOLS}
 
+# EGRESS ツール（外部送信・副作用あり）。分類情報として残す（テスト・ドキュメント用）。
+# 実際の絞り込みは COMMAND_TOOLS / registry_for による allow-list で行う
+# （docs/security-architecture.md §4.1、P1 能力分離）。
+EGRESS_TOOL_NAMES: frozenset[str] = frozenset({
+    "box_upload_file",
+    "slack_post_message",
+    "canvas_post_content",
+})
+
+# READ ツール13（機微データ読取のみ・副作用なし）。TOOLS からの機械的な導出はせず、
+# 明示的にリテラル列挙する（導出にすると新ツール追加時に自動で allow-list へ入り、
+# allow-list の意味が失われるため）。
+READ_TOOL_NAMES: frozenset[str] = frozenset({
+    "get_app_achievements",
+    "get_assignee_workload",
+    "get_milestone_progress",
+    "get_overdue_items",
+    "get_slack_messages",
+    "read_document",
+    "search_action_items",
+    "search_decisions",
+    "search_entity",
+    "search_mentions",
+    "search_text",
+    "search_text_hybrid",
+    "synthesize_answers",
+})
+
+# コマンド別ツール allow-list（docs/security-architecture.md §4.1）。
+# 空集合は「ツールを渡さない」を意味する。ツールループを持つのは
+# pm_argus_agent.run_agent の investigate_loop（LLM がツールを自律選択する唯一の経路）
+# のみで、それ以外は現状すべて空（brief/risk/patrol/narrate/ingest/investigate_oneshot
+# はツール表面ゼロ）。
+COMMAND_TOOLS: dict[str, frozenset[str]] = {
+    "brief": frozenset(),
+    "risk": frozenset(),
+    "patrol": frozenset(),
+    "narrate": frozenset(),
+    "ingest": frozenset(),
+    "investigate_oneshot": frozenset(),
+    # 唯一ツールを持つ経路。READ 13 のみ。EGRESS 3 は含めない
+    "investigate_loop": READ_TOOL_NAMES,
+}
+
+
+class ToolRegistryError(RuntimeError):
+    """COMMAND_TOOLS の宣言違反（未宣言コマンド／EGRESS混入／不明ツール名）。"""
+
+
+def registry_for(command: str) -> list[ToolDef]:
+    """コマンドに宣言された allow-list のツールだけを返す（fail-closed）。
+
+    - 未宣言のコマンドは例外
+    - 宣言集合に EGRESS ツールが含まれていたら例外（将来の誤設定を検出）
+    - 宣言集合に TOOLS に存在しないツール名があったら例外（タイプミス検出）
+    """
+    if command not in COMMAND_TOOLS:
+        raise ToolRegistryError(f"未宣言のコマンド: {command!r}")
+    allowed = COMMAND_TOOLS[command]
+    unknown = allowed - _TOOL_MAP.keys()
+    if unknown:
+        raise ToolRegistryError(
+            f"COMMAND_TOOLS[{command!r}] に TOOLS に存在しないツール名があります: {sorted(unknown)}"
+        )
+    egress = allowed & EGRESS_TOOL_NAMES
+    if egress:
+        raise ToolRegistryError(
+            f"COMMAND_TOOLS[{command!r}] に EGRESS ツールを含めることはできません: {sorted(egress)}"
+        )
+    return [_TOOL_MAP[name] for name in sorted(allowed)]
+
 
 # =========================================================================== #
 #  Tool Description Builder
 # =========================================================================== #
 
-def _build_tool_descriptions(exclude: set[str] | None = None) -> str:
+def _build_tool_descriptions(exclude: Set[str] | None = None) -> str:
     lines = []
     tools = [t for t in TOOLS if not (exclude and t.name in exclude)]
     for i, t in enumerate(tools, 1):

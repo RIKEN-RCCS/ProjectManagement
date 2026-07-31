@@ -22,3 +22,65 @@ repos:
         types: [python]
         stages: [manual]
         pass_filenames: false
+      - id: no-box-open-company-access
+        # 検出範囲の限界（既知）: 改行で分割された `"--access",` / `"open",`、
+        # `--access=open` 形式、シングルクォート、変数間接指定（例: `["--access", ACC]`）は
+        # このリテラル grep では検出できない。特に変数間接指定は box_cli.py の
+        # BOX_SHARED_LINK_ACCESS 定数実装そのものの形であり、そこは
+        # tests/utils/test_box_cli.py のリテラル比較（実引数列のアサーション）で担保する。
+        # grep は「マッチ無し(exit=1)」のときだけ PASS。マッチあり(0)・実行エラー(>=2)は
+        # いずれも FAIL とし、`!` による fail-open（ディレクトリ不在等でも exit=0 になる
+        # 事象）を避ける。
+        name: box share access lint (scripts/, best-effort literal grep)
+        entry: >-
+          bash -c '
+          grep -rnE -- "--access[\"]?,?\s*[\"]?(open|company)" scripts/;
+          rc=$?;
+          if [ "$rc" -eq 1 ]; then exit 0; else exit 1; fi
+          '
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false
+      - id: net-guard-import-required
+        # requests / urllib / slack_sdk を import しているファイルは、必ず net_guard
+        # （または net_guard を import 済みのハブモジュール db_utils/cli_utils/llm/
+        # canvas_utils/narrate のいずれか）を import していなければならない
+        # （scripts/utils/net_guard.py 参照）。
+        #
+        # 既知の例外（除外パス）:
+        #   - scripts/eval/ 配下: 開発用の評価ツールであり、本番の実行経路ではない
+        #   - scripts/data-pipeline/pm_web_fetch.py（旧パス symlink 含む）:
+        #     docs/security-architecture.md §4.5 で廃止決定済み
+        #
+        # 検出範囲の限界（既知）: grep によるファイル内文字列一致であり、実際に
+        # import 文として解釈できるかは見ない。コメント中の言及だけでも誤って
+        # PASS しうる。特に narrate.py / canvas_utils.py は自分自身のファイル名を
+        # docstring に含むため、この lint は自己言及だけで PASS してしまいうる
+        # （net_guard import の有無は別途レビューで確認すること）。
+        # grep は「マッチ無し(exit=1)」のときだけ対象ファイル無しとして扱い、
+        # マッチあり(0)は個別ファイルを検査、実行エラー(>=2)は FAIL とする
+        # （no-box-open-company-access と同じ fail-closed 方針）。
+        name: net_guard import lint (scripts/, requests/urllib/slack_sdk 使用箇所)
+        entry: >-
+          bash -c '
+          net_users=$(grep -rlE "^[[:space:]]*(import requests\b|from requests\b|import urllib\b|import urllib\.|from urllib\.|import slack_sdk\b|from slack_sdk\b)" scripts --include="*.py");
+          rc=$?;
+          if [ "$rc" -ge 2 ]; then echo "[net-guard-lint] grep 実行エラー"; exit 1; fi;
+          fail=0;
+          for f in $net_users; do
+            case "$f" in
+              scripts/eval/*) continue ;;
+              scripts/data-pipeline/pm_web_fetch.py|scripts/pm_web_fetch.py) continue ;;
+            esac;
+            if ! grep -qE "net_guard|db_utils|cli_utils|canvas_utils|\bllm\b|\bnarrate\b" "$f"; then
+              echo "[net-guard-lint] net_guard (または hub モジュール) の import が無い: $f";
+              fail=1;
+            fi;
+          done;
+          exit $fail
+          '
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false

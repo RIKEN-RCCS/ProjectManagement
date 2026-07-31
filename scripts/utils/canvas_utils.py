@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from utils import net_guard  # noqa: F401 (import 時の install() 副作用のため)
 
 _URLOPEN_TIMEOUT_SEC = 30
 

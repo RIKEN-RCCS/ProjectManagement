@@ -32,6 +32,20 @@ import secrets
 import sqlite3 as _sqlite3
 from pathlib import Path
 
+# net_guard の import（import 時の install() 副作用のため）。
+# db_utils.py は `python3 scripts/db_utils.py --gen-key` 等で直接実行されることが
+# あり、その場合 sys.path[0] は scripts/utils（scripts/ ではない）になるため
+# `from utils import net_guard` がそのままでは失敗する。フォールバックで
+# scripts/ を sys.path に追加してから再 import する。
+try:
+    from utils import net_guard  # noqa: F401
+except ImportError:
+    import sys as _sys
+    _scripts_dir = str(Path(__file__).resolve().parent.parent)
+    if _scripts_dir not in _sys.path:
+        _sys.path.insert(0, _scripts_dir)
+    from utils import net_guard  # noqa: F401
+
 # sqlcipher3 が利用可能かチェック
 try:
     from sqlcipher3 import dbapi2 as _sqlcipher3
