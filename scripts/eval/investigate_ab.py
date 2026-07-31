@@ -38,7 +38,7 @@ export したシェルで pm_ingest.py 等の本番パイプラインを実行�
 例:
     source ~/.secrets/rivault_tokens.sh
     ~/.venv_aarch64/bin/python3 scripts/eval/investigate_ab.py run
-    ~/.venv_aarch64/bin/python3 scripts/eval/investigate_ab.py run --entry frontflow-blue-nvhpc-bug
+    ~/.venv_aarch64/bin/python3 scripts/eval/investigate_ab.py run --entry ENTRY_ID
     ~/.venv_aarch64/bin/python3 scripts/eval/investigate_ab.py run --save-answers
     ~/.venv_aarch64/bin/python3 scripts/eval/investigate_ab.py report
 
@@ -183,7 +183,7 @@ ARM_PRESETS: dict[str, dict] = {
     # one-shot の TOP_K=50 は 2026-07-29 の N スイープ実測による:
     # N=50 で gold reference を完全にカバーし（N=200/600 は詳細増のみで正答性向上なし）、
     # kimi-k3 は設問依存で生成が長引くと RIKYU 側 nginx の 600s gateway timeout に
-    # 当たる（salmon 問 N=200/600 で全損を再現）。client --timeout では回避不可。
+    # 当たる（生成が長引く設問で N=200/600 で全損を再現）。client --timeout では回避不可。
     "glm-oneshot": {
         "env": {
             "ARGUS_ONESHOT": "1",

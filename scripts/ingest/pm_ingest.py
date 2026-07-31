@@ -76,7 +76,7 @@ def main() -> None:
   python3 scripts/pm_ingest.py slack --slack-channel CHANNEL_ID
   python3 scripts/pm_ingest.py minutes --since 2026-01-01 --db data/pm.db
   python3 scripts/pm_ingest.py ledger --dry-run
-  python3 scripts/pm_ingest.py achievements --achievements-apps GENESIS,SALMON --dry-run
+  python3 scripts/pm_ingest.py achievements --achievements-apps APP1,APP2 --dry-run
   python3 scripts/pm_ingest.py --list
 """,
     )

@@ -23,8 +23,8 @@ NO_REPEAT_NGRAM_SIZE = 3
 
 INITIAL_PROMPT = (
     "以下は富岳NEXT開発プロジェクトの日本語の会議録です。"
-    "固有名詞：理化学研究所、富岳、富士通、NVIDIA、R-CCS、BenchKit、Benchpark、"
-    "富岳NEXT、GENESIS、SALMON、Spack、Ramble、OpenOnDemand、"
+    "固有名詞：理化学研究所、富岳、富士通、NVIDIA、R-CCS、Benchpark、"
+    "富岳NEXT、Spack、Ramble、OpenOnDemand、"
     "Wahib、Domke、Dawson、近藤、佐野、井上、青木、小林、西澤、中村、"
     "専門用語：コデザイン、ベンチマーク、フレームワーク、スーパーコンピュータ、"
     "ワーキンググループ、アーキテクチャ、フラッグシップ、生成AI、知識蒸留。"

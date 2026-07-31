@@ -218,7 +218,7 @@ whisperx_pyfix オーバーレイ）で動作し、reconcile に決定論的話�
 ### initial-search 既定ON の事後観察（期限 2026-07-27）
 
 **ステータス**: 観察中（2026-07-13〜）。コミット `6855533` で investigate/メンション応答の
-全経路に初期 retrieval シードを既定ON化したが、検証は SCALE-LETKF 1クエリの before/after のみ。
+全経路に初期 retrieval シードを既定ON化したが、検証は Q-Helix 1クエリの before/after のみ。
 n=1 デプロイのため、実トラフィックで2週間観察してから定着/巻き戻しを判断する。
 
 **確認コマンド**（`logs/pm_qa_server.log` に対して。qa デーモン稼働ホストで）:
@@ -314,33 +314,33 @@ pm.db 変更のフィールドは同期せず WARN、--force で明示上書き�
 **ステータス**: 保留中（2026-07-13）。診断済み・軽量対策は失敗確認済み。
 
 **問題**: investigate が「主題（例: GPU化・性能評価）から意味的に離れた語彙で書かれた事実」を
-取りこぼす。実例: SCALE-LETKF レポートで benchpark/Benchkit の完了状況（qa_index.db
-id=22835[2026-05-15 Yamaura], 22877[2026-06-16], 17624[2026-06-16 Status表「Benchkit/fj/6」]、
+取りこぼす。実例: Q-Helix レポートで benchpark/AppTheta の完了状況（qa_index.db
+id=22835[2026-05-15 Yamaura], 22877[2026-06-16], 17624[2026-06-16 Status表「AppTheta/fj/6」]、
 いずれも `--since 2026-03-01` の在窓）を拾えず「確認できなかった」と過小報告。原因は
 (a) 該当チャンクが簡潔な進捗ボックスノート／ステータス表で `GPU` 語を含まない、
-(b) 文書側が英語 `benchpark`/`Benchkit`＋レベル番号、クエリ側が片仮名「ベンチマーク」＋GPU寄り、
+(b) 文書側が英語 `benchpark`/`AppTheta`＋レベル番号、クエリ側が片仮名「ベンチマーク」＋GPU寄り、
 という主題・日英表記のミスマッチ。
 
 **試して失敗した案（2026-07-13）**: 案A＝rewrite プロンプトにドメイン同義語（英表記・略語・環境名）
 併記の**汎用**ガイダンスを追加。→ 英語表現(status/porting)や富岳は入ったが、質問に無い固有名詞
-（Benchkit/Benchpark/FX700/GH200/Genoa）までは LLM が生成せず、該当チャンクは依然未取得。
+（AppTheta/Benchpark/FX700/GH200/Genoa）までは LLM が生成せず、該当チャンクは依然未取得。
 かつ latency が 2分→9分に増。**汎用の語彙拡張ではこの種の miss は解けない**と結論し、変更は破棄
 （コミットせず）。
 
 **却下した案（個別最適化のため不採用）**: 特定フォルダ（`22_進捗報告`）やステータス表を検索で
-優先する案は、SCALE-LETKF（特定の文書配置）に着目した**個別最適化**であり、他エンティティ・他の
+優先する案は、Q-Helix（特定の文書配置）に着目した**個別最適化**であり、他エンティティ・他の
 フォルダ構成では効かず他クエリの精度を歪めるだけなので採らない。
 
 **汎用の方向性（特定アプリ/フォルダ非依存）**:
 - **索引由来の共起語拡張** — ❌ **試して失敗（2026-07-13, Stage1）**。qa_index.db に
   entity_cooccurrence を構築し retrieve_chunks に opt-in 配線して baseline-v1 と Δ 測定した結果、
   topic hit@k は改善せず（Δ≤0、悪化複数）。原因: エンティティの大域共起は「アプリ一覧に併記される
-  他アプリ名・領域専門語」に支配され、狙った具体的関連語（Benchkit/Yamaura 等）は 70〜900 位に埋もれる。
+  他アプリ名・領域専門語」に支配され、狙った具体的関連語（AppTheta/Yamaura 等）は 70〜900 位に埋もれる。
   ＋FTS 暗黙 AND で変種がノイズ化。コード・テーブルは破棄済み（コミットせず）。
 - **エンティティ起点の網羅パス** — ⏸ **検証したが保留（2026-07-13, Stage1）**。entity 検出＋recency
   取得は正しく動き、reserve slots(M=8) で **fts 層は topic hit@60 +0.071 と新規 recall を開けた**
   （メカニズムは実証）。しかし2つの壁で**実運用 hybrid では効果が正味ゼロ**: (1) hybrid 外側の
-  fts+vector 融合(_rrf_merge)で anchor 候補が再クラウドアウト、(2) 動機ケース(SCALE-LETKF/22877)は
+  fts+vector 融合(_rrf_merge)で anchor 候補が再クラウドアウト、(2) 動機ケース(Q-Helix/22877)は
   anchor recency 20位で M=8 に届かず、届かせる M 拡大は base 排除(precision 退行)と表裏。
   再開時の残作業: reserve を hybrid/hyde 最外層へ移す＋M を数水準で振り precision コストを実測して
   recall↔precision を判断。コードは破棄済み（コミットせず、ハーネス・baseline は温存）。

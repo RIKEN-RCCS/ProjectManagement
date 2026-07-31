@@ -71,7 +71,7 @@ RULES:
 6. Section titles: concise Japanese noun phrases reflecting the actual topic discussed (15 characters or less)
 7. NO speaker attribution ("〜さんが言った", "SPEAKER_XX が" etc.)
 8. Do NOT insert horizontal rules (---) between sections
-9. Actively correct speech recognition errors: cross-reference ALL technical terms, application names, and project-specific words against the Project Terminology Reference AND the Slides Shown in This Meeting (if provided). Replace phonetic approximations or garbled terms with the correct form (e.g. 「ファントホローブルー」→ FrontFlow/Blue, 「サーモン」→ SALMON, 「スケールTKF」→ SCALE-LETKF). Slide text is ground truth for proper nouns and numeric figures.
+9. Actively correct speech recognition errors: cross-reference ALL technical terms, application names, and project-specific words against the Project Terminology Reference AND the Slides Shown in This Meeting (if provided). Replace phonetic approximations or garbled terms with the correct form (e.g. 「スパック」→ Spack, 「ランブル」→ Ramble, 「オープンオンデマンド」→ OpenOnDemand). Slide text is ground truth for proper nouns and numeric figures.
 10. Preserve exact numbers and dates as written in the summaries
 11. Begin output immediately with "## 議事内容" — no preamble, no other sections
 CRITICAL: The strings "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in your output.
@@ -109,7 +109,7 @@ RULES:
 2. Begin immediately with "## 決定事項" — no preamble, no thinking text
 3. Dates/deadlines: use exactly as written in the summaries (e.g. "26日", "来週月曜日") — do NOT expand or infer months/years
 4. Person names: normalize using the Participant List below; if no clear assignee, write "（未定）"
-5. Actively correct speech recognition errors: replace phonetic approximations with correct terms from the Participant List, Project Terminology Reference, AND the Slides Shown in This Meeting (if provided) (e.g. 「ファントホローブルー」→ FrontFlow/Blue, 「サーモン」→ SALMON). Slide text is ground truth for proper nouns and numeric figures.
+5. Actively correct speech recognition errors: replace phonetic approximations with correct terms from the Participant List, Project Terminology Reference, AND the Slides Shown in This Meeting (if provided) (e.g. 「スパック」→ Spack, 「ランブル」→ Ramble). Slide text is ground truth for proper nouns and numeric figures.
 CRITICAL: "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc. must NEVER appear in output.
 {vtt_speaker_instructions}
 ## 決定事項 rules:
@@ -302,8 +302,8 @@ Your task: Write a detailed Japanese prose summary of everything discussed in th
 
 RULES:
 1. CRITICAL - ASR correction: Before writing, scan the transcript for misrecognized words and replace them with the correct form from the Project Terminology below. Common ASR error patterns:
-   - Phonetic katakana rendering of English terms (e.g. 「フロントフロー」「ファントホローブルー」→ FrontFlow/Blue, 「スケールTKF」「スケールエルティーケーエフ」→ SCALE-LETKF, 「サーモン」→ SALMON, 「ジェネシス」→ GENESIS, 「エルキューシーディー」→ LQCD-DWF-HMC)
-   - Partial or garbled technical acronyms (e.g. 「エフエフブイ」→ FFVHC-ACE, 「ユワバミ」→ UWABAMI)
+   - Phonetic katakana rendering of English terms (e.g. 「スパック」→ Spack, 「ランブル」→ Ramble, 「ウィスパー」→ Whisper, 「パイアノート」→ PyAnnote)
+   - Partial or garbled technical acronyms (e.g. 「ブイエルエルエム」「ブイエルエム」→ vLLM, 「ビージーイー」→ bge-m3)
    - Person names misheard as similar-sounding names — check against the Participant List and use the correct name
 2. Cover ALL topics mentioned: decisions, numbers, proposals, concerns, and action items
 3. Write in natural Japanese WITHOUT speaker attribution or "SPEAKER_XX" references

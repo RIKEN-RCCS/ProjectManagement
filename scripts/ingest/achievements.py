@@ -25,7 +25,6 @@ from enrich.achievements_extract import extract_achievements
 
 from ingest.ingest_plugin import IngestContext
 
-_DEFAULT_APPS = "GENESIS,LQCD-DWF-HMC,SCALE-LETKF,E-Wave,SALMON,FrontFlow/blue"
 # skill embedding-similarity-dedup の 0.85=審査ラインに合わせる（0.88 だと
 # LLM言い換えブレ「（再報告）」等の近似重複が閾値未満で漏れやすかったため）。
 _DEFAULT_DEDUP_THRESHOLD = 0.85
@@ -34,6 +33,27 @@ _DEFAULT_DEDUP_THRESHOLD = 0.85
 # 括弧の中身ごと正規化前に取り除く。
 _BRACKET_CONTENT_RE = re.compile(r"[（(][^）)]*[）)]")
 _NORMALIZE_RE = re.compile(r"[\s　\-_/,、。.:：;；()（）\[\]【】]")
+
+
+def _load_default_apps(db_path) -> list[str]:
+    """pm.db.terminology（category='app'）から実績抽出対象アプリの既定一覧を読み込む。
+
+    プロジェクト固有のアプリ名をこのスクリプトに直書きしないための経路
+    （pm_terminology_update.py: _load_dynamic_app_pattern() と同じ前例）。
+    登録が無い場合は WARN を出し空リストを返す（silent degrade しない。
+    --achievements-apps で明示指定すればこの経路は使われない）。
+    """
+    from utils.terminology import load_all_terms
+    terms = [t["term"] for t in load_all_terms(db_path=db_path) if t.get("category") == "app"]
+    if not terms:
+        print(
+            "[WARN] terminology テーブルに category='app' の登録がありません — "
+            "--achievements-apps 省略時のデフォルトアプリ一覧が空です。"
+            "pm_terminology_update.py での app 登録、または --achievements-apps の"
+            "明示指定を検討してください",
+            file=sys.stderr,
+        )
+    return terms
 
 
 def _normalize_title(title: str) -> str:
@@ -185,9 +205,10 @@ class AchievementsIngestPlugin:
 
     def add_args(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "--achievements-apps", default=_DEFAULT_APPS,
+            "--achievements-apps", default=None,
             metavar="APP1,APP2,...",
-            help=f"実績を抽出する対象アプリ（カンマ区切り、デフォルト: {_DEFAULT_APPS}）",
+            help="実績を抽出する対象アプリ（カンマ区切り）。省略時は pm.db.terminology "
+                 "（category='app'）から動的に取得する",
         )
         parser.add_argument(
             "--achievements-dedup-threshold", type=float, default=_DEFAULT_DEDUP_THRESHOLD,
@@ -196,8 +217,11 @@ class AchievementsIngestPlugin:
         )
 
     def run(self, args: argparse.Namespace, ctx: IngestContext) -> None:
-        apps_arg = getattr(args, "achievements_apps", None) or _DEFAULT_APPS
-        apps = [a.strip() for a in apps_arg.split(",") if a.strip()]
+        apps_arg = getattr(args, "achievements_apps", None)
+        if apps_arg:
+            apps = [a.strip() for a in apps_arg.split(",") if a.strip()]
+        else:
+            apps = _load_default_apps(ctx.pm_db_path)
         threshold = getattr(args, "achievements_dedup_threshold", _DEFAULT_DEDUP_THRESHOLD)
 
         if ctx.dry_run:

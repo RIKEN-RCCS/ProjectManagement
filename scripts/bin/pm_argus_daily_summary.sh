@@ -34,11 +34,11 @@ elif [[ "$_arch" == "x86_64" ]]; then
 else
     echo "Unknown architecture: $_arch"; exit 1
 fi
-CANVAS_ID="F0ATCN7E2D9"  # リーダー会議Canvas ID
+# Canvas ID は argus_config.yaml の argus_daily.brief_canvas_id から解決される
+# （pm_argus.py の resolve_brief_canvas_id() 経由）
 
 echo "[$(date +'%Y-%m-%d %H:%M:%S')] 日次サマリー生成開始"
 "$PYTHON3" "$SCRIPT_DIR/argus/pm_argus.py" \
     --brief-to-canvas \
-    --canvas-id "$CANVAS_ID" \
     --today-only
 echo "[$(date +'%Y-%m-%d %H:%M:%S')] 日次サマリー生成完了"

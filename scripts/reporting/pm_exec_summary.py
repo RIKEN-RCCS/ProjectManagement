@@ -105,7 +105,7 @@ _TRANSLATE_SYSTEM = (
     "You are a professional translator. Translate the Japanese text values in "
     "the given JSON into natural, fluent English. Keep the JSON keys and "
     "structure exactly the same. Keep application names, proper nouns, and "
-    "technical terms (e.g. GPU, NVIDIA, GENESIS) in their original form. "
+    "technical terms (e.g. GPU, NVIDIA, vLLM) in their original form. "
     "Output JSON only, no commentary."
 )
 

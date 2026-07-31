@@ -401,7 +401,7 @@ source ~/.secrets/rivault_tokens.sh
 ```sh
 PYTHONPATH=scripts ~/.venv_x86_64/bin/python3 scripts/argus/pm_argus_agent.py \
   --investigate "M3の進捗状況とリスク" \
-  --to-slack C12345XXX --to-box --to-canvas \
+  --to-slack C0XXXXXXX --to-box --to-canvas \
   --max-steps 3 --days 14
 ```
 

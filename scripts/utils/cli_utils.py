@@ -195,6 +195,67 @@ def resolve_report_canvas_id(
     return fallback
 
 
+def _resolve_canvas_id(
+    env_var: str,
+    section_key: str,
+    id_key: str,
+    fallback: str | None = None,
+    config_path: Path | str = "data/argus_config.yaml",
+) -> str | None:
+    """argus_config.yaml の `<section_key>.<id_key>` から Canvas ID を解決する共通ロジック。
+
+    優先順位: 環境変数 env_var > argus_config.yaml の該当キー > fallback
+    """
+    env_val = os.environ.get(env_var)
+    if env_val:
+        return env_val
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return fallback
+    cfg_path = Path(config_path)
+    if not cfg_path.is_absolute():
+        cfg_path = _REPO_ROOT / cfg_path
+    if not cfg_path.exists():
+        return fallback
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        return fallback
+    section = cfg.get(section_key) or {}
+    cid = section.get(id_key)
+    if isinstance(cid, str) and cid:
+        return cid
+    return fallback
+
+
+def resolve_brief_canvas_id(
+    fallback: str | None = None,
+    config_path: Path | str = "data/argus_config.yaml",
+) -> str | None:
+    """pm_argus.py --brief-to-canvas が投稿する Canvas ID を解決する。
+
+    優先順位: 環境変数 PM_BRIEF_CANVAS_ID > argus_config.yaml の argus_daily.brief_canvas_id > fallback
+    """
+    return _resolve_canvas_id(
+        "PM_BRIEF_CANVAS_ID", "argus_daily", "brief_canvas_id", fallback, config_path,
+    )
+
+
+def resolve_risk_canvas_id(
+    fallback: str | None = None,
+    config_path: Path | str = "data/argus_config.yaml",
+) -> str | None:
+    """pm_argus.py --risk が投稿する Canvas ID を解決する。
+
+    優先順位: 環境変数 PM_RISK_CANVAS_ID > argus_config.yaml の argus_daily.risk_canvas_id > fallback
+    """
+    return _resolve_canvas_id(
+        "PM_RISK_CANVAS_ID", "argus_daily", "risk_canvas_id", fallback, config_path,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # ロガーユーティリティ
 # --------------------------------------------------------------------------- #

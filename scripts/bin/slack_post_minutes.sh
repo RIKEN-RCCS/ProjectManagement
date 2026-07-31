@@ -4,8 +4,8 @@
 # 議事録DBの内容をSlackチャンネルに投稿する（pm_minutes_import.py --post-to-slack のラッパー）。
 #
 # Usage:
-#   bash scripts/slack_post_minutes.sh --meeting-name Leader_Meeting --held-at 2026-03-10 -c C08SXA4M7JT
-#   bash scripts/slack_post_minutes.sh --meeting-name Leader_Meeting --held-at 2026-03-10 -c C08SXA4M7JT --force
+#   bash scripts/slack_post_minutes.sh --meeting-name Leader_Meeting --held-at 2026-03-10 -c C0XXXXXXX
+#   bash scripts/slack_post_minutes.sh --meeting-name Leader_Meeting --held-at 2026-03-10 -c C0XXXXXXX --force
 #
 # Options:
 #   --meeting-name NAME    会議種別名（必須）

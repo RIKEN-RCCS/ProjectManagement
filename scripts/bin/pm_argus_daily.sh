@@ -18,5 +18,7 @@ source "$HOME/.secrets/rivault_tokens.sh"
 source "$HOME/.secrets/localLLM.sh"
 
 BASEDIR="/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement"
-python3 "$BASEDIR/scripts/argus/pm_argus.py" --brief-to-canvas --canvas-id F0ATCN7E2D9 >> $LOGFILE 2>&1
-python3 "$BASEDIR/scripts/argus/pm_argus.py" --risk --canvas-id F0ATN63JQV7 >> $LOGFILE 2>&1
+# Canvas ID は argus_config.yaml の argus_daily.brief_canvas_id / risk_canvas_id から解決される
+# （pm_argus.py の resolve_brief_canvas_id() / resolve_risk_canvas_id() 経由）
+python3 "$BASEDIR/scripts/argus/pm_argus.py" --brief-to-canvas >> $LOGFILE 2>&1
+python3 "$BASEDIR/scripts/argus/pm_argus.py" --risk >> $LOGFILE 2>&1

@@ -47,14 +47,14 @@ data/eval/minutes_ab/ に保存。K3 の評価記録（rikyu_argus_model_eval.md
 **再開条件**: セキュリティ懸念の解消（PM 判断）。残っていた URL/TOKEN の export
 （~/.secrets/rikyu_token.sh 7-8 行目）の削除は PM 作業。
 
-## 2026-07-30 E-Wave 本番障害からクエリトークン品質を修正 — FTS5 ハイフン=NOT の潜在バグも発見
+## 2026-07-30 Q-Nova 本番障害からクエリトークン品質を修正 — FTS5 ハイフン=NOT の潜在バグも発見
 
-**背景**: K3 有効化直後の本番 investigate「E-Wave の停滞理由」が検索破綻。Sudachi トークンが
-E-Wave→Wave に縮退、段階的 AND が文順先頭の「今年度」1 語まで落ち低関連 70 件が RRF で vector を
+**背景**: K3 有効化直後の本番 investigate「Q-Nova の停滞理由」が検索破綻。Sudachi トークンが
+Q-Nova→Nova に縮退、段階的 AND が文順先頭の「今年度」1 語まで落ち低関連 70 件が RRF で vector を
 全滅、さらにハイフン付きトークンは FTS5 の NOT 解釈で silently SQL エラー、の 3 連鎖を特定。
 **決定**: 複合エンティティ保持 + FTS5 エスケープ + 機能動詞除去/汎用語降格 + 1 語縮退段の RRF 遮断。
-**ボツ**: 単独 ASCII 語抽出（AI4S 注入が LQCD の 4 語 AND を破壊し rank1→43）と、エンティティの
-弱段解除（LQCD は語形はエンティティでもコーパス内低選択性、hit@60 -0.074）— いずれも recall_eval
+**ボツ**: 単独 ASCII 語抽出（AppGamma7 注入が AppBeta の 4 語 AND を破壊し rank1→43）と、エンティティの
+弱段解除（AppBeta は語形はエンティティでもコーパス内低選択性、hit@60 -0.074）— いずれも recall_eval
 実測で撤回。語形からコーパス内選択性は判定できない、が教訓。
 **副産物**: recall_eval が _init_sudachi() を呼ばず過去の recall 測定は fts_tokens 段を素通り
 していた計測ギャップを発見（要修正、PLAN 参照）。テストは運用フラグを conftest で密閉化。
@@ -64,7 +64,7 @@ E-Wave→Wave に縮退、段階的 AND が文順先頭の「今年度」1 語�
 **背景**: one-shot 検証（下記）で K3 の敗因を深掘りした結果、モデルでなく検索段に原因を発見。
 (1) sanitize_fts_query が全角括弧・読点等を除去せず日本語質問で FTS 4 段が全滅、
 (2) 最終段「日付降順フォールバック」（関連度ゼロの最新記録）が RRF で vector 候補 50 件を
-数学的に押し出す。生質問で検索する経路が系統的に破綻していた（mh-nvl72 実測: 証跡 0/7）。
+数学的に押し出す。生質問で検索する経路が系統的に破綻していた（gv-nvl72 実測: 証跡 0/7）。
 **決定**: sanitize の全角対応 + 日付フォールバックの RRF 遮断（vector 脚が空の時のみ最終手段として
 温存）。knowledge_context.py の重複 sanitize 実装も削除し retrieval 側へ一本化。
 **影響**: 隔離した評価 18 件の再計測で勝敗 9 件（50%）が反転 — 修正前の A/B は判定不能だった。
@@ -147,7 +147,7 @@ pm_screen --triage（一括 LLM 審査→ pm_relink 互換 CSV）で洗い出し
 既知の制限: 録音経路は生成時＋転記時の二重トリアージになる（recall への影響は運用観察で判断）。
 **較正**: 初回の一括審査で decisions の DROP が 123/396（31%）と過剰 — ゲート1（マイルストーン
 関連性）が AI 向け設計のまま決定にも適用され、正当な資源配分・技術決定（NVL72 レンタル範囲、
-AWS GB200 測定方針、LQCD 測定パラメータ等）を「マイルストーン非関連」で落としていた。
+AWS GB200 測定方針、AppBeta 測定パラメータ等）を「マイルストーン非関連」で落としていた。
 TRIAGE_PROMPT に決定事項向け例外（EXTRACT_PROMPT の分類ゲート 3 問と整合: 覆すとやり直し／
 選択肢排除／資源・方向確定なら KEEP、ただし会議運営・連絡共有は DROP）を追加し 50/396（12.6%）
 に収束。実データで較正してから ingest 適用できたのは pm_screen --triage を先に走らせた副産物。
@@ -353,7 +353,7 @@ known_titles の status フィルタ撤廃で対応済み・rejected 現存 0 �
 **決定**: per-app commit 化（途中失敗時の全損防止）、抽出時の `_strip_app_name_prefix` 正規化
 （既存 confirmed 行は人間承認済み台帳のため不変更）、populate は pm_box_update.sh 内で
 **月曜のみ週次実行**（embed 後に依存、`ACHIEVEMENTS_WEEKLY=0` で無効化）。毎晩は実績の発生
-頻度に対し LLM コスト過剰と判断。GENESIS 1 アプリの dry-run で e2e 動作確認済み。
+頻度に対し LLM コスト過剰と判断。AppDelta 1 アプリの dry-run で e2e 動作確認済み。
 
 ## 2026-07-24 「V4-Flash 切替の follow-up」計画を obsolete としてクローズ — glm-5.2 移行で前提消滅
 
@@ -525,7 +525,7 @@ LOW 6件を精査し、成果物の存在が確認できるのに完了宣言が
 （`ORDER BY achieved_on LIMIT 5` 昇順＝最古5件固定）。
 **決定**: 上限を60字に緩和（暴走ガードとして残置）＋noAutofit明示＋全列8pt。選抜は「直近5件」案を
 実装後に撤回（古い重要合意が落ちるため）し、**confirmed 全件を LLM で5件に凝縮**する方式を採用
-（`condense_confirmed_titles`、失敗時は直近5件フォールバック）。E-Wave 10→4件・GENESIS 10→5件で
+（`condense_confirmed_titles`、失敗時は直近5件フォールバック）。Q-Nova 10→4件・AppDelta 10→5件で
 最古実績の保持と関連合意の統合を実測確認。
 **影響**: 実績タブの「達成日空欄」報告も同根で調査 → DB/API は正常、ag-Grid v31+ の型自動推論が
 月精度値（YYYY-MM）を dateString として不正扱いする**フロント表示バグ**と特定し `cellDataType:'text'`
@@ -647,8 +647,8 @@ source_modified_at 基準が確立し、以後のBox側更新は夜間cronで自
 
 ## 2026-07-18 全文読込QAに「偽の関連情報なし」ガードを追加（モデル申告を信用しない）
 
-**背景**: --file 全文読込で glm-5.2 が中身のある窓（LQCD章等）を「関連情報なし」6字・サブ秒で
-誤却下（7窓中4窓）し、統合段が「GENESIS/LQCD は記載なし」と誤回答。同一6字×4窓のパターンは
+**背景**: --file 全文読込で glm-5.2 が中身のある窓（AppBeta章等）を「関連情報なし」6字・サブ秒で
+誤却下（7窓中4窓）し、統合段が「AppDelta/AppBeta は記載なし」と誤回答。同一6字×4窓のパターンは
 embedding で確認済みのエンドポイントキャッシュ衝突の chat 版の疑いもある。
 **決定**: モデルの「なし」申告を信用せず決定論検証を導入 — 質問中のエンティティが窓本文に
 存在するのに却下されたらリトライ（nonce で文面を毎回変えキャッシュも回避）、再失敗は
@@ -707,7 +707,7 @@ search_action_items / get_slack_messages / search_mentions / get_milestone_progr
 ## 2026-07-16 実績DB（achievements ledger）を新設し「完了」列の検索依存を断つ
 
 **背景**: 前エントリの通り「完了列をinvestigエージェントの都度検索に依存する」設計は run 毎に
-薄い/空になるムラがあり（SCALE-LETKF が 0 件になる実測）、根本原因は「過去の完了実績は一度確定
+薄い/空になるムラがあり（Q-Helix が 0 件になる実測）、根本原因は「過去の完了実績は一度確定
 すれば変化しないのに毎回検索し直している」ミスマッチだった。
 **決定**: pm.db に per-app の `achievements` テーブルを新設し、確定した実績は検索せず参照する
 方式に変更。信頼モデルはハイブリッド（confidence=high→自動confirmed、low→proposedで人間が
@@ -730,7 +730,7 @@ Box XLSXの「実績」シートは confirmed のみ・表示専用・逆同期�
 **対応**: `pm_embed.py` に埋め込み索引化を実装（全26,902件構築）、`retrieval.py` の recency を緩和
 (0.15 / 365日)、`.sh` の窓を 2025-04-01 に拡張、`pm_exec_summary.py` の完了列を
 「recency非適用ハイブリッド検索＋LLM凝縮」の**決定的経路**に変更（next/vendor はレポート由来のまま）。
-**捨てた案**: 完了列を investigエージェント出力に依存し続ける案（run 毎に空/薄のムラ、SCALE-LETKF が
+**捨てた案**: 完了列を investigエージェント出力に依存し続ける案（run 毎に空/薄のムラ、Q-Helix が
 0件になる実測で棄却）、グローバル recency 無効化（PM 用途の新しさ優先を壊すため 0.15 の軽い重みに留めた）。
 **要注意**: `retrieval.py` の定数変更は稼働中 qa デーモンに未反映 → 反映には `pm_daemon.sh` で qa 再起動。
 
@@ -823,17 +823,17 @@ baseline 完成後に before/after を測定してから判断する（今回は
 **背景**: investigate 実走検証で、Pass2（`--context-file` 注入時）に DeepSeek が STEP1 で
 ツール呼び出し0件のまま単発生成し、検索せずに具体名・数値を断定する挙動を確認。DB 照合では
 今回は幻覚0件だったが「たまたま内部知識が実在と一致した」だけで、検索省略のプロセス欠陥は残存
-（かつ Benchkit 完了・EEA 成熟度など DB にある最新情報を取りこぼしていた）。
+（かつ AppTheta 完了・EEA 成熟度など DB にある最新情報を取りこぼしていた）。
 
 **決定**: `run_agent()` のループ開始前に、rewrite が生成した検索クエリ上位3件を既存 `search_text`
 経由で事前実行し history に投入する「初期 retrieval シード」を**既定ON**で追加
 （`ARGUS_DISABLE_INITIAL_SEARCH=1` で opt-out）。opt-in 案も検討したが、接地品質を優先し
-investigate・メンション応答（`run_agent` 共有の全経路）で既定有効化する判断。SCALE-LETKF で
+investigate・メンション応答（`run_agent` 共有の全経路）で既定有効化する判断。Q-Helix で
 再走し、出典引用付き・未確認事項の明示・より新しい事実の捕捉へ改善を確認（latency 2m→5m 程度増）。
 
 **影響**: 全 investigate/メンション応答に事前3クエリ検索(HyDE+rerank)が1ラウンド加わる（並列・
 120s上限）。シードは try/except で握りつぶし、失敗時は従来挙動にフォールバック。patrol は
-run_agent 不使用で影響なし。**反映には qa デーモン再起動が必要**。残課題: 強制版でも Benchkit を
+run_agent 不使用で影響なし。**反映には qa デーモン再起動が必要**。残課題: 強制版でも AppTheta を
 「確認できなかった」と留保する retrieval recall の取りこぼし、INFO ログが stdout に漏れ Box
 レポート先頭に混入する既存バグ（別途）。検証詳細は `docs/decisions/rivault_model_eval_2026-07.md`。
 
@@ -841,7 +841,7 @@ run_agent 不使用で影響なし。**反映には qa デーモン再起動が�
 
 **背景**: 2026-07-11 評価では対話系→Qwen3.6-35B-A3B-FP8 / 集約分析→DeepSeek の
 ハイブリッドを推奨としていた。これを詰めるため実際の `pm_argus_agent.py --investigate`
-（マルチステップ tool-call ループ）で SCALE-LETKF を2パス実走し両モデルを比較
+（マルチステップ tool-call ループ）で Q-Helix を2パス実走し両モデルを比較
 （env `RIVAULT_MODEL`+`ARGUS_SKIP_LLM_SECRETS=1` で切替、コード無改修、本番非破壊）。
 
 **決定**: **全用途 DeepSeek 単独運用**（現行主力を維持、Qwen 採用見送り）。理由: `llm.py`
@@ -1046,8 +1046,8 @@ gemma4への切替ではなくRIVAULTフォールバックの活性化が正し�
 
 ## 2026-07-03 G-NSの「松岡指令」出所をBOX新規資料で確認（台帳の最後の未確認出所を解消）
 
-**背景**: 直前のエントリの時点で、G-NS（最上位目標）の出所のうち「松岡センター長 AI4S
-最上位目標 指令」は一次情報が未確認のまま残っていた。ユーザーがMEXT・松岡センター長・
+**背景**: 直前のエントリの時点で、G-NS（最上位目標）の出所のうち「松岡センター長のAI活用に関する
+最上位目標の指令」は一次情報が未確認のまま残っていた。ユーザーがMEXT・松岡センター長・
 富岳NEXTリーダーによる公開情報をBOX新規フォルダ「プロジェクト方針」に追加、
 `box_sources.yaml`にも登録した。
 
@@ -1277,7 +1277,7 @@ Memory 上で vLLM(gemma4, 常駐53GB) と Whisper が同居しており OOM kil
 グリッド1枚に作図 → 日英2版を `box_upload_file` でアップロード。
 `pm_nvidia_collab_update.sh` の末尾に統合、失敗しても個別レポート本体には影響しない。
 
-**影響**: 実データ（GENESIS/SALMON）での動作確認済み。分類ゲートが証拠なき「完了」を
+**影響**: 実データ（AppDelta/AppEpsilon）での動作確認済み。分類ゲートが証拠なき「完了」を
 正しく除外することを確認。マルチカラムのpptx生成パターンが今後の同種レポートに再利用可能。
 
 ---

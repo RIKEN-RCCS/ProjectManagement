@@ -7,7 +7,7 @@ file_id を引いて files.delete API を呼ぶために使う。
     CREATE TABLE voice_uploads (
         message_ts TEXT NOT NULL,    -- bot が投稿したメッセージの ts (= スレッド親)
         channel_id TEXT NOT NULL,    -- 投稿先 (= 実行者との DM チャンネル)
-        file_id    TEXT NOT NULL,    -- Slack の file_id (F0123ABCD)
+        file_id    TEXT NOT NULL,    -- Slack の file_id (F0XXXXXXX)
         user_id    TEXT NOT NULL,    -- 実行者
         kind       TEXT NOT NULL,    -- today / brief / risk など
         title      TEXT,

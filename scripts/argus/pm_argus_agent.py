@@ -559,7 +559,7 @@ _QUERY_REWRITE_PROMPT = """\
 - EEA (Early Evaluation Application): 評価対象アプリ群、EEA-1 / EEA-2 などのフェーズあり
 - コデザイン: 富岳NEXT のハード・ソフト協調設計活動
 - スケールアウトネットワーク: ノード間相互接続
-- HBM, ノード構成, ベンチマーク, 性能予測, LQCD, GENESIS, NICAM, Petsy, PyTorch 等
+- HBM, ノード構成, ベンチマーク, 性能予測, Spack, Ramble, NICAM, Petsy, PyTorch 等
 
 以下を JSON で出力してください（コードブロック禁止、JSON のみ）:
 

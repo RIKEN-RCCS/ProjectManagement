@@ -16,6 +16,8 @@ Options:
   --from-pm-db         pm.db の decisions/actions から用語を抽出（デフォルト: 有効）
   --no-pm-db           pm.db からの抽出を無効化
   --db PATH            pm.db のパス（デフォルト: data/pm.db）
+  --goals PATH         goals.yaml のパス（デフォルト: goals.yaml。テスト等で実ファイルを
+                       読ませたくない場合は架空パスを明示指定する）
   --no-encrypt         平文モード
   --dry-run            DB 更新せずに抽出結果を表示
 
@@ -35,7 +37,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from utils.terminology import add_term
+from utils.terminology import add_term, load_all_terms
 
 # --------------------------------------------------------------------------- #
 # ソース別の用語抽出
@@ -57,9 +59,10 @@ def extract_from_slide_terms(slide_terms_path: str | Path) -> list[tuple[str, st
     return terms
 
 
+# 公開 OSS ツール名のみを直書きする（プロジェクト固有のアプリ名は _load_dynamic_app_pattern()
+# 経由で pm.db.terminology から動的に読み込む。直書きしない理由は同関数の docstring 参照）。
 _APP_PATTERN = re.compile(
-    r"\b(GENESIS|SALMON|SCALE-LETKF|LQCD-DWF-HMC|E-Wave|FrontFlow[/\-]?[Bb]lue?|"
-    r"BenchKit|Benchpark|OpenOnDemand|FFVHC-ACE|UWABAMI|Spack|Ramble|"
+    r"\b(Benchpark|OpenOnDemand|Spack|Ramble|"
     r"vLLM|bge-m3|PyAnnote|Whisper)\b",
     re.IGNORECASE,
 )
@@ -67,19 +70,8 @@ _PERSON_PATTERN = re.compile(r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:氏|さん|
 
 # マッチ文字列（小文字化）→ 正規形のマッピング
 _APP_CANONICAL: dict[str, str] = {
-    "genesis": "GENESIS",
-    "salmon": "SALMON",
-    "scale-letkf": "SCALE-LETKF",
-    "lqcd-dwf-hmc": "LQCD-DWF-HMC",
-    "e-wave": "E-Wave",
-    "frontflow/blue": "FrontFlow/blue",
-    "frontflow-blue": "FrontFlow/blue",
-    "frontflowblue": "FrontFlow/blue",
-    "benchkit": "BenchKit",
     "benchpark": "Benchpark",
     "openondemand": "OpenOnDemand",
-    "ffvhc-ace": "FFVHC-ACE",
-    "uwabami": "UWABAMI",
     "spack": "Spack",
     "ramble": "Ramble",
     "vllm": "vLLM",
@@ -96,6 +88,51 @@ def _canonical_app(matched: str) -> str:
     if key not in _APP_CANONICAL:
         print(f"[WARN] _APP_CANONICAL に未登録: {matched!r} — _APP_CANONICAL への追加を検討してください", file=sys.stderr)
     return _APP_CANONICAL.get(key, matched)
+
+
+def _load_dynamic_app_pattern(db_path: Path) -> tuple[re.Pattern | None, dict[str, str]]:
+    """pm.db.terminology（category='app'）からプロジェクト固有のアプリ名を動的に読み込み、
+    追加の抽出パターンと正規形マッピングを構築する。
+
+    プロジェクト固有のアプリ名を _APP_PATTERN / _APP_CANONICAL に直書きしないための経路
+    （terminology-curation Skill 参照）。terminology テーブルに category='app' の登録が
+    無い場合は WARN を出し、この経路での抽出をスキップする（silent degrade しない）。
+    """
+    terms = [t for t in load_all_terms(db_path=db_path) if t.get("category") == "app"]
+    if not terms:
+        print(
+            "[WARN] terminology テーブルに category='app' の登録がありません — "
+            "pm.db からのアプリ名抽出（動的分）をスキップします。"
+            "slide_ocr 経由の登録または utils/terminology.py: add_term() での手動登録を検討してください",
+            file=sys.stderr,
+        )
+        return None, {}
+
+    canonical: dict[str, str] = {}
+    alternatives: list[str] = []
+    for t in terms:
+        term = t["term"]
+        canonical[term.lower()] = term
+        alternatives.append(re.escape(term))
+        if t.get("aliases"):
+            try:
+                aliases = json.loads(t["aliases"])
+            except Exception:
+                aliases = []
+            for alias in aliases:
+                canonical[alias.lower()] = term
+                alternatives.append(re.escape(alias))
+
+    if not alternatives:
+        return None, {}
+    # \b は使わない: Python の Unicode 対応 \b は日本語も「単語文字」とみなすため、
+    # 「の」+ ASCII 固有名詞のように日本語に囲まれた表記（decisions/action_items の
+    # 実文でよくある形）で境界が成立しない。ASCII 英数字のみを境界判定対象にする。
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(" + "|".join(alternatives) + r")(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    return pattern, canonical
 
 
 def extract_from_pm_db(db_path: Path, no_encrypt: bool = False) -> list[tuple[str, str, list[str]]]:
@@ -119,12 +156,18 @@ def extract_from_pm_db(db_path: Path, no_encrypt: bool = False) -> list[tuple[st
     finally:
         conn.close()
 
+    dynamic_pattern, dynamic_canonical = _load_dynamic_app_pattern(db_path)
+
     term_counts: dict[str, int] = {}
     for row in rows:
         text = row[0] or ""
         for m in _APP_PATTERN.finditer(text):
             canonical = _canonical_app(m.group(0))
             term_counts[canonical] = term_counts.get(canonical, 0) + 1
+        if dynamic_pattern:
+            for m in dynamic_pattern.finditer(text):
+                canonical = dynamic_canonical.get(m.group(0).lower(), m.group(0))
+                term_counts[canonical] = term_counts.get(canonical, 0) + 1
 
     results = []
     for term, count in sorted(term_counts.items(), key=lambda x: x[1], reverse=True):
@@ -133,12 +176,14 @@ def extract_from_pm_db(db_path: Path, no_encrypt: bool = False) -> list[tuple[st
     return results
 
 
-def extract_from_goals(no_encrypt: bool = False) -> list[tuple[str, str, list[str]]]:
+def extract_from_goals(goals_path: Path) -> list[tuple[str, str, list[str]]]:
     """goals.yaml のマイルストーン名・目標名から用語を抽出する。
-    Claude からは goals.yaml を直接読めないため、subprocess で Python を呼ぶ方式は使わず、
-    goals.py スキーマを参照する安全な経路で取得する。
+
+    goals_path は呼び出し元（main()）が --goals で明示指定したパスをそのまま渡す。
+    ここで REPO_ROOT を使って固定パスを組み立てない: --db に架空パスを渡した
+    --dry-run でも本関数だけが実 goals.yaml（機密ファイル）を読みに行ってしまう
+    事故が過去に発生したため。
     """
-    goals_path = REPO_ROOT / "goals.yaml"
     if not goals_path.exists():
         return []
     try:
@@ -221,6 +266,9 @@ def main() -> None:
                         help="pm.db の decisions/actions から用語抽出（デフォルト: 有効）")
     parser.add_argument("--no-pm-db", action="store_true", help="pm.db からの抽出を無効化")
     parser.add_argument("--db", default=str(REPO_ROOT / "data" / "pm.db"), help="pm.db パス")
+    parser.add_argument("--goals", default=str(REPO_ROOT / "goals.yaml"),
+                        help="goals.yaml パス（--dry-run 等で実ファイルを読ませたくない場合に"
+                             "架空パスを明示指定する）")
     parser.add_argument("--no-encrypt", action="store_true", help="平文モード")
     parser.add_argument("--dry-run", action="store_true", help="DB 更新せずに抽出結果を表示")
     parser.add_argument("--list", action="store_true", help="現在 DB に登録されている用語を一覧表示して終了")
@@ -254,7 +302,7 @@ def main() -> None:
         all_terms.extend(pm_terms)
 
     # goals.yaml ソース
-    goal_terms = extract_from_goals(no_encrypt=args.no_encrypt)
+    goal_terms = extract_from_goals(Path(args.goals))
     if goal_terms:
         print(f"[INFO] goals.yaml から {len(goal_terms)} 語を抽出")
         all_terms.extend(goal_terms)

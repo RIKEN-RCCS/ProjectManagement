@@ -84,3 +84,56 @@ repos:
         stages: [pre-commit]
         always_run: true
         pass_filenames: false
+      - id: no-slack-id-literals
+        # scripts/ tests/ docs/ 配下（git 管理下ファイルのみ。docs/project.md 等の
+        # gitignore 対象は対象外）に Slack ID 形式（channel = C.../ user = U.../
+        # canvas = F.../ group = G... + 英数字8文字以上）の直書きが無いことを確認する。
+        # 実値は必ず data/argus_config.yaml 経由で参照し、コードには置かない。
+        #
+        # 既知の例外（誤検知）:
+        #   - [CUFG]0X+ / [CUFG]0Y+ （例: C0XXXXXXX, F0YYYYYYY）:
+        #     ドキュメント・docstring 用のプレースホルダ表記
+        #   - GMT[0-9]{8} : Zoom 録画ファイルの自動タイムスタンプ prefix
+        #     （例: GMT20260302-032528_Recording.mp4）。Slack ID ではない
+        #   - CONTRADICTS : scripts/argus/patrol/detect.py の LLM 判定キーワード
+        #     （C + 大文字10文字が偶然パターンに一致するだけ）
+        #   - USLACKBOT : Slack が全ワークスペース共通で予約する Bot user_id
+        #     （プロジェクト固有の秘匿情報ではない）
+        #
+        # 検出範囲の限界（既知）: リテラル文字列としての grep 一致であり、
+        # コメント・docstring・実引数の区別はしない。fail-closed 方針は他の
+        # lint（no-box-open-company-access 等）と同じ: マッチ無し(exit=1)のみ
+        # PASS、マッチあり(0)・実行エラー(>=2)はいずれも FAIL とする。
+        name: no Slack ID literals (scripts/, tests/, docs/)
+        entry: >-
+          bash -c '
+          mapfile -t files < <(git ls-files -- scripts tests docs);
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "[slack-id-lint] git ls-files の結果が空でした（想定外のためFAIL）";
+            exit 1;
+          fi;
+          out=$(grep -nHoE "\b[CUFG][0-9A-Z]{8,}\b" -- "${files[@]}" 2>&1);
+          rc=$?;
+          if [ "$rc" -ge 2 ]; then
+            echo "[slack-id-lint] grep 実行エラー: $out";
+            exit 1;
+          fi;
+          if [ "$rc" -eq 1 ]; then
+            exit 0;
+          fi;
+          leaked=$(printf "%s\n" "$out" \
+            | grep -vE ":[CUFG]0[XY]+\$" \
+            | grep -vE ":GMT[0-9]{8}\$" \
+            | grep -vE ":CONTRADICTS\$" \
+            | grep -vE ":USLACKBOT\$");
+          if [ -n "$leaked" ]; then
+            echo "[slack-id-lint] Slack ID らしき文字列が検出されました。data/argus_config.yaml からの参照に置き換えるか、プレースホルダ（例: C0XXXXXXX）にしてください:";
+            echo "$leaked";
+            exit 1;
+          fi;
+          exit 0
+          '
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false

@@ -847,7 +847,7 @@ bash scripts/pm_box_update.sh --dry-run
 ```yaml
 sources:
   - name: "20_アプリケーション開発ユニット"
-    folder_id: "321131927032"        # BOX Web UI URL の末尾から取得
+    folder_id: "000000000000"        # BOX Web UI URL の末尾から取得
     index_names: [pm, pm-all]        # 投入先の論理 index 名（qa_index.db.chunk_indexes に登録）
     recursive: true
     extensions: [pptx, docx, pdf, md]

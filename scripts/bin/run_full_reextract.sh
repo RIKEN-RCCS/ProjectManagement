@@ -1,6 +1,9 @@
 #!/bin/bash
-# Full Slack re-extraction across all 56 channels in reverse (DESC) order.
+# Full Slack re-extraction across all channels in reverse (DESC) order.
 # Run sequentially because gemma4 vLLM cannot serve concurrent prompts efficiently.
+#
+# チャンネル一覧の出典は argus_config.yaml の indices.pm-all.channels
+# （pm_from_slack_daily.sh と同じ出典）。
 
 set -u
 cd "$(dirname "$0")/.."
@@ -24,20 +27,24 @@ LOG_DIR=logs
 SUMMARY_LOG="$LOG_DIR/slack_reextract_summary.log"
 mkdir -p "$LOG_DIR"
 
-CHANNELS=(
-    C0AU688SQFL C0AS2JKS200 C0A9KG036CS C0A6AC59AHM C0A5MRRP268
-    C0A1H7EF324 C0A1H6PP82C C0A11R260JV C0A11QXGLKT C0A0LS4C1UN
-    C0A0KEMJM29 C0A0GG4ULLT C0A07EAKKSB C09MDALKEUQ C09JMEA157E
-    C09FFN6725N C09EJLFES11 C09DUURNB47 C09DMJ5P5J4 C09DMHK10C8
-    C09DMHJA5MW C09D7GK0QSV C09CYEV4BV2 C09CVJK9TNC C09CUHNRW6A
-    C09CUH5RTP0 C09CUH37NTG C09CUH1SSBY C09CTDXFK4J C09CS0JFVL5
-    C09CPFSJG67 C09CE3C3C4X C09CE38SDFZ C09AANCC649 C099LH46K36
-    C097A2P387R C096ER1A0LU C094Z4XKYGG C094CTQUXRS C094CTHUPTN
-    C094C73FSKB C094ARMCHK4 C0949U7983X C0949TWGMFX C0949TUE33P
-    C094715A23Y C093Y781T1V C093LP1J15G C093DQFSCRH C0936JBQVGQ
-    C08SXA4M7JT C08PE3K9N72 C08MJ0NF5UZ C08M0249GRL C08M002D7TQ
-    C08LSJP4R6K
-)
+_BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$_BASH_SELF_DIR/../.." && pwd)"
+
+mapfile -t CHANNELS < <("$PY" -c "
+import sys
+import yaml
+from pathlib import Path
+cfg_path = Path('$REPO_ROOT/data/argus_config.yaml')
+if not cfg_path.exists():
+    sys.exit(1)
+cfg = yaml.safe_load(cfg_path.read_text()) or {}
+for ch in (cfg.get('indices', {}).get('pm-all', {}).get('channels') or []):
+    print(ch)
+")
+if [[ ${#CHANNELS[@]} -eq 0 ]]; then
+    echo "[ERROR] argus_config.yaml の indices.pm-all.channels からチャンネル一覧を取得できませんでした" >&2
+    exit 1
+fi
 
 START=$(date +%s)
 echo "[$(date -Iseconds)] START full re-extraction (${#CHANNELS[@]} channels)" | tee -a "$SUMMARY_LOG"

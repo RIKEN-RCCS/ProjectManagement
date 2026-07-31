@@ -33,15 +33,32 @@ SUMMARY_WORKDIR=$(mktemp -d "/tmp/argus_exec_summary_XXXXXXXX")
 trap 'rm -rf "$SUMMARY_WORKDIR"' EXIT
 
 # ── 調査対象アプリ一覧 ──
-APPS=(
-  "GENESIS|GENESIS"
-  "LQCD-DWF-HMC|LQCD-DWF-HMC"
-  "SCALE-LETKF|SCALE-LETKF"
-  "E-Wave|E-Wave"
-  "SALMON|SALMON"
-  "FrontFlow/blue|FrontFlowblue"
+# data/argus_config.yaml: app_status_report.additional_apps（"QueryName|FileName" 形式の
+# 文字列リスト、PM が値を追加する前提の空エントリ）からプロジェクト固有のアプリ名を読み込む。
+# プロジェクト固有のアプリ名をこのスクリプトに直書きしないための唯一の経路のため、
+# キー未設定/空の場合は WARN を出し調査自体をスキップする（silent degrade しない）。
+ADDITIONAL_APPS_RAW=$(
+  ~/.venv_aarch64/bin/python3 -c "
+import yaml
+try:
+    with open('${REPO_ROOT}/data/argus_config.yaml', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    cfg = {}
+apps = (cfg.get('app_status_report') or {}).get('additional_apps') or []
+for a in apps:
+    print(a)
+"
 )
-#APPS=("SCALE-LETKF|SCALE-LETKF")
+
+APPS=()
+while IFS= read -r line; do
+  [ -n "$line" ] && APPS+=("$line")
+done <<< "$ADDITIONAL_APPS_RAW"
+
+if [ "${#APPS[@]}" -eq 0 ]; then
+  echo "[WARN] $(date '+%Y-%m-%d %H:%M:%S') app_status_report.additional_apps が data/argus_config.yaml に未設定/空です — 調査対象アプリが0件のため週次調査を全てスキップします" >> "$LOG_FILE"
+fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting per-app investigation (${#APPS[@]} apps)..." >> "$LOG_FILE"
 
@@ -94,7 +111,7 @@ GPU化・性能評価・ベンダー協業・アーキテクチャ連携の進�
     > "$TMP_OUTPUT"
 
 #検索結果に他のアプリ名が含まれている場合はその部分を無視し、${QUERY_NAME} に直接言及している内容のみを根拠として使うこと。\
-#${QUERY_NAME} 以外のアプリケーション（GENESIS・LQCD-DWF-HMC・SCALE-LETKF・E-Wave・SALMON・FrontFlow/blue・FFVHC-ACE 等）の情報は含めないでください。\
+#${QUERY_NAME} 以外のアプリケーション（調査対象アプリ一覧の他エントリ）の情報は含めないでください。\
 #方針変更・合意の撤回・新しい決定事項（ツール不使用の合意・計画断念・入力取得完了等）についても積極的に検索し、最新の状態をレポートに反映すること。\
   rm -f "$TMP_NATURE"
 

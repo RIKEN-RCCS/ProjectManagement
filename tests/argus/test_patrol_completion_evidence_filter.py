@@ -178,7 +178,7 @@ class TestThreadReplyCutoff:
         （アイテム発生前の返信を完了証拠にしないため）。"""
         row = {
             "id": 1, "content": "対応する", "assignee": "someone", "due_date": None,
-            "source_ref": "https://x.slack.com/archives/C12345678/p1234567890123456",
+            "source_ref": "https://x.slack.com/archives/C0XXXXXXX/p1234567890123456",
             "source": "slack", "extracted_at": "2026-07-20T00:00:00", "note": None,
         }
         ctx = _make_ctx(
@@ -208,7 +208,7 @@ class TestThreadReplyCutoff:
         """extracted_at が base_cutoff より古い場合は従来どおり base_cutoff を使う。"""
         row = {
             "id": 2, "content": "対応する", "assignee": "someone", "due_date": None,
-            "source_ref": "https://x.slack.com/archives/C12345678/p1234567890123456",
+            "source_ref": "https://x.slack.com/archives/C0XXXXXXX/p1234567890123456",
             "source": "slack", "extracted_at": "2026-01-01T00:00:00", "note": None,
         }
         ctx = _make_ctx(

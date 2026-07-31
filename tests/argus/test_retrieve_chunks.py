@@ -135,7 +135,7 @@ class TestBuildDateFilter:
 class TestSanitizeFtsQuery:
     def test_fullwidth_parentheses_are_split(self):
         """全角括弧が空白化され、括弧内外が別トークンとして分割される
-        （2026-07 k3-loss-analysis: mh-nvl72 で括弧ごと1トークン化していたバグ）。"""
+        （2026-07 本番障害の事後解析: gv-nvl72 で括弧ごと1トークン化していたバグ）。"""
         from argus.retrieval import sanitize_fts_query
         result = sanitize_fts_query("外部GPU計算リソース（NVL72クラス）の確保方針")
         tokens = result.split()
@@ -145,7 +145,7 @@ class TestSanitizeFtsQuery:
     def test_fullwidth_touten_kuten_are_split(self):
         """全角読点・句点で分割される。"""
         from argus.retrieval import sanitize_fts_query
-        result = sanitize_fts_query("GENESIS、ライセンス変更。BSD/MIT")
+        result = sanitize_fts_query("AppDelta、ライセンス変更。BSD/MIT")
         tokens = result.split()
         assert not any("、" in t or "。" in t for t in tokens)
 
@@ -174,9 +174,9 @@ class TestSanitizeFtsQuery:
 # --------------------------------------------------------------------------- #
 # _fts5_escape_token — FTS5 予約文字（特にハイフン=NOT演算子）のクォート
 # 2026-07-30 実測: sanitize_fts_query はハイフンを除去しないため
-# "E-Wave"/"GH200-NVL72" のようなトークンがそのまま MATCH クエリに渡ると
+# "Q-Nova"/"GH200-NVL72" のようなトークンがそのまま MATCH クエリに渡ると
 # ハイフンが NOT 演算子として解釈され sqlite3.OperationalError
-# （"no such column: Wave"）が発生し、_fts_tokens_search / retrieve_chunks の
+# （"no such column: Nova"）が発生し、_fts_tokens_search / retrieve_chunks の
 # trigram ループで「ヒットなし」に丸められ、本来ヒットしうる部分一致が
 # silently 握りつぶされていた（複合エンティティ導入前から潜在する既存バグ）。
 # --------------------------------------------------------------------------- #
@@ -189,7 +189,7 @@ class TestFts5EscapeToken:
 
     def test_hyphenated_token_is_quoted(self):
         from argus.retrieval import _fts5_escape_token
-        assert _fts5_escape_token("E-Wave") == '"E-Wave"'
+        assert _fts5_escape_token("Q-Nova") == '"Q-Nova"'
         assert _fts5_escape_token("GH200-NVL72") == '"GH200-NVL72"'
 
     def test_internal_double_quote_is_escaped(self):
@@ -198,15 +198,15 @@ class TestFts5EscapeToken:
 
     def test_query_string_with_hyphenated_token_does_not_raise_operational_error(self, tmp_path):
         """ハイフンを含むトークンで組み立てた MATCH クエリが構文エラーにならず、
-        実際にヒットすること（'no such column: Wave' の再現・回帰防止）。"""
+        実際にヒットすること（'no such column: Nova' の再現・回帰防止）。"""
         db_path = _make_qa_db(tmp_path)
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         try:
             from argus.retrieval import _fts5_escape_token
-            tokens = ["スケールアウト", "E-Wave"]
+            tokens = ["スケールアウト", "Q-Nova"]
             q = " ".join(_fts5_escape_token(t) for t in tokens)
-            # 例外を投げないこと（従来は "no such column: Wave" 相当で落ちていた）
+            # 例外を投げないこと（従来は "no such column: Nova" 相当で落ちていた）
             rows = conn.execute(
                 "SELECT c.id FROM fts JOIN chunks c ON fts.rowid = c.id WHERE fts MATCH ?", (q,)
             ).fetchall()
@@ -217,7 +217,7 @@ class TestFts5EscapeToken:
 
 # --------------------------------------------------------------------------- #
 # sudachi_tokenize_query — トークン品質（ASCII複合エンティティ・機能動詞除去・並べ替え）
-# 2026-07-30 本番実測障害の修正（E-Wave が 'Wave' に縮退、機能動詞混入）。
+# 2026-07-30 本番実測障害の修正（Q-Nova が 'Nova' に縮退、機能動詞混入）。
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture(scope="module")
@@ -232,33 +232,33 @@ def real_sudachi():
 
 class TestSudachiTokenizeQueryTokenQuality:
     def test_ascii_compound_entity_preserved_not_degraded_to_partial_word(self, real_sudachi):
-        """「E-Wave」が複合エンティティとして丸ごと保持され、Sudachi由来の
-        部分語 'Wave'（旧バグ: len>=2フィルタが'E'を、品詞フィルタが'-'を除去
+        """「Q-Nova」が複合エンティティとして丸ごと保持され、Sudachi由来の
+        部分語 'Nova'（旧バグ: len>=2フィルタが'Q'を、品詞フィルタが'-'を除去
         した結果）には縮退しない。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
-        assert "E-Wave" in tokens
-        assert "Wave" not in tokens
-        assert "E" not in tokens
+        tokens = sudachi_tokenize_query("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert "Q-Nova" in tokens
+        assert "Nova" not in tokens
+        assert "Q" not in tokens
 
     def test_ascii_compound_entity_slash_separator(self, real_sudachi):
-        """FrontFlow/blue のような '/' 区切り複合エンティティも保持される。"""
+        """AppZeta/blue のような '/' 区切り複合エンティティも保持される。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("FrontFlow/blue のライセンス変更について検討している")
-        assert "FrontFlow/blue" in tokens
+        tokens = sudachi_tokenize_query("AppZeta/blue のライセンス変更について検討している")
+        assert "AppZeta/blue" in tokens
 
     def test_function_verbs_are_removed(self, real_sudachi):
         """「する」「いる」等の機能動詞（辞書形）は検索トークンから除外される。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
+        tokens = sudachi_tokenize_query("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？")
         assert "する" not in tokens
         assert "いる" not in tokens
 
     def test_generic_demote_terms_pushed_to_back(self, real_sudachi):
         """時制・汎用語（今年度・理由 等）は他の実質語より後方へ降格される。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
-        assert tokens.index("今年度") > tokens.index("E-Wave")
+        tokens = sudachi_tokenize_query("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert tokens.index("今年度") > tokens.index("Q-Nova")
         assert tokens.index("理由") > tokens.index("NVIDIA")
 
     def test_ascii_compound_entity_is_most_selective_top_token(self, real_sudachi):
@@ -266,8 +266,8 @@ class TestSudachiTokenizeQueryTokenQuality:
         本番実測障害（'今年度' 1語まで縮退）の再発を防ぐため、複合エンティティが
         先頭に来ること自体を明示的に確認する。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
-        assert tokens[0] == "E-Wave"
+        tokens = sudachi_tokenize_query("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert tokens[0] == "Q-Nova"
 
     def test_no_compound_entity_preserves_sudachi_natural_order(self, real_sudachi):
         """複合エンティティ・降格対象語が無い場合、Sudachiの形態素出現順
@@ -280,35 +280,35 @@ class TestSudachiTokenizeQueryTokenQuality:
 
     def test_single_token_degeneration_keeps_compound_entity_not_generic_term(self, real_sudachi):
         """先頭1語までの縮退（_fts_tokens_search の最弱段）で残るのが
-        E-Wave であり、'今年度' ではないことを確認する（本番障害の直接再現）。"""
+        Q-Nova であり、'今年度' ではないことを確認する（本番障害の直接再現）。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？")
-        assert tokens[:1] == ["E-Wave"]
+        tokens = sudachi_tokenize_query("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？")
+        assert tokens[:1] == ["Q-Nova"]
 
     def test_single_ascii_word_entity_does_not_disturb_following_noun_order(self, real_sudachi):
         """単独ASCII語（複合エンティティではない）は Sudachi の自然な出現順の
         先頭にとどまり、後続の一般名詞の相対順序を乱さない。
         （2026-07-30 recall_eval で発見した回帰: カタカナ・ASCII語を一般名詞より
-        一律優先する並べ替えにすると、'BenchKit 外部からのコード貢献ルール確認'
-        で自然語順なら1件に絞り込めていた組み合わせ（BenchKit+外部+コード）が
-        壊れ、選択性の低い組み合わせ（BenchKit+コード+ルール）に縮退し、
+        一律優先する並べ替えにすると、'AppTheta 外部からのコード貢献ルール確認'
+        で自然語順なら1件に絞り込めていた組み合わせ（AppTheta+外部+コード）が
+        壊れ、選択性の低い組み合わせ（AppTheta+コード+ルール）に縮退し、
         recall@30/60 が悪化した。3段簡易カテゴリへの変更で自然順を保持する）。
         単独ASCII語は正規表現での追加抽出を撤回した（下記テスト参照）ため、
         Sudachi の dictionary_form() 仕様どおり小文字化される。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("BenchKit 外部からのコード貢献ルール確認")
-        assert tokens[:3] == ["benchkit", "外部", "コード"]
+        tokens = sudachi_tokenize_query("AppTheta 外部からのコード貢献ルール確認")
+        assert tokens[:3] == ["apptheta", "外部", "コード"]
 
     def test_standalone_ascii_word_extraction_removed_relies_on_sudachi(self, real_sudachi):
         """単独ASCII語（NVIDIA 等）は正規表現での追加抽出をせず、Sudachi の
         形態素解析結果のみをトークンとして使う（複合エンティティのみ抽出に限定した
-        較正: 2026-07-30 recall_eval 実測で単独語抽出時に注入された "AI4S" が
-        Sudachi 由来の "AI" と別トークン化され、lqcd-dwf-hmc-comm-profiling-progress-202606
-        の4語AND一致を壊し hybrid rank が 1→43 に劣化したため撤回）。"""
+        較正: 2026-07-30 recall_eval 実測で単独語抽出時に注入された "AppGamma7" が
+        Sudachi 由来の "appgamma" と別トークン化され、既存の4語AND一致クエリ
+        を壊し hybrid rank が 1→43 に劣化したため撤回）。"""
         from argus.retrieval import sudachi_tokenize_query
-        tokens = sudachi_tokenize_query("LQCD 通信 AI4S プロファイリング")
-        assert "AI4S" not in tokens
-        assert tokens.count("AI") <= 1
+        tokens = sudachi_tokenize_query("AppBeta 通信 AppGamma7 プロファイリング")
+        assert "AppGamma7" not in tokens
+        assert tokens.count("appgamma") <= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -453,14 +453,14 @@ class TestRetrieveChunksWeakStage:
     def test_trigram_hit_on_hyphenated_content_is_not_swallowed_by_operational_error(
         self, tmp_path, monkeypatch,
     ):
-        """ハイフンを含む語（E-Wave）を含む本文が trigram 段で構文エラーに
+        """ハイフンを含む語（Q-Nova）を含む本文が trigram 段で構文エラーに
         よって silent に握りつぶされず、正しくヒットする（本来2語ヒットする
         はずが構文エラーで弱段まで過剰縮退していた既存バグの回帰防止）。"""
         import argus.retrieval as srv
         db_path = tmp_path / "qa_index.db"
         conn = sqlite3.connect(str(db_path))
         conn.executescript(_QA_INDEX_SCHEMA)
-        content = "E-Waveのコデザイン管理表にはNVIDIA対応状況の記載がある"
+        content = "Q-Novaのコデザイン管理表にはNVIDIA対応状況の記載がある"
         conn.execute(
             "INSERT INTO chunks (source_type, source_db, record_id, held_at, content, indexed_at)"
             " VALUES (?,?,?,?,?,?)",
@@ -475,15 +475,15 @@ class TestRetrieveChunksWeakStage:
         monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
         from argus.retrieval import STAGE_TRIGRAM, retrieve_chunks
         results, stage = retrieve_chunks(
-            "E-WaveのNVIDIA対応状況について", db_path, index_name="test", return_stage=True,
+            "Q-NovaのNVIDIA対応状況について", db_path, index_name="test", return_stage=True,
         )
         assert stage == STAGE_TRIGRAM
-        assert any("E-Wave" in r["content"] for r in results)
+        assert any("Q-Nova" in r["content"] for r in results)
 
     def test_fts_tokens_weak_when_degenerated_to_one_token(self, qa_db, monkeypatch):
         """複数語クエリが1語まで縮退してヒットした場合 stage=STAGE_FTS_TOKENS_WEAK。"""
         import argus.retrieval as srv
-        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["今年度", "E-Wave", "NVIDIA"])
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["今年度", "Q-Nova", "NVIDIA"])
         monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: ([{"id": 1, "content": "dummy"}], 1))
         from argus.retrieval import STAGE_FTS_TOKENS_WEAK, retrieve_chunks
         results, stage = retrieve_chunks("dummy", qa_db, return_stage=True)
@@ -493,7 +493,7 @@ class TestRetrieveChunksWeakStage:
     def test_fts_tokens_not_weak_when_multiple_tokens_used(self, qa_db, monkeypatch):
         """縮退が2語以上で止まった場合は通常段（STAGE_FTS_TOKENS）のまま。"""
         import argus.retrieval as srv
-        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["今年度", "E-Wave", "NVIDIA"])
+        monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: ["今年度", "Q-Nova", "NVIDIA"])
         monkeypatch.setattr(srv, "_fts_tokens_search", lambda *a, **kw: ([{"id": 1, "content": "dummy"}], 2))
         from argus.retrieval import STAGE_FTS_TOKENS, retrieve_chunks
         results, stage = retrieve_chunks("dummy", qa_db, return_stage=True)
@@ -512,7 +512,7 @@ class TestRetrieveChunksWeakStage:
         """trigram 段でも複数語クエリが1語まで縮退してヒットした場合 stage=STAGE_TRIGRAM_WEAK。"""
         import argus.retrieval as srv
         monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
-        monkeypatch.setattr(srv, "sanitize_fts_query", lambda q: "今年度 EWave NVIDIA")
+        monkeypatch.setattr(srv, "sanitize_fts_query", lambda q: "今年度 QNova NVIDIA")
 
         def fake_fts5_search(conn, q, k, *a, **kw):
             if q == "今年度":
@@ -529,10 +529,10 @@ class TestRetrieveChunksWeakStage:
         """全語のAND検索で一発ヒットした場合は通常段（STAGE_TRIGRAM）のまま。"""
         import argus.retrieval as srv
         monkeypatch.setattr(srv, "sudachi_tokenize_query", lambda q: [])
-        monkeypatch.setattr(srv, "sanitize_fts_query", lambda q: "今年度 EWave NVIDIA")
+        monkeypatch.setattr(srv, "sanitize_fts_query", lambda q: "今年度 QNova NVIDIA")
 
         def fake_fts5_search(conn, q, k, *a, **kw):
-            if q == "今年度 EWave NVIDIA":
+            if q == "今年度 QNova NVIDIA":
                 return [{"id": 1, "content": "dummy"}]
             return []
         monkeypatch.setattr(srv, "_fts5_search", fake_fts5_search)
@@ -814,7 +814,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
         monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
 
         from argus.retrieval import retrieve_chunks_hybrid
-        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+        results = retrieve_chunks_hybrid("gv-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
 
         result_ids = {r["id"] for r in results}
         fallback_ids = {c["id"] for c in fallback_chunks}
@@ -836,7 +836,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
         monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: [])
 
         from argus.retrieval import retrieve_chunks_hybrid
-        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+        results = retrieve_chunks_hybrid("gv-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
 
         assert len(results) == 50
         assert {r["id"] for r in results} <= {c["id"] for c in fallback_chunks}
@@ -880,7 +880,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
 
         from argus.retrieval import retrieve_chunks_hybrid
         with caplog.at_level(logging.INFO, logger="pm_qa_server"):
-            retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+            retrieve_chunks_hybrid("gv-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
 
         assert any(
             "FTS date_fallback excluded from RRF" in rec.message for rec in caplog.records
@@ -900,7 +900,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
         monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
 
         from argus.retrieval import retrieve_chunks_hybrid
-        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+        results = retrieve_chunks_hybrid("gv-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
 
         result_ids = {r["id"] for r in results}
         like_ids = {c["id"] for c in like_chunks}
@@ -921,7 +921,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
         monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: [])
 
         from argus.retrieval import retrieve_chunks_hybrid
-        results = retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+        results = retrieve_chunks_hybrid("gv-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
 
         assert len(results) == 50
         assert {r["id"] for r in results} <= {c["id"] for c in like_chunks}
@@ -942,7 +942,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
 
         from argus.retrieval import retrieve_chunks_hybrid
         with caplog.at_level(logging.INFO, logger="pm_qa_server"):
-            retrieve_chunks_hybrid("mh-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
+            retrieve_chunks_hybrid("gv-nvl72 外部GPU計算リソース確保方針", qa_db, k=50)
 
         assert any(
             "FTS like excluded from RRF" in rec.message for rec in caplog.records
@@ -963,7 +963,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
         monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
 
         from argus.retrieval import retrieve_chunks_hybrid
-        results = retrieve_chunks_hybrid("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
+        results = retrieve_chunks_hybrid("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
 
         result_ids = {r["id"] for r in results}
         weak_ids = {c["id"] for c in weak_chunks}
@@ -984,7 +984,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
         monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: [])
 
         from argus.retrieval import retrieve_chunks_hybrid
-        results = retrieve_chunks_hybrid("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
+        results = retrieve_chunks_hybrid("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
 
         assert len(results) == 50
         assert {r["id"] for r in results} <= {c["id"] for c in weak_chunks}
@@ -1002,7 +1002,7 @@ class TestRetrieveChunksHybridFallbackExclusion:
         monkeypatch.setattr(srv, "retrieve_chunks_vector", lambda *a, **kw: vector_chunks)
 
         from argus.retrieval import retrieve_chunks_hybrid
-        results = retrieve_chunks_hybrid("今年度のE-WaveのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
+        results = retrieve_chunks_hybrid("今年度のQ-NovaのNVIDIAとのコラボレーションが停滞している理由は？", qa_db, k=50)
 
         result_ids = {r["id"] for r in results}
         weak_ids = {c["id"] for c in weak_chunks}

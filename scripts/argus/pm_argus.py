@@ -44,7 +44,12 @@ _REPO_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import yaml
-from cli_utils import call_argus_llm, load_claude_md_context
+from cli_utils import (
+    call_argus_llm,
+    load_claude_md_context,
+    resolve_brief_canvas_id,
+    resolve_risk_canvas_id,
+)
 from db_utils import (
     fetch_assignee_workload,
     fetch_milestone_progress,
@@ -1809,7 +1814,7 @@ def _filter_mentions_for_user(
     Args:
         messages: fetch_raw_messages() の出力 (チャンネル単位で整形済み)
         user_name: 実行者の表示名 (例: "Hikaru Inoue (RIKEN)" または "hikaru.inoue")
-        user_id: 実行者の Slack user_id (例: "U08MWC731GR")
+        user_id: 実行者の Slack user_id (例: "U0XXXXXXX")
         channel_names: チャンネルID -> 表示名のマッピング
         user_id_map: user_id -> user_name のマッピング（テキスト内のユーザーID展開用）
 
@@ -2204,9 +2209,10 @@ def main() -> None:
             print("[INFO] --dry-run: Canvas 投稿をスキップ", file=sys.stderr)
             return
 
-        canvas_id = args.canvas_id
+        canvas_id = args.canvas_id or resolve_brief_canvas_id()
         if not canvas_id:
-            print("[ERROR] Canvas ID が不明。--canvas-id を指定してください",
+            print("[ERROR] Canvas ID が不明。--canvas-id を指定するか、"
+                  "argus_config.yaml の argus_daily.brief_canvas_id を設定してください",
                   file=sys.stderr)
             sys.exit(1)
 
@@ -2230,9 +2236,10 @@ def main() -> None:
             print("[INFO] --dry-run: Canvas 投稿をスキップ", file=sys.stderr)
             return
 
-        canvas_id = args.canvas_id
+        canvas_id = args.canvas_id or resolve_risk_canvas_id()
         if not canvas_id:
-            print("[ERROR] Canvas ID が不明。--canvas-id を指定してください",
+            print("[ERROR] Canvas ID が不明。--canvas-id を指定するか、"
+                  "argus_config.yaml の argus_daily.risk_canvas_id を設定してください",
                   file=sys.stderr)
             sys.exit(1)
 

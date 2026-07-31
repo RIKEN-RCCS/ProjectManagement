@@ -382,19 +382,19 @@ class _FakeLLM:
 
 def test_run_document_qa_retries_suspicious_no_info_and_recovers(monkeypatch, agent_context):
     """(a) 中身のある窓で1回目「関連情報なし」→リトライ発火→2回目成功で抽出反映。"""
-    content = "第3章 LATTICE QCD 計算結果: 実行時間は 2847.77 秒であった。"
+    content = "第3章 AppBeta 計算結果: 実行時間は 2847.77 秒であった。"
     _patch_single_window_doc(monkeypatch, content)
     agent_context.record_ids = ["rid1"]
     agent_context.scoped_file_names = ["報告書.pdf"]
 
     fake = _FakeLLM([
         "関連情報なし",  # 1回目の map（疑わしい却下）
-        "LATTICE QCD の実行時間は 2847.77 秒。",  # リトライで成功
-        "GENESIS/LATTICE QCD ともに 2847.77 秒。",  # reduce
+        "AppBeta の実行時間は 2847.77 秒。",  # リトライで成功
+        "AppDelta/AppBeta ともに 2847.77 秒。",  # reduce
     ])
     monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake)
 
-    answer = run_document_qa("LATTICE QCDの実行時間は？", None, agent_context)
+    answer = run_document_qa("AppBetaの実行時間は？", None, agent_context)
 
     assert len(fake.calls) == 3
     assert "再試行" in fake.calls[1]
@@ -404,7 +404,7 @@ def test_run_document_qa_retries_suspicious_no_info_and_recovers(monkeypatch, ag
 
 def test_run_document_qa_records_failure_after_retry(monkeypatch, agent_context):
     """(b) 2回とも「なし」→制限事項に記録。"""
-    content = "第3章 LATTICE QCD の章はあるが数値記述が乏しい断片。"
+    content = "第3章 AppBeta の章はあるが数値記述が乏しい断片。"
     _patch_single_window_doc(monkeypatch, content)
     agent_context.record_ids = ["rid1"]
     agent_context.scoped_file_names = ["報告書.pdf"]
@@ -416,11 +416,11 @@ def test_run_document_qa_records_failure_after_retry(monkeypatch, agent_context)
     ])
     monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake)
 
-    answer = run_document_qa("LATTICE QCDの実行時間は？", None, agent_context)
+    answer = run_document_qa("AppBetaの実行時間は？", None, agent_context)
 
     assert len(fake.calls) == 3
     assert "## 制限事項" in answer
-    assert "LATTICE" in answer
+    assert "AppBeta" in answer
     assert "抽出に失敗（2回試行）" in answer
 
 
@@ -437,7 +437,7 @@ def test_run_document_qa_no_retry_when_entity_absent(monkeypatch, agent_context)
     ])
     monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake)
 
-    run_document_qa("LATTICE QCDの実行時間は？", None, agent_context)
+    run_document_qa("AppBetaの実行時間は？", None, agent_context)
 
     assert len(fake.calls) == 2
     assert "再試行" not in fake.calls[0]
@@ -445,23 +445,23 @@ def test_run_document_qa_no_retry_when_entity_absent(monkeypatch, agent_context)
 
 def test_run_document_qa_reduce_input_has_fragment_header_with_entities(monkeypatch, agent_context):
     """(d) reduce 入力に断片ヘッダ（含まれるエンティティ）が付く。"""
-    content = "第3章 LATTICE QCD 計算結果: 実行時間は 2847.77 秒であった。"
+    content = "第3章 AppBeta 計算結果: 実行時間は 2847.77 秒であった。"
     _patch_single_window_doc(monkeypatch, content)
     agent_context.record_ids = ["rid1"]
     agent_context.scoped_file_names = ["報告書.pdf"]
 
     fake = _FakeLLM([
         # 50字以上にして「極端に短い」判定（疑わしい却下）に該当させない
-        "LATTICE QCD の実行時間は 2847.77 秒であり、他の主要アプリと比べても妥当な水準の数値である。",
-        "LATTICE QCD は 2847.77 秒。",  # reduce
+        "AppBeta の実行時間は 2847.77 秒であり、他の主要アプリと比べても妥当な水準の数値である。",
+        "AppBeta は 2847.77 秒。",  # reduce
     ])
     monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake)
 
-    run_document_qa("LATTICE QCDの実行時間は？", None, agent_context)
+    run_document_qa("AppBetaの実行時間は？", None, agent_context)
 
     reduce_prompt = fake.calls[-1]
     assert "含まれるエンティティ" in reduce_prompt
-    assert "LATTICE" in reduce_prompt
+    assert "AppBeta" in reduce_prompt
 
 
 # --------------------------------------------------------------------------- #

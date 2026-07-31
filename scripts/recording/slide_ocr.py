@@ -304,7 +304,7 @@ def build_slide_context(slide_mds: list[str], max_chars: int = 15000) -> str:
 # --------------------------------------------------------------------------- #
 # 英大文字略語（GPU, MONAKA-X, NVLink-C2C 等）
 _RE_ACRONYM = re.compile(r'\b[A-Z][A-Z0-9]{1,}(?:[-/][A-Z0-9]+)*\b')
-# キャメルケース・固有英名（Benchpark, FrontFlow 等）
+# キャメルケース・固有英名（Benchpark, PyAnnote 等）
 _RE_CAMEL = re.compile(r'\b[A-Z][a-z]+(?:[A-Z][a-z0-9]+)+\b')
 # カタカナ語（4文字以上）
 _RE_KATAKANA = re.compile(r'[ァ-ヺー]{4,}')
@@ -335,7 +335,7 @@ _TERMINOLOGY_FILTER_PROMPT = """\
 {terms}
 
 残すべき語のみを JSON 配列で出力してください。前置き・説明・コードフェンスは不要です。
-例: ["GENESIS", "MONAKA-X"]
+例: ["PyAnnote", "MONAKA-X"]
 """
 
 
