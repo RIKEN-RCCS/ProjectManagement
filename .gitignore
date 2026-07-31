@@ -6,6 +6,8 @@ logs/
 meetings/
 reports/
 docs/project.md
+docs/decisions/
+docs/security-architecture.md
 scripts/pm_from_slack_daily.sh
 scripts/pm_biweekly_report.sh
 scripts/pm_argus_daily.sh
@@ -49,11 +51,9 @@ fish.tar
 scripts/fish_seed_sweep.sh
 scripts/eval/*
 !scripts/eval/recall_eval.py
-!scripts/eval/recall_gold.yaml
 !scripts/eval/embedding_duplicate_repro.py
 !scripts/eval/knowledge_ab.py
 !scripts/eval/argus_ab_judge.py
 !scripts/eval/investigate_ab.py
-!scripts/eval/investigate_gold.yaml
 scripts/ingest/*.bak
 scripts/data/voice_uploads.db
