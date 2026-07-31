@@ -50,8 +50,7 @@ repos:
         #
         # 既知の例外（除外パス）:
         #   - scripts/eval/ 配下: 開発用の評価ツールであり、本番の実行経路ではない
-        #   - scripts/data-pipeline/pm_web_fetch.py（旧パス symlink 含む）:
-        #     docs/security-architecture.md §4.5 で廃止決定済み
+        # （pm_web_fetch.py の除外は 2026-08-01 の削除に伴い不要になった。§4.5）
         #
         # 検出範囲の限界（既知）: grep によるファイル内文字列一致であり、実際に
         # import 文として解釈できるかは見ない。コメント中の言及だけでも誤って
@@ -71,7 +70,6 @@ repos:
           for f in $net_users; do
             case "$f" in
               scripts/eval/*) continue ;;
-              scripts/data-pipeline/pm_web_fetch.py|scripts/pm_web_fetch.py) continue ;;
             esac;
             if ! grep -qE "net_guard|db_utils|cli_utils|canvas_utils|\bllm\b|\bnarrate\b" "$f"; then
               echo "[net-guard-lint] net_guard (または hub モジュール) の import が無い: $f";

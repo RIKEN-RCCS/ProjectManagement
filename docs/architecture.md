@@ -20,7 +20,6 @@
 │  pm_from_recording.sh (Whisper→generate_minutes_local→import)           │
 │  pm_box_crawl.py  → data/box_docs.db                                    │
 │  pm_slack_box_links.py → data/docs_*.db                                 │
-│  pm_web_fetch.py  → data/web_articles.db                                │
 │  pm_ingest.py (slack/minutes/goals/achievements の pm.db への転記)        │
 │                                                                         │
 │  ★ ここで pm.db が「正本」になる                                        │
@@ -166,9 +165,6 @@ recency 非適用でハイブリッド検索した結果を `enrich/achievements
 
 [BOX リンク (Slack上)]
   └── pm_slack_box_links.py ──→ data/docs_*.db (メタデータ)
-
-[Web 記事]
-  └── pm_web_fetch.py ──→ data/web_articles.db
 
 [Excel 編集の反映]
   └── pm_xlsx_sync.py ──→ pm.db (Box XLSX → pm.db の逆方向同期)
@@ -358,7 +354,7 @@ pm_qa_server.py (Socket Mode デーモン)
 | `data/pm.db` | **正本**: action_items/decisions/meetings/goals/milestones/achievements | `pm_ingest.py`, `enrich_items.py`, Web UI, `pm_sync_canvas.py`, `pm_xlsx_sync.py` | 全スクリプト | ✅ |
 | `data/docs_*.db` | BOX ドキュメントメタデータ | `pm_slack_box_links.py` | `pm_box_crawl.py` | ✅ |
 | `data/box_docs.db` | BOX ドキュメント本文 (Markdown) | `pm_box_crawl.py` | `pm_embed.py` | ✅ |
-| `data/web_articles.db` | 外部 Web 記事 | `pm_web_fetch.py` | `pm_embed.py` | ✅ |
+| `data/web_articles.db` | 外部 Web 記事（**収集は 2026-08-01 に廃止**。既存データのみ保持） | -（`pm_web_fetch.py` 削除済み） | `pm_embed.py` | ✅ |
 | `data/qa_index.db` | FTS5 全文検索 + embedding | `pm_embed.py` | Argus (investigate/ask) | ✅ |
 | `data/patrol_state.db` | Patrol 冪等性・承認待ち | `pm_argus_patrol.py` | `pm_argus_patrol.py` | -（平文設計。機密情報を含まないため暗号化不要） |
 | `data/voice_uploads.db` | TTS 音声ファイル投稿履歴 | `pm_tts.py` | `pm_tts.py` | ✅ |
@@ -379,8 +375,9 @@ pm_qa_server.py (Socket Mode デーモン)
 | 16:00 月〜金 | `pm_from_slack_daily.sh` | Slack 走査 + embed → argus-today 前提データ | `logs/pm_from_slack_daily_*.log` |
 
 **cron に載っていないスクリプト**（存在はするが定期実行されていない）:
-`pm_web_update.sh`（Web 記事収集。`pm_web_fetch.py` は `docs/security-architecture.md` §4.5 で
-廃止決定済みのため、復活させない）、`pm_argus_daily_summary.sh`、`pm_box_distill.sh`（コメントアウト）。
+`pm_argus_daily_summary.sh`、`pm_box_distill.sh`（コメントアウト）。
+`pm_web_update.sh` / `pm_web_fetch.py` は **2026-08-01 に削除**（`docs/security-architecture.md`
+§4.5。認証境界の外へ出る唯一の経路だった）。復活させないこと。
 
 月〜金限定のジョブがあるため、全 cron 経路を 1 周させるには**平日を通す（実質 1 週間）**必要がある。
 `net_guard` の warn フェーズで宛先を洗い出す際はこの周期が下限になる（`PLAN.md` 参照）。
@@ -445,7 +442,6 @@ scripts/
 │   ├── pm_box_crawl.py                BOX本文取得 → box_docs.db
 │   ├── pm_box_relevance.py            box_docs.db relevance 判定
 │   ├── pm_embed.py                    FTS5 + embedding 索引構築
-│   ├── pm_web_fetch.py                外部Web → web_articles.db
 │   └── pm_users_sync.py               Slack ユーザー → argus_config.yaml
 │
 ├── minutes/                           議事録パイプライン
@@ -506,7 +502,6 @@ scripts/
 ├── bin/                               シェルスクリプト
 │   ├── pm_daemon.sh                   統合管理 (qa/web)
 │   ├── pm_box_update.sh               夜間BOX更新
-│   ├── pm_web_update.sh               夜間Web記事更新
 │   ├── pm_argus_daily.sh              CRON ブリーフィング
 │   ├── pm_from_recording.sh           録音 → 議事録
 │   ├── pm_from_slack_daily.sh         CRON Slack走査

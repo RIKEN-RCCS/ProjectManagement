@@ -96,13 +96,14 @@ python3 scripts/ingest/pm_ingest.py minutes --minutes-list --since 2026-02-01
 - LLMによるIntent分類で質問を `structured` / `text` / `hybrid` に自動分類
 - 「富岳太郎さんの担当タスクは？」「期限超過アイテムは？」のような構造化質問に直接回答可能
 
-#### 5.7 外部Web情報の取り込み（pm_web_fetch.py、実装済み）
+#### 5.7 外部Web情報の取り込み（pm_web_fetch.py、実装済み → **2026-08-01 廃止**）
 
-- RIKEN公式サイト・HPC系ニュース（Top500/HPCwire/insideHPC）・NVIDIAブログなどの公開情報を定期取得し `/argus-investigate` で検索可能にする
-- `data/web_sources.yaml` でソース・キーワードフィルタ・対象インデックスを定義し、`pm_web_fetch.py` が `data/web_articles.db` に保存する
-- `pm_embed.py --web-only` で高速に FTS5 インデックスに組み込み（議事録・Slack処理をスキップ）
-- `pm_web_fetch.py` を cron（毎朝03:30 JST）で定期実行。FTS5 組み込みは `pm_box_update.sh`（`pm_embed.py`）が自動で行う
-- 出典は `top500.org / Web記事 (2025-11-15)` 形式で表示される
+- RIKEN公式サイト・HPC系ニュース（Top500/HPCwire/insideHPC）・NVIDIAブログなどの公開情報を定期取得し `/argus-investigate` で検索可能にしていた
+- **廃止理由**: Argus の推論経路から認証境界の外（公開インターネット）へ出る唯一の経路であり、
+  得るものに対してリスクが大きいと判断した（`docs/security-architecture.md` §4.5）
+- **既存データは保持**。`data/web_articles.db` の索引済みチャンクは引き続き検索可能で、
+  出典は `top500.org / Web記事 (2025-11-15)` 形式で表示される
+- `pm_web_fetch.py` / `pm_web_update.sh` は削除済み。復活は認証境界の設計判断を伴う
 
 #### 5.8 ナレッジ蒸留レイヤ（pm_box_distill.py、実装済み 2026-05-18 → 2026-06-16 全廃）
 

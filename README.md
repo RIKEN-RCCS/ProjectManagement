@@ -177,7 +177,6 @@ Pass 1: 収集・抽出
   pm_minutes_import.py    → data/minutes/{kind}.db
   pm_ingest.py            → data/pm.db（正本: actions/decisions/meetings/goals/milestones）
   pm_box_crawl.py         → data/box_docs.db（本文Markdown）
-  pm_web_fetch.py         → data/web_articles.db
 
 Pass 2: エンリッチメント・索引化
   enrich_items.py         → pm.db に判断者・根拠・関連IDを補完
@@ -268,7 +267,7 @@ scripts/
 ├── data-pipeline/       Pass 1: 一次情報収集
 │   ├── slack_pipeline.py / pm_embed.py
 │   ├── pm_box_crawl.py / pm_box_relevance.py
-│   └── pm_web_fetch.py / pm_slack_box_links.py
+│   └── pm_slack_box_links.py
 ├── minutes/             議事録パイプライン
 │   ├── pm_minutes_import.py / pm_minutes_catalog.py
 │   └── pm_minutes_publish.py

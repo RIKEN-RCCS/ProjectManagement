@@ -74,14 +74,21 @@ def test_pm_daemon():
 # 処理を開始するが、タイムアウトで止めるスクリプト
 # --------------------------------------------------------------------------- #
 
-def test_pm_web_update():
-    # --dry-run は Web 取得を試みてから終了するが、タイムアウトは成功扱い
-    rc, out, err = _bash("pm_web_update.sh", "--dry-run", timeout=8)
-    if rc != 0:
-        # タイムアウト = 正常起動した証拠
-        pass
-    assert "pm_web_fetch.py" in out + err or "取得中" in out + err or rc == 0, \
-        f"起動できず: out={out[:200]} err={err[:200]}"
+# pm_web_update.sh / pm_web_fetch.py は 2026-08-01 に削除した
+# （docs/security-architecture.md §4.5。認証境界の外へ出る唯一の経路だったため）。
+# 復活させないこと — 再導入はセキュリティ上の判断を伴う。
+
+
+def test_web_fetch_scripts_are_gone():
+    """Web 取得スクリプトが復活していないことを固定する（§4.5 の廃止決定）。"""
+    for rel in (
+        "bin/pm_web_update.sh",
+        "data-pipeline/pm_web_fetch.py",
+        "pm_web_fetch.py",
+    ):
+        assert not (REPO_ROOT / "scripts" / rel).exists(), (
+            f"{rel} が復活しています。docs/security-architecture.md §4.5 で廃止決定済み"
+        )
 
 
 def test_canvas_report():
