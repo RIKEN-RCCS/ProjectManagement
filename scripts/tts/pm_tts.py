@@ -29,7 +29,12 @@ from pathlib import Path
 
 import requests
 
-VOICEVOX_HOST = "http://localhost:50021"
+# 127.0.0.1 表記にすること（localhost にしないこと）。
+# config/network_allowlist.yaml のエントリは `127.0.0.1:50021` で、net_guard の照合は
+# 名前解決をしない文字列一致なので、`localhost` 表記だと enforce モードで resolve 段が
+# 遮断される（2026-08-01 に /argus-brief で実際に verdict=deny が出た）。
+# allow-list 側に localhost を足す選択は採らない — 許可対象が増え、/etc/hosts に依存する。
+VOICEVOX_HOST = "http://127.0.0.1:50021"
 VOICEVOX_TEXT_LIMIT = 200
 QUERY_TIMEOUT = 30
 SYNTH_TIMEOUT = 120

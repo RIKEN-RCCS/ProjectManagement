@@ -90,6 +90,7 @@ DNS 解決自体を遮断すると、canary ホスト名は allow-list 外なの
 from __future__ import annotations
 
 import argparse
+import io
 import ipaddress
 import logging
 import os
@@ -775,10 +776,14 @@ def main(argv: list[str] | None = None) -> int:
         print(print_env_hosts())
         return 0
     if args.summarize_log:
+        # errors="replace" は必須。実運用のログには不正な UTF-8 バイト列が混ざる
+        # （Box 文書名・LLM 出力・端末制御シーケンス等）。strict デコードだと
+        # 集計そのものが UnicodeDecodeError で落ち、enforce へ倒す判断ができない。
         if args.summarize_log == "-":
-            lines = sys.stdin.readlines()
+            stream = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+            lines = stream.readlines()
         else:
-            with open(args.summarize_log, encoding="utf-8") as f:
+            with open(args.summarize_log, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
         print(summarize_log(lines))
         return 0

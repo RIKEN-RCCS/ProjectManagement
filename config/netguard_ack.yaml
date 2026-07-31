@@ -1,0 +1,31 @@
+# config/netguard_ack.yaml
+#
+# 「原因を直したが、古いログ行が残っているために鳴り続ける」net_guard の deny を
+# 抑制する申告リスト。参照: scripts/quality/pm_selfcheck.py の netguard_deny チェック。
+#
+# ★ 恒久的な mute ではない ★
+#   抑制されるのは `fixed_at` より**前**のタイムスタンプを持つログ行だけ。
+#   修正後に同じ宛先がまた deny になれば、もう一度違反として報告される。
+#   タイムスタンプを読めない行（シェルの echo 等）は抑制しない（保守的側に倒す）。
+#
+# ここに足すのは「宛先に到達しないようコード／設定を直した」場合だけにする。
+# 「その宛先は正当だった」場合は config/network_allowlist.yaml に足すのが正しく、
+# ここに書いて黙らせてはいけない（allow-list が実態と乖離する）。
+#
+# フィールド:
+#   destination — deny ログの host= または ip=（host が '-' のときは ip）
+#   port        — 省略可。省略するとポートを問わず一致
+#   stage       — 省略可（'resolve' | 'connect'）。省略すると両段に一致
+#   fixed_at    — 'YYYY-MM-DD' または 'YYYY-MM-DD HH:MM:SS'（ローカル時刻）
+#   reason      — 何をして解消したか。後から読む人のために必ず書く
+
+resolved:
+  - destination: "localhost"
+    port: 50021
+    stage: "resolve"
+    fixed_at: "2026-08-01 01:30:00"
+    reason: >-
+      pm_tts.VOICEVOX_HOST が http://localhost:50021 のハードコードで、
+      allow-list の 127.0.0.1:50021 と文字列一致しなかった（net_guard の照合は
+      名前解決をしない）。コード側を http://127.0.0.1:50021 に正規化して解消。
+      allow-list に localhost を足す選択は採っていない（許可対象を増やさない）。

@@ -281,6 +281,9 @@ _LOG_SCAN_MAX_BYTES = 32 * 1024 * 1024
 
 _NETGUARD_DENY_MARKER = "[NETGUARD] verdict=deny"
 
+# ログ行先頭のタイムスタンプ（例: "2026-08-01 01:22:15 [ERROR] ..."）
+_LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
 # 報告するグループ数の上限。超過分は件数だけ集計して other_groups に出す。
 _DENY_GROUP_LIMIT = 20
 
@@ -319,18 +322,105 @@ def _iter_log_lines(paths: list[Path]) -> tuple[list[tuple[Path, str]], list[str
     return lines, truncated
 
 
-def check_netguard_deny(logs_dir: Path, days: int) -> list[dict]:
+def _parse_log_timestamp(line: str) -> datetime | None:
+    """ログ行先頭の `YYYY-MM-DD HH:MM:SS` を UTC aware な datetime として返す。
+
+    タイムスタンプを持たないログ（シェルスクリプトの echo 等）では None。
+    ローカル時刻（JST）で書かれているものとして解釈する。
+    """
+    m = _LOG_TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        naive = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return naive.astimezone()
+
+
+def load_netguard_ack(path: Path | None = None) -> list[dict]:
+    """解消済み deny の申告（ack）を読む。
+
+    「直したのに古いログ行が残っていて鳴り続ける」を止めるための仕組み。
+    `fixed_at` より**前**の行だけを抑制するので、修正後に同じ宛先がまた出れば
+    もう一度違反として報告される（恒久的な mute にはならない）。
+    """
+    ack_path = path or (REPO_ROOT / "config" / "netguard_ack.yaml")
+    if not ack_path.is_file():
+        return []
+    try:
+        import yaml
+
+        data = yaml.safe_load(ack_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    entries = data.get("resolved") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for e in entries:
+        if not isinstance(e, dict) or "destination" not in e or "fixed_at" not in e:
+            continue
+        fixed_at = str(e["fixed_at"])
+        try:
+            dt = datetime.strptime(fixed_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            try:
+                dt = datetime.strptime(fixed_at, "%Y-%m-%d")
+            except ValueError:
+                continue
+        out.append(
+            {
+                "destination": str(e["destination"]),
+                "port": str(e["port"]) if e.get("port") is not None else None,
+                "stage": str(e["stage"]) if e.get("stage") else None,
+                "fixed_at": dt.astimezone(),
+                "reason": e.get("reason"),
+            }
+        )
+    return out
+
+
+def _ack_covers(acks: list[dict], stage: str, destination: str, port: str, ts: datetime | None) -> bool:
+    """この deny 行が「解消済みの古い行」として抑制対象かを返す。
+
+    タイムスタンプが読めない行は抑制しない（保守的側に倒す — 抑制の判断材料が
+    無いのに黙らせると、再発を見逃す）。
+    """
+    if ts is None:
+        return False
+    for ack in acks:
+        if ack["destination"] != destination:
+            continue
+        if ack["port"] is not None and ack["port"] != port:
+            continue
+        if ack["stage"] is not None and ack["stage"] != stage:
+            continue
+        if ts < ack["fixed_at"]:
+            return True
+    return False
+
+
+def check_netguard_deny(
+    logs_dir: Path, days: int, acks: list[dict] | None = None
+) -> list[dict]:
     """net_guard が allow-list 外の宛先を記録していないか検査する。
 
     warn モードでは通っている（記録だけ）ので、この検査が唯一の気づき方になる。
     enforce へ倒した後は deny がゼロであることが正常状態なので、1 件でも異常。
+
+    `config/netguard_ack.yaml` に解消済みとして申告された宛先は、その `fixed_at` より
+    前のログ行だけ抑制する（修正後の再発は必ず報告される）。
     """
     paths = _recent_log_files(logs_dir, days)
     if not paths:
         return []
+    if acks is None:
+        acks = load_netguard_ack()
     lines, truncated = _iter_log_lines(paths)
 
     groups: dict[tuple[str, str, object], dict] = {}
+    suppressed = 0
     for path, line in lines:
         if _NETGUARD_DENY_MARKER not in line:
             continue
@@ -340,13 +430,26 @@ def check_netguard_deny(logs_dir: Path, days: int) -> list[dict]:
                 k, _, v = token.partition("=")
                 fields[k] = v
         label = fields.get("host") if fields.get("host", "-") != "-" else fields.get("ip", "-")
-        key = (fields.get("stage", "-"), label or "-", fields.get("port", "-"))
+        stage = fields.get("stage", "-")
+        port = fields.get("port", "-")
+        if _ack_covers(acks, stage, label or "-", port, _parse_log_timestamp(line)):
+            suppressed += 1
+            continue
+        key = (stage, label or "-", port)
         group = groups.setdefault(key, {"count": 0, "callers": [], "files": set()})
         group["count"] += 1
         group["files"].add(path.name)
         caller = fields.get("caller", "-")
         if caller not in group["callers"] and len(group["callers"]) < 3:
             group["callers"].append(caller)
+
+    if suppressed:
+        # 抑制したこと自体は必ず見せる（黙って減らすと「静かになった」と誤読される）
+        print(
+            f"[INFO] netguard_deny: 解消済み申告により {suppressed} 行を抑制しました"
+            " (config/netguard_ack.yaml)",
+            file=sys.stderr,
+        )
 
     ordered = sorted(groups.items(), key=lambda kv: kv[1]["count"], reverse=True)
     violations = []
@@ -435,6 +538,7 @@ def run_checks(
     days: int,
     today: str,
     logs_dir: Path | None = None,
+    security_days: int = 1,
 ) -> list[dict]:
     # audit_log.changed_at は datetime.now(UTC).isoformat()（"+00:00" 付き）で
     # 記録されるため、cutoff も UTC aware で揃える。today（ローカル暦日）基準だと
@@ -449,8 +553,11 @@ def run_checks(
     if state_conn is not None:
         violations += check_state_key_drift(state_conn)
     if logs_dir is not None:
-        violations += check_canary_hits(pm_conn, logs_dir, days)
-        violations += check_netguard_deny(logs_dir, days)
+        # セキュリティ監視のログ走査は独立した窓（既定 1 日）で行う。データ検査の
+        # --days 7 と同じ窓にすると、解消済みの deny が 1 週間鳴り続けて監視が
+        # ノイズになる（2026-08-01 に実際に起きた）。
+        violations += check_canary_hits(pm_conn, logs_dir, security_days)
+        violations += check_netguard_deny(logs_dir, security_days)
     return violations
 
 
@@ -479,6 +586,11 @@ def main() -> int:
     parser.add_argument(
         "--no-security-checks", action="store_true",
         help="canary_hit / netguard_deny をスキップする（データ検査のみ行う）",
+    )
+    parser.add_argument(
+        "--security-days", type=int, default=1, metavar="N",
+        help="canary_hit / netguard_deny が走査するログの対象期間（日数、デフォルト: 1）。"
+             "データ検査の --days とは独立（解消済みの deny が鳴り続けるのを避けるため）",
     )
     args = parser.parse_args()
 
@@ -515,7 +627,9 @@ def main() -> int:
                 file=sys.stderr,
             )
             logs_dir = None
-    violations = run_checks(pm_conn, state_conn, args.days, today, logs_dir)
+    violations = run_checks(
+        pm_conn, state_conn, args.days, today, logs_dir, args.security_days
+    )
 
     pm_conn.close()
     if state_conn is not None:

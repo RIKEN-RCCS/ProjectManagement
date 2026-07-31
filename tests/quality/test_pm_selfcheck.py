@@ -458,3 +458,116 @@ def test_run_checks_skips_security_checks_without_logs_dir(pm_db_path, tmp_path)
     violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-07-31")
     conn.close()
     assert violations == []
+
+
+# --------------------------------------------------------------------------- #
+# netguard_deny の解消済み申告（ack）
+# --------------------------------------------------------------------------- #
+def _write_ack(tmp_path: Path, body: str) -> Path:
+    p = tmp_path / "netguard_ack.yaml"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def _deny_line(ts: str, host: str = "localhost", port: int = 50021, stage: str = "resolve") -> str:
+    return (
+        f"{ts} [ERROR] [NETGUARD] verdict=deny host={host} ip=- port={port}"
+        f" caller=scripts/tts/pm_tts.py:111 stage={stage}\n"
+    )
+
+
+def test_ack_suppresses_lines_before_fixed_at(tmp_path):
+    logs = tmp_path / "logs"
+    _write_log(logs, "qa.log", _deny_line("2026-08-01 01:22:15"))
+    acks = pm_selfcheck.load_netguard_ack(
+        _write_ack(tmp_path, """
+resolved:
+  - destination: "localhost"
+    port: 50021
+    stage: "resolve"
+    fixed_at: "2026-08-01 01:30:00"
+    reason: "テスト"
+""")
+    )
+    assert pm_selfcheck.check_netguard_deny(logs, days=7, acks=acks) == []
+
+
+def test_ack_does_not_suppress_recurrence_after_fixed_at(tmp_path):
+    """修正後に同じ宛先が再発したら、ack があっても必ず報告される。"""
+    logs = tmp_path / "logs"
+    _write_log(logs, "qa.log", _deny_line("2026-08-01 09:00:00"))
+    acks = pm_selfcheck.load_netguard_ack(
+        _write_ack(tmp_path, """
+resolved:
+  - destination: "localhost"
+    port: 50021
+    fixed_at: "2026-08-01 01:30:00"
+    reason: "テスト"
+""")
+    )
+    violations = pm_selfcheck.check_netguard_deny(logs, days=7, acks=acks)
+    assert len(violations) == 1
+    assert violations[0]["destination"] == "localhost"
+
+
+def test_ack_does_not_suppress_lines_without_timestamp(tmp_path):
+    """タイムスタンプが読めない行は抑制しない（判断材料が無いので保守的に報告）。"""
+    logs = tmp_path / "logs"
+    _write_log(
+        logs, "box.log",
+        "[NETGUARD] verdict=deny host=localhost ip=- port=50021 caller=a.py:1 stage=resolve\n",
+    )
+    acks = pm_selfcheck.load_netguard_ack(
+        _write_ack(tmp_path, """
+resolved:
+  - destination: "localhost"
+    port: 50021
+    fixed_at: "2026-08-01 01:30:00"
+    reason: "テスト"
+""")
+    )
+    assert len(pm_selfcheck.check_netguard_deny(logs, days=7, acks=acks)) == 1
+
+
+def test_ack_port_mismatch_is_not_suppressed(tmp_path):
+    logs = tmp_path / "logs"
+    _write_log(logs, "qa.log", _deny_line("2026-08-01 01:22:15", port=9999))
+    acks = pm_selfcheck.load_netguard_ack(
+        _write_ack(tmp_path, """
+resolved:
+  - destination: "localhost"
+    port: 50021
+    fixed_at: "2026-08-01 01:30:00"
+    reason: "テスト"
+""")
+    )
+    assert len(pm_selfcheck.check_netguard_deny(logs, days=7, acks=acks)) == 1
+
+
+def test_load_netguard_ack_missing_file_is_empty(tmp_path):
+    assert pm_selfcheck.load_netguard_ack(tmp_path / "nope.yaml") == []
+
+
+def test_run_checks_uses_security_days_for_log_scan(pm_db_path, tmp_path):
+    """データ検査は --days、ログ走査は --security-days の窓を使う。"""
+    import os
+
+    logs = tmp_path / "logs"
+    # 宛先はリポジトリの config/netguard_ack.yaml に載っていないものを使う
+    # （既定の ack が読まれるため、載っている宛先だと抑制されてしまう）
+    path = _write_log(
+        logs, "qa.log", _deny_line("2026-07-28 01:00:00", host="evil.example", port=443)
+    )
+    old = datetime.now(UTC).timestamp() - 3 * 86400
+    os.utime(path, (old, old))
+
+    conn = _open_plain(pm_db_path)
+    v_wide = pm_selfcheck.run_checks(
+        conn, None, days=7, today="2026-08-01", logs_dir=logs, security_days=7
+    )
+    v_narrow = pm_selfcheck.run_checks(
+        conn, None, days=7, today="2026-08-01", logs_dir=logs, security_days=1
+    )
+    conn.close()
+    assert any(v["check"] == "netguard_deny" for v in v_wide)
+    assert v_narrow == []

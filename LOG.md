@@ -7,6 +7,36 @@
 
 ---
 
+## 2026-08-01 net_guard を enforce へ（デーモン先行）— 初回の deny は綴り不一致だった
+
+**経緯**: warn 1 周（cron を手動で全実行）で deny 0 を確認し、`pm_daemon.sh` に qa/web 限定で
+`ARGUS_NETGUARD=enforce` を既定化。cron は各自が `~/.secrets/*.sh` を source する別経路なので
+影響を受けない（デーモン先行 → 1 日観測 → cron の段階導入）。両デーモンは
+`EndpointMismatchError` を出さず起動し、embedding は `localhost:8001` エントリで
+resolve→connect の連鎖が enforce でも通ることを実接続で確認した。
+**enforce 初日の唯一の deny**: `/argus-brief` 実行時に `host=localhost port=50021`
+（VOICEVOX）が resolve 段で遮断された。原因は `pm_tts.VOICEVOX_HOST` が
+`http://localhost:50021` のハードコードで、allow-list は `127.0.0.1:50021` だったこと。
+**判断**: allow-list に `localhost` を足すのではなく**コード側を 127.0.0.1 に正規化**した
+（許可対象を増やさない、`/etc/hosts` に依存させない）。同じ綴り不一致は
+`DOCLING_SERVE_URL` / `FISH_TTS_HOST` でも起きており、これで 3 件目。
+**教訓**: net_guard の照合は名前解決をしない文字列一致なので、**ローカルサービスの宛先は
+コード・環境変数の両方で `127.0.0.1` 表記に統一する**。数値 IP リテラルは resolve 段を
+スキップし connect 段のリテラル一致で通るため、綴りの揺れ自体が起きない。
+**別件（enforce とは無関係）**: 同じ `/argus-brief` で fish-speech への接続が
+`Connection refused` になった。これは allow-list 済み宛先へのサービス未起動であり遮断ではない。
+`FISH_TTS_HOST` が設定されている間 pm_tts は fish を選ぶため、fish 停止中は TTS が失敗する。
+
+**監視のノイズ対策（同日、上の deny をきっかけに判明）**: 修正済みの deny がログに残る限り
+`netguard_deny` が `--days 7` の窓で鳴り続ける設計だった。**監視がノイズになると見られなく
+なり、監視が無いのと同じになる**ため 2 点入れた。(1) ログ走査の窓をデータ検査から分離
+（`--security-days`、既定 1 日）、(2) `config/netguard_ack.yaml` に解消済みを申告する仕組み。
+ack は**恒久 mute ではない** — 抑制するのは `fixed_at` より前のタイムスタンプを持つ行だけで、
+修正後の再発は必ず報告される。タイムスタンプを読めない行は抑制しない（判断材料が無いのに
+黙らせると再発を見逃す）。抑制件数は毎回 stderr に出す（黙って減らすと「静かになった」と誤読
+される）。**「宛先が正当だった」場合は allow-list に足すのが正しく、ack に書いて黙らせない** —
+混同すると allow-list が実態と乖離する。
+
 ## 2026-08-01 pm_web_fetch.py を廃止 — 認証境界の外へ出る経路が無くなった
 
 **背景**: §4.5 の判断（隔離ではなく廃止）を実行。外部 URL の取得は攻撃者が管理しうるサーバへの

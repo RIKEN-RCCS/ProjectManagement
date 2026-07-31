@@ -143,6 +143,19 @@ cmd_start() {
         # shellcheck disable=SC1091
         source "$HOME/.secrets/fish_tts.sh"
     fi
+    # net_guard（外向き通信の allow-list、docs/security-architecture.md §4.7 層1）を
+    # デーモンでは enforce にする。allow-list 外の宛先は resolve/connect の両段で
+    # PermissionError になり、起動時には from_env の実値照合が走る（不一致なら起動しない）。
+    #
+    # ここで export するのは qa/web のデーモンだけ。cron スクリプトは各自が
+    # ~/.secrets/*.sh を source する別経路なので影響を受けない（意図的な段階導入 —
+    # デーモンを先に enforce にして1日観測し、問題なければ cron 側にも広げる）。
+    # 退避が必要なときは ARGUS_NETGUARD=warn を環境に置いて再起動すればこの既定を上書きできる。
+    if [[ "$name" == "qa" || "$name" == "web" ]]; then
+        export ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"
+        echo "net_guard mode: ${ARGUS_NETGUARD}"
+    fi
+
     if [[ "$name" == "docling" ]]; then
         # MAX_SYNC_WAIT はサーバ側同期待ちの上限。既定 120s のままだと大型 PDF
         # （table_mode=accurate）が途中で 404 を返しクライアントがフォールバックする。
