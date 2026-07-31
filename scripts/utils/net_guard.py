@@ -58,6 +58,17 @@ fail-open（WARN ログのみ）、enforce では `EndpointMismatchError` で起
         ログから `[NETGUARD] verdict=deny` 行を集計し、allow-list に
         追加すべき候補を提示する。
 
+    python3 scripts/utils/net_guard.py --plant-hostname-canary [--notes TEXT]
+        hostname canary を発行して pm.db の canary_tokens に登録する（§4.3）。
+        ホスト名は `.internal-check.invalid`（RFC 2606 予約 TLD）なので正引きは
+        原理的に成功しない。発行時に「canary が allow-list に一致しないこと」を
+        検証する（一致していたら検知面が消えるので例外で止める）。
+
+    python3 scripts/utils/net_guard.py --list-canaries
+    python3 scripts/utils/net_guard.py --revoke-canary <TOKEN>
+        canary 台帳の一覧・失効。発火の検知は pm_selfcheck.py の
+        canary_hit / netguard_deny チェックが行う（cron 06:30 平日）。
+
 既知の限界（P10 — この対策が何を証明し、何を証明しないか）:
 
 - 証明するのは「この Python プロセス内のどのコード経路もリスト外ホストに
@@ -655,9 +666,63 @@ def summarize_log(lines) -> str:
     return "\n".join(out)
 
 
+# --------------------------------------------------------------------------- #
+# hostname canary（docs/security-architecture.md §4.3）
+# --------------------------------------------------------------------------- #
+
+def host_in_allowlist_any_port(host: str, entries: list[dict] | None = None) -> bool:
+    """host が allow-list のどれか（ポートを問わず）に一致するか。
+
+    canary ホスト名が allow-list に載っていないことの検証に使う。載っていると
+    canary への到達が `verdict=allow` になり、検知面が丸ごと消えるため。
+    """
+    if entries is None:
+        entries = _get_allowlist()
+    return any(_host_allowed(host, entry.get("port"), [entry]) for entry in entries)
+
+
+def plant_hostname_canary(db_path, *, no_encrypt: bool = False, notes: str | None = None) -> dict:
+    """hostname canary を発行して pm.db の canary_tokens に登録する。
+
+    ホスト名は `.internal-check.invalid`（RFC 2606 予約 TLD）なので、正引きが
+    成功することは無い。したがって「このホスト名の解決が試みられた」= 到達を
+    試みた主体が居た、という強いシグナルになる（enforce なら resolve 段で
+    遮断され、warn でも `verdict=deny stage=resolve` として記録される）。
+
+    埋め込み先（Box 文書・議事録等）への実際の記載は呼び出し側／運用の責務で、
+    ここでは台帳登録までを行う（planted_in='registry_only'）。
+    """
+    from db_utils import (  # 遅延 import（循環回避）
+        CANARY_HOSTNAME_SUFFIX,
+        open_db,
+        plant_canary,
+    )
+
+    conn = open_db(db_path, encrypt=not no_encrypt)
+    try:
+        row = plant_canary(
+            conn,
+            kind="hostname",
+            planted_in="registry_only",
+            notes=notes or f"hostname canary（{CANARY_HOSTNAME_SUFFIX} / RFC 2606 予約 TLD）",
+        )
+    finally:
+        conn.close()
+
+    if host_in_allowlist_any_port(row["token"]):
+        raise RuntimeError(
+            f"NETGUARD: 発行した canary ホスト名 {row['token']} が allow-list に一致します。"
+            "allow-list を修正してください（canary は必ず allow-list 外である必要があります）。"
+        )
+    return row
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="net_guard 運用支援 CLI（--print-env-hosts / --summarize-log）"
+        description=(
+            "net_guard 運用支援 CLI"
+            "（--print-env-hosts / --summarize-log / canary の発行・一覧・失効）"
+        )
     )
     parser.add_argument(
         "--print-env-hosts",
@@ -668,6 +733,37 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--summarize-log",
         metavar="PATH",
         help="ログファイル（'-' で stdin）から [NETGUARD] verdict=deny 行を集計する",
+    )
+    parser.add_argument(
+        "--plant-hostname-canary",
+        action="store_true",
+        help="hostname canary を発行して pm.db の canary_tokens に登録する（§4.3）",
+    )
+    parser.add_argument(
+        "--list-canaries",
+        action="store_true",
+        help="canary_tokens の active な行を一覧する",
+    )
+    parser.add_argument(
+        "--revoke-canary",
+        metavar="TOKEN",
+        help="指定した canary を失効させる（行は残す）",
+    )
+    parser.add_argument(
+        "--notes",
+        default=None,
+        help="--plant-hostname-canary 時に台帳へ残すメモ（埋め込み先など）",
+    )
+    parser.add_argument(
+        "--db",
+        default=None,
+        metavar="PATH",
+        help="pm.db のパス（既定: <repo>/data/pm.db）。canary 系サブコマンドで使う",
+    )
+    parser.add_argument(
+        "--no-encrypt",
+        action="store_true",
+        help="pm.db を平文で開く（canary 系サブコマンド）",
     )
     return parser
 
@@ -686,6 +782,49 @@ def main(argv: list[str] | None = None) -> int:
                 lines = f.readlines()
         print(summarize_log(lines))
         return 0
+
+    if args.plant_hostname_canary or args.list_canaries or args.revoke_canary:
+        from pathlib import Path as _Path
+
+        db_path = _Path(args.db) if args.db else _REPO_ROOT / "data" / "pm.db"
+        if args.plant_hostname_canary:
+            row = plant_hostname_canary(
+                db_path, no_encrypt=args.no_encrypt, notes=args.notes
+            )
+            print(f"植えた canary: {row['token']}")
+            print(f"  kind={row['kind']} planted_in={row['planted_in']} planted_at={row['planted_at']}")
+            print("  次にやること: このホスト名を「モデルが読む場所」に記載する")
+            print("    （例: Box 文書・議事録本文。人間向けレポートに出る場所は避ける）")
+            print("  記載したら --notes 相当を canary_tokens.row_ref に反映しておく")
+            return 0
+        if args.revoke_canary:
+            from db_utils import open_db, revoke_canary
+
+            conn = open_db(db_path, encrypt=not args.no_encrypt)
+            try:
+                ok = revoke_canary(conn, args.revoke_canary)
+            finally:
+                conn.close()
+            print("失効させました" if ok else f"該当する canary がありません: {args.revoke_canary}")
+            return 0 if ok else 1
+
+        from db_utils import list_canaries, open_db
+
+        conn = open_db(db_path, encrypt=not args.no_encrypt)
+        try:
+            rows = list_canaries(conn, active_only=True)
+        finally:
+            conn.close()
+        if not rows:
+            print("active な canary はありません")
+            return 0
+        for row in rows:
+            in_allowlist = host_in_allowlist_any_port(row["token"]) if row["kind"] == "hostname" else False
+            warn = "  ★allow-list に一致（検知面が消えています）" if in_allowlist else ""
+            print(f"{row['token']}  kind={row['kind']} planted_in={row['planted_in']}"
+                  f" row_ref={row['row_ref'] or '-'} planted_at={row['planted_at']}{warn}")
+        return 0
+
     parser.print_help()
     return 1
 

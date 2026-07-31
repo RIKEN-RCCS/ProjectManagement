@@ -543,3 +543,72 @@ def test_summarize_log_empty_input_reports_no_candidates():
 
     assert "解析できなかった行: 0件" in output
     assert "該当する deny 行なし" in output
+
+
+# --------------------------------------------------------------------------- #
+# hostname canary（docs/security-architecture.md §4.3）
+# --------------------------------------------------------------------------- #
+
+class TestHostnameCanary:
+    def test_host_in_allowlist_any_port_matches_regardless_of_port(self, monkeypatch):
+        entries = [{"host": "slack.com", "port": 443}]
+        monkeypatch.setattr(net_guard, "_get_allowlist", lambda: entries)
+        assert net_guard.host_in_allowlist_any_port("slack.com") is True
+        assert net_guard.host_in_allowlist_any_port("evil.example") is False
+
+    def test_host_in_allowlist_any_port_honours_wildcard(self, monkeypatch):
+        entries = [{"host": "*.slack.com", "port": 443}]
+        monkeypatch.setattr(net_guard, "_get_allowlist", lambda: entries)
+        assert net_guard.host_in_allowlist_any_port("wss-1.slack.com") is True
+
+    def test_canary_hostname_is_not_in_real_allowlist(self):
+        """実際の config/network_allowlist.yaml に canary ドメインが載っていないこと。
+
+        載っていると canary への到達が verdict=allow になり検知面が消える。
+        """
+        from db_utils import CANARY_HOSTNAME_SUFFIX
+
+        host = f"docs-deadbeef{CANARY_HOSTNAME_SUFFIX}"
+        assert net_guard.host_in_allowlist_any_port(host) is False
+
+    def test_plant_hostname_canary_registers_row(self, tmp_path):
+        from db_utils import CANARY_HOSTNAME_SUFFIX, init_pm_db, list_canaries, open_db
+
+        db = tmp_path / "pm.db"
+        init_pm_db(db, no_encrypt=True).close()
+
+        row = net_guard.plant_hostname_canary(db, no_encrypt=True, notes="テスト")
+        assert row["kind"] == "hostname"
+        assert row["token"].endswith(CANARY_HOSTNAME_SUFFIX)
+        assert row["planted_in"] == "registry_only"
+
+        conn = open_db(db, encrypt=False)
+        rows = list_canaries(conn)
+        conn.close()
+        assert [r["token"] for r in rows] == [row["token"]]
+
+    def test_plant_hostname_canary_rejects_allowlisted_domain(self, tmp_path, monkeypatch):
+        """canary ドメインが allow-list に載っている構成では発行を失敗させる。"""
+        from db_utils import CANARY_HOSTNAME_SUFFIX, init_pm_db
+
+        db = tmp_path / "pm.db"
+        init_pm_db(db, no_encrypt=True).close()
+        entries = [{"host": f"*{CANARY_HOSTNAME_SUFFIX}", "port": None}]
+        monkeypatch.setattr(net_guard, "_get_allowlist", lambda: entries)
+
+        with pytest.raises(RuntimeError, match="allow-list"):
+            net_guard.plant_hostname_canary(db, no_encrypt=True)
+
+    def test_revoke_canary_marks_inactive(self, tmp_path):
+        from db_utils import init_pm_db, list_canaries, open_db, revoke_canary
+
+        db = tmp_path / "pm.db"
+        init_pm_db(db, no_encrypt=True).close()
+        row = net_guard.plant_hostname_canary(db, no_encrypt=True)
+
+        conn = open_db(db, encrypt=False)
+        assert revoke_canary(conn, row["token"]) is True
+        assert list_canaries(conn, active_only=True) == []
+        assert len(list_canaries(conn, active_only=False)) == 1
+        assert revoke_canary(conn, "no-such-token") is False
+        conn.close()

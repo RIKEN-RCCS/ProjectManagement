@@ -316,3 +316,145 @@ def test_run_checks_returns_no_violations_for_clean_db(pm_db_path):
     violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-07-27")
     conn.close()
     assert violations == []
+
+
+# --------------------------------------------------------------------------- #
+# 6-7. セキュリティ監視（canary_hit / netguard_deny）
+# --------------------------------------------------------------------------- #
+def _write_log(logs_dir: Path, name: str, body: str) -> Path:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _insert_canary(conn, token: str, kind: str = "hostname") -> None:
+    from db_utils import ensure_canary_table
+
+    ensure_canary_table(conn)
+    conn.execute(
+        "INSERT INTO canary_tokens (token, planted_in, row_ref, planted_at, active, kind, notes)"
+        " VALUES (?, 'box_docs', 'doc:1', ?, 1, ?, NULL)",
+        (token, datetime.now(UTC).isoformat(), kind),
+    )
+    conn.commit()
+
+
+def test_check_netguard_deny_groups_by_destination(tmp_path):
+    logs = tmp_path / "logs"
+    _write_log(
+        logs, "qa.log",
+        "[NETGUARD] verdict=deny host=evil.example ip=- port=443"
+        " caller=scripts/argus/qa_engine.py:12 stage=resolve\n"
+        "[NETGUARD] verdict=deny host=evil.example ip=- port=443"
+        " caller=scripts/argus/qa_engine.py:12 stage=resolve\n"
+        "[NETGUARD] verdict=allow host=slack.com ip=- port=443 caller=x.py:1 stage=resolve\n"
+        "無関係なログ行\n",
+    )
+    violations = pm_selfcheck.check_netguard_deny(logs, days=7)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v["check"] == "netguard_deny"
+    assert v["destination"] == "evil.example"
+    assert v["count"] == 2
+    assert v["stage"] == "resolve"
+    assert "qa.log" in v["log_files"]
+
+
+def test_check_netguard_deny_uses_ip_when_host_absent(tmp_path):
+    logs = tmp_path / "logs"
+    _write_log(
+        logs, "web.log",
+        "[NETGUARD] verdict=deny host=- ip=203.0.113.9 port=80 caller=a.py:2 stage=connect\n",
+    )
+    violations = pm_selfcheck.check_netguard_deny(logs, days=7)
+    assert violations[0]["destination"] == "203.0.113.9"
+    assert violations[0]["stage"] == "connect"
+
+
+def test_check_netguard_deny_ignores_old_logs(tmp_path):
+    import os
+
+    logs = tmp_path / "logs"
+    path = _write_log(
+        logs, "old.log",
+        "[NETGUARD] verdict=deny host=evil.example ip=- port=443 caller=a.py:1 stage=resolve\n",
+    )
+    old = datetime.now(UTC).timestamp() - 30 * 86400
+    os.utime(path, (old, old))
+    assert pm_selfcheck.check_netguard_deny(logs, days=7) == []
+
+
+def test_check_netguard_deny_clean_logs(tmp_path):
+    logs = tmp_path / "logs"
+    _write_log(logs, "qa.log", "[NETGUARD] verdict=allow host=slack.com ip=- port=443 caller=a.py:1 stage=resolve\n")
+    assert pm_selfcheck.check_netguard_deny(logs, days=7) == []
+
+
+def test_check_canary_hits_detects_token_in_log(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    token = "docs-deadbeef.internal-check.invalid"
+    _insert_canary(conn, token)
+
+    logs = tmp_path / "logs"
+    _write_log(
+        logs, "qa.log",
+        f"[NETGUARD] verdict=deny host={token} ip=- port=443 caller=a.py:1 stage=resolve\n",
+    )
+    violations = pm_selfcheck.check_canary_hits(conn, logs, days=7)
+    conn.close()
+
+    assert len(violations) == 1
+    assert violations[0]["check"] == "canary_hit"
+    assert violations[0]["token"] == token
+    assert violations[0]["kind"] == "hostname"
+    assert violations[0]["count"] == 1
+
+
+def test_check_canary_hits_ignores_revoked(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    token = "ARGUS-CANARY-abcd1234"
+    _insert_canary(conn, token, kind="text")
+    conn.execute("UPDATE canary_tokens SET active = 0 WHERE token = ?", (token,))
+    conn.commit()
+
+    logs = tmp_path / "logs"
+    _write_log(logs, "qa.log", f"leaked {token} somewhere\n")
+    violations = pm_selfcheck.check_canary_hits(conn, logs, days=7)
+    conn.close()
+    assert violations == []
+
+
+def test_check_canary_hits_without_table_is_noop(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    conn.execute("DROP TABLE IF EXISTS canary_tokens")
+    conn.commit()
+    logs = tmp_path / "logs"
+    _write_log(logs, "qa.log", "何もない\n")
+    violations = pm_selfcheck.check_canary_hits(conn, logs, days=7)
+    conn.close()
+    assert violations == []
+
+
+def test_run_checks_includes_security_checks_when_logs_dir_given(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    token = "docs-cafebabe.internal-check.invalid"
+    _insert_canary(conn, token)
+    logs = tmp_path / "logs"
+    _write_log(
+        logs, "qa.log",
+        f"[NETGUARD] verdict=deny host={token} ip=- port=443 caller=a.py:1 stage=resolve\n",
+    )
+    violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-07-31", logs_dir=logs)
+    conn.close()
+    checks = {v["check"] for v in violations}
+    assert "canary_hit" in checks
+    assert "netguard_deny" in checks
+
+
+def test_run_checks_skips_security_checks_without_logs_dir(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    _insert_canary(conn, "docs-0badf00d.internal-check.invalid")
+    violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-07-31")
+    conn.close()
+    assert violations == []

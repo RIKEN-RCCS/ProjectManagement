@@ -30,10 +30,45 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    Canvas `--recreate`、Box 共有リンク作成。Patrol は 30 分間隔なので放置で出る。
    **飛ばすと、稀にしか動かない経路が enforce 後に初めて落ちる**（warn 中は何も止まらないので
    「1 周した」の判定はログでしかできない）
-2. **`pm_web_fetch.py` の廃止** — 認証境界の外へ出る唯一の経路。`web_articles.db` は保持
-   （取得を止めた時点でリスクは消えるため、既存データの削除は不要）。
-   **`pm_web_update.sh` は現在 cron に載っていないため、コード削除だけで済む**（運用の穴埋め不要）
-3. **hostname canary + 監視** — 2 の後は `verdict=deny` が無条件に異常シグナルになる
+
+   **warn 初日（2026-08-01、qa 再起動後）に出た起動時照合 NG 2 件 — enforce 前に必須で解消する**
+   （enforce では `EndpointMismatchError` で**デーモンが起動しない**）:
+   - `FISH_TTS_HOST` expected=`127.0.0.1:8080` actual=`localhost:8080` — 綴り不一致
+   - `DOCLING_SERVE_URL` expected=`127.0.0.1:5001` actual=`localhost:-` — 綴り不一致 + **ポート無し**
+   docling は `pm_box_update.sh` の既定（`http://127.0.0.1:5001`）とは一致するが、
+   **qa デーモンの環境では別の値（localhost・ポート無し）が入っている**。つまり
+   「127.0.0.1:5001 が確定値」は box crawl 経路についてのみ正しかった。
+   対処は (i) allow-list に `localhost` 綴りのエントリを併記するか、(ii) 環境変数側を
+   `http://127.0.0.1:5001` に正規化するかのどちらか。**(ii) を推奨**（許可対象が増えないため）
+2. ~~**`pm_web_fetch.py` の廃止**~~ → **2026-08-01 完了**（`pm_web_fetch.py` / 旧パス symlink /
+   `pm_web_update.sh` を削除。`web_articles.db` は保持し既存チャンクは検索可能のまま。
+   復活は `test_web_fetch_scripts_are_gone` が検出）。
+   **これで Argus の推論経路から認証境界の外へ出る経路は無くなった**
+3. **hostname canary + 監視** — 2 の後は `verdict=deny` が無条件に異常シグナルになる。
+   **機構は実装済み（2026-07-31）**: `canary_tokens` テーブル（pm.db）、`net_guard.py` の
+   `--plant-hostname-canary` / `--list-canaries` / `--revoke-canary`、`pm_selfcheck.py` の
+   `canary_hit` / `netguard_deny`（既に cron 06:30 平日で回っているジョブに同乗。違反時 exit 1）。
+   **残っている運用手順**:
+   - (a) ~~qa/web デーモンの再起動~~ → **qa は 2026-08-01 に再起動済み**（`[NETGUARD]` 行が
+     出始め、warn 期間が開始）。**`pm_api`（web、7/27 起動）は未再起動でフック無し** —
+     Web UI 経由のジョブ（embed / xlsx / minutes publish）は依然として観測できていない
+   - (b) 本番 pm.db への `canary_tokens` 作成（`--plant-hostname-canary` が自動で作る）
+   - (c) **canary の植え付け** — 発行したホスト名を「モデルが読む場所」に記載する。
+     人間向けレポートに出る場所（pm.db の action_items / decisions）に植えるには
+     先に `is_canary` 列と全レポート経路での除外が必要（§4.3）。除外漏れは PM の
+     レポートに架空項目を出すため、**box_docs 側から始める**のが安全
+   - (d) アラートの届け先 — 現状は exit 1 + `logs/pm_selfcheck.log` のみで、人が見に
+     行かないと気づけない。Slack への通知は Phase 3 のブローカー経由にする
+     （ここで場当たりの egress を足すと allow-list の意味が薄れる）
+   - (e) **canary の生存確認チェックが無い**（実装済みなのは発火検知だけ）。植えた行が
+     同名PDFクリーンアップで消える / `relevance='noise'` を付けられて索引から落ちる /
+     `pm_embed` の対象外になる — どれが起きても監視は「異常なし」を出し続ける。
+     **植えるなら「box_docs に存在し qa_index にチャンクがある」ことの検査を同時に入れる**
+   - **費用対効果の再評価（2026-08-01）**: 植え付けは (c) より先に `tool_calls` 記録
+     （下記 5）を入れる方が増分が大きい。理由は §4.3 の検知点②（出力・ツール引数）が
+     未実装で出力側を覆えていないこと、およびモデルが呼べる 13 ツールに URL 取得が無く
+     「餌に噛める口が無い」こと。未知の宛先への到達自体は canary 無しで
+     `netguard_deny` が拾う
 4. **Box 既存共有リンクの正規化** — 事前に「読ませたい人が全員 collaborator か」を Box 側で
    揃える（順序を逆にすると一時的にリンク切れ）
 5. `tool_calls` 記録 / `top_k` 200→100→50 の被害半径実測（P7 の文脈軸）
@@ -43,7 +78,8 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 
 HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0）。再発は pre-commit の
-3 lint（`no-box-open-company-access` / `net-guard-import-required` / `no-slack-id-literals`）が防ぐ。
+4 lint（`no-box-open-company-access` / `net-guard-import-required` / `no-slack-id-literals` /
+`no-mcp-server-registration`）が防ぐ。
 
 - **人名 — 当面そのまま（2026-07-31 PM 判断）。** 敬称つきで 18 件 / 7 ファイル。
   **敬称なしの姓はパターンで検出できない**（例: `patrol/users.py` の docstring）。

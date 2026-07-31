@@ -7,6 +7,39 @@
 
 ---
 
+## 2026-08-01 pm_web_fetch.py を廃止 — 認証境界の外へ出る経路が無くなった
+
+**背景**: §4.5 の判断（隔離ではなく廃止）を実行。外部 URL の取得は攻撃者が管理しうるサーバへの
+外向きリクエストであり、URL・パラメータ・タイミングがそのままチャネルになる。Box/Slack が
+認証で守られていることは宛先が境界の外なので一切の助けにならない。
+**決定**: `pm_web_fetch.py`（+ 旧パス symlink・`pm_web_update.sh`）を削除。**`web_articles.db` は
+残す** — 取得を止めた時点でリスクは消えるため、蓄積データのパージは不要。既存チャンクは
+`search_text` で引き続き引ける。`pm_embed.py` はコード変更なし（追記元が消えただけ）。
+**再発防止**: `test_web_fetch_scripts_are_gone` で 3 ファイルの不在を固定し、
+`net-guard-import-required` lint の除外リストから pm_web_fetch を削除（除外を残すと、同じ名前で
+新しい実装が入ったとき net_guard 無しで素通りする）。
+**代替**: 記事が必要なら人が Box に置き `pm_box_crawl.py` の既存経路に乗せる（人間の判断が入る）。
+**副産物**: canary のシグナルが明確になった。正当なフェッチャーが存在しなくなったので、
+canary ホスト名への名前解決が観測されたら無条件に異常。
+
+## 2026-07-31 canary + 監視を実装 — 既存の selfcheck ジョブに同乗させ、新デーモンを増やさない
+
+**背景**: §4.3 の canary は「安価で既存コードをほとんど触らない」ことが採用理由。専用の
+監視デーモンを立てると、その分だけ守る対象が増えて本末転倒になる。
+**決定**: 検知を `pm_selfcheck.py`（既に cron 06:30 平日・読み取り専用・違反で exit 1）に
+`canary_hit` / `netguard_deny` として追加。canary の発行・失効は `net_guard.py` の CLI に置いた
+（allow-list との衝突検証を同じモジュールで持てるため。db_utils は遅延 import で循環回避）。
+ホスト名は `.internal-check.invalid`（RFC 2606 予約 TLD）— 実在ドメインだと「canary への到達」が
+本物の外部 DNS クエリになってしまう。
+**踏んだバグ**: テーブル未作成の吸収を `except sqlite3.OperationalError` で書いたところ、
+**SQLCipher の例外は標準 sqlite3 の派生でないため暗号化 DB でだけ落ちた**（平文のテストは全部通る）。
+`table_exists()`（sqlite_master 参照）に置き換えた。暗号化 DB を扱う箇所で例外クラスに依存する
+判定を書かない、が教訓。
+**判明**: 稼働中の qa デーモンは net_guard 導入（20:28）より前の 11:48 起動で、`[NETGUARD]` 行が
+1 本も出ていない。**warn 期間はまだ始まっていない**（再起動が前提条件）。
+**保留**: canary の実データへの植え付け。人間向けレポート経路の `is_canary` 除外が無い状態で
+pm.db に植えると架空のアクションアイテムが PM のレポートに出るため、box_docs 側から始める。
+
 ## 2026-07-31 MCP Server（pm-multi-agent）を丸ごと廃止 — 2 箇所目のチョークポイントを消す
 
 **背景**: `investigate` ループには `COMMAND_TOOLS` allow-list を入れたが、`pm_mcp_server.py` は

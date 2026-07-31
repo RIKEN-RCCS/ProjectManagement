@@ -301,6 +301,21 @@ CREATE TABLE IF NOT EXISTS achievements (
 );
 CREATE INDEX IF NOT EXISTS idx_achievements_app ON achievements(app);
 
+-- canary トークン台帳（docs/security-architecture.md §4.3）。
+-- 「植えた canary が、本来出てこない場所に現れたか」を検知するための正本。
+-- 実際の検知は pm_selfcheck.py の canary_hit / netguard_deny チェックが行う。
+-- token は「スキャン対象の文字列そのもの」を入れる（kind='hostname' なら
+-- ホスト名、kind='text' なら ARGUS-CANARY-xxxx 形式のトークン）。
+CREATE TABLE IF NOT EXISTS canary_tokens (
+    token       TEXT PRIMARY KEY,
+    planted_in  TEXT NOT NULL,   -- 'action_items' | 'decisions' | 'minutes' | 'box_docs' | 'slack' | 'registry_only'
+    row_ref     TEXT,            -- 埋めた行の参照（未植え付けなら NULL）
+    planted_at  TEXT NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1,
+    kind        TEXT NOT NULL,   -- 'text' | 'hostname'
+    notes       TEXT
+);
+
 -- 変更履歴（pm_relink.py / pm_sync_canvas.py / pm_xlsx_sync.py 等が共有）。
 -- pm_xlsx_sync.py の鮮度ガードが SELECT するため、pm.db 生成時から必ず存在させる。
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -350,6 +365,122 @@ def init_pm_db(db_path: Path, no_encrypt: bool = False):
             "ALTER TABLE decisions ADD COLUMN ledger_gate_reason TEXT",
         ],
     )
+
+
+# --------------------------------------------------------------------------- #
+# canary トークン台帳（docs/security-architecture.md §4.3）
+# --------------------------------------------------------------------------- #
+
+# hostname canary のドメイン。`.invalid` は RFC 2606 の予約 TLD であり、
+# 正引きは原理的に成功しない。実在ドメインを使うと「canary への到達」が
+# 本物の外部 DNS クエリになってしまうため、必ず予約 TLD を使う。
+CANARY_HOSTNAME_SUFFIX = ".internal-check.invalid"
+
+_CANARY_DDL = """
+CREATE TABLE IF NOT EXISTS canary_tokens (
+    token       TEXT PRIMARY KEY,
+    planted_in  TEXT NOT NULL,
+    row_ref     TEXT,
+    planted_at  TEXT NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1,
+    kind        TEXT NOT NULL,
+    notes       TEXT
+);
+"""
+
+
+def table_exists(conn: "_sqlite3.Connection", name: str) -> bool:
+    """テーブルの存在を sqlite_master で確認する。
+
+    例外での判定にはしない。SQLCipher 使用時の `sqlcipher3.dbapi2.OperationalError`
+    は標準 `sqlite3.OperationalError` の派生ではないため、`except sqlite3.OperationalError`
+    では捕まらず、暗号化 DB でだけ落ちる（実際に踏んだ）。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def ensure_canary_table(conn: "_sqlite3.Connection") -> None:
+    """canary_tokens テーブルを作成する（既存 pm.db への後付け用・冪等）。
+
+    init_pm_db() を経由しない既存 DB でも動くようにするため、スキーマ定義と
+    同じ DDL をここでも実行できるようにしてある。
+    """
+    conn.executescript(_CANARY_DDL)
+    conn.commit()
+
+
+def _new_canary_token(kind: str) -> str:
+    suffix = secrets.token_hex(4)
+    if kind == "hostname":
+        return f"docs-{suffix}{CANARY_HOSTNAME_SUFFIX}"
+    return f"ARGUS-CANARY-{suffix}"
+
+
+def plant_canary(
+    conn: "_sqlite3.Connection",
+    *,
+    kind: str,
+    planted_in: str,
+    row_ref: str | None = None,
+    notes: str | None = None,
+    token: str | None = None,
+) -> dict:
+    """canary を台帳に登録して、登録した行を dict で返す。
+
+    kind='hostname' の場合、token はスキャン対象のホスト名そのものになる。
+    planted_in='registry_only' は「台帳に登録したがまだどこにも埋めていない」
+    状態を表す（発行だけ先に済ませて植え付けは別途行う運用のため）。
+
+    実データ（pm.db の行・box_docs の文書等）への埋め込みは呼び出し側の責務。
+    """
+    from datetime import UTC, datetime
+
+    if kind not in ("text", "hostname"):
+        raise ValueError(f"kind は 'text' | 'hostname' のいずれか: {kind!r}")
+    ensure_canary_table(conn)
+    tok = token or _new_canary_token(kind)
+    planted_at = datetime.now(UTC).isoformat()
+    conn.execute(
+        "INSERT INTO canary_tokens (token, planted_in, row_ref, planted_at, active, kind, notes)"
+        " VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (tok, planted_in, row_ref, planted_at, kind, notes),
+    )
+    conn.commit()
+    return {
+        "token": tok,
+        "planted_in": planted_in,
+        "row_ref": row_ref,
+        "planted_at": planted_at,
+        "active": 1,
+        "kind": kind,
+        "notes": notes,
+    }
+
+
+def list_canaries(conn: "_sqlite3.Connection", *, active_only: bool = True) -> list[dict]:
+    """canary_tokens を新しい順に返す。テーブルが無い場合は空リスト。"""
+    if not table_exists(conn, "canary_tokens"):
+        return []
+    sql = "SELECT token, planted_in, row_ref, planted_at, active, kind, notes FROM canary_tokens"
+    if active_only:
+        sql += " WHERE active = 1"
+    sql += " ORDER BY planted_at DESC"
+    return [dict(row) for row in conn.execute(sql).fetchall()]
+
+
+def revoke_canary(conn: "_sqlite3.Connection", token: str) -> bool:
+    """canary を失効させる（行は残す）。対象が無ければ False。"""
+    cur = conn.execute("UPDATE canary_tokens SET active = 0 WHERE token = ?", (token,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def active_canary_tokens(conn: "_sqlite3.Connection") -> list[str]:
+    """active な canary の token 文字列（＝スキャン対象）を返す。"""
+    return [row["token"] for row in list_canaries(conn, active_only=True)]
 
 
 def normalize_assignee(name: str | None) -> str | None:

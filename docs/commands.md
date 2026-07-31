@@ -891,59 +891,18 @@ sources:
 
 定期運用は `pm_box_update.sh` を crontab に登録、relevance 判定は新規追加時のみ実行する形が現実的。
 
-### 13. 外部Web情報取得（pm_web_fetch.py）
+### 13. 外部Web情報取得（pm_web_fetch.py）— **廃止（2026-08-01）**
 
-RIKEN公式サイト・HPCニュースサイト・NVIDIAブログなどの外部公開情報を取得し `data/web_articles.db` に保存する。
-取得対象・キーワードフィルタ・対象インデックスは `data/web_sources.yaml` で定義する。
-FTS5インデックスへの組み込みは `pm_box_update.sh`（`pm_embed.py`）が自動的に行う。
+`pm_web_fetch.py` / `pm_web_update.sh` は削除した。**Argus の推論経路から、認証境界の外
+（公開インターネット）へ出る唯一の経路だった**ため（`docs/security-architecture.md` §4.5）。
 
-```sh
-# 全ソースの差分取得（新規URLのみ保存）
-python3 scripts/pm_web_fetch.py
-
-# 特定ソースのみ
-python3 scripts/pm_web_fetch.py --source "Top500"
-
-# 保存せず件数確認
-python3 scripts/pm_web_fetch.py --dry-run
-
-# 全件再取得（既存URLも上書き）
-python3 scripts/pm_web_fetch.py --full-refetch
-
-# 保存済み記事一覧
-python3 scripts/pm_web_fetch.py --list
-```
-
-| オプション | デフォルト | 説明 |
-|---|---|---|
-| `--source NAME` | 全ソース | `web_sources.yaml` の name 値で特定ソースのみ処理 |
-| `--dry-run` | - | DB保存なし・件数確認のみ |
-| `--full-refetch` | - | 全件再取得（既存URLも上書き） |
-| `--list` | - | 保存済み記事一覧を表示して終了 |
-| `--index-name NAME` | - | `--list` 時のインデックスフィルタ |
-| `--config PATH` | `data/web_sources.yaml` | ソース定義ファイルのパス |
-| `--data-dir PATH` | `data` | データディレクトリのパス |
-
-**cron設定（毎朝03:30 JST）**:
-```sh
-crontab -e
-# 以下を追加:
-# 30 3 * * * cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement && ~/.venv_aarch64/bin/python3 scripts/pm_web_fetch.py >> logs/pm_web_cron.log 2>&1
-```
-
-**FTS5連携**: `web_articles.db` が存在すれば `pm_embed.py`（`pm_box_update.sh` 経由）実行時に自動で FTS5 インデックスに組み込まれ `/argus-investigate` で検索可能になる。
-
-**web_sources.yaml の構造**:
-```yaml
-sources:
-  - name: "Top500"
-    url: "https://top500.org/news/feed/"
-    type: rss                          # "rss" または "html_index"
-    keywords: [Fugaku, RIKEN, HPC]    # いずれか1語を含む記事のみ保存
-    max_articles: 50                   # 1回の実行で最大何件保存するか
-    target_indices: [pm, pm-hpc]       # 組み込む論理 index 名（qa_index.db.chunk_indexes に登録）
-    enabled: true
-```
+- **既存データは保持する** — `data/web_articles.db` はそのまま残り、`pm_embed.py` が索引化
+  した既存チャンクは `/argus-investigate` で引き続き検索できる。取得を止めた時点で
+  リスクは消えるので、蓄積済みデータの削除は不要という判断
+- `data/web_sources.yaml`（取得対象定義）は参照されなくなった。ファイルは残置
+- **復活させないこと。** 再導入は「認証境界の外へ出る経路を再び作る」という判断そのものなので、
+  実装の前にセキュリティ設計側の合意が必要。`tests/test_shell_scripts.py` の
+  `test_web_fetch_scripts_are_gone` が復活を検出する
 
 ### 14. エンリッチメント（enrich_items.py） — Pass 2
 
@@ -1154,6 +1113,39 @@ python3 scripts/pm_relink.py --list --all
 # cron ラッパー（venv activate + logs/pm_selfcheck.log へ追記）
 bash scripts/bin/pm_selfcheck.sh
 ```
+
+### セキュリティ監視（canary_hit / netguard_deny）
+
+同じジョブで `logs/` を走査し、以下 2 つを検査する（`docs/security-architecture.md` §4.3）。
+
+| チェック | 内容 | 正常状態 |
+|---|---|---|
+| `canary_hit` | active な canary トークンがログに出現 | 常に 0 件。1 件でも異常（最優先で調査し、該当ログを保全する） |
+| `netguard_deny` | `[NETGUARD] verdict=deny` の宛先別集計 | warn 期間中は allow-list に追加すべき候補。`enforce` 後は 0 件が正常 |
+
+```sh
+# ログ走査の対象を明示（既定は <repo>/logs、対象は mtime が --days 以内の *.log）
+~/.venv_aarch64/bin/python3 scripts/quality/pm_selfcheck.py --logs-dir logs --days 1
+
+# データ検査のみ（セキュリティ監視を外す）
+~/.venv_aarch64/bin/python3 scripts/quality/pm_selfcheck.py --no-security-checks
+```
+
+canary の発行・一覧・失効は `net_guard.py` 側にある。
+
+```sh
+PYTHONPATH=scripts ~/.venv_aarch64/bin/python3 scripts/utils/net_guard.py \
+  --plant-hostname-canary --notes "埋め込み先: <どこに書いたか>"
+PYTHONPATH=scripts ~/.venv_aarch64/bin/python3 scripts/utils/net_guard.py --list-canaries
+PYTHONPATH=scripts ~/.venv_aarch64/bin/python3 scripts/utils/net_guard.py --revoke-canary <TOKEN>
+```
+
+発行されるホスト名は `docs-<hex>.internal-check.invalid`（RFC 2606 の予約 TLD なので
+正引きは原理的に成功しない）。発行時に allow-list との衝突を検証する — 一致していると
+canary への到達が `verdict=allow` になり検知面が消えるため、その場合は例外で止まる。
+
+**1 ファイル 32MB を超える巨大ログは打ち切る**（検査ジョブが張り付くのを防ぐため）。
+打ち切った場合は `truncated_files` として違反一覧に出るので、黙って見逃すことはない。
 
 静的なバグクラス検査（CLI --help 全数スモーク、cron ラッパーの PATH/venv 契約、
 patrol 状態キーの記録↔判定整合、argparse 飾り引数、patrol config キー整合）は

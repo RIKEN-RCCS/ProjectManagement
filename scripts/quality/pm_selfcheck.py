@@ -17,14 +17,27 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
   5. state_key_drift       — patrol_state.db notifications.event_type が
                              既知のイベントキー集合の外にある（クラス c の運用時監視）
 
+さらにセキュリティ監視として以下を検査する
+（docs/security-architecture.md §4.3。--no-security-checks で無効化）:
+
+  6. canary_hit            — active な canary トークンがログに出現した。canary は
+                             本来どこにも現れない文字列なので 1 件でも異常。最優先で
+                             調査し、発火セッションのログを保全する
+  7. netguard_deny         — net_guard が allow-list 外の宛先を記録した。warn モード
+                             では通ってしまうため、この検査が唯一の気づき方になる。
+                             enforce 後は 1 件でも異常
+
 書き込みは一切行わない。値（channel/user ID 等）はログに出力しない
-（state_key_drift は event_type のキー名のみを出力する）。
+（state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
+canary トークン・宛先ホスト・呼び出し元を出力するが、いずれも秘匿値ではない）。
 
 Usage:
     python3 scripts/quality/pm_selfcheck.py
     python3 scripts/quality/pm_selfcheck.py --days 7
     python3 scripts/quality/pm_selfcheck.py --json
     python3 scripts/quality/pm_selfcheck.py --db data/pm.db --state-db data/patrol_state.db
+    python3 scripts/quality/pm_selfcheck.py --logs-dir logs --days 1
+    python3 scripts/quality/pm_selfcheck.py --no-security-checks
 """
 from __future__ import annotations
 
@@ -40,7 +53,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 from cli_utils import add_db_arg, add_no_encrypt_arg, resolve_db_path
-from db_utils import open_db
+from db_utils import open_db, table_exists
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -259,6 +272,161 @@ def check_state_key_drift(state_conn: sqlite3.Connection) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# 6-7. セキュリティ監視（docs/security-architecture.md §4.3）
+# --------------------------------------------------------------------------- #
+
+# 1 ファイルから読む上限。巨大ログで検査ジョブが張り付くのを防ぐ。
+# 超過分は読まずに truncated として報告する（黙って打ち切らない）。
+_LOG_SCAN_MAX_BYTES = 32 * 1024 * 1024
+
+_NETGUARD_DENY_MARKER = "[NETGUARD] verdict=deny"
+
+# 報告するグループ数の上限。超過分は件数だけ集計して other_groups に出す。
+_DENY_GROUP_LIMIT = 20
+
+
+def _recent_log_files(logs_dir: Path, days: int) -> list[Path]:
+    """logs_dir 直下の *.log のうち、mtime が days 以内のものを返す。"""
+    if not logs_dir.is_dir():
+        return []
+    cutoff = datetime.now(UTC).timestamp() - days * 86400
+    out = []
+    for path in sorted(logs_dir.glob("*.log")):
+        try:
+            if path.stat().st_mtime >= cutoff:
+                out.append(path)
+        except OSError:
+            continue
+    return out
+
+
+def _iter_log_lines(paths: list[Path]) -> tuple[list[tuple[Path, str]], list[str]]:
+    """(ファイル, 行) の列と、途中で打ち切ったファイル名の一覧を返す。"""
+    lines: list[tuple[Path, str]] = []
+    truncated: list[str] = []
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                read = 0
+                for line in f:
+                    read += len(line)
+                    if read > _LOG_SCAN_MAX_BYTES:
+                        truncated.append(path.name)
+                        break
+                    lines.append((path, line))
+        except OSError:
+            continue
+    return lines, truncated
+
+
+def check_netguard_deny(logs_dir: Path, days: int) -> list[dict]:
+    """net_guard が allow-list 外の宛先を記録していないか検査する。
+
+    warn モードでは通っている（記録だけ）ので、この検査が唯一の気づき方になる。
+    enforce へ倒した後は deny がゼロであることが正常状態なので、1 件でも異常。
+    """
+    paths = _recent_log_files(logs_dir, days)
+    if not paths:
+        return []
+    lines, truncated = _iter_log_lines(paths)
+
+    groups: dict[tuple[str, str, object], dict] = {}
+    for path, line in lines:
+        if _NETGUARD_DENY_MARKER not in line:
+            continue
+        fields = {}
+        for token in line.split():
+            if "=" in token:
+                k, _, v = token.partition("=")
+                fields[k] = v
+        label = fields.get("host") if fields.get("host", "-") != "-" else fields.get("ip", "-")
+        key = (fields.get("stage", "-"), label or "-", fields.get("port", "-"))
+        group = groups.setdefault(key, {"count": 0, "callers": [], "files": set()})
+        group["count"] += 1
+        group["files"].add(path.name)
+        caller = fields.get("caller", "-")
+        if caller not in group["callers"] and len(group["callers"]) < 3:
+            group["callers"].append(caller)
+
+    ordered = sorted(groups.items(), key=lambda kv: kv[1]["count"], reverse=True)
+    violations = []
+    for (stage, label, port), info in ordered[:_DENY_GROUP_LIMIT]:
+        violations.append(
+            {
+                "check": "netguard_deny",
+                "stage": stage,
+                "destination": label,
+                "port": port,
+                "count": info["count"],
+                "callers": ",".join(info["callers"]),
+                "log_files": ",".join(sorted(info["files"])),
+            }
+        )
+    if len(ordered) > _DENY_GROUP_LIMIT:
+        violations.append(
+            {
+                "check": "netguard_deny",
+                "other_groups": len(ordered) - _DENY_GROUP_LIMIT,
+                "note": "報告上限を超えた宛先グループ（net_guard.py --summarize-log で全件確認）",
+            }
+        )
+    if truncated:
+        violations.append(
+            {
+                "check": "netguard_deny",
+                "note": "サイズ上限で読み切れなかったログがある（検査は不完全）",
+                "truncated_files": ",".join(sorted(set(truncated))),
+            }
+        )
+    return violations
+
+
+def check_canary_hits(
+    pm_conn: sqlite3.Connection, logs_dir: Path, days: int
+) -> list[dict]:
+    """active な canary トークンがログに現れていないか検査する（§4.3 検知点）。
+
+    canary は「本来どこにも出てこない文字列」なので、1 件でも現れたら異常。
+    ログに現れる典型は (a) net_guard が canary ホスト名の解決を deny した、
+    (b) LLM の出力・ツール引数に canary 文字列が混じった、のいずれか。
+
+    canary_tokens テーブルが無い pm.db（未導入）では空リストを返す。
+    """
+    if not table_exists(pm_conn, "canary_tokens"):
+        return []
+    rows = pm_conn.execute(
+        "SELECT token, kind, planted_in FROM canary_tokens WHERE active = 1"
+    ).fetchall()
+    tokens = {row["token"]: dict(row) for row in rows}
+    if not tokens:
+        return []
+
+    paths = _recent_log_files(logs_dir, days)
+    if not paths:
+        return []
+    lines, _truncated = _iter_log_lines(paths)
+
+    hits: dict[tuple[str, str], int] = {}
+    for path, line in lines:
+        for token in tokens:
+            if token in line:
+                key = (token, path.name)
+                hits[key] = hits.get(key, 0) + 1
+
+    return [
+        {
+            "check": "canary_hit",
+            "token": token,
+            "kind": tokens[token]["kind"],
+            "planted_in": tokens[token]["planted_in"],
+            "log_file": file_name,
+            "count": count,
+        }
+        for (token, file_name), count in sorted(hits.items())
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 def run_checks(
@@ -266,6 +434,7 @@ def run_checks(
     state_conn: sqlite3.Connection | None,
     days: int,
     today: str,
+    logs_dir: Path | None = None,
 ) -> list[dict]:
     # audit_log.changed_at は datetime.now(UTC).isoformat()（"+00:00" 付き）で
     # 記録されるため、cutoff も UTC aware で揃える。today（ローカル暦日）基準だと
@@ -279,6 +448,9 @@ def run_checks(
     violations += check_missing_close_note(pm_conn, cutoff)
     if state_conn is not None:
         violations += check_state_key_drift(state_conn)
+    if logs_dir is not None:
+        violations += check_canary_hits(pm_conn, logs_dir, days)
+        violations += check_netguard_deny(logs_dir, days)
     return violations
 
 
@@ -299,6 +471,14 @@ def main() -> int:
     parser.add_argument(
         "--json", action="store_true",
         help="結果をJSON形式で出力する",
+    )
+    parser.add_argument(
+        "--logs-dir", default=None, metavar="PATH",
+        help="canary_hit / netguard_deny が走査するログディレクトリ（既定: <repo>/logs）",
+    )
+    parser.add_argument(
+        "--no-security-checks", action="store_true",
+        help="canary_hit / netguard_deny をスキップする（データ検査のみ行う）",
     )
     args = parser.parse_args()
 
@@ -326,7 +506,16 @@ def main() -> int:
         )
 
     today = date.today().isoformat()
-    violations = run_checks(pm_conn, state_conn, args.days, today)
+    logs_dir = None
+    if not args.no_security_checks:
+        logs_dir = Path(args.logs_dir) if args.logs_dir else REPO_ROOT / "logs"
+        if not logs_dir.is_dir():
+            print(
+                f"[WARN] ログディレクトリが見つかりません（canary_hit / netguard_deny はスキップ）: {logs_dir}",
+                file=sys.stderr,
+            )
+            logs_dir = None
+    violations = run_checks(pm_conn, state_conn, args.days, today, logs_dir)
 
     pm_conn.close()
     if state_conn is not None:
