@@ -7,6 +7,46 @@
 
 ---
 
+## 2026-07-31 docs/decisions/ を追跡から外す — public リポジトリへの機微情報混入
+
+**背景**: `.gitignore` には以前から `docs/decisions/` があったが、**追跡開始が先だったため無効**
+だった（gitignore は追跡済みファイルに効かない）。origin は public な GitHub リポジトリ。
+**決定**: `git rm --cached` で追跡から外す。ファイル実体は手元に残す（スクリプトは FS から直読）。
+**未解決**: **HEAD から外しても公開履歴（2026-07-13 以降 8 コミット）には残る。** 履歴書き換え
+（filter-repo + force-push）は組織調整が必要なため別途判断。あわせて棚卸しした結果、
+`docs/project.md` / `argus_config.yaml` / `goals.yaml` は**一度も commit されておらず**、
+履歴にある `data/minutes/*.db` は **SQLCipher 暗号化済み・鍵は未コミット**であることを確認した。
+
+## 2026-07-31 出力と外向き通信の宛先を allow-list 化（deny-list からの転換）
+
+**背景**: 松岡先生経由の LLM バックドア脅威の一次整理を受け、脅威モデルと目標構成を
+`docs/security-architecture.md` に定義。実装との突合を 4 回繰り返し、**同じ型の誤りを 4 回**
+犯した — いずれも「エージェントのツールレジストリが漏斗である」という誤った前提だった
+（実際の主流は cron とパイプライン）。原則 P8（被覆率を実流量で検算）と P10（対策が何を
+証明するかを明示）はこの反省から立てた。
+**決定**: (1) ツール公開を `COMMAND_TOOLS` の allow-list に転換（deny-list では新 EGRESS
+ツールが既定で露出する）、(2) 外向き通信を `net_guard` で socket 層フックし宛先を照合
+（呼び出し箇所ごとのチェックは書き忘れが素通りするため採らない）、(3) Box 共有リンクを
+`--access open` から `collaborators` へ。
+**捨てた案**: ブローカーをツール層に置く案（実際の出力量の大半を占める cron/Patrol の自動
+投稿を覆えない）、MUTATE の構造化フィールド制約（MUTATE ツールは 0 件で被覆率 0%）、
+引用スパンによる「捏造の原理的排除」（証明できるのは根拠の実在のみ）。
+**影響**: net_guard は既定 `warn` で記録のみ。allow-list の実値確定後に `enforce` へ倒す。
+box CLI 等の subprocess と MCP 経路は対象外（範囲は設計文書に明記）。
+
+## 2026-07-31 Kimi-K3 の Argus 活用を一旦停止（セキュリティ懸念・PM 判断）
+
+**背景**: PM からセキュリティ上の懸念が示され、Kimi-K3 の活用を一旦取りやめる判断。
+**実施**: (1) 進行中だった議事録視覚ベンチ（minutes_ab、20 本中 8 本完了時点）を停止、
+(2) qa デーモンの K3 override を無効化（settings.json から ARGUS_ONESHOT_LLM_MODEL を除去し
+再起動。one-shot 経路自体は glm-5.2 で継続 — 実測で現行超えのため）。
+**残置**: 視覚議事録の実装（call_vision_llm / --slide-images / minutes_ab）は**未コミットのまま
+凍結**（opt-in 設計で K3 非依存だが、再開判断まで保留）。ベンチ素材・部分結果は
+data/eval/minutes_ab/ に保存。K3 の評価記録（rikyu_argus_model_eval.md / kimi-k3-migration.md）は
+再開時の資産としてそのまま。
+**再開条件**: セキュリティ懸念の解消（PM 判断）。残っていた URL/TOKEN の export
+（~/.secrets/rikyu_token.sh 7-8 行目）の削除は PM 作業。
+
 ## 2026-07-30 E-Wave 本番障害からクエリトークン品質を修正 — FTS5 ハイフン=NOT の潜在バグも発見
 
 **背景**: K3 有効化直後の本番 investigate「E-Wave の停滞理由」が検索破綻。Sudachi トークンが

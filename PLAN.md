@@ -6,9 +6,56 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 
 ## 現在進行中の計画
 
+### セキュリティ対策（docs/security-architecture.md）— 流出面を優先
+
+**方針**: PM 判断により、改竄（R5）より**流出**を優先。改竄向けの項目（出自の独立した
+第2系統・引用スパン照合・二段抽出・挙動指紋）は保留。
+
+**完了**: ツール allow-list（`COMMAND_TOOLS`）/ 外向き通信 allow-list（`net_guard`、既定 warn）
+/ Box 共有リンクの `collaborators` 化 / pre-commit による不変条件の固定 / 認証境界の棚卸し
+（Slack Connect・ゲスト不在、パートナーチャンネルには非投稿、Box 実効 `company`）。
+
+**次にやること**（優先順）:
+1. **`config/network_allowlist.yaml` の実値化** — `net_guard.py --print-env-hosts` で既知分を
+   埋める → qa 再起動 → warn で cron 1 周ぶん運転 → `--summarize-log` で未知の宛先を追加。
+   `stage=resolve` / `stage=connect` の両方で deny がゼロになったら `ARGUS_NETGUARD=enforce`
+2. **`pm_web_fetch.py` の廃止** — 認証境界の外へ出る唯一の経路。`web_articles.db` は保持
+   （取得を止めた時点でリスクは消えるため、既存データの削除は不要）
+3. **hostname canary + 監視** — 2 の後は `verdict=deny` が無条件に異常シグナルになる
+4. **Box 既存共有リンクの正規化** — 事前に「読ませたい人が全員 collaborator か」を Box 側で
+   揃える（順序を逆にすると一時的にリンク切れ）
+5. `tool_calls` 記録 / `top_k` 200→100→50 の被害半径実測（P7 の文脈軸）
+6. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
+   SDK 直叩き 25 箇所の移送が必要**（工数の大半）
+
+**未解決の懸案**:
+- **public リポジトリの履歴に `docs/decisions/` が残る**（2026-07-13 以降 8 コミット）。
+  filter-repo + force-push は組織調整が必要。LOG.md 参照
+- MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま。investigate ループのみ対応済み
+- `~/.claude/settings.json` の GitHub PAT 失効（PM 作業）
+
+### 議事録生成への Kimi-K3 視覚入力の組み込み（2026-07-31 着手）
+
+**ステータス**: **中断（2026-07-31、セキュリティ懸念による PM 判断 — LOG.md 参照）**。
+実装（call_vision_llm / --slide-images / minutes_ab）はレビュー済み・テスト 1131 件グリーンだが
+**未コミットで凍結**。ベンチは 20 本中 8 本完了時点で停止（data/eval/minutes_ab/ に保存）。
+再開時は本エントリの下記内容がそのまま有効。詳細計画は `~/.claude/plans/rustling-pondering-starlight.md`。
+
+**内容**: 文字起こし + スライド画像を直接 kimi-k3 に渡す議事録生成。
+(1) llm.py に call_vision_llm 新設（複数画像・常時ストリーミング・usage/image_tokens 記録・
+ctx 超過時の画像間引き梯子）、(2) generate_minutes_local に `--slide-images` +
+`MINUTES_VISION_LLM_*` opt-in（Stage 2/3 のみ視覚化・失敗時テキストフォールバック・既定不変）、
+(3) scripts/eval/minutes_ab.py で 4 アーム盲検 A/B（A=glm+OCR / B=K3+OCR / C=K3+画像 /
+D=K3+画像+OCR、judge は中立の DeepSeek-V4-Flash）。
+**Phase 2（本番 opt-in 配線）はベンチ勝利（C or D が A に ≥60% + 形式崩壊 0）が条件。**
+OCR は視覚化後も廃止しない（Whisper initial_prompt の terminology が依存）。
+
 ### Kimi-K3 の実力を引き出す investigate 実装の検証（one-shot 長文脈 2×2 実験）
 
-**ステータス**: 実装完了・レビュー指摘対応中（2026-07-29 着手）。
+**ステータス**: 検証完了・**K3 は一旦停止（2026-07-31、セキュリティ懸念 — LOG.md 参照）**。
+qa デーモンの K3 override（ARGUS_ONESHOT_LLM_MODEL）は除去済み。**one-shot 経路自体は
+glm-5.2 で本番継続中**（ARGUS_ONESHOT=1、実測で現行超えのため）。評価記録・実装は再開時の
+資産として維持。以下は経緯の記録（2026-07-29 着手）。
 詳細計画: `~/.claude/plans/rustling-pondering-starlight.md`、背景は
 docs/decisions/rikyu_argus_model_eval.md（investigate 単発品質のみ K3 が glm 超えという評価事実）。
 
