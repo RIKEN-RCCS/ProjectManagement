@@ -26,6 +26,9 @@
 #      で集計する。verdict=deny の頻出先を allow-list に追加する候補として検討する。
 #
 # localhost は一括許可しない。ポートまで含めて明示すること。
+# `localhost` と `127.0.0.1` は文字列一致で判定するため別物として扱われる。
+# 各エントリはシェルスクリプト／環境変数側の実際の綴りに合わせること
+# （ingest_plane は 127.0.0.1、read_plane の embedding は localhost で確定済み）。
 
 read_plane:
   - host: "api.rikyu.r-ccs.riken.jp"
@@ -39,10 +42,18 @@ read_plane:
     from_env: EMBED_API_BASE
 
 ingest_plane:
-  - host: "127.0.0.1"            # プレースホルダ。PM が実値に置換する
+  # 確定値（プレースホルダではない）。接続側 scripts/bin/pm_box_update.sh の既定
+  # DOCLING_SERVE_URL=http://127.0.0.1:5001 と、待受側 scripts/bin/pm_daemon.sh の
+  # docling-serve 起動 `--host 127.0.0.1 --port ${DOCLING_PORT:-5001}` の両方に一致する。
+  - host: "127.0.0.1"
     port: 5001
     from_env: DOCLING_SERVE_URL
-    note: "Box取込の文書変換サービス。悪性文書が通過する注入経路上のコンポーネント"
+    note: "Box取込の文書変換サービス。悪性文書が通過する注入経路上のコンポーネント。
+           loopback だが docling-serve は別プロセスであり、その外向き通信は
+           net_guard の対象外（この行が保証するのは pm_box_crawl 側の宛先のみ）。
+           DOCLING_PORT を変える場合はこの port も同時に変えること（enforce では
+           起動時照合が NG になる）。綴りは文字列一致で判定するため
+           http://localhost:5001 に変えると不一致になる"
 
 broker: []  # 外向き通信なし
 

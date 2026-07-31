@@ -1,7 +1,12 @@
 """output_tools.py — Box / Slack / Canvas 出力操作の実装本体
 
-pm_mcp_server.py（MCP ツール）と pm_qa_server.py（Slack Bot コマンド）の
-両方から import して使われる。ユーザー確認は呼び出し元の責務。
+EGRESS（外向き出力）の実装本体。pm_qa_server.py（Slack Bot コマンド）・
+pm_argus_agent.py の `--to-*` フラグ・pm_exec_summary.py から import して使われる。
+ユーザー確認は呼び出し元の責務。
+
+**LLM のツール表面には出さない**（`agent_tools.EGRESS_TOOL_NAMES` として
+`COMMAND_TOOLS` から機械的に排除。docs/security-architecture.md §4.1）。
+旧 pm_mcp_server.py はここを MCP ツールとして公開していたが 2026-07-31 に廃止した。
 """
 from __future__ import annotations
 

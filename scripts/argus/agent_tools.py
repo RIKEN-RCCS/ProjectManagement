@@ -2,7 +2,8 @@
 
 pm_argus_agent.py から呼ばれるツール群。
 実装本体は argus.mcp_tools（検索・分析）と argus.output_tools（出力）に委譲する。
-pm_mcp_server.py（FastMCP）と同じ関数群を提供するため、挙動は統一されている。
+**LLM にツールを渡す経路はここだけ**（旧 pm_mcp_server.py は 2026-07-31 に廃止し、
+チョークポイントはこのファイルの COMMAND_TOOLS に一本化された）。
 
 このファイルが管理するもの:
   - AgentContext（investigate agent の状態）

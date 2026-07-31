@@ -12,15 +12,27 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 第2系統・引用スパン照合・二段抽出・挙動指紋）は保留。
 
 **完了**: ツール allow-list（`COMMAND_TOOLS`）/ 外向き通信 allow-list（`net_guard`、既定 warn）
-/ Box 共有リンクの `collaborators` 化 / pre-commit による不変条件の固定 / 認証境界の棚卸し
-（Slack Connect・ゲスト不在、パートナーチャンネルには非投稿、Box 実効 `company`）。
+/ Box 共有リンクの `collaborators` 化 / pre-commit による不変条件の固定（lint 4 本）/ 認証境界の棚卸し
+（Slack Connect・ゲスト不在、パートナーチャンネルには非投稿、Box 実効 `company`）/
+**MCP Server（`pm_mcp_server.py`）の廃止** — チョークポイントは `agent_tools.py` の 1 箇所に集約。
 
 **次にやること**（優先順）:
-1. **`config/network_allowlist.yaml` の実値化** — `net_guard.py --print-env-hosts` で既知分を
-   埋める → qa 再起動 → warn で cron 1 周ぶん運転 → `--summarize-log` で未知の宛先を追加。
-   `stage=resolve` / `stage=connect` の両方で deny がゼロになったら `ARGUS_NETGUARD=enforce`
+1. **`config/network_allowlist.yaml` の実値化** — `ingest_plane`（docling `127.0.0.1:5001`）は
+   pm_box_update.sh の既定と pm_daemon.sh の bind 両方に一致することを確認済み（確定値）。
+   残りは read_plane / write_plane。`net_guard.py --print-env-hosts` で既知分を
+   埋める → qa 再起動 → **warn で 1 周**運転 → `cat logs/*.log | net_guard.py --summarize-log -`
+   で未知の宛先を `caller=` を確認しながら追加。
+   `stage=resolve` / `stage=connect` の両方で deny がゼロになったら `ARGUS_NETGUARD=enforce`。
+   **「1 周」の定義**: 月〜金限定の cron があるため**平日 1 周（実質 1 週間）が下限**。
+   加えて cron に載っていない経路は手で 1 回ずつ叩く必要がある — qa デーモンの各 `/argus-*` と
+   メンション応答、録音パイプライン（`pm_from_recording.sh`）、`/argus-narrate`（TTS。
+   `FISH_TTS_HOST` 系はこの経路でしか出ない）、Web UI 経由のジョブ（embed / xlsx / minutes publish）、
+   Canvas `--recreate`、Box 共有リンク作成。Patrol は 30 分間隔なので放置で出る。
+   **飛ばすと、稀にしか動かない経路が enforce 後に初めて落ちる**（warn 中は何も止まらないので
+   「1 周した」の判定はログでしかできない）
 2. **`pm_web_fetch.py` の廃止** — 認証境界の外へ出る唯一の経路。`web_articles.db` は保持
-   （取得を止めた時点でリスクは消えるため、既存データの削除は不要）
+   （取得を止めた時点でリスクは消えるため、既存データの削除は不要）。
+   **`pm_web_update.sh` は現在 cron に載っていないため、コード削除だけで済む**（運用の穴埋め不要）
 3. **hostname canary + 監視** — 2 の後は `verdict=deny` が無条件に異常シグナルになる
 4. **Box 既存共有リンクの正規化** — 事前に「読ませたい人が全員 collaborator か」を Box 側で
    揃える（順序を逆にすると一時的にリンク切れ）
@@ -46,7 +58,8 @@ HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0�
   除去範囲が確定してから 1 回で実施する
 
 **その他の懸案**:
-- MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま。investigate ループのみ対応済み
+- ~~MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま~~ → **2026-07-31 に丸ごと廃止**
+  （チョークポイント 2 箇所目が閉じた。再登録は pre-commit の `no-mcp-server-registration` が防ぐ）
 - `~/.claude/settings.json` の GitHub PAT 失効（PM 作業）
 - `argus_config.yaml` の `indices.pm-all.channels` は 55 件。旧ハードコード（57 件の和集合）との
   差分 2 件は PM 判断で現状維持
@@ -54,8 +67,9 @@ HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0�
 ### 議事録生成への Kimi-K3 視覚入力の組み込み（2026-07-31 着手）
 
 **ステータス**: **中断（2026-07-31、セキュリティ懸念による PM 判断 — LOG.md 参照）**。
-実装（call_vision_llm / --slide-images / minutes_ab）はレビュー済み・テスト 1131 件グリーンだが
-**未コミットで凍結**。ベンチは 20 本中 8 本完了時点で停止（data/eval/minutes_ab/ に保存）。
+実装（call_vision_llm / --slide-images / minutes_ab）はレビュー済み・テストグリーンで
+**コミット済み（既定 OFF の opt-in）**。有効化の判断のみ保留。
+ベンチは 20 本中 8 本完了時点で停止（data/eval/minutes_ab/ に保存）。
 再開時は本エントリの下記内容がそのまま有効。詳細計画は `~/.claude/plans/rustling-pondering-starlight.md`。
 
 **内容**: 文字起こし + スライド画像を直接 kimi-k3 に渡す議事録生成。

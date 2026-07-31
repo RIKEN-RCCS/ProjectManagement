@@ -7,6 +7,36 @@
 
 ---
 
+## 2026-07-31 MCP Server（pm-multi-agent）を丸ごと廃止 — 2 箇所目のチョークポイントを消す
+
+**背景**: `investigate` ループには `COMMAND_TOOLS` allow-list を入れたが、`pm_mcp_server.py` は
+`registry_for()` を通らず 14 ツール（READ 10 + **EGRESS 3**）を `@mcp.tool()` で公開しており、
+**READ と EGRESS が同一プロセスに同居する唯一の経路**として残っていた。加えてこの経路の推論主体は
+ローカル LLM ではなく Claude であり、`search_text` が返す議事録・Slack 本文が Anthropic API に
+渡る構造で、機密ファイルを Claude に読ませない運用と整合していなかった。
+**判明した事実**: `claude mcp list` は "No MCP servers configured"。登録先が `.claude/settings.json` の
+`mcpServers` で、Claude Code が読むのは `.mcp.json` か `~/.claude.json` のため、**2026-06-20 の導入以降
+一度も接続されていなかった**（`enabledMcpjsonServers` も空、プロセスも不在）。EGRESS 3 だけ外す部分
+対応も検討したが、実利用ゼロ・代替（`pm_argus_agent.py --investigate` + `--to-*` フラグ）が揃って
+いるため **丸ごと畳む**判断（PM）。
+**実施**: `pm_mcp_server.py` と `.claude/settings.json` を削除、`pm-multi-agent` Skill を撤去、
+再登録を防ぐ pre-commit lint `no-mcp-server-registration` を追加（`.mcp.json` / `mcpServers` /
+`@mcp.tool` を検出）。`mcp_tools.py` / `output_tools.py` は Slack Bot 側と `pm_exec_summary.py` が
+使うため据え置き（ファイル名の "mcp" は旧サーバ由来という注記を docstring に追加）。
+**副作用**: `docs/kimi-k3-migration.md` の優先度6「既存MCP資産をそのまま活かす」は前提が消えたため無効化。
+
+## 2026-07-31 net_guard warn フェーズの前提を実 crontab と突合 — docs の CRON 表が実態とズレていた
+
+**背景**: `enforce` へ倒す前提の「warn で 1 周」を具体化するため実 crontab を確認したところ、
+`docs/architecture.md` / `argus_outcomes.md` の CRON 表と**時刻も本数も一致していなかった**
+（実際は 02:00 box / 06:30 selfcheck / 07:00 canvas_report / 07:47 argus_daily / 16:00 from_slack）。
+**判明した 2 点**: (1) `pm_web_update.sh` は cron に載っていない — 認証境界の外へ出る唯一の経路が
+そもそも定期実行されていないため、`pm_web_fetch.py` 廃止はコード削除だけで済む（運用の穴埋め不要）。
+(2) 月〜金限定ジョブがあるため warn フェーズの下限は 24 時間ではなく**平日 1 周（実質 1 週間）**。
+**あわせて修正**: `network_allowlist.yaml` の docling `127.0.0.1:5001` に付いていた「プレースホルダ」
+注記は誤り。接続側 `pm_box_update.sh` の既定と待受側 `pm_daemon.sh` の bind 両方に一致する確定値
+だった（allow-list を環境変数 grep だけで書き、シェルスクリプトを見ていなかったため）。
+
 ## 2026-07-31 docs/decisions/ を追跡から外す — public リポジトリへの機微情報混入
 
 **背景**: `.gitignore` には以前から `docs/decisions/` があったが、**追跡開始が先だったため無効**
@@ -40,8 +70,9 @@ box CLI 等の subprocess と MCP 経路は対象外（範囲は設計文書に�
 **実施**: (1) 進行中だった議事録視覚ベンチ（minutes_ab、20 本中 8 本完了時点）を停止、
 (2) qa デーモンの K3 override を無効化（settings.json から ARGUS_ONESHOT_LLM_MODEL を除去し
 再起動。one-shot 経路自体は glm-5.2 で継続 — 実測で現行超えのため）。
-**残置**: 視覚議事録の実装（call_vision_llm / --slide-images / minutes_ab）は**未コミットのまま
-凍結**（opt-in 設計で K3 非依存だが、再開判断まで保留）。ベンチ素材・部分結果は
+**残置**: 視覚議事録の実装（call_vision_llm / --slide-images / minutes_ab）は
+**2026-07-31 にコミット済み・既定 OFF で凍結**（opt-in 設計で K3 非依存。未コミットで放置すると
+失われるためコミットまでは進め、有効化の判断のみ保留）。ベンチ素材・部分結果は
 data/eval/minutes_ab/ に保存。K3 の評価記録（rikyu_argus_model_eval.md / kimi-k3-migration.md）は
 再開時の資産としてそのまま。
 **再開条件**: セキュリティ懸念の解消（PM 判断）。残っていた URL/TOKEN の export

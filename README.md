@@ -133,17 +133,23 @@ bash scripts/pm_box_update.sh                           # 走査・変換・FTS5
 python3 scripts/pm_box_relevance.py --judge --stats      # relevance 判定・分布確認
 ```
 
-### 7. マルチエージェント MCP Server（pm-multi-agent）
+### 7. 調査・分析の CLI 実行
 
-`pm_mcp_server.py` は FastMCP サーバーとして動作し、Claude Code（Orchestrator）から全ツールを呼び出せる。`/argus-investigate` と全く同一のツール群を提供する。
+`/argus-investigate` と同じ調査は CLI からも実行できる（出力先フラグ `--to-box` / `--to-slack` /
+`--to-canvas` つき）。オプション一覧は `docs/argus_outcomes.md`「CLI 実行」を参照。
 
 ```sh
 source ~/.secrets/slack_tokens.sh
 source ~/.secrets/rivault_tokens.sh
-PYTHONPATH=scripts ~/.venv_aarch64/bin/python3 scripts/pm_mcp_server.py
+PYTHONPATH=scripts ~/.venv_aarch64/bin/python3 scripts/argus/pm_argus_agent.py \
+  --investigate "M3の進捗状況とリスク" --days 14
 ```
 
-Claude Code の `.claude/settings.json` に MCP サーバーとして登録することで、分析結果を Box/Slack/Canvas に直接出力できる。
+> [!note] MCP Server（pm-multi-agent）は 2026-07-31 に廃止した
+> `pm_mcp_server.py` は Claude Code から全ツール（検索 10 + 出力 3）を呼べる FastMCP サーバー
+> だったが、READ と EGRESS が同一プロセスに同居する唯一の経路であり、pm.db・議事録・Slack 本文が
+> Claude に渡る経路でもあったため撤去した（`docs/security-architecture.md` §3.3・§4.1、LOG.md）。
+> **再登録しないこと**（`.mcp.json` の新設も含む。pre-commit の `no-mcp-server-registration` が検出する）。
 
 ### 8. データの編集と修正 — 「LLMの誤りを人間が正せる」
 
@@ -177,9 +183,9 @@ Pass 2: エンリッチメント・索引化
   enrich_items.py         → pm.db に判断者・根拠・関連IDを補完
   pm_embed.py             → qa_index.db（FTS5 + bge-m3 embedding）
 
-Pass 3: 検索・分析・生成（Argus AI / pm-multi-agent）
+Pass 3: 検索・分析・生成（Argus AI）
   pm_qa_server.py（Slack Socket Mode）→ /argus-* コマンド
-  pm_mcp_server.py（FastMCP）         → Claude Code からのツール呼び出し
+  pm_argus_agent.py                   → investigate（Slack / CLI 共通）
   pm_argus_patrol.py                  → 自律巡回
 ```
 
@@ -274,12 +280,11 @@ scripts/
 │   ├── pm_argus_agent.py   Investigation Agent + CLI（--to-box 等対応）
 │   ├── pm_argus.py         ブリーフィング/リスク/草案生成
 │   ├── pm_argus_patrol.py  自律巡回 Patrol Agent
-│   ├── agent_tools.py      ToolDef レジストリ（mcp_tools 委譲）
-│   ├── mcp_tools.py        MCP 全ツール実装本体（pm-multi-agent と共有）
-│   ├── output_tools.py     Box/Slack/Canvas 出力実装
+│   ├── agent_tools.py      ToolDef レジストリ + COMMAND_TOOLS allow-list（mcp_tools 委譲）
+│   ├── mcp_tools.py        検索・分析ツールの実装本体（名前は旧 MCP 由来）
+│   ├── output_tools.py     Box/Slack/Canvas 出力実装（EGRESS。LLM には渡さない）
 │   ├── mcp_explorer.py     Explorer Agent
 │   └── retrieval.py        FTS5 + embedding 検索
-├── pm_mcp_server.py      FastMCP Server "pm-multi-agent"
 ├── reporting/           レポート・エクスポート
 │   ├── pm_report.py / pm_insight.py
 │   └── pm_xlsx_report.py / pm_xlsx_sync.py

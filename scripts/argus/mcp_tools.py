@@ -1,8 +1,12 @@
-"""mcp_tools.py — pm-multi-agent 全ツールの実装本体
+"""mcp_tools.py — 検索・分析ツール（READ）の実装本体
 
-pm_mcp_server.py（FastMCP 経由）と pm_argus_agent.py（/argus-investigate）の
-両方から import して使われる。呼び出し形式は MCP ツールと同じシグネチャ。
-出力ツール（box_upload / slack_post / canvas_post）は output_tools.py にある。
+`agent_tools.py` 経由で pm_argus_agent.py（/argus-investigate）から呼ばれる。
+出力ツール（box_upload / slack_post / canvas_post）は output_tools.py にあり、
+**LLM には渡さない**（`agent_tools.COMMAND_TOOLS` の allow-list、
+docs/security-architecture.md §4.1）。
+
+ファイル名の "mcp" は旧 pm_mcp_server.py（FastMCP Server "pm-multi-agent"）に
+由来する。同サーバは 2026-07-31 に廃止済みで、MCP 経路はもう存在しない（LOG.md 参照）。
 """
 from __future__ import annotations
 

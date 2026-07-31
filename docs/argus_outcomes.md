@@ -73,7 +73,7 @@ Slack から呼び出せる Argus AI の **8 コマンド**の正式リファレ
 
 ### 前提データ
 
-16:50 の cron で当日分の Slack を取り込む処理が走るため、**17:00 以降** に実行するのが前提。それ以前に実行すると当日のメッセージが不完全な可能性がある。
+16:00 の cron（`pm_from_slack_daily.sh`）で当日分の Slack を取り込む処理が走るため、**その完了後**に実行するのが前提。それ以前に実行すると当日のメッセージが不完全な可能性がある。
 
 ### `/argus-brief` との違い
 
@@ -424,6 +424,21 @@ PYTHONPATH=scripts ~/.venv_x86_64/bin/python3 scripts/argus/pm_argus_agent.py \
 | `--oneshot` | - | one-shot 経路（`ARGUS_ONESHOT=1` 相当）を有効化する。query rewrite 等の補助 LLM 呼び出しを一切行わない K3-native 検証用 opt-in（既定挙動は不変）|
 | `--oneshot-top-k N` | `200` | one-shot 経路の取得件数（`ARGUS_ONESHOT_TOP_K` 相当）。`--oneshot` 未指定時に単独指定すると警告のみで無効 |
 
+#### cron での定期実行例
+
+現在の crontab には登録していない（上記「cron 定期実行」参照）。登録する場合の形。
+
+```crontab
+# 毎週月曜 10:00 に先週の決定事項を調査して Box に保存
+0 10 * * 1 cd /path/to/ProjectManagement \
+  && source ~/.secrets/slack_tokens.sh && source ~/.secrets/rivault_tokens.sh \
+  && PYTHONPATH=scripts ~/.venv_x86_64/bin/python3 scripts/argus/pm_argus_agent.py \
+    --investigate "先週の決定事項と実行状況" --to-box --max-steps 5 --days 7
+```
+
+Box の投稿先は `PM_BOX_FOLDER_ID`、Canvas は `PM_REPORT_CANVAS_ID` で上書きできる
+（未設定時は `argus_config.yaml` の `box.upload_folder_id` / `report.canvas_id`）。
+
 ### `/argus-brief` / `/argus-risk` / `/argus-direction` / `/argus-today` 相当（`scripts/argus/pm_argus.py`）
 
 | オプション | 説明 |
@@ -444,11 +459,13 @@ PYTHONPATH=scripts ~/.venv_x86_64/bin/python3 scripts/argus/pm_argus_agent.py \
 
 ## cron 定期実行
 
+実 crontab の内容（2026-07-31 時点。全体は `docs/architecture.md`「CRON 定期実行」）。
+
 | 時刻 | スクリプト | 内容 |
 |---|---|---|
-| 06:57 月〜金 | `pm_argus_daily.sh` | `/argus-brief` 相当 → Canvas |
-| 16:50 月〜金 | `pm_from_slack_daily.sh` | Slack 当日分取込 → `/argus-today` 前提データ整備 |
-| 17:00 月〜金 | `pm_argus_daily_summary.sh` | `/argus-brief --today-only` 相当 |
+| 07:47 月〜金 | `pm_argus_daily.sh` | `/argus-brief` + `/argus-risk` 相当 → Canvas |
+| 16:00 月〜金 | `pm_from_slack_daily.sh` | Slack 当日分取込 + embed → `/argus-today` 前提データ整備 |
 
-`/argus-direction` は cron 化されていない（Slack コマンド／CLI からの手動実行のみ）。
+`pm_argus_daily_summary.sh`（`/argus-brief --today-only` 相当）は**スクリプトは存在するが cron に
+載っていない**。`/argus-direction` も cron 化されていない（Slack コマンド／CLI からの手動実行のみ）。
 

@@ -4,7 +4,8 @@
 エモーション（conservative / aggressive / objective / future_oriented）の
 組み合わせで、異なる視点からの分析を提供する。
 
-pm_mcp_server.py の search_entity ツールから呼ばれることを想定。
+`mcp_tools.search_entity` から呼ばれる（旧 pm_mcp_server.py 経由の呼び出しは
+同サーバの廃止（2026-07-31）により無くなった）。
 """
 from __future__ import annotations
 

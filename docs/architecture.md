@@ -368,13 +368,22 @@ pm_qa_server.py (Socket Mode デーモン)
 
 ## CRON 定期実行
 
-| 時刻 | スクリプト | 内容 |
-|---|---|---|
-| 02:00 毎日 | `pm_box_update.sh` | BOX収集 + FTS5 索引更新 |
-| 03:00 毎日 | `pm_web_update.sh` | Web 記事収集 |
-| 06:57 月〜金 | `pm_argus_daily.sh` | ブリーフィング生成 → Canvas |
-| 07:00 月〜金 | `canvas_report.sh` | 各種レポート Canvas 投稿 |
-| 16:50 月〜金 | `pm_from_slack_daily.sh` | Slack 走査 → argus-today |
+実 crontab の内容（2026-07-31 時点）。**時刻を変えたらこの表も更新すること。**
+
+| 時刻 | スクリプト | 内容 | ログ |
+|---|---|---|---|
+| 02:00 毎日 | `pm_box_update.sh` | BOX収集 + FTS5 索引更新（docling-serve 経由） | `logs/pm_box_update.log` |
+| 06:30 月〜金 | `pm_selfcheck.sh` | 既知バグクラスの再発検査 | `logs/pm_selfcheck.log` |
+| 07:00 月〜金 | `canvas_report.sh` | 各種レポート Canvas 投稿（`--filter` 8 本付き） | `logs/canvas_report.log` |
+| 07:47 月〜金 | `pm_argus_daily.sh` | ブリーフィング + リスク生成 → Canvas | `logs/pm_argus_daily_*.log` |
+| 16:00 月〜金 | `pm_from_slack_daily.sh` | Slack 走査 + embed → argus-today 前提データ | `logs/pm_from_slack_daily_*.log` |
+
+**cron に載っていないスクリプト**（存在はするが定期実行されていない）:
+`pm_web_update.sh`（Web 記事収集。`pm_web_fetch.py` は `docs/security-architecture.md` §4.5 で
+廃止決定済みのため、復活させない）、`pm_argus_daily_summary.sh`、`pm_box_distill.sh`（コメントアウト）。
+
+月〜金限定のジョブがあるため、全 cron 経路を 1 周させるには**平日を通す（実質 1 週間）**必要がある。
+`net_guard` の warn フェーズで宛先を洗い出す際はこの周期が下限になる（`PLAN.md` 参照）。
 
 ---
 

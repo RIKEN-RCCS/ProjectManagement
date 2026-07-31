@@ -178,7 +178,13 @@ Moonshot自身がBrowseCompで1M全投入（90.4）より**300Kで文脈圧縮�
 
 **GLM-5.2を捨てる工程は一つもない。**
 
-### 優先度6：既存MCP資産をそのまま活かす
+### 優先度6：既存MCP資産をそのまま活かす（**無効化。2026-07-31**）
+
+> [!warning] この案は前提が消えた
+> 依拠していた `pm_mcp_server.py`（FastMCP Server "pm-multi-agent"）は **2026-07-31 に廃止**した
+> （READ と EGRESS が同一プロセスに同居する唯一の経路だったため。`docs/security-architecture.md`
+> §3.3・§4.1、LOG.md）。「追加実装ほぼゼロ」という前提はもう成り立たない。
+> Kimi Code CLI 案は元より恒久的に不採用（§7 明示的な非目標）。
 
 K3はMCP経路が最強（MCPMark-Verified 94.5で全モデル中トップ、MCP-Atlas 84.2、Toolathlon-Verified 76.5）。すでに `pm_mcp_server.py` がFastMCPで全ツールを出しているので、**オーケストレータをClaude CodeからKimi Code CLIに差し替えるだけ**で長時間セッションを回せる。追加実装ほぼゼロ。
 

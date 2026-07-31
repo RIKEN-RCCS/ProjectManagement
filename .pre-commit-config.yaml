@@ -137,3 +137,45 @@ repos:
         stages: [pre-commit]
         always_run: true
         pass_filenames: false
+      - id: no-mcp-server-registration
+        # MCP Server（旧 pm_mcp_server.py / FastMCP "pm-multi-agent"）は 2026-07-31 に
+        # 廃止した。READ ツールと EGRESS ツールが同一プロセスに同居する唯一の経路であり、
+        # かつ pm.db・議事録・Slack 本文が Claude に渡る経路でもあったため
+        # （docs/security-architecture.md §3.3・§4.1、LOG.md）。
+        #
+        # 以下 3 つのいずれかが現れたら FAIL とし、再登録・再実装を機械的に止める:
+        #   1. `.mcp.json`（Claude Code のプロジェクトスコープ MCP 定義）の新設
+        #   2. .claude/settings*.json への `mcpServers` キーの追加
+        #   3. scripts/ 配下での `@mcp.tool()` / `FastMCP(` の使用
+        #
+        # 検出範囲の限界（既知）: ユーザースコープの登録（~/.claude.json /
+        # `claude mcp add`）はリポジトリ外なので検出できない。他の MCP サーバを
+        # 意図して導入する場合は、この hook を外す判断そのものをレビュー対象にする。
+        name: no MCP server registration (retired 2026-07-31)
+        entry: >-
+          bash -c '
+          fail=0;
+          if [ -e .mcp.json ]; then
+            echo "[mcp-lint] .mcp.json が存在します（MCP 経路は廃止済み）";
+            fail=1;
+          fi;
+          for f in .claude/settings.json .claude/settings.local.json; do
+            if [ -f "$f" ] && grep -q "mcpServers" "$f"; then
+              echo "[mcp-lint] $f に mcpServers があります（MCP 経路は廃止済み）";
+              fail=1;
+            fi;
+          done;
+          out=$(grep -rnE "@mcp\.tool|FastMCP\(" scripts --include="*.py");
+          rc=$?;
+          if [ "$rc" -ge 2 ]; then echo "[mcp-lint] grep 実行エラー"; exit 1; fi;
+          if [ "$rc" -eq 0 ]; then
+            echo "[mcp-lint] scripts/ に MCP ツール定義があります（廃止済み）:";
+            echo "$out";
+            fail=1;
+          fi;
+          exit $fail
+          '
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false
