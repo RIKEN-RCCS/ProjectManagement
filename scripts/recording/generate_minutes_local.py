@@ -26,12 +26,16 @@ Options:
 ローカル LLM (vLLM gemma4) 用と RiVault Embedding (bge-m3) 用は環境変数を分離する:
   - LOCAL_LLM_URL / LOCAL_LLM_TOKEN    — vLLM gemma4（議事録生成）
   - RIVAULT_URL / RIVAULT_TOKEN          — RiVault（embed_utils 経由で embedding 取得）
+
+視覚モード（--slide-images、opt-in）は独立した環境変数を使う:
+  - MINUTES_VISION_LLM_URL / _MODEL / _TOKEN（既定 dummy）/ _TEMPERATURE（既定 1.0）
 """
 
 import argparse
 import os
 import re
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -52,6 +56,7 @@ from cli_utils import (
     load_claude_md_context,
     load_llm_secrets,
 )
+from utils.llm import call_vision_llm
 
 # --------------------------------------------------------------------------- #
 # プロンプトテンプレート
@@ -180,6 +185,195 @@ Write "（未定）" ONLY when none of the above heuristics yield a name.
 ## Speaker name mapping (VTT English → Japanese)
 {speaker_map}
 """
+
+
+# --------------------------------------------------------------------------- #
+# 視覚モード（--slide-images）
+#   opt-in: --slide-images 指定 かつ MINUTES_VISION_LLM_URL/_MODEL 設定時のみ有効。
+#   既定（未設定）では従来のテキストのみ経路と完全に同じ挙動になる。
+# --------------------------------------------------------------------------- #
+_VISION_IMAGES_MAX_DEFAULT = 40
+_VISION_LLM_TOKEN_DEFAULT = "dummy"
+_VISION_LLM_TEMPERATURE_DEFAULT = "1.0"  # kimi 系 HF モデルカード推奨値（ARGUS_ONESHOT_LLM_TEMPERATURE と同型）
+
+_VISION_ONLY_SLIDE_BLOCK = (
+    "\n## Slides Shown in This Meeting\n"
+    "The actual presentation slides shown during this meeting are attached as images. "
+    "Treat them as ground truth for proper nouns, acronyms, technical terms, and numeric "
+    "figures. When the transcript conflicts with the slides, trust the slides.\n"
+)
+
+_VISION_WITH_OCR_SUFFIX = (
+    "\nThe actual presentation slides are ALSO attached as images for this call; "
+    "cross-reference them alongside the OCR text above.\n"
+)
+
+
+def _effective_vision_llm_temperature() -> float | None:
+    """MINUTES_VISION_LLM_TEMPERATURE（既定 "1.0"）の実効値を返す。
+
+    float 変換に失敗した場合は WARN を出して None（call_vision_llm への未指定扱い）を返す。
+    """
+    raw = os.environ.get("MINUTES_VISION_LLM_TEMPERATURE", _VISION_LLM_TEMPERATURE_DEFAULT)
+    try:
+        return float(raw)
+    except ValueError:
+        print(
+            f"[WARN] MINUTES_VISION_LLM_TEMPERATURE の値が不正です: {raw!r}"
+            "。未指定扱いにフォールバックします。",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _resolve_vision_config() -> dict | None:
+    """MINUTES_VISION_LLM_URL / _MODEL / _TOKEN / _TEMPERATURE から視覚モード設定を解決する。
+
+    呼び出し側は --slide-images 指定時のみこの関数を呼ぶ。URL・MODEL の
+    どちらかが欠けている場合は WARN して None を返し、従来のテキストのみ経路に
+    フォールバックする。
+
+    先頭で load_llm_secrets() を呼ぶ: --from-combined 経路では Stage 1
+    （call_argus_llm 経由で load_llm_secrets() を呼ぶ）が丸ごとスキップされ、
+    このプロセス内で secrets ファイルを読む機会が他に無いため、
+    ~/.secrets/localLLM.sh に MINUTES_VISION_LLM_* を追記しても静かに反映されない
+    問題を防ぐ。
+    """
+    load_llm_secrets()
+    url = os.environ.get("MINUTES_VISION_LLM_URL")
+    model = os.environ.get("MINUTES_VISION_LLM_MODEL")
+    if not (url and model):
+        print(
+            "[WARN] --slide-images が指定されましたが MINUTES_VISION_LLM_URL / "
+            "MINUTES_VISION_LLM_MODEL の両方が設定されていないため視覚モードを無効化し、"
+            "従来経路（テキストのみ）で続行します",
+            file=sys.stderr,
+        )
+        return None
+    token = os.environ.get("MINUTES_VISION_LLM_TOKEN", _VISION_LLM_TOKEN_DEFAULT)
+    temperature = _effective_vision_llm_temperature()
+    return {"url": url, "model": model, "token": token, "temperature": temperature}
+
+
+def _load_slide_images(slide_images_dir: str, max_images: int) -> list[str]:
+    """PNG ディレクトリから時系列順（ファイル名昇順）で画像パスを取得する。
+
+    max_images を超える場合は slide_ocr.py の extract_slide_frames と同じ
+    均等間引き（インデックス [0, total) から max_images 個を等間隔で選ぶ）で選別する。
+    """
+    frames = sorted(Path(slide_images_dir).glob("*.png"))
+    total = len(frames)
+    if total > max_images:
+        step = total / max_images
+        picked_idx = {int(i * step) for i in range(max_images)}
+        frames = [f for i, f in enumerate(frames) if i in picked_idx]
+        print(
+            f"[INFO] スライド画像を均等間引き: {total} → {len(frames)} 枚 (max={max_images})",
+            file=sys.stderr,
+        )
+    return [str(f) for f in frames]
+
+
+def _slide_image_labels(slide_images_dir: str, slide_images: list[str]) -> list[str]:
+    """間引き後の slide_images に対し、間引き前の元の通し番号を保持したラベルを返す。
+
+    例: 42枚から8枚に間引いても "Slide 7/42" のように元番号を表示する（連番が飛ぶことで
+    LLM がスライドの並びの連続性を誤認しないようにするため）。
+    """
+    all_frames = sorted(Path(slide_images_dir).glob("*.png"))
+    total = len(all_frames)
+    index_by_name = {f.name: i for i, f in enumerate(all_frames)}
+    labels = []
+    for p in slide_images:
+        idx = index_by_name.get(Path(p).name)
+        labels.append(f"Slide {idx + 1}/{total}" if idx is not None else "Slide")
+    return labels
+
+
+def _vision_or_argus_llm(
+    prompt: str,
+    *,
+    system: str,
+    timeout: int,
+    max_tokens: int,
+    think: bool,
+    temperature: float | None,
+    no_chat_template_kwargs: bool,
+    slide_images: list[str] | None,
+    vision_cfg: dict | None,
+    image_labels: list[str] | None = None,
+) -> str:
+    """視覚モードが有効なら call_vision_llm、無効なら従来通り call_argus_llm を呼ぶ。
+
+    視覚呼び出しの timeout はクライアント側で max(timeout, 900) に引き上げる
+    （RIKYU 視覚推論の長時間化対策）。think は call_vision_llm に渡さない
+    （K3 は thinking 無効化不可・常時 thinking のため）。視覚呼び出しが例外を
+    送出した場合は同一プロンプト・system で call_argus_llm に1回だけフォールバック
+    する。このフォールバックは fallback=False・timeout=min(timeout, 600) に限定し、
+    rivault→local の2段試行はさせない（vision失敗の後始末に時間をかけすぎない
+    ための時間予算）。
+    """
+    if vision_cfg and slide_images:
+        vision_timeout = max(timeout, 900)
+        print(
+            f"[vision] slides={len(slide_images)} (max={vision_cfg.get('max_images')})",
+            file=sys.stderr,
+        )
+        try:
+            return call_vision_llm(
+                prompt,
+                slide_images,
+                model=vision_cfg["model"],
+                base_url=vision_cfg["url"],
+                api_key=vision_cfg["token"],
+                system=system,
+                max_tokens=max_tokens,
+                timeout=vision_timeout,
+                temperature=vision_cfg["temperature"],
+                image_labels=image_labels,
+            )
+        except Exception as e:
+            print(f"[WARN] vision LLM 失敗 ({e})。テキストのみで再試行", file=sys.stderr)
+            return call_argus_llm(
+                prompt, timeout=min(timeout, 600), max_tokens=max_tokens,
+                think=think, temperature=temperature, system=system,
+                no_chat_template_kwargs=no_chat_template_kwargs,
+                fallback=False,
+            )
+    return call_argus_llm(
+        prompt, timeout=timeout, max_tokens=max_tokens,
+        think=think, temperature=temperature, system=system,
+        no_chat_template_kwargs=no_chat_template_kwargs,
+    )
+
+
+def _vision_call_fn(
+    slide_images: list[str] | None,
+    vision_cfg: dict | None,
+    image_labels: list[str] | None = None,
+) -> Callable[..., str]:
+    """_sample_n_times / 単発呼び出し向けの視覚対応 call_fn を返す。
+
+    vision_cfg が None（視覚モード無効）の場合は call_argus_llm と同じ
+    シグネチャ・挙動の関数になる（_vision_or_argus_llm が内部で振り分ける）。
+    """
+    def _call(
+        prompt: str,
+        *,
+        timeout: int,
+        max_tokens: int,
+        think: bool,
+        temperature: float | None,
+        no_chat_template_kwargs: bool,
+    ) -> str:
+        return _vision_or_argus_llm(
+            prompt, system="", timeout=timeout, max_tokens=max_tokens,
+            think=think, temperature=temperature,
+            no_chat_template_kwargs=no_chat_template_kwargs,
+            slide_images=slide_images, vision_cfg=vision_cfg,
+            image_labels=image_labels,
+        )
+    return _call
 
 
 # --------------------------------------------------------------------------- #
@@ -464,13 +658,19 @@ def _sample_n_times(
     no_chat_template_kwargs: bool,
     base_temperature: float | None,
     label: str,
+    call_fn: Callable[..., str] | None = None,
 ) -> list[str]:
     """同一プロンプトを n 回サンプリングし、空でない結果のリストを返す。
 
     各サンプルで temperature を僅かにずらしてサンプリング多様性を確保する
-    （base ± 0.1 程度の範囲）。空応答（reasoning parser の streaming 問題等）は
-    no_stream=True でリトライする。
+    （base ± 0.1 程度の範囲）。個々のサンプルで例外発生・空応答が返った場合は
+    リトライせずそのサンプルをスキップし、残りのサンプルのみで集約を続行する
+    （集約側 _consensus_stage2/3 が min_vote で最終判定する）。
+
+    call_fn: 省略時は call_argus_llm を使う。視覚モード有効時は呼び出し側から
+    _vision_call_fn() で束縛した閉包を渡すことで各サンプルを視覚経由にできる。
     """
+    llm_call = call_fn if call_fn is not None else call_argus_llm
     base_t = base_temperature if base_temperature is not None else (0.6 if think else 0.8)
     if n <= 1:
         deltas = [0.0]
@@ -486,7 +686,7 @@ def _sample_n_times(
         t = max(0.05, min(1.5, base_t + d))
         print(f"[INFO] {label} サンプル {i}/{n} (temperature={t:.2f}) 生成中...", file=sys.stderr)
         try:
-            text = call_argus_llm(
+            text = llm_call(
                 prompt, timeout=timeout, max_tokens=max_tokens,
                 think=think, temperature=t,
                 no_chat_template_kwargs=no_chat_template_kwargs,
@@ -933,6 +1133,8 @@ def generate_minutes(
     consensus_threshold: float = 0.78,
     consensus_min_vote: int | None = None,
     enable_triage: bool = True,
+    slide_images_dir: str | None = None,
+    slide_images_max: int = _VISION_IMAGES_MAX_DEFAULT,
 ) -> str:
     """文字起こしファイルから議事録を生成してファイルに保存する。
 
@@ -952,6 +1154,12 @@ def generate_minutes(
     スキップし全文をそのまま Stage 2/3 に投入する（全文→要約→展開のボトルネック解消）。
     複数チャンクになる場合は Stage 1 の出力字数目標・タイムアウトをチャンク長に
     比例してスケールする。
+
+    slide_images_dir が指定され、かつ MINUTES_VISION_LLM_URL / _MODEL が設定されている
+    場合のみ視覚モードが有効になる（opt-in、既定は完全に従来動作）。有効時は
+    Stage 2（議事内容）・Stage 3（決定事項/AI）の LLM 呼び出しをスライド画像付きの
+    call_vision_llm に差し替える。Stage 1（チャンク抽出）と consensus 集約は
+    常にテキストのみで実行する。
     """
     consensus_enabled = consensus_n is not None and consensus_n >= 2
     if consensus_enabled and consensus_min_vote is None:
@@ -989,18 +1197,56 @@ def generate_minutes(
     except Exception as _e:
         print(f"[INFO] glossary 追記スキップ: {_e}")
 
-    # スライドOCRから得た文脈をプロンプトに同梱するブロック
+    # 視覚モード（--slide-images）の解決: opt-in、URL+MODEL 両方揃って初めて有効
+    slide_images: list[str] = []
+    slide_image_labels: list[str] | None = None
+    vision_cfg: dict | None = None
+    if slide_images_dir:
+        resolved = _resolve_vision_config()
+        if resolved is not None:
+            slide_images = _load_slide_images(slide_images_dir, slide_images_max)
+            if slide_images:
+                vision_cfg = {**resolved, "max_images": slide_images_max}
+                slide_image_labels = _slide_image_labels(slide_images_dir, slide_images)
+            else:
+                print(
+                    f"[WARN] --slide-images ディレクトリに PNG が見つかりません: {slide_images_dir}",
+                    file=sys.stderr,
+                )
+    vision_enabled = vision_cfg is not None
+    if vision_enabled:
+        print(f"[INFO] vision config: model={vision_cfg['model']}", file=sys.stderr)
+        if consensus_enabled:
+            print(
+                f"[WARN] vision 有効 + consensus N={consensus_n}: "
+                f"スライド画像を {consensus_n} 回再送します（vision 呼び出しコストが N 倍）",
+                file=sys.stderr,
+            )
+    stage_call_fn = _vision_call_fn(slide_images, vision_cfg, slide_image_labels)
+
+    # スライドOCRから得た文脈をプロンプトに同梱するブロック。
+    # Stage 1（チャンク抽出）は画像を一切添付しない（extract_from_chunk は
+    # call_argus_llm 直呼び）ため、Stage 2/3（stage_call_fn 経由）用とは別に
+    # stage1_slide_context_block を用意する: 画像のみモードでは Stage 1 に無注入
+    # （""）、OCR併用時は OCR ブロックのみ（画像添付を示唆する suffix は付けない）。
     if slide_context:
-        slide_context_block = (
+        ocr_block = (
             "\n## Slides Shown in This Meeting\n"
             "These are the ACTUAL presentation slides shown during this meeting, extracted via OCR. "
             "Treat these as ground truth for proper nouns, acronyms, technical terms, and numeric figures. "
             "When Whisper ASR output conflicts with slide text, trust the slide text.\n\n"
             f"{slide_context}\n"
         )
+        stage1_slide_context_block = ocr_block
+        slide_context_block = ocr_block + _VISION_WITH_OCR_SUFFIX if vision_enabled else ocr_block
         print(f"[INFO] スライド文脈を同梱: {len(slide_context)} 字")
+    elif vision_enabled:
+        slide_context_block = _VISION_ONLY_SLIDE_BLOCK
+        stage1_slide_context_block = ""
+        print(f"[INFO] 視覚モード有効: スライド画像 {len(slide_images)} 枚（OCRテキストなし）")
     else:
         slide_context_block = ""
+        stage1_slide_context_block = ""
 
     # 出力パスの命名に必要な now/basename は早めに確定する
     now = datetime.now()
@@ -1027,6 +1273,7 @@ def generate_minutes(
                 timeout=timeout, think=think, max_tokens=max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs,
                 base_temperature=temperature, label="Stage 2 (from-combined)",
+                call_fn=stage_call_fn,
             )
             if len(drafts) >= 2:
                 minutes_text = _consensus_stage2(
@@ -1038,7 +1285,7 @@ def generate_minutes(
                 print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
                 minutes_text = drafts[0] if drafts else ""
         else:
-            minutes_text = call_argus_llm(
+            minutes_text = stage_call_fn(
                 prompt, timeout=timeout, max_tokens=max_tokens,
                 think=think, temperature=temperature,
                 no_chat_template_kwargs=no_chat_template_kwargs,
@@ -1081,7 +1328,7 @@ def generate_minutes(
                         think=think,
                         no_chat_template_kwargs=no_chat_template_kwargs,
                         temperature=temperature, max_tokens=max_tokens,
-                        slide_context_block=slide_context_block,
+                        slide_context_block=stage1_slide_context_block,
                         target_chars=target_chars,
                     )
                     # 空チャンクのリトライ（call_argus_llm の fallback 後でも空の場合）
@@ -1093,7 +1340,7 @@ def generate_minutes(
                             think=think,
                             no_chat_template_kwargs=no_chat_template_kwargs,
                             temperature=temperature, max_tokens=max_tokens,
-                            slide_context_block=slide_context_block,
+                            slide_context_block=stage1_slide_context_block,
                             target_chars=target_chars,
                         )
                 except Exception as e:
@@ -1131,6 +1378,7 @@ def generate_minutes(
                 timeout=timeout, think=think, max_tokens=max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs,
                 base_temperature=temperature, label="Stage 2 (multi-stage)",
+                call_fn=stage_call_fn,
             )
             if len(drafts) >= 2:
                 minutes_text = _consensus_stage2(
@@ -1142,7 +1390,7 @@ def generate_minutes(
                 print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
                 minutes_text = drafts[0] if drafts else ""
         else:
-            minutes_text = call_argus_llm(
+            minutes_text = stage_call_fn(
                 prompt, timeout=timeout, max_tokens=max_tokens,
                 think=think, temperature=temperature,
                 no_chat_template_kwargs=no_chat_template_kwargs,
@@ -1166,6 +1414,7 @@ def generate_minutes(
                 timeout=timeout, think=think, max_tokens=max_tokens,
                 no_chat_template_kwargs=no_chat_template_kwargs,
                 base_temperature=temperature, label="Stage 2 (single-pass)",
+                call_fn=stage_call_fn,
             )
             if len(drafts) >= 2:
                 minutes_text = _consensus_stage2(
@@ -1177,7 +1426,7 @@ def generate_minutes(
                 print("[WARN] Stage 2 ドラフトが不足、単発フォールバック", file=sys.stderr)
                 minutes_text = drafts[0] if drafts else ""
         else:
-            minutes_text = call_argus_llm(
+            minutes_text = stage_call_fn(
                 prompt, timeout=timeout, max_tokens=max_tokens,
                 think=think, temperature=temperature,
                 no_chat_template_kwargs=no_chat_template_kwargs,
@@ -1233,6 +1482,7 @@ def generate_minutes(
             timeout=decisions_timeout, think=decisions_think, max_tokens=decisions_max_tokens,
             no_chat_template_kwargs=no_chat_template_kwargs,
             base_temperature=temperature, label="Stage 3",
+            call_fn=stage_call_fn,
         )
         if len(drafts) >= 2:
             decisions_text = _consensus_stage3(
@@ -1245,7 +1495,7 @@ def generate_minutes(
             print("[WARN] Stage 3 ドラフトが不足、単発フォールバック", file=sys.stderr)
             decisions_text = drafts[0] if drafts else ""
     else:
-        decisions_text = call_argus_llm(
+        decisions_text = stage_call_fn(
             decisions_prompt, timeout=decisions_timeout, max_tokens=decisions_max_tokens,
             think=decisions_think, temperature=temperature,
             no_chat_template_kwargs=no_chat_template_kwargs,
@@ -1391,6 +1641,24 @@ def main() -> int:
              "Stage 1/2/3 プロンプトに同梱して固有名詞の誤変換を補正する",
     )
     parser.add_argument(
+        "--slide-images",
+        default=None,
+        dest="slide_images",
+        metavar="DIR",
+        help="スライド画像（PNG）ディレクトリ。MINUTES_VISION_LLM_URL / _MODEL が"
+             "設定されている場合のみ視覚モードが有効になり、Stage 2/3 の LLM 呼び出しに"
+             "画像を添付する（opt-in、既定は従来のテキストのみ経路）",
+    )
+    parser.add_argument(
+        "--slide-images-max",
+        type=int,
+        default=_VISION_IMAGES_MAX_DEFAULT,
+        dest="slide_images_max",
+        metavar="N",
+        help=f"視覚モードに投入するスライド画像の最大枚数（デフォルト: {_VISION_IMAGES_MAX_DEFAULT}。"
+             "超過時は時系列で均等間引きする）",
+    )
+    parser.add_argument(
         "--consensus",
         type=int,
         default=1,
@@ -1448,6 +1716,8 @@ def main() -> int:
         print(f"[INFO] VTT ファイル  : {args.vtt}")
     if args.slide_context:
         print(f"[INFO] スライド文脈  : {args.slide_context}")
+    if args.slide_images:
+        print(f"[INFO] スライド画像  : {args.slide_images} (max={args.slide_images_max})")
     if args.consensus and args.consensus >= 2:
         print(f"[INFO] consensus    : N={args.consensus}, threshold={args.consensus_threshold}")
     print(f"[INFO] トリアージ  : {'無効' if args.no_triage else '有効'}")
@@ -1468,6 +1738,8 @@ def main() -> int:
             consensus_threshold=args.consensus_threshold,
             consensus_min_vote=args.consensus_min_vote,
             enable_triage=not args.no_triage,
+            slide_images_dir=args.slide_images,
+            slide_images_max=args.slide_images_max,
         )
         print(f"[完了] {output_path}")
         return 0

@@ -55,5 +55,6 @@ scripts/eval/*
 !scripts/eval/knowledge_ab.py
 !scripts/eval/argus_ab_judge.py
 !scripts/eval/investigate_ab.py
+!scripts/eval/minutes_ab.py
 scripts/ingest/*.bak
 scripts/data/voice_uploads.db

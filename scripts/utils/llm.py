@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, overload
 
@@ -21,7 +22,9 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 _LLM_SECRET_FILES = (Path.home() / ".secrets/localLLM.sh", Path.home() / ".secrets/rivault_tokens.sh")
-_LLM_ENV_PREFIXES = ("LOCAL_LLM_", "LOCAL_OCR_", "RIVAULT_", "EMBED_", "ARGUS_PREFER_RIVAULT")
+_LLM_ENV_PREFIXES = (
+    "LOCAL_LLM_", "LOCAL_OCR_", "RIVAULT_", "EMBED_", "ARGUS_PREFER_RIVAULT", "MINUTES_VISION_",
+)
 
 _llm_secrets_mtime_cache: tuple | None = None
 
@@ -461,6 +464,208 @@ def call_local_llm(
             temperature=temperature, reasoning_effort=reasoning_effort,
             return_reasoning=return_reasoning,
         )
+
+
+# --------------------------------------------------------------------------- #
+# マルチモーダル (vision) 呼び出し
+# --------------------------------------------------------------------------- #
+
+def _log_int(value: int | None) -> int:
+    """ログ出力用に None を 0 へ丸める（harness 側パーサの \\d+ 前提を満たす契約）。"""
+    return value if isinstance(value, int) else 0
+
+
+def call_vision_llm(
+    prompt: str,
+    image_paths: Sequence[str | Path],
+    *,
+    model: str,
+    base_url: str,
+    api_key: str = "dummy",
+    system: str = "",
+    max_tokens: int = 16384,
+    timeout: int = 900,
+    temperature: float | None = None,
+    image_labels: Sequence[str] | None = None,
+    return_usage: bool = False,
+) -> str | tuple[str, dict]:
+    """複数画像を投入するマルチモーダル LLM 呼び出し（常時ストリーミング）。
+
+    pm_box_crawl._ocr_image（1 画像・非ストリーム・失敗時 None を返す OCR 専用実装、
+    3 系統が依存）とは独立した関数であり、_ocr_image 自体には手を入れない。
+
+    content 配列は画像ごとに（ラベルテキスト（image_labels 指定時のみ）+ image_url）を
+    並べ、最後に prompt 本文を積む。image_url の data URI は data:image/png;base64,...
+    形式（base64 エンコードは 1 回のみ行い、コンテキスト長超過時の再試行間で使い回す）。
+
+    リトライは 400 のコンテキスト長超過時のみ行う。画像を均等間引きして
+    n → ceil(n/2) → ceil(n/4) 枚で再試行し、それでも 400 が続く場合は
+    RuntimeError（入力トークン数を含む）を送出する。5xx・タイムアウト・接続エラーは
+    リトライせずそのまま例外を送出する（呼び出し側にテキストフォールバックがある前提）。
+
+    return_usage=True のとき (content, usage_dict) のタプルを返す。usage_dict は
+    prompt_tokens / completion_tokens / total_tokens / image_tokens / cached_tokens を
+    含む（vLLM の usage.prompt_tokens_details 配下にある場合もこの階層にフラット化する）。
+    """
+    import base64 as _base64
+    import json as _json
+    import math
+    import time as _time
+
+    import requests
+
+    paths = [Path(p) for p in image_paths]
+    for p in paths:
+        if not p.exists():
+            raise ValueError(f"画像ファイルが存在しません: {p}")
+
+    labels: list[str] | None = None
+    if image_labels is not None:
+        labels = list(image_labels)
+        if len(labels) != len(paths):
+            raise ValueError(
+                "image_labels の要素数は image_paths と一致させてください "
+                f"(image_paths={len(paths)}, image_labels={len(labels)})"
+            )
+
+    encoded_images: list[str] = []
+    for p in paths:
+        with open(p, "rb") as f:
+            encoded_images.append(_base64.b64encode(f.read()).decode("ascii"))
+
+    n_images = len(paths)
+
+    def _thinned_indices(target: int) -> list[int]:
+        if target >= n_images:
+            return list(range(n_images))
+        step = n_images / target
+        return sorted({int(i * step) for i in range(target)})
+
+    def _build_content(idx_list: list[int]) -> list[dict]:
+        content: list[dict] = []
+        for i in idx_list:
+            if labels is not None:
+                content.append({"type": "text", "text": labels[i]})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{encoded_images[i]}"},
+            })
+        content.append({"type": "text", "text": prompt})
+        return content
+
+    def _build_messages(idx_list: list[int]) -> list[dict]:
+        messages: list[dict] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": _build_content(idx_list)})
+        return messages
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    url = base_url.rstrip("/") + "/chat/completions"
+
+    print(f"[INFO] LLM call: backend=vision model={model} url={base_url} images={n_images}",
+          file=sys.stderr)
+
+    started = _time.time()
+    targets = [n_images, math.ceil(n_images / 2), math.ceil(n_images / 4)]
+    resp = None
+    used_indices: list[int] = list(range(n_images))
+    for attempt, target in enumerate(targets):
+        used_indices = _thinned_indices(target)
+        payload: dict = {
+            "model": model,
+            "messages": _build_messages(used_indices),
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+        if resp.status_code < 400:
+            break
+        if resp.status_code == 400:
+            err_body = resp.text[:1000]
+            is_ctx_overflow = bool(re.search(r"maximum context length.*input tokens", err_body))
+            if is_ctx_overflow and attempt < len(targets) - 1:
+                next_target = targets[attempt + 1]
+                actual_next = len(_thinned_indices(min(next_target, n_images)))
+                print(f"[WARN] vision: コンテキスト長超過。画像 {len(used_indices)}枚 → "
+                      f"{actual_next}枚に間引いて再試行", file=sys.stderr)
+                resp.close()
+                continue
+            if is_ctx_overflow:
+                m = re.search(r"at least (\d+) input tokens", err_body)
+                m2 = re.search(r"maximum context length is (\d+) tokens", err_body)
+                input_tok = m.group(1) if m else "?"
+                max_ctx = m2.group(1) if m2 else "?"
+                print(f"[ERROR] vision LLM 400: {err_body[:500]}", file=sys.stderr)
+                resp.close()
+                raise RuntimeError(
+                    f"画像を間引いてもコンテキスト長を超過します "
+                    f"(入力 {input_tok} トークン / 上限 {max_ctx})。"
+                )
+        print(f"[ERROR] vision LLM {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
+        resp.raise_for_status()
+
+    content_parts: list[str] = []
+    usage: dict = {}
+    for raw_line in resp.iter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+        if not line.startswith("data: "):
+            continue
+        data_str = line[len("data: "):]
+        if data_str.strip() == "[DONE]":
+            break
+        try:
+            chunk = _json.loads(data_str)
+        except _json.JSONDecodeError:
+            continue
+        choices = chunk.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta", {}) or {}
+            token = delta.get("content") or ""
+            if token:
+                content_parts.append(token)
+            # reasoning_content は蓄積しない（捨てる）
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+
+    content = "".join(content_parts)
+    stripped = strip_think_blocks(content)
+
+    details = usage.get("prompt_tokens_details") or {}
+    usage_out = {
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+        "image_tokens": usage.get("image_tokens", details.get("image_tokens")),
+        "cached_tokens": usage.get("cached_tokens", details.get("cached_tokens")),
+    }
+    latency_ms = int((_time.time() - started) * 1000)
+    # ログの usage 値は常に整数（欠測は0）で出す契約。harness側パーサ（\d+ 前提）が
+    # None 混入で行ごと欠測しないようにするため（usage_out 自体は None を保持する）。
+    print(f"[INFO] vision usage: prompt={_log_int(usage_out['prompt_tokens'])} "
+          f"image={_log_int(usage_out['image_tokens'])} completion={_log_int(usage_out['completion_tokens'])} "
+          f"cached={_log_int(usage_out['cached_tokens'])} latency_ms={latency_ms} "
+          f"images={len(used_indices)}", file=sys.stderr)
+
+    if not stripped.strip():
+        raise RuntimeError(
+            "vision LLM から空の応答が返されました "
+            f"(completion_tokens={_log_int(usage_out['completion_tokens'])})。"
+            "reasoning で max_tokens を消費し尽くした可能性があります。"
+            "max_tokens を増やすか think/reasoning 設定を確認してください。"
+        )
+
+    if not return_usage:
+        return stripped
+    return stripped, usage_out
 
 
 # --------------------------------------------------------------------------- #

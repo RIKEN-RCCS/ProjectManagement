@@ -590,6 +590,300 @@ class TestLoadLlmSecretsPrefixes:
 
 
 # --------------------------------------------------------------------------- #
+# call_vision_llm — SSE response helper
+# --------------------------------------------------------------------------- #
+
+def _make_vision_sse_response(tokens: list[str], usage: dict | None = None,
+                               status_code: int = 200) -> MagicMock:
+    """call_vision_llm 用の SSE モック。argus_ab.py:905-973 の流儀に合わせ、
+    usage は choices が空の最終チャンクで届く形にする。"""
+    lines = []
+    for t in tokens:
+        chunk = {"choices": [{"delta": {"content": t}}]}
+        lines.append(f"data: {json.dumps(chunk)}".encode())
+    if usage is not None:
+        lines.append(f"data: {json.dumps({'choices': [], 'usage': usage})}".encode())
+    lines.append(b"data: [DONE]")
+
+    mock = MagicMock()
+    mock.status_code = status_code
+    mock.iter_lines.return_value = iter(lines)
+    return mock
+
+
+class TestCallVisionLlmContentStructure:
+    def test_content_order_with_labels(self, tmp_path):
+        img1 = tmp_path / "a.png"
+        img1.write_bytes(b"fakedata1")
+        img2 = tmp_path / "b.png"
+        img2.write_bytes(b"fakedata2")
+        mock = _make_vision_sse_response(["answer"])
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return mock
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            call_vision_llm(
+                "説明して", [img1, img2],
+                model="k3", base_url="http://host/v1",
+                image_labels=["スライド1", "スライド2"],
+            )
+        content = captured["json"]["messages"][-1]["content"]
+        assert content[0] == {"type": "text", "text": "スライド1"}
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+        assert content[2] == {"type": "text", "text": "スライド2"}
+        assert content[3]["type"] == "image_url"
+        assert content[4] == {"type": "text", "text": "説明して"}
+        assert captured["json"]["stream"] is True
+        assert captured["json"]["stream_options"] == {"include_usage": True}
+
+    def test_content_order_without_labels(self, tmp_path):
+        img1 = tmp_path / "a.png"
+        img1.write_bytes(b"fakedata")
+        mock = _make_vision_sse_response(["ok"])
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return mock
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            call_vision_llm("prompt", [img1], model="k3", base_url="http://host/v1")
+        content = captured["json"]["messages"][-1]["content"]
+        assert content[0]["type"] == "image_url"
+        assert content[1] == {"type": "text", "text": "prompt"}
+
+    def test_mismatched_image_labels_length_raises(self, tmp_path):
+        img1 = tmp_path / "a.png"
+        img1.write_bytes(b"fakedata")
+        from utils.llm import call_vision_llm
+        with pytest.raises(ValueError):
+            call_vision_llm(
+                "prompt", [img1], model="k3", base_url="http://host/v1",
+                image_labels=["l1", "l2"],
+            )
+
+
+class TestCallVisionLlmUsage:
+    def test_usage_recovery_and_log_line(self, tmp_path, capsys):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"fakedata")
+        usage = {
+            "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+            "prompt_tokens_details": {"image_tokens": 80, "cached_tokens": 10},
+        }
+        mock = _make_vision_sse_response(["hello", " world"], usage=usage)
+        from utils.llm import call_vision_llm
+        with patch("requests.post", MagicMock(return_value=mock)):
+            text, usage_out = call_vision_llm(
+                "prompt", [img], model="k3", base_url="http://host/v1",
+                return_usage=True,
+            )
+        assert text == "hello world"
+        assert usage_out == {
+            "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+            "image_tokens": 80, "cached_tokens": 10,
+        }
+        captured = capsys.readouterr()
+        assert "vision usage: prompt=100 image=80 completion=20 cached=10" in captured.err
+        assert "images=1" in captured.err
+
+    def test_return_usage_false_returns_str_only(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"fakedata")
+        mock = _make_vision_sse_response(["ok"])
+        from utils.llm import call_vision_llm
+        with patch("requests.post", MagicMock(return_value=mock)):
+            result = call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+        assert result == "ok"
+        assert isinstance(result, str)
+
+    def test_missing_usage_fields_logged_as_zero_not_none(self, tmp_path, capsys):
+        """usage が全く届かない（None混入）場合でも、ログの usage 値は常に整数で出す契約。"""
+        img = tmp_path / "a.png"
+        img.write_bytes(b"fakedata")
+        mock = _make_vision_sse_response(["ok"])  # usage=None → 全フィールド欠測
+        from utils.llm import call_vision_llm
+        with patch("requests.post", MagicMock(return_value=mock)):
+            call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+        err = capsys.readouterr().err
+        assert "None" not in err
+        assert "vision usage: prompt=0 image=0 completion=0 cached=0" in err
+
+    def test_empty_content_raises_runtimeerror(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"fakedata")
+        mock = _make_vision_sse_response([])  # トークンなし → content 空
+        from utils.llm import call_vision_llm
+        with patch("requests.post", MagicMock(return_value=mock)):
+            with pytest.raises(RuntimeError, match="空の応答"):
+                call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+
+    def test_whitespace_only_content_raises_runtimeerror(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"fakedata")
+        mock = _make_vision_sse_response(["   ", "\n"])
+        from utils.llm import call_vision_llm
+        with patch("requests.post", MagicMock(return_value=mock)):
+            with pytest.raises(RuntimeError, match="空の応答"):
+                call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+
+
+class TestCallVisionLlmCtxOverflowRetry:
+    def test_retries_with_halved_images_then_succeeds(self, tmp_path):
+        imgs = []
+        for i in range(4):
+            p = tmp_path / f"{i}.png"
+            p.write_bytes(b"x")
+            imgs.append(p)
+        err_resp = MagicMock()
+        err_resp.status_code = 400
+        err_resp.text = ("This model's maximum context length is 100 tokens. "
+                          "However you requested at least 500 input tokens")
+        ok_resp = _make_vision_sse_response(
+            ["ok"],
+            usage={"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55,
+                   "image_tokens": 40, "cached_tokens": 0},
+        )
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(kwargs["json"])
+            return err_resp if len(calls) == 1 else ok_resp
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            text, usage_out = call_vision_llm(
+                "prompt", imgs, model="k3", base_url="http://host/v1", return_usage=True,
+            )
+        assert text == "ok"
+        assert len(calls) == 2
+        image_entries = [c for c in calls[1]["messages"][-1]["content"] if c["type"] == "image_url"]
+        assert len(image_entries) == 2  # ceil(4/2) に間引かれている
+        assert usage_out["image_tokens"] == 40
+
+    def test_all_retries_fail_raises_runtimeerror_with_token_count(self, tmp_path):
+        imgs = []
+        for i in range(4):
+            p = tmp_path / f"{i}.png"
+            p.write_bytes(b"x")
+            imgs.append(p)
+        err_resp = MagicMock()
+        err_resp.status_code = 400
+        err_resp.text = ("maximum context length is 100 tokens. "
+                          "However you requested at least 999 input tokens")
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(kwargs["json"])
+            return err_resp
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            with pytest.raises(RuntimeError, match="999"):
+                call_vision_llm("prompt", imgs, model="k3", base_url="http://host/v1")
+        assert len(calls) == 3  # n, ceil(n/2), ceil(n/4) の3段
+
+
+class TestCallVisionLlm5xxAndErrors:
+    def test_5xx_raises_without_retry(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.text = "internal error"
+        resp.raise_for_status.side_effect = RuntimeError("HTTP 500")
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(1)
+            return resp
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            with pytest.raises(RuntimeError, match="HTTP 500"):
+                call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+        assert len(calls) == 1
+
+    def test_connection_error_propagates_without_retry(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(1)
+            raise ConnectionError("boom")
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            with pytest.raises(ConnectionError):
+                call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+        assert len(calls) == 1
+
+    def test_strip_think_blocks_applied(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        mock = _make_vision_sse_response(["<think>reasoning</think>", "final answer"])
+        from utils.llm import call_vision_llm
+        with patch("requests.post", MagicMock(return_value=mock)):
+            text = call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+        assert text == "final answer"
+
+    def test_nonexistent_image_path_raises_valueerror(self, tmp_path):
+        from utils.llm import call_vision_llm
+        with pytest.raises(ValueError):
+            call_vision_llm(
+                "prompt", [tmp_path / "missing.png"],
+                model="k3", base_url="http://host/v1",
+            )
+
+
+class TestCallVisionLlmTemperature:
+    def test_temperature_omitted_when_none(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        mock = _make_vision_sse_response(["ok"])
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs["json"]
+            return mock
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            call_vision_llm("prompt", [img], model="k3", base_url="http://host/v1")
+        assert "temperature" not in captured["json"]
+
+    def test_temperature_included_when_set(self, tmp_path):
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        mock = _make_vision_sse_response(["ok"])
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs["json"]
+            return mock
+
+        from utils.llm import call_vision_llm
+        with patch("requests.post", fake_post):
+            call_vision_llm(
+                "prompt", [img], model="k3", base_url="http://host/v1", temperature=1.0,
+            )
+        assert captured["json"]["temperature"] == 1.0
+
+
+class TestCallVisionLlmEnvPrefix:
+    def test_minutes_vision_prefix_included(self):
+        from utils.llm import _LLM_ENV_PREFIXES
+        assert "MINUTES_VISION_" in _LLM_ENV_PREFIXES
+
+
+# --------------------------------------------------------------------------- #
 # call_argus_llm — routing logic
 # --------------------------------------------------------------------------- #
 
