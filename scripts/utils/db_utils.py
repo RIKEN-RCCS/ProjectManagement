@@ -664,8 +664,11 @@ def record_tool_call(
 ) -> dict:
     """ツール呼び出しを1件追記し、書いた行を返す（§4.4）。
 
-    ハッシュ連鎖の計算と INSERT は**呼び出し側で直列化すること**（並列ツール実行が
-    あるため、prev_hash の読み取りと INSERT の間に他の追記が入ると連鎖が壊れる）。
+    prev_hash の読み取りから INSERT + commit までを `BEGIN IMMEDIATE` トランザクションで
+    包み、**関数内でスレッド間・プロセス間の両方を直列化する**（呼び出し側で直列化する
+    必要はない）。ただし呼び出し時点で**既に外側のトランザクションが開いている場合**
+    （`conn.in_transaction` が True）は自前の BEGIN を発行せずそのまま進める —
+    その場合の直列化・commit/rollback は外側の呼び出し側の責務のままである。
 
     > 連鎖の頭が同じ信頼領域内にあると、意図的な改竄は検出できない（§4.4 の警告）。
     > 検出できるのは事故による破損まで。外部アンカー（日次のハッシュ投稿）は Phase 3。
@@ -681,32 +684,55 @@ def record_tool_call(
         raise ValueError(f"outcome は 'ok' | 'blocked' | 'error': {outcome!r}")
 
     ensure_tool_calls_table(conn)
-    row = conn.execute(
-        "SELECT entry_hash FROM tool_calls ORDER BY rowid DESC LIMIT 1"
-    ).fetchone()
-    prev_hash = (row[0] if not hasattr(row, "keys") else row["entry_hash"]) if row else GENESIS_HASH
+    # 直列化待ちで固まらないよう上限を設ける。SQLCipher の例外は stdlib sqlite3 の
+    # 派生ではないため、下の except は sqlite3.OperationalError ではなく
+    # operational_errors() で両方を拾う。
+    conn.execute("PRAGMA busy_timeout = 10000")
 
-    call_id = uuid.uuid4().hex
-    ts = datetime.now(UTC).isoformat()
-    args_json = _json.dumps(args, ensure_ascii=False, sort_keys=True)
-    payload = f"{prev_hash}{call_id}{ts}{tool_name}{args_json}{outcome}"
-    entry_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    own_transaction = not conn.in_transaction
+    if own_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT entry_hash FROM tool_calls ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        prev_hash = (row[0] if not hasattr(row, "keys") else row["entry_hash"]) if row else GENESIS_HASH
 
-    result_bytes = len(result.encode("utf-8")) if result is not None else None
-    result_sha256 = (
-        hashlib.sha256(result.encode("utf-8")).hexdigest() if result is not None else None
-    )
+        call_id = uuid.uuid4().hex
+        ts = datetime.now(UTC).isoformat()
+        args_json = _json.dumps(args, ensure_ascii=False, sort_keys=True)
+        payload = f"{prev_hash}{call_id}{ts}{tool_name}{args_json}{outcome}"
+        entry_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    conn.execute(
-        "INSERT INTO tool_calls (call_id, session_id, seq, ts, plane, tool_name, args_json,"
-        " args_max_entropy, result_bytes, result_sha256, model, model_revision,"
-        " reasoning_sha256, outcome, block_reason, prev_hash, entry_hash)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (call_id, session_id, seq, ts, plane, tool_name, args_json,
-         _args_max_entropy(args), result_bytes, result_sha256, model, model_revision,
-         reasoning_sha256, outcome, block_reason, prev_hash, entry_hash),
-    )
-    conn.commit()
+        result_bytes = len(result.encode("utf-8")) if result is not None else None
+        result_sha256 = (
+            hashlib.sha256(result.encode("utf-8")).hexdigest() if result is not None else None
+        )
+
+        conn.execute(
+            "INSERT INTO tool_calls (call_id, session_id, seq, ts, plane, tool_name, args_json,"
+            " args_max_entropy, result_bytes, result_sha256, model, model_revision,"
+            " reasoning_sha256, outcome, block_reason, prev_hash, entry_hash)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (call_id, session_id, seq, ts, plane, tool_name, args_json,
+             _args_max_entropy(args), result_bytes, result_sha256, model, model_revision,
+             reasoning_sha256, outcome, block_reason, prev_hash, entry_hash),
+        )
+    except BaseException:
+        # **どの例外でも必ず rollback する。** operational_errors() だけを拾うと、
+        # それ以外の失敗（引数の JSON 化・エントロピー計算など）で BEGIN IMMEDIATE の
+        # 書き込みロックを掴んだまま抜け、以降の追記が busy_timeout まで待たされる。
+        if own_transaction:
+            try:
+                conn.rollback()
+            except operational_errors():
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "[AUDIT] tool_calls のロールバックに失敗しました"
+                )
+        raise
+    if own_transaction:
+        conn.commit()
     return {
         "call_id": call_id, "session_id": session_id, "seq": seq, "ts": ts,
         "plane": plane, "tool_name": tool_name, "outcome": outcome,

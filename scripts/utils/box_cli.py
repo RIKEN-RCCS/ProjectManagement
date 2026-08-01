@@ -6,9 +6,12 @@ pm_xlsx_report / pm_xlsx_sync / pm_minutes_catalog / pm_minutes_publish 等で�
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def box_json(cmd: list[str], timeout: int = 120):
@@ -70,8 +73,11 @@ def _guard_box_payload(local_path, folder_id: str, filename: str) -> None:
     try:
         from db_utils import open_db
         conn = open_db(_Path(__file__).resolve().parents[2] / "data" / "pm.db", encrypt=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "[EGRESS] canary 台帳用の pm.db を開けませんでした。"
+            "canary 検査とegress記録を行わずに送信します: %s", exc
+        )
     try:
         guard_outbound_text(content, transport="box", dest=f"{folder_id}/{filename}", conn=conn)
     finally:

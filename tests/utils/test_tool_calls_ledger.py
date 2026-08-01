@@ -180,6 +180,51 @@ class TestReasoningTraces:
         c.close()
 
 
+class TestConcurrentRecording:
+    """欠陥2（prev_hash 読み取り〜INSERT が直列化されておらず並列書き込みで連鎖が壊れる）
+    の回帰テスト。8スレッド x 10回、別接続から同一 DB に書き込んでも連鎖が壊れないこと。
+    """
+
+    def test_parallel_writes_from_separate_connections_keep_chain_valid(self, pm_db_path):
+        import threading
+
+        n_threads = 8
+        n_per_thread = 10
+        errors: list[BaseException] = []
+
+        def worker(n: int) -> None:
+            c = sqlite3.connect(str(pm_db_path))
+            c.row_factory = sqlite3.Row
+            try:
+                for i in range(n_per_thread):
+                    record_tool_call(
+                        c, session_id=f"s{n}", seq=i, plane="read",
+                        tool_name="search_text", args={"thread": n, "i": i}, outcome="ok",
+                    )
+            except BaseException as exc:  # noqa: BLE001 - スレッド内例外を集めて後で assert する
+                errors.append(exc)
+            finally:
+                c.close()
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+
+        c = sqlite3.connect(str(pm_db_path))
+        c.row_factory = sqlite3.Row
+        try:
+            assert c.execute("SELECT count(*) FROM tool_calls").fetchone()[0] == (
+                n_threads * n_per_thread
+            )
+            assert verify_tool_call_chain(c) == []
+        finally:
+            c.close()
+
+
 class TestAnchor:
     def test_anchor_returns_latest_hash_and_count(self, conn):
         from db_utils import tool_call_anchor

@@ -6,6 +6,7 @@ Slack Canvas 操作の共通ユーティリティ。
 複数スクリプトで重複していた Canvas 投稿・セクション削除・テキスト整形を一元管理する。
 """
 
+import logging
 import os
 import re
 import sys
@@ -16,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from utils import net_guard  # noqa: F401 (import 時の install() 副作用のため)
+
+logger = logging.getLogger(__name__)
 
 _URLOPEN_TIMEOUT_SEC = 30
 
@@ -551,8 +554,11 @@ def _guard_canvas_payload(canvas_id: str, content: str) -> None:
         from db_utils import open_db
         _repo = _Path(__file__).resolve().parents[2]
         conn = open_db(_repo / "data" / "pm.db", encrypt=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "[EGRESS] canary 台帳用の pm.db を開けませんでした。"
+            "canary 検査とegress記録を行わずに送信します: %s", exc
+        )
     try:
         guard_outbound_text(content, transport="canvas", dest=canvas_id, conn=conn)
     finally:

@@ -95,6 +95,29 @@ class SlackEgressBlocked(RuntimeError):
     """送信前の検査で止めた（canary 検出・ゼロ幅文字）。"""
 
 
+def _open_audit_conn():
+    """canary 台帳・egress 記録用の pm.db 接続を自前で開く。
+
+    呼び出し側（`post_message` 等の 25 箇所）が `conn` を渡さない場合の
+    フォールバック。`canvas_utils.py` / `box_cli.py` のガードと同じ形にそろえてある。
+
+    失敗したら None を返す。**黙って握りつぶさない** — 検査が効いていないのに
+    効いているように見える状態を作らないため、必ず WARNING を出す（P6）。
+    """
+    from pathlib import Path as _Path
+
+    try:
+        from db_utils import open_db
+        repo_root = _Path(__file__).resolve().parents[2]
+        return open_db(repo_root / "data" / "pm.db", encrypt=True)
+    except Exception as exc:
+        logger.warning(
+            "[EGRESS] canary 台帳用の pm.db を開けませんでした。"
+            "canary 検査とegress記録を行わずに送信します: %s", exc
+        )
+        return None
+
+
 def _payload_text(kwargs: dict) -> str:
     """検査対象になるテキストを kwargs から集める（text と blocks の中身）。"""
     import json as _json
@@ -135,25 +158,39 @@ def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
 
     検査するのは canary とゼロ幅文字だけである。**自然な散文に符号化されたものは
     通る**（TrojanStego 型）ので、これで内容が安全になるわけではない（P10）。
+
+    `conn` が渡されなかった場合は `_open_audit_conn()` で自分で pm.db を開く。
+    自分で開いた接続は必ず閉じる（呼び出し側から渡された接続は所有権を持たないため
+    閉じない）。
     """
-    text = _payload_text(kwargs)
-    reasons = scan_text_for_egress(text, conn)
+    owns_conn = conn is None
+    if owns_conn:
+        conn = _open_audit_conn()
+    try:
+        text = _payload_text(kwargs)
+        reasons = scan_text_for_egress(text, conn)
 
-    outcome = "blocked" if reasons else "ok"
-    if conn is not None:
-        try:
-            from db_utils import record_tool_call
-            record_tool_call(
-                conn, session_id=source or "slack", seq=0, plane="egress",
-                tool_name=f"slack:{method}",
-                args={"channel": str(kwargs.get("channel") or ""), "chars": len(text)},
-                outcome=outcome, block_reason="; ".join(reasons) or None,
-            )
-        except Exception:
-            logger.exception("[SLACK-EGRESS] tool_calls への記録に失敗（送信判断は継続）")
+        outcome = "blocked" if reasons else "ok"
+        if conn is not None:
+            try:
+                from db_utils import record_tool_call
+                record_tool_call(
+                    conn, session_id=source or "slack", seq=0, plane="egress",
+                    tool_name=f"slack:{method}",
+                    args={"channel": str(kwargs.get("channel") or ""), "chars": len(text)},
+                    outcome=outcome, block_reason="; ".join(reasons) or None,
+                )
+            except Exception:
+                logger.exception("[SLACK-EGRESS] tool_calls への記録に失敗（送信判断は継続）")
 
-    if reasons:
-        raise SlackEgressBlocked(f"[SLACK-EGRESS] {method}: {'; '.join(reasons)}")
+        if reasons:
+            raise SlackEgressBlocked(f"[SLACK-EGRESS] {method}: {'; '.join(reasons)}")
+    finally:
+        if owns_conn and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def post_message(client, *, conn=None, source: str = "", **kwargs):
@@ -190,19 +227,32 @@ def guard_outbound_text(text: str, *, transport: str, dest: str = "",
 
     検査して記録し、問題があれば例外を投げる。**Slack のファネルと同じ検査・同じ台帳**を
     使うのは、出口ごとに基準が違うと「どの出口なら通るか」を探せてしまうため。
+
+    `conn` が渡されなかった場合は `_open_audit_conn()` で自分で pm.db を開く
+    （`_guard()` と同じ）。自分で開いた接続は必ず閉じる。
     """
-    reasons = scan_text_for_egress(text, conn)
-    if conn is not None:
-        try:
-            from db_utils import record_tool_call
-            record_tool_call(
-                conn, session_id=source or transport, seq=0, plane="egress",
-                tool_name=f"{transport}:post",
-                args={"dest": dest, "chars": len(text)},
-                outcome="blocked" if reasons else "ok",
-                block_reason="; ".join(reasons) or None,
-            )
-        except Exception:
-            logger.exception("[EGRESS] tool_calls への記録に失敗（送信判断は継続）")
-    if reasons:
-        raise SlackEgressBlocked(f"[EGRESS] {transport}: {'; '.join(reasons)}")
+    owns_conn = conn is None
+    if owns_conn:
+        conn = _open_audit_conn()
+    try:
+        reasons = scan_text_for_egress(text, conn)
+        if conn is not None:
+            try:
+                from db_utils import record_tool_call
+                record_tool_call(
+                    conn, session_id=source or transport, seq=0, plane="egress",
+                    tool_name=f"{transport}:post",
+                    args={"dest": dest, "chars": len(text)},
+                    outcome="blocked" if reasons else "ok",
+                    block_reason="; ".join(reasons) or None,
+                )
+            except Exception:
+                logger.exception("[EGRESS] tool_calls への記録に失敗（送信判断は継続）")
+        if reasons:
+            raise SlackEgressBlocked(f"[EGRESS] {transport}: {'; '.join(reasons)}")
+    finally:
+        if owns_conn and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass

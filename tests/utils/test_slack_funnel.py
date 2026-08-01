@@ -44,6 +44,22 @@ def conn(pm_db_path):
     c.close()
 
 
+@pytest.fixture
+def patch_audit_conn(pm_db_path, monkeypatch):
+    """`_open_audit_conn()` を差し替え、conn 未指定でも `pm_db_path` を自前で
+    開くようにする（本番の data/pm.db には決して触れない）。
+    """
+    from utils import slack_post
+
+    def _open():
+        c = sqlite3.connect(str(pm_db_path))
+        c.row_factory = sqlite3.Row
+        return c
+
+    monkeypatch.setattr(slack_post, "_open_audit_conn", _open)
+    return pm_db_path
+
+
 class TestPassThrough:
     def test_kwargs_are_forwarded_unchanged(self):
         """移送を機械的にするため kwargs はそのまま透過する。"""
@@ -103,7 +119,32 @@ class TestRecording:
         r = conn.execute("SELECT args_json FROM tool_calls").fetchone()
         assert "極秘の本文" not in r["args_json"]
 
-    def test_without_conn_nothing_is_recorded_but_send_proceeds(self):
+    def test_without_conn_send_proceeds_when_audit_conn_unavailable(self, monkeypatch):
+        """自前で開く pm.db 接続すら得られない場合でも fail-open で送信は続ける。"""
+        from utils import slack_post
+
+        monkeypatch.setattr(slack_post, "_open_audit_conn", lambda: None)
         c = FakeClient()
         post_message(c, channel="C0XXXXXXX", text="本文")
         assert len(c.calls) == 1
+
+
+class TestGuardWithoutConnArgument:
+    """欠陥1（conn 未指定だと canary 検査・egress 記録がまるごと素通りする）の回帰テスト。"""
+
+    def test_canary_is_detected_without_passing_conn(self, conn, patch_audit_conn):
+        from db_utils import plant_canary
+
+        row = plant_canary(conn, kind="text", planted_in="registry_only")
+        c = FakeClient()
+        with pytest.raises(SlackEgressBlocked, match="canary"):
+            post_message(c, channel="C0XXXXXXX", text=f"本文に {row['token']} を含む")
+        assert c.calls == []
+
+    def test_egress_is_recorded_without_passing_conn(self, conn, patch_audit_conn):
+        post_message(FakeClient(), channel="C0XXXXXXX", text="通常の本文")
+        rows = conn.execute(
+            "SELECT tool_name, plane, outcome FROM tool_calls"
+            " WHERE tool_name='slack:chat_postMessage' AND plane='egress' AND outcome='ok'"
+        ).fetchall()
+        assert len(rows) == 1
