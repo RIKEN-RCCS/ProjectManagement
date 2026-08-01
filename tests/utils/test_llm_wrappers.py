@@ -884,6 +884,116 @@ class TestCallVisionLlmEnvPrefix:
 
 
 # --------------------------------------------------------------------------- #
+# _token_for_base — base_url に応じたトークン選択（RiVault/RIKYU 混同バグの回帰防止）
+# --------------------------------------------------------------------------- #
+
+class TestTokenForBase:
+    def _clear(self, monkeypatch):
+        for var in ("RIVAULT_URL", "RIVAULT_TOKEN", "LOCAL_LLM_TOKEN", "RIKYU_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_rivault_host_uses_rivault_token(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("RIVAULT_TOKEN", "dummy-rivault")
+        monkeypatch.setenv("LOCAL_LLM_TOKEN", "dummy-local")
+        from utils.llm import _token_for_base
+        assert _token_for_base("http://rivault.example/v1") == "dummy-rivault"
+
+    def test_rivault_host_match_ignores_trailing_slash_and_v1(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1/")
+        monkeypatch.setenv("RIVAULT_TOKEN", "dummy-rivault")
+        from utils.llm import _token_for_base
+        assert _token_for_base("http://rivault.example") == "dummy-rivault"
+        assert _token_for_base("http://rivault.example/") == "dummy-rivault"
+        assert _token_for_base("http://rivault.example/v1") == "dummy-rivault"
+
+    def test_different_host_uses_local_llm_token(self, monkeypatch):
+        """RIKYU 相当の別ホストには RIVAULT_TOKEN を使わない（本バグの本体）。"""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("RIVAULT_TOKEN", "dummy-rivault")
+        monkeypatch.setenv("LOCAL_LLM_TOKEN", "dummy-rikyu")
+        from utils.llm import _token_for_base
+        assert _token_for_base("http://api.rikyu.example/v1") == "dummy-rikyu"
+
+    def test_local_llm_token_unset_falls_back_to_rikyu_token(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("RIVAULT_TOKEN", "dummy-rivault")
+        monkeypatch.setenv("RIKYU_TOKEN", "dummy-rikyu-direct")
+        from utils.llm import _token_for_base
+        assert _token_for_base("http://api.rikyu.example/v1") == "dummy-rikyu-direct"
+
+    def test_nothing_set_falls_back_to_dummy(self, monkeypatch):
+        self._clear(monkeypatch)
+        from utils.llm import _token_for_base
+        assert _token_for_base("http://api.rikyu.example/v1") == "dummy"
+
+
+# --------------------------------------------------------------------------- #
+# call_local_llm — RiVault → local フォールバックの LOCAL_LLM_MODEL / pin 遵守
+# --------------------------------------------------------------------------- #
+
+class TestCallLocalLlmFallbackModelPin:
+    def test_fallback_prefers_local_llm_model_over_detect(self, monkeypatch):
+        """LOCAL_LLM_MODEL が設定されていれば detect_vllm_model を呼ばない。"""
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://api.rikyu.example/v1")
+        monkeypatch.setenv("LOCAL_LLM_MODEL", "glm-5.2")
+
+        from utils import llm as llm_mod
+
+        def fail_if_called(*a, **kw):
+            raise AssertionError("LOCAL_LLM_MODEL 設定時は detect_vllm_model を呼ばないはず")
+        monkeypatch.setattr(llm_mod, "detect_vllm_model", fail_if_called)
+
+        captured = {}
+
+        def fake_inner(prompt, model, base_url, api_key, **kw):
+            captured["model"] = model
+            captured["base_url"] = base_url
+            if base_url == "http://rivault.example/v1":
+                raise RuntimeError("RiVault down")
+            return "local result"
+        monkeypatch.setattr(llm_mod, "_call_local_llm_inner", fake_inner)
+        monkeypatch.setattr(llm_mod, "_assert_model_pin", MagicMock())
+
+        result = llm_mod.call_local_llm(
+            "prompt", model="rivault-model", base_url="http://rivault.example/v1",
+            api_key="tok",
+        )
+        assert result == "local result"
+        assert captured["model"] == "glm-5.2"
+
+    def test_fallback_calls_assert_model_pin(self, monkeypatch):
+        """フォールバック経路で解決したモデルに対して _assert_model_pin が呼ばれる。"""
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://api.rikyu.example/v1")
+        monkeypatch.delenv("LOCAL_LLM_MODEL", raising=False)
+
+        from utils import llm as llm_mod
+        monkeypatch.setattr(llm_mod, "detect_vllm_model", lambda *a, **kw: "qwen3.6-35b")
+
+        def fake_inner(prompt, model, base_url, api_key, **kw):
+            if base_url == "http://rivault.example/v1":
+                raise RuntimeError("RiVault down")
+            return "local result"
+        monkeypatch.setattr(llm_mod, "_call_local_llm_inner", fake_inner)
+
+        pin_mock = MagicMock()
+        monkeypatch.setattr(llm_mod, "_assert_model_pin", pin_mock)
+
+        result = llm_mod.call_local_llm(
+            "prompt", model="rivault-model", base_url="http://rivault.example/v1",
+            api_key="tok",
+        )
+        assert result == "local result"
+        pin_mock.assert_called_once_with("qwen3.6-35b")
+
+
+# --------------------------------------------------------------------------- #
 # call_argus_llm — routing logic
 # --------------------------------------------------------------------------- #
 

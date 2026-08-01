@@ -167,7 +167,12 @@ def fetch_served_models(base_url: str, api_key: str | None = None,
     if not url.endswith("/models"):
         url += "/models"
     if api_key is None:
-        api_key = os.environ.get("RIVAULT_TOKEN") or os.environ.get("LOCAL_LLM_TOKEN", "dummy")
+        # base_url に対応したトークンを選ぶ。RIKYU と RiVault はトークンが別なので、
+        # 「RIVAULT_TOKEN を先に試す」固定順だと RIKYU に対して常に 401 になる
+        # （llm.py:detect_vllm_model で実際に 58 回記録されていた同型のバグ）。
+        # 遅延 import なのは llm.py がこのモジュールを import しているため（循環回避）。
+        from utils.llm import _token_for_base
+        api_key = _token_for_base(url)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         data = json.loads(resp.read())

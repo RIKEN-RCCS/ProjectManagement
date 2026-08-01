@@ -124,13 +124,41 @@ def _assert_model_pin(model_id: str | None) -> None:
         logger.exception("[MODELPIN] 照合に失敗しました（続行）")
 
 
+def _resolve_local_token(base_url: str) -> tuple[str, str]:
+    """base_url に対応する API トークンと、使用した環境変数名を解決する。
+
+    RIVAULT_URL と同じホストを指す base_url にのみ RIVAULT_TOKEN を使う。
+    それ以外（RIKYU 等のローカル系エンドポイント）は
+    LOCAL_LLM_TOKEN → RIKYU_TOKEN → RIVAULT_TOKEN → "dummy" の順で解決する
+    （末尾 `/` や `/v1` の有無に影響されないよう netloc で比較する）。
+    """
+    import urllib.parse
+    rivault_url = os.environ.get("RIVAULT_URL", "")
+    if rivault_url:
+        rivault_netloc = urllib.parse.urlparse(rivault_url).netloc
+        base_netloc = urllib.parse.urlparse(base_url).netloc
+        if base_netloc and base_netloc == rivault_netloc:
+            return os.environ.get("RIVAULT_TOKEN", "dummy"), "RIVAULT_TOKEN"
+    for var in ("LOCAL_LLM_TOKEN", "RIKYU_TOKEN", "RIVAULT_TOKEN"):
+        value = os.environ.get(var)
+        if value:
+            return value, var
+    return "dummy", "dummy"
+
+
+def _token_for_base(base_url: str) -> str:
+    """base_url に対応する API トークンを解決する（`_resolve_local_token` のトークン値のみ版）。"""
+    return _resolve_local_token(base_url)[0]
+
+
 def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
     """vLLM の /v1/models エンドポイントからモデル名を自動取得する。"""
     import json
     import urllib.request
     url = base_url.rstrip("/") + "/models"
+    token_var = "explicit"
     if api_key is None:
-        api_key = os.environ.get("RIVAULT_TOKEN") or os.environ.get("LOCAL_LLM_TOKEN", "dummy")
+        api_key, token_var = _resolve_local_token(base_url)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -140,7 +168,8 @@ def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
             raise RuntimeError(f"vLLM にモデルが見つかりません: {url}")
         return models[0]
     except Exception as e:
-        raise RuntimeError(f"vLLM モデル自動取得に失敗: {url} — {e}") from e
+        # トークンの値は絶対にログへ出さない。変数名のみ記録する（診断に必要なため）。
+        raise RuntimeError(f"vLLM モデル自動取得に失敗: {url} (token={token_var}) — {e}") from e
 
 
 # --------------------------------------------------------------------------- #
@@ -476,7 +505,11 @@ def call_local_llm(
             raise
         print(f"[WARN] call_local_llm: RiVault 失敗 ({type(exc).__name__}: {exc})。"
               f"local ({local_base}) にフォールバック", file=sys.stderr)
-        local_model = detect_vllm_model(local_base)
+        # フォールバックは障害時にしか通らない経路なので、_try_local() (line ~976) と
+        # 同じ形に揃える。ここだけ LOCAL_LLM_MODEL / pin 照合を素通りさせると、
+        # 「普段は守られているが、壊れたときだけ守られない」状態になってしまう。
+        local_model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
+        _assert_model_pin(local_model)
         return _call_local_llm_inner(
             prompt, model=local_model, base_url=local_base,
             api_key=os.environ.get("LOCAL_LLM_TOKEN", "dummy"),
