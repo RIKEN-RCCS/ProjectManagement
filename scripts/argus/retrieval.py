@@ -244,14 +244,34 @@ def sanitize_fts_query(q: str) -> str:
 # （2026-07-30 実運用クエリの実測: ASCII複合エンティティ導入に伴い顕在化。
 # sanitize_fts_query 自体はハイフンを除去しないため、複合エンティティ導入前から
 # 潜在していた既存バグでもある）。
-_FTS5_SPECIAL_CHARS_RE = re.compile(r'["\-:^*()]')
+#
+# 上記はかつて `_FTS5_SPECIAL_CHARS_RE = re.compile(r'["\-:^*()]')` という
+# 予約文字の**列挙（ブラックリスト）**で対処していたが、"/" が列挙から漏れており
+# 同種の sqlite3.OperationalError（"syntax error near '/'"）を再発させた
+# （2026-08-02: "/" を含むアプリ名等でゴールド質問セット 17 問中 2 問が
+# FTS ヒット 0 件に静かに縮退していたことが判明。ハイフンの件と同じ型の
+# バグを2度踏んだ）。列挙し忘れた文字が出るたびに再発する構造だったため、
+# **ホワイトリスト方式に変更**した: bareword として安全な形（Unicode の
+# 英数字・アンダースコアのみ）でなければ無条件にダブルクォートでフレーズ化する。
+# 余分にクォートを付けても 1 トークンのフレーズは bareword と同じ意味になり無害
+# — ブラックリストの取りこぼしで検索が静かに壊れるより、引用符が多い方が
+# はるかに安全という判断による。
 
 
 def _fts5_escape_token(token: str) -> str:
-    """FTS5 予約文字を含むトークンをダブルクォートでフレーズ化して安全に渡す。"""
-    if _FTS5_SPECIAL_CHARS_RE.search(token):
-        return '"' + token.replace('"', '""') + '"'
-    return token
+    """FTS5 の bareword として安全でないトークンをダブルクォートでフレーズ化する。
+
+    判定はホワイトリスト方式（Unicode の英数字・アンダースコアのみで構成される
+    トークンのみ非クォート）。理由は上のコメント参照。
+    空文字列・空白のみのトークンはそのまま返す（呼び出し側は既に空トークンを
+    フィルタ済みのため実運用では素通りしないが、空文字を無害にクォートすると
+    " \"\" " のような空フレーズを生みかねないため明示的に除外する）。
+    """
+    if not token or token.isspace():
+        return token
+    if re.fullmatch(r"\w+", token, re.UNICODE):
+        return token
+    return '"' + token.replace('"', '""') + '"'
 
 
 def _build_date_filter(since_date: str | None, exempt_box: bool = True) -> tuple[str, list]:
@@ -280,6 +300,10 @@ def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
                  record_filter: str = "", record_params: list | None = None) -> list[dict]:
     date_params = date_params or []
     record_params = record_params or []
+    # SQLCipher の OperationalError は標準 sqlite3.OperationalError の派生ではないため、
+    # 暗号化 DB（qa_index.db, 2026-08-01〜）では except sqlite3.OperationalError が
+    # 素通りしてしまう（db_utils.operational_errors() 参照）。
+    from db_utils import operational_errors
     try:
         if index_name:
             sql = (
@@ -304,8 +328,12 @@ def _fts5_search(conn: sqlite3.Connection, query: str, k: int,
             params = [query] + date_params + record_params + [k]
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
-    except sqlite3.OperationalError as e:
-        logger.debug(f"FTS5クエリエラー: {e} (query={query!r})")
+    except operational_errors() as e:
+        # ヒットなしへ丸めるだけだと検索段が壊れていても誰も気づけない
+        # （2026-08-02: "/" を含むトークンで FTS5 構文エラーが発生し、この丸めが
+        # ゴールド質問セットで静かに検索を全滅させていた実例あり）。WARNING で
+        # 必ず表に出す。
+        logger.warning(f"FTS5クエリエラー: {e} (query={query[:80]!r})")
         return []
 
 
@@ -329,6 +357,10 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
     if len(tokens) > 1:
         token_sets.append(tokens[:1])
 
+    # SQLCipher の OperationalError は標準 sqlite3.OperationalError の派生ではないため、
+    # 暗号化 DB（qa_index.db, 2026-08-01〜）では except sqlite3.OperationalError が
+    # 素通りしてしまう（db_utils.operational_errors() 参照）。
+    from db_utils import operational_errors
     for tset in token_sets:
         query = " ".join(_fts5_escape_token(t) for t in tset)
         try:
@@ -356,8 +388,12 @@ def _fts_tokens_search(conn: sqlite3.Connection, tokens: list[str], k: int,
             rows = conn.execute(sql, params).fetchall()
             if rows:
                 return [dict(r) for r in rows], len(tset)
-        except sqlite3.OperationalError as e:
-            logger.debug(f"fts_tokensクエリエラー: {e} (query={query!r})")
+        except operational_errors() as e:
+            # ヒットなしへ丸めるだけだと検索段が壊れていても誰も気づけない
+            # （2026-08-02: "/" を含むトークンで FTS5 構文エラーが発生し、この丸めが
+            # ゴールド質問セットで静かに検索を全滅させていた実例あり）。WARNING で
+            # 必ず表に出す。
+            logger.warning(f"fts_tokensクエリエラー: {e} (query={query[:80]!r})")
             return [], 0
     return [], 0
 

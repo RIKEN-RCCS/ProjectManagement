@@ -214,6 +214,110 @@ class TestFts5EscapeToken:
         finally:
             conn.close()
 
+    def test_slash_token_is_quoted(self):
+        """'/' を含むトークンが引用符で囲まれる（ホワイトリスト化の直接テスト。
+        2026-08-02: ブラックリストの列挙漏れで "/" が FTS5 構文エラー
+        "syntax error near \"/\"" を引き起こしていたバグの回帰防止）。"""
+        from argus.retrieval import _fts5_escape_token
+        assert _fts5_escape_token("Foo/bar") == '"Foo/bar"'
+
+    def test_plain_alphanumeric_and_japanese_tokens_stay_unquoted(self):
+        """純粋な英数字・日本語（アンダースコア含む）のみのトークンは
+        ホワイトリスト化後も引用符が付かない（既存挙動の維持）。"""
+        from argus.retrieval import _fts5_escape_token
+        for raw in ("NVIDIA123", "スケールアウト", "GB200_NVL72", "アプリ名"):
+            assert _fts5_escape_token(raw) == raw
+
+    def test_existing_reserved_chars_are_still_quoted(self):
+        """従来のブラックリスト（\" - : ^ * ( )）に含まれていた予約文字は、
+        ホワイトリスト化後も従来どおり引用符で囲まれる（回帰確認）。"""
+        from argus.retrieval import _fts5_escape_token
+        for raw in ('foo"bar', "foo-bar", "foo:bar", "foo^bar", "foo*bar", "foo(bar", "foo)bar"):
+            escaped = _fts5_escape_token(raw)
+            assert escaped.startswith('"') and escaped.endswith('"')
+
+    def test_query_string_with_slash_token_does_not_raise_operational_error(self, tmp_path):
+        """'/' を含むトークンで組み立てた MATCH クエリが構文エラーにならず、
+        実際にヒットすること（2026-08-02 バグの直接の再発検出テスト。実測:
+        修正前のブラックリスト正規表現ではこのテストは
+        `sqlite3.OperationalError: fts5: syntax error near "/"` で失敗する）。"""
+        db_path = _make_qa_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            from argus.retrieval import _fts5_escape_token
+            tokens = ["スケールアウト", "Foo/bar"]
+            q = " ".join(_fts5_escape_token(t) for t in tokens)
+            rows = conn.execute(
+                "SELECT c.id FROM fts JOIN chunks c ON fts.rowid = c.id WHERE fts MATCH ?", (q,)
+            ).fetchall()
+            assert isinstance(rows, list)
+        finally:
+            conn.close()
+
+    def test_fts_tokens_table_with_slash_token_does_not_raise_operational_error(self, tmp_path):
+        """fts_tokens（unicode61 tokenizer）側でも '/' を含むトークンが構文
+        エラーを起こさないこと（trigram だけでなく fts_tokens 経路の回帰防止）。"""
+        db_path = _make_qa_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            from argus.retrieval import _fts5_escape_token
+            q = _fts5_escape_token("Foo/bar")
+            rows = conn.execute(
+                "SELECT c.id FROM fts_tokens JOIN chunks c ON fts_tokens.rowid = c.id"
+                " WHERE fts_tokens MATCH ?", (q,)
+            ).fetchall()
+            assert isinstance(rows, list)
+        finally:
+            conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# _fts5_search / _fts_tokens_search — 検索失敗を静かに握りつぶさない
+# 2026-08-02: sqlite3.OperationalError を握りつぶす際 logger.debug のみだったため、
+# "/" のようなエスケープ漏れで検索段が全滅していても誰も気づけなかった。
+# WARNING で必ず表に出るようにした。
+# --------------------------------------------------------------------------- #
+
+class TestFtsSearchWarnsOnOperationalError:
+    def test_fts5_search_logs_warning_on_operational_error(self, tmp_path, caplog):
+        """_fts5_search が OperationalError を握りつぶす際に WARNING を出すこと
+        （クエリ先頭 80 文字・例外内容を含む）。"""
+        import logging
+
+        from argus.retrieval import _fts5_search
+        db_path = _make_qa_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            with caplog.at_level(logging.WARNING, logger="pm_qa_server"):
+                # エスケープをすり抜けた想定の生の "/" を含む不正クエリで構文エラーを誘発する
+                rows = _fts5_search(conn, "Foo/bar", 10)
+            assert rows == []
+            assert any("FTS5クエリエラー" in rec.message for rec in caplog.records)
+        finally:
+            conn.close()
+
+    def test_fts_tokens_search_logs_warning_on_operational_error(self, tmp_path, caplog, monkeypatch):
+        """_fts_tokens_search が OperationalError を握りつぶす際に WARNING を出すこと。
+        （_fts5_escape_token を無効化し、生の '/' を含むクエリで構文エラーを誘発する）"""
+        import logging
+
+        import argus.retrieval as srv
+        db_path = _make_qa_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            monkeypatch.setattr(srv, "_fts5_escape_token", lambda t: t)
+            with caplog.at_level(logging.WARNING, logger="pm_qa_server"):
+                rows, tokens_used = srv._fts_tokens_search(conn, ["Foo/bar"], 10)
+            assert rows == []
+            assert tokens_used == 0
+            assert any("fts_tokensクエリエラー" in rec.message for rec in caplog.records)
+        finally:
+            conn.close()
+
 
 # --------------------------------------------------------------------------- #
 # sudachi_tokenize_query — トークン品質（ASCII複合エンティティ・機能動詞除去・並べ替え）

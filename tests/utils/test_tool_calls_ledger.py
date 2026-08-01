@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 import pytest
@@ -239,3 +240,166 @@ class TestAnchor:
         from db_utils import tool_call_anchor
 
         assert tool_call_anchor(conn) is None
+
+
+# --------------------------------------------------------------------------- #
+# ensure_tool_calls_table() が呼び出し側の未コミットトランザクションを
+# 暗黙 COMMIT してしまう欠陥の回帰テスト（executescript() の implicit commit）。
+# --------------------------------------------------------------------------- #
+class TestCallerTransactionIsolation:
+    def test_uncommitted_caller_work_is_not_committed_by_record_tool_call(self, pm_db_path):
+        """欠陥の再発検出: tool_calls が既に存在する DB で、呼び出し側が未コミットの
+        別テーブルへの書き込みを持ったまま record_tool_call を呼んでも、
+        rollback すればその書き込みは残らないこと。"""
+        a = sqlite3.connect(str(pm_db_path))
+        a.row_factory = sqlite3.Row
+        ensure_tool_calls_table(a)  # tool_calls を先に存在させておく
+
+        a.execute("BEGIN")
+        a.execute("INSERT INTO action_items (content) VALUES ('未コミットの作業')")
+        _rec(a)
+        a.rollback()
+        a.close()
+
+        b = sqlite3.connect(str(pm_db_path))
+        b.row_factory = sqlite3.Row
+        try:
+            count = b.execute(
+                "SELECT count(*) FROM action_items WHERE content='未コミットの作業'"
+            ).fetchone()[0]
+        finally:
+            b.close()
+        assert count == 0
+
+    def test_record_tool_call_defers_commit_to_caller_transaction(self, pm_db_path):
+        a = sqlite3.connect(str(pm_db_path))
+        a.row_factory = sqlite3.Row
+        ensure_tool_calls_table(a)
+
+        a.execute("BEGIN")
+        _rec(a)
+
+        b = sqlite3.connect(str(pm_db_path))
+        b.row_factory = sqlite3.Row
+        try:
+            # 呼び出し側がまだ commit していないので、別接続からはまだ見えない
+            assert b.execute("SELECT count(*) FROM tool_calls").fetchone()[0] == 0
+        finally:
+            b.close()
+
+        a.commit()
+        a.close()
+
+        c = sqlite3.connect(str(pm_db_path))
+        c.row_factory = sqlite3.Row
+        try:
+            assert c.execute("SELECT count(*) FROM tool_calls").fetchone()[0] == 1
+        finally:
+            c.close()
+
+    def test_record_tool_call_commits_immediately_without_caller_transaction(self, pm_db_path):
+        """呼び出し側がトランザクションを開いていない場合は、従来どおり
+        record_tool_call 単体で確定すること（own_transaction の既存挙動）。"""
+        a = sqlite3.connect(str(pm_db_path))
+        a.row_factory = sqlite3.Row
+        ensure_tool_calls_table(a)
+        assert not a.in_transaction
+
+        _rec(a)
+        a.close()
+
+        b = sqlite3.connect(str(pm_db_path))
+        b.row_factory = sqlite3.Row
+        try:
+            assert b.execute("SELECT count(*) FROM tool_calls").fetchone()[0] == 1
+        finally:
+            b.close()
+
+    def test_ensure_tool_calls_table_does_not_change_transaction_state(self, pm_db_path):
+        """tool_calls が既にある DB に対して ensure_tool_calls_table を呼んでも
+        conn.in_transaction が変化しないこと（executescript の暗黙 COMMIT を
+        誘発しないこと）。"""
+        a = sqlite3.connect(str(pm_db_path))
+        a.row_factory = sqlite3.Row
+        ensure_tool_calls_table(a)  # 1回目でテーブルを作成しておく
+
+        a.execute("BEGIN")
+        a.execute("INSERT INTO action_items (content) VALUES ('x')")
+        assert a.in_transaction
+
+        ensure_tool_calls_table(a)  # 2回目: テーブルは既にある
+        assert a.in_transaction
+
+        a.rollback()
+        a.close()
+
+
+# --------------------------------------------------------------------------- #
+# open_db() の schema 初期化が素朴な `;` 分割のせいで tool_calls の append-only
+# トリガをサイレントに作成し損ねていた欠陥の回帰テスト、および
+# ensure_tool_calls_table() によるトリガ欠落の検知・修復の検証。
+# --------------------------------------------------------------------------- #
+class TestTriggerCreationAndRepair:
+    def test_init_pm_db_creates_append_only_triggers(self, pm_db_path):
+        """(b) の回帰検出: 新規作成した pm.db に append-only トリガが存在すること。"""
+        c = sqlite3.connect(str(pm_db_path))
+        c.row_factory = sqlite3.Row
+        try:
+            names = {
+                r["name"]
+                for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                    " AND name LIKE 'tool_calls_no_%'"
+                )
+            }
+        finally:
+            c.close()
+        assert names == {"tool_calls_no_update", "tool_calls_no_delete"}
+
+    def test_ensure_tool_calls_table_repairs_missing_triggers_with_warning(
+        self, pm_db_path, caplog
+    ):
+        """(a) の検証: トリガだけを DROP した DB に対して ensure_tool_calls_table()
+        を呼ぶと、トリガが再作成され WARNING が出ること。"""
+        c = sqlite3.connect(str(pm_db_path))
+        c.row_factory = sqlite3.Row
+        c.execute("DROP TRIGGER tool_calls_no_update")
+        c.execute("DROP TRIGGER tool_calls_no_delete")
+        c.commit()
+
+        with caplog.at_level(logging.WARNING, logger="db_utils"):
+            ensure_tool_calls_table(c)
+
+        assert any(
+            "append-only トリガが欠落していたため再作成しました" in r.message
+            for r in caplog.records
+        )
+        names = {
+            r["name"]
+            for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+                " AND name LIKE 'tool_calls_no_%'"
+            )
+        }
+        assert names == {"tool_calls_no_update", "tool_calls_no_delete"}
+        c.close()
+
+    def test_repaired_triggers_reject_update_and_delete(self, pm_db_path):
+        """トリガ再作成後に UPDATE / DELETE が拒否されること。"""
+        c = sqlite3.connect(str(pm_db_path))
+        c.row_factory = sqlite3.Row
+        c.execute("DROP TRIGGER tool_calls_no_update")
+        c.execute("DROP TRIGGER tool_calls_no_delete")
+        c.commit()
+
+        ensure_tool_calls_table(c)
+        record_tool_call(
+            c, session_id="s1", seq=1, plane="read", tool_name="search_text",
+            args={"query": "テスト"}, outcome="ok",
+        )
+
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            c.execute("UPDATE tool_calls SET outcome='blocked'")
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            c.execute("DELETE FROM tool_calls")
+        c.close()

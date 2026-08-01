@@ -71,6 +71,42 @@ def _isolate_env(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Fixture: redirect the audit-DB funnel (slack_post._open_audit_conn) away
+# from the production data/pm.db
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _isolate_audit_conn(tmp_path, monkeypatch):
+    """`utils.slack_post._open_audit_conn()` を一時 DB へ差し替える。
+
+    `post_message` 等の Slack 投稿ファネル、および `canvas_utils.py` /
+    `box_cli.py` のガード関数は、いずれも conn 未指定時にこの関数を呼んで
+    自前で監査用 pm.db 接続を開く（差し替え点は1箇所に集約済み）。ここを
+    monkeypatch しないと、テストがこれらのファネルを呼ぶだけで本番
+    `data/pm.db` の `tool_calls` にテスト由来の行が書き込まれてしまう
+    （実測: コミット b6b95e5 で本番 tool_calls 72 行がすべてテスト由来だった）。
+
+    `canvas_utils.py` / `box_cli.py` はガード関数内で `utils.slack_post` を
+    遅延 import してから `_open_audit_conn` を参照するため、モジュール import
+    のタイミングに関わらずここでの monkeypatch が効く。
+
+    `None` を返すと canary 検査・egress 記録そのものが無効化されてしまい、
+    「検査が効いている」ことを前提にしたテストが回帰を見逃す。そのため
+    必ず有効な一時 DB 接続を返す。
+    """
+    audit_db_path = tmp_path / "_audit_pm.db"
+
+    def _fake_open_audit_conn():
+        conn = sqlite3.connect(str(audit_db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    from utils import slack_post
+    monkeypatch.setattr(slack_post, "_open_audit_conn", _fake_open_audit_conn)
+    yield
+
+
+# --------------------------------------------------------------------------- #
 # Fixture: in-memory pm.db via init_pm_db schema
 # --------------------------------------------------------------------------- #
 

@@ -55,7 +55,18 @@ _MAX_INITIAL_SEARCH_QUERIES = 8
 _MAX_ZERO_TOOL_NUDGES = 2
 
 # one-shot 経路（ARGUS_ONESHOT）のパラメータ既定値
-_ONESHOT_TOP_K_DEFAULT = 200
+#
+# top_k は 2026-07-30 の A/B で **50 を運用値として確定**している（RIKYU nginx の
+# 600 秒制約。PLAN.md 参照）。だが既定値は 200 のままで、実際の 50 は qa デーモンを
+# 起動したシェルの環境変数 `ARGUS_ONESHOT_TOP_K` に入っているだけだった
+# （`~/.secrets/` にも `pm_daemon.sh` にも `.bashrc` にも無い）。
+# **別のシェルから再起動すると黙って 200 に戻る**。
+#
+# 2026-08-02 の被害半径実測（`recall_eval.py exposure`）では、k を 50→200 にすると
+# 1 クエリが視界に入れる文書が 24→62 件、質問 17 問の到達率が 7.1%→14.6% に広がる。
+# つまり「環境変数が付いていない起動」は、汚染文書がモデルの文脈へ入る機会を
+# 倍以上に広げる。**既定値を運用値に合わせ、環境が欠けたときに安全側へ倒す。**
+_ONESHOT_TOP_K_DEFAULT = 50
 _ONESHOT_CHAR_BUDGET_DEFAULT = 400_000
 _ONESHOT_MAX_TOKENS_DEFAULT = 16_384
 
@@ -81,7 +92,7 @@ def _effective_doc_qa_window_size() -> int:
 
 
 def _effective_oneshot_top_k() -> int:
-    """ARGUS_ONESHOT_TOP_K（既定 _ONESHOT_TOP_K_DEFAULT=200）の実効値を返す。"""
+    """ARGUS_ONESHOT_TOP_K（既定 _ONESHOT_TOP_K_DEFAULT=50）の実効値を返す。"""
     return _env_int("ARGUS_ONESHOT_TOP_K", _ONESHOT_TOP_K_DEFAULT)
 
 
@@ -2176,7 +2187,7 @@ def main():
     parser.add_argument("--context-file", help="事前調査結果等の背景情報ファイル（Pass 1 結果を Pass 2 に渡す際に使用）")
     parser.add_argument("--file", default="", help="Box資料名/フォルダ名の一部で検索範囲をそのファイルのみに固定する")
     parser.add_argument("--oneshot", action="store_true", help="one-shot 経路（ARGUS_ONESHOT=1 相当）を有効化する")
-    parser.add_argument("--oneshot-top-k", type=int, default=None, help="one-shot 経路の取得件数（ARGUS_ONESHOT_TOP_K 相当、既定200）")
+    parser.add_argument("--oneshot-top-k", type=int, default=None, help="one-shot 経路の取得件数（ARGUS_ONESHOT_TOP_K 相当、既定50）")
     args = parser.parse_args()
 
     if args.oneshot:

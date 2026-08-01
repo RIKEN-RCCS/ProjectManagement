@@ -37,6 +37,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -45,11 +46,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cli_utils import add_no_encrypt_arg, call_argus_llm
-from db_utils import open_db
+from db_utils import open_db, open_pm_db
+
+# flag_sensitive_terms / _load_second_opinion_config は scripts/ingest/slack.py 側の実装を
+# そのまま使う（重複させない）。ingest → data-pipeline 方向の依存は無いため循環importにはならない。
+from ingest.slack import _load_second_opinion_config, flag_sensitive_terms
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 BOX_DOCS_DB = DATA_DIR / "box_docs.db"
+PM_DB = DATA_DIR / "pm.db"
 
 VALID_RELEVANCE = {"core", "related", "noise", "unknown"}
 BATCH_SIZE = 5  # 本文を渡すので少なめ
@@ -145,63 +151,209 @@ def judge_batch(rows: list, logger) -> dict[str, tuple[str, str]]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# 第2系統（独立系統）による差分検査 — R8 / Phase 4
+# --------------------------------------------------------------------------- #
+#
+# noise 判定のうち、フラグ語が立ったものだけを対象にする。
+# **索引から落とす判定（noise）だけが欠落を作る** — core/related の誤りは検索すれば
+# いずれ見つかるが、noise と判定されたドキュメントは二度と検索結果に出てこない。
+# そのため第2系統も noise 判定の再審査に絞り、主系統が noise で第2系統が
+# core/related と判定したときだけ不一致として記録する（自動では relevance を上書きしない）。
+
+
+def second_opinion_box_verdict(doc_text: str, *, model: str | None = None) -> tuple[str, str]:
+    """独立系統（非中国系モデル）にドキュメント1件の relevance を単独で判定させる。
+
+    既存 JUDGE_PROMPT は複数件バッチ・主モデル向けに調整されたプロンプトのため
+    流用しない（scripts/ingest/slack.py の second_opinion_extraction と同じ理由:
+    別モデルにそのまま当てると差がプロンプト適合度の差になってしまう）。
+    """
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    model = model or cfg.get("model")
+    prompt = (
+        "次のドキュメントが、富岳NEXTプロジェクトの検索インデックスに残すべきかを判定してください。\n"
+        "判定は core（本質的ナレッジ）/ related（関連あり）/ noise（無関係、索引化不要）/ "
+        "unknown（判定不能）のいずれか1語だけを1行目に出力し、\n"
+        "2行目に理由を1文で書いてください。\n\n"
+        f"{doc_text}\n"
+    )
+    from utils.llm import call_rivault
+
+    raw = call_rivault(prompt, model=model, max_tokens=256, timeout=120)
+    head = (raw or "").strip().splitlines()[0].lower() if raw else ""
+    verdict = "unknown"
+    for cand in ("core", "related", "noise"):
+        if cand in head:
+            verdict = cand
+            break
+    return verdict, (raw or "")[:500]
+
+
+def _open_pm_db_for_second_opinion():
+    """記録先の pm.db 接続を開く。存在しなければ None（第2系統の記録をスキップ）。
+
+    pm.db は常に暗号化前提で開く。呼び出し元の `--no-encrypt` は box_docs.db を
+    平文で扱うための CLI フラグであり、そのまま pm.db に流用すると、暗号化済みの
+    pm.db を平文接続で開いた壊れた接続を掴んでしまい、第2系統の記録が全部
+    落ちる（box_docs.db だけを平文で扱う運用は想定されるが、pm.db は本番では
+    常に暗号化されている前提のため区別する）。
+    """
+    if not PM_DB.exists():
+        return None
+    return open_pm_db(PM_DB)
+
+
+def apply_second_opinion_box_relevance(
+    batch: list, verdicts: dict[str, tuple[str, str]], *,
+    conn_pm=None, log=None, state: dict | None = None,
+) -> list[dict]:
+    """判定済みバッチのうち、主系統が noise と判定した行に第2系統を当てる。
+
+    box_files.relevance は一切上書きしない。主系統 noise × 第2系統 core/related の
+    ときだけ不一致として `triage_second_opinion`（pm.db）に記録する。
+
+    戻り値: 不一致だった項目一覧（テスト・ログ確認用）。
+    """
+    log = log or (lambda msg: print(msg, file=sys.stderr))
+    if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
+        return []
+
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    cap = int(cfg.get("max_flagged_per_run") or 30)
+    state = state if state is not None else {}
+    model = cfg.get("model") or ""
+
+    disagreements: list[dict] = []
+    for row in batch:
+        fid = row["box_file_id"]
+        v = verdicts.get(fid)
+        if not v or v[0] != "noise":
+            continue
+
+        doc_text = format_doc_for_prompt(row)
+        terms = flag_sensitive_terms(doc_text)
+        if not terms:
+            continue
+
+        count = state.get("count", 0)
+        if count >= cap:
+            if not state.get("cap_warned"):
+                log(f"[WARN] 第2系統(box relevance) の実行回数が上限 {cap} 件に達しました。"
+                    "これ以降の noise 判定には第2系統を当てません"
+                    "（黙って打ち切ると「全部見た」と誤読されるため明示します）")
+                state["cap_warned"] = True
+            continue
+        state["count"] = count + 1
+
+        try:
+            second, raw = second_opinion_box_verdict(doc_text)
+        except Exception as e:
+            log(f"[WARN] 第2系統(box relevance) の呼び出しに失敗（この行はスキップ）: {e}")
+            continue
+
+        if second not in ("core", "related"):
+            continue
+
+        content = f"{row['name'] or ''} (box_file_id={fid})"
+        disagreements.append({"box_file_id": fid, "primary": "noise", "second": second})
+        if conn_pm is not None:
+            try:
+                from db_utils import record_second_opinion
+                record_second_opinion(
+                    conn_pm, kind="box_relevance", content=content,
+                    primary_verdict="noise", second_verdict=second,
+                    flagged_terms=terms, model=model, raw=raw,
+                )
+            except Exception as e:
+                log(f"[WARN] 第2系統(box relevance) の結果を記録できませんでした（判定は継続）: {e}")
+
+    if disagreements:
+        log(f"[SECOND-OPINION] Box relevance: noise 判定のうち第2系統との不一致 "
+            f"{len(disagreements)} 件を検出。**relevance は上書きしない** — "
+            "pm.db の triage_second_opinion を確認してください")
+    return disagreements
+
+
 def cmd_judge(args, logger) -> None:
     if not BOX_DOCS_DB.exists():
         print(f"box_docs.db が存在しません: {BOX_DOCS_DB}")
         return
 
     conn = open_db(BOX_DOCS_DB, encrypt=not args.no_encrypt)
+    conn_pm = None
+    try:
+        where = ["dc.content_md IS NOT NULL"]
+        if not args.force:
+            where.append("(bf.relevance IS NULL OR bf.relevance = '')")
+        if args.index_name:
+            where.append(f"bf.index_name LIKE '%\"{args.index_name}\"%'")
+        where_sql = " AND ".join(where)
 
-    where = ["dc.content_md IS NOT NULL"]
-    if not args.force:
-        where.append("(bf.relevance IS NULL OR bf.relevance = '')")
-    if args.index_name:
-        where.append(f"bf.index_name LIKE '%\"{args.index_name}\"%'")
-    where_sql = " AND ".join(where)
+        rows = conn.execute(
+            f"SELECT bf.box_file_id, bf.name, bf.folder_path, bf.file_format,"
+            f" dc.content_md"
+            f" FROM box_files bf JOIN doc_content dc"
+            f" ON bf.box_file_id = dc.box_file_id"
+            f" WHERE {where_sql}"
+            f" ORDER BY bf.box_file_id"
+        ).fetchall()
 
-    rows = conn.execute(
-        f"SELECT bf.box_file_id, bf.name, bf.folder_path, bf.file_format,"
-        f" dc.content_md"
-        f" FROM box_files bf JOIN doc_content dc"
-        f" ON bf.box_file_id = dc.box_file_id"
-        f" WHERE {where_sql}"
-        f" ORDER BY bf.box_file_id"
-    ).fetchall()
+        if not rows:
+            print("判定対象なし")
+            return
 
-    if not rows:
-        print("判定対象なし")
+        print(f"判定対象: {len(rows)} 件")
+        now = datetime.now().isoformat()
+        total_updated = 0
+        processed = 0
+
+        # 第2系統（R8 / Phase 4）: dry-run では box_files.relevance も pm.db への記録も
+        # 一切書き込まないため、pm.db 接続自体を開かない。
+        conn_pm = None if args.dry_run else _open_pm_db_for_second_opinion()
+        second_opinion_state: dict = {}
+
+        for start in range(0, len(rows), BATCH_SIZE):
+            batch = rows[start : start + BATCH_SIZE]
+            verdicts = judge_batch(batch, logger)
+            processed += len(batch)
+            print(f"  [{processed}/{len(rows)}] バッチ処理 (判定: {len(verdicts)}/{len(batch)})")
+
+            if args.dry_run:
+                for r in batch:
+                    v = verdicts.get(r["box_file_id"])
+                    if v:
+                        print(f"    {r['box_file_id']} {v[0]:7s} {(r['name'] or '')[:50]} — {v[1][:60]}")
+                continue
+
+            for fid, (rel, reason) in verdicts.items():
+                conn.execute(
+                    "UPDATE box_files SET relevance=?, relevance_reason=?,"
+                    " relevance_judged_at=? WHERE box_file_id=?",
+                    (rel, reason, now, fid),
+                )
+                total_updated += 1
+            conn.commit()
+
+            try:
+                apply_second_opinion_box_relevance(
+                    batch, verdicts, conn_pm=conn_pm, log=print, state=second_opinion_state,
+                )
+            except Exception as e:
+                # apply_second_opinion_box_relevance() 内で保護されているのは LLM 呼び出しと
+                # 記録だけで、設定読み込み・format_doc_for_prompt・flag_sensitive_terms は
+                # 素通りする。ここで受けずに伝播させるとバッチループごと落ち、残りバッチの
+                # relevance 判定（主系統）まで失われるため、ここで受けて処理を続行する。
+                print(
+                    "[WARN] 第2系統(box relevance) の適用に失敗"
+                    f"（主系統の判定結果は影響を受けません）: {e}"
+                )
+
+        print(f"\n完了: {total_updated} 件更新" + (" (dry-run)" if args.dry_run else ""))
+    finally:
+        if conn_pm is not None:
+            conn_pm.close()
         conn.close()
-        return
-
-    print(f"判定対象: {len(rows)} 件")
-    now = datetime.now().isoformat()
-    total_updated = 0
-    processed = 0
-
-    for start in range(0, len(rows), BATCH_SIZE):
-        batch = rows[start : start + BATCH_SIZE]
-        verdicts = judge_batch(batch, logger)
-        processed += len(batch)
-        print(f"  [{processed}/{len(rows)}] バッチ処理 (判定: {len(verdicts)}/{len(batch)})")
-
-        if args.dry_run:
-            for r in batch:
-                v = verdicts.get(r["box_file_id"])
-                if v:
-                    print(f"    {r['box_file_id']} {v[0]:7s} {(r['name'] or '')[:50]} — {v[1][:60]}")
-            continue
-
-        for fid, (rel, reason) in verdicts.items():
-            conn.execute(
-                "UPDATE box_files SET relevance=?, relevance_reason=?,"
-                " relevance_judged_at=? WHERE box_file_id=?",
-                (rel, reason, now, fid),
-            )
-            total_updated += 1
-        conn.commit()
-
-    conn.close()
-    print(f"\n完了: {total_updated} 件更新" + (" (dry-run)" if args.dry_run else ""))
 
 
 def cmd_export(args, logger) -> None:

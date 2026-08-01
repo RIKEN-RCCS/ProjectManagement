@@ -9,6 +9,7 @@ pm_ingest.py slack 経由で呼び出される。
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import math
 import os
@@ -774,6 +775,14 @@ def apply_second_opinion(results: dict, milestones: list[dict], *,
     **自動で覆すのではなくフラグを立てるに留める**。
 
     戻り値: 不一致だった項目の一覧。
+
+    **注意（2026-08）**: この関数は `triage_items(return_verdicts=True)` が返す
+    `(item, verdict, reason)` タプル形式を前提としている。既定の `DEFAULT_TRIAGE_MODE`
+    は "integrated" であり、この形式の後段 `triage_items` 呼び出し自体が発生しないため、
+    **integrated モードの production 経路からは呼ばれない**（呼び出しは
+    `tests/ingest/test_second_opinion.py` のみ）。削除はせず、two_stage 復帰時のために残す。
+    production の第2系統は `apply_second_opinion_extraction`（Pass 1 抽出）と
+    `pm_box_relevance.py` 側の配線を使う。
     """
     log = log or _default_batch_log
     if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
@@ -814,8 +823,8 @@ def apply_second_opinion(results: dict, milestones: list[dict], *,
                     second_verdict=second, flagged_terms=terms,
                     model=(cfg.get("model") or ""), raw=raw,
                 )
-            except Exception:
-                log("[WARN] 第2系統の結果を記録できませんでした（判定は継続）")
+            except Exception as e:
+                log(f"[WARN] 第2系統の結果を記録できませんでした（判定は継続）: {e}")
         if not agree:
             disagreements.append({
                 "kind": kind, "content": content[:120],
@@ -825,6 +834,198 @@ def apply_second_opinion(results: dict, milestones: list[dict], *,
     if disagreements:
         log(f"[SECOND-OPINION] フラグ付き {len(flagged)} 件中 {len(disagreements)} 件で"
             "主系統と不一致。**自動では覆さない** — pm.db の triage_second_opinion を確認してください")
+    return disagreements
+
+
+# --------------------------------------------------------------------------- #
+# 第2系統（独立系統）による Pass 1 抽出の差分検査 — R8 / Phase 4
+# --------------------------------------------------------------------------- #
+#
+# apply_second_opinion（上）は主系統が KEEP/DROP を判定した *生き残った* 項目にだけ
+# 第2系統を当てる。だが既定の DEFAULT_TRIAGE_MODE = "integrated" では DROP された項目は
+# 出力に現れないため、生き残った項目をいくら再審査しても「誤って残ったもの」しか
+# 見えず、**探している欠落（omission）は原理的に見えない**。
+#
+# そのため以下は、同じ生入力（スレッド本文）を第2系統に独立抽出させ、
+# 主系統の抽出結果に **無い** 項目を探す。第2系統の判定で主系統の抽出結果を
+# 上書きすることはしない — 記録してフラグを立てるに留める（apply_second_opinion と同じ方針）。
+
+# SequenceMatcher.ratio() の一致判定閾値。0.6 は表記ゆれ（「〜する」/「〜します」、
+# 助詞の省略等）を同一項目とみなしつつ、内容の異なる別項目まで同一視しない値として選定。
+# 変更する場合は config/sensitive_terms.yaml 同様、件数への影響を見ること。
+_EXTRACTION_MATCH_RATIO_THRESHOLD = 0.6
+
+
+def compare_extractions(primary: dict, second: dict) -> dict:
+    """主系統・第2系統の抽出結果を突き合わせ、**第2系統にあって主系統に無い**項目を返す。
+
+    突合は SequenceMatcher.ratio() >= _EXTRACTION_MATCH_RATIO_THRESHOLD を「一致」とみなす
+    （表記ゆれは吸収しつつ、別項目を同一視しない程度の閾値。根拠は定数のコメント参照）。
+
+    戻り値: {"decisions": [未一致content...], "action_items": [...],
+             "primary_counts": {...}, "second_counts": {...}}
+    """
+    result: dict = {}
+    primary_counts: dict = {}
+    second_counts: dict = {}
+    for kind in ("decisions", "action_items"):
+        primary_contents = [
+            (item or {}).get("content", "") or "" for item in (primary.get(kind) or [])
+        ]
+        second_contents = [
+            (item or {}).get("content", "") or "" for item in (second.get(kind) or [])
+        ]
+        primary_counts[kind] = len(primary_contents)
+        second_counts[kind] = len(second_contents)
+
+        missing = []
+        for s in second_contents:
+            # 空・空白のみの content は突合対象から除外する。第2系統が
+            # {"content": ""} を返すことがあり、これをそのまま扱うと空文字が
+            # missing に入り、triage_second_opinion に空の所見が記録されてしまう。
+            if not s.strip():
+                continue
+            matched = any(
+                difflib.SequenceMatcher(None, s, p).ratio() >= _EXTRACTION_MATCH_RATIO_THRESHOLD
+                for p in primary_contents
+            )
+            if not matched:
+                missing.append(s)
+        result[kind] = missing
+
+    result["primary_counts"] = primary_counts
+    result["second_counts"] = second_counts
+    return result
+
+
+def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
+                                    model: str | None = None) -> tuple[dict, str]:
+    """第2系統モデルに同じ生入力から独立抽出させる（LLM 呼び出し本体）。
+
+    `second_opinion_extraction()` の公開シグネチャは `dict` のみを返すが、
+    `record_second_opinion` の `raw` には生応答が必要なため、raw も返す
+    内部ヘルパーを分離してある（呼び出し元での二重 LLM 呼び出しを避ける）。
+    """
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    model = model or cfg.get("model")
+    prompt = (
+        "次のやり取りから、(1) 決定事項 (2) アクションアイテム を抜き出し、JSON で返してください。\n"
+        '`{"decisions": [{"content": "..."}], "action_items": [{"content": "..."}]}` の形式で、'
+        "本文は1行の日本語にしてください。該当が無ければ空配列にしてください。\n"
+    )
+    if context:
+        prompt += f"\n## 文脈\n{context}\n"
+    prompt += f"\n## やり取り\n{thread_text}\n"
+
+    from utils.llm import call_rivault
+
+    try:
+        raw = call_rivault(prompt, model=model, max_tokens=1024, timeout=120)
+    except Exception as e:
+        print(f"[WARN] 第2系統抽出の呼び出しに失敗: {e}", file=sys.stderr)
+        return {"decisions": [], "action_items": []}, ""
+
+    raw = raw or ""
+    try:
+        parsed = extract_json(raw)
+    except Exception as e:
+        print(f"[WARN] 第2系統抽出のJSONパースに失敗: {e}", file=sys.stderr)
+        return {"decisions": [], "action_items": []}, raw[:500]
+    return parsed, raw[:500]
+
+
+def second_opinion_extraction(thread_text: str, *, context: str = "",
+                              milestones: list[dict] | None = None,
+                              model: str | None = None) -> dict:
+    """独立系統（非中国系モデル）に、同じ生入力（スレッド本文）から決定事項・
+    アクションアイテムを**独立に**抽出させる。
+
+    主系統の EXTRACT_PROMPT は流用しない — 巨大かつ主モデル向けに調整済みのプロンプトを
+    そのまま別モデルに当てると、差がプロンプト適合度の差になってしまうため、
+    短く独立した指示にする。
+
+    失敗（LLM呼び出し失敗・JSONパース失敗）しても例外は投げない —
+    呼び出し元がこの項目をスキップできるよう、空の抽出結果を返す（ログには出す）。
+
+    milestones は現時点ではプロンプトに使用しない（呼び出し側の signature を
+    extract_from_thread 相当に揃えるために受け取るのみ）。
+    """
+    parsed, _raw = _call_second_opinion_extraction(thread_text, context=context, model=model)
+    return parsed
+
+
+def apply_second_opinion_extraction(
+    thread_text: str,
+    extracted: dict,
+    milestones: list[dict],
+    *,
+    context_note: str = "",
+    conn=None,
+    log=None,
+    state: dict | None = None,
+) -> list[dict]:
+    """Slack Pass 1 抽出（integrated モード）に第2系統の差分検査をかける（R8 / Phase 4）。
+
+    主系統が抽出した `extracted` と、第2系統が同じ生入力から独立抽出した結果を
+    `compare_extractions` で突き合わせ、**第2系統にあって主系統に無い**項目を
+    `triage_second_opinion` に記録する（`kind="decisions_extraction"` /
+    `"action_items_extraction"`, `primary_verdict="MISSING"`, `second_verdict="PRESENT"`）。
+
+    pm.db への保存内容（save_slack_items 経由）は一切変えない — ここでは記録のみ行う。
+
+    state: 呼び出し元（SlackIngestPlugin.run）が run 全体で使い回す可変 dict。
+    `max_flagged_per_run` の上限判定に使う（スレッドをまたいだカウンタ）。
+    省略時は呼び出しごとに新規カウンタになる。
+
+    戻り値: 未一致だった項目一覧（テスト・ログ確認用。呼び出し元は無視してよい）。
+    """
+    log = log or _default_batch_log
+    if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
+        return []
+
+    terms = flag_sensitive_terms(thread_text)
+    if not terms:
+        return []
+
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    cap = int(cfg.get("max_flagged_per_run") or 30)
+    state = state if state is not None else {}
+    count = state.get("count", 0)
+    if count >= cap:
+        if not state.get("cap_warned"):
+            log(f"[WARN] 第2系統抽出の実行回数が上限 {cap} 件に達しました。"
+                "これ以降のスレッドには第2系統を当てません"
+                "（黙って打ち切ると「全部見た」と誤読されるため明示します）")
+            state["cap_warned"] = True
+        return []
+    state["count"] = count + 1
+
+    second, raw = _call_second_opinion_extraction(thread_text, context=context_note)
+    diff = compare_extractions(extracted, second)
+    model = cfg.get("model") or ""
+
+    disagreements: list[dict] = []
+    for kind, so_kind in (
+        ("decisions", "decisions_extraction"),
+        ("action_items", "action_items_extraction"),
+    ):
+        for content in diff.get(kind, []):
+            disagreements.append({"kind": so_kind, "content": content})
+            if conn is not None:
+                try:
+                    from db_utils import record_second_opinion
+                    record_second_opinion(
+                        conn, kind=so_kind, content=content,
+                        primary_verdict="MISSING", second_verdict="PRESENT",
+                        flagged_terms=terms, model=model, raw=raw,
+                    )
+                except Exception as e:
+                    log(f"[WARN] 第2系統抽出の結果を記録できませんでした（判定は継続）: {e}")
+
+    if disagreements:
+        log(f"[SECOND-OPINION] Slack抽出: 第2系統が主系統の出力に無い項目を "
+            f"{len(disagreements)} 件検出。**自動では追加しない** — "
+            "pm.db の triage_second_opinion を確認してください")
     return disagreements
 
 
@@ -1267,6 +1468,10 @@ class SlackIngestPlugin:
                 f"threshold={consensus_threshold}, min_vote={consensus_min_vote or '⌈N/2⌉'}"
             )
 
+        # 第2系統（独立系統）の run 全体カウンタ（max_flagged_per_run の上限判定に使う）。
+        # R8 / Phase 4: docs/security-architecture.md 参照。
+        second_opinion_state: dict = {}
+
         for i, row in enumerate(threads, 1):
             ts = row["thread_ts"]
             if not force_reextract and is_already_extracted(ctx.pm_conn, ts, channel_id):
@@ -1292,6 +1497,15 @@ class SlackIngestPlugin:
             except Exception as e:
                 ctx.log(f"  [WARN] 抽出失敗: {e}")
                 continue
+
+            try:
+                apply_second_opinion_extraction(
+                    row["thread_text"], extracted, milestones,
+                    context_note=context, conn=ctx.pm_conn, log=ctx.log,
+                    state=second_opinion_state,
+                )
+            except Exception as e:
+                ctx.log(f"  [WARN] 第2系統抽出の適用に失敗（主系統の抽出結果は影響を受けません）: {e}")
 
             d_count = len(extracted.get("decisions", []))
             a_count = len(extracted.get("action_items", []))

@@ -9,6 +9,7 @@ GitHub Flavored Markdown を Slack mrkdwn に変換し、Slack section block の
 ここへ移送して、送信前の検査と egress ログを1箇所に集約する。
 """
 import logging
+import os
 import re
 
 logger = logging.getLogger(__name__)
@@ -99,17 +100,32 @@ def _open_audit_conn():
     """canary 台帳・egress 記録用の pm.db 接続を自前で開く。
 
     呼び出し側（`post_message` 等の 25 箇所）が `conn` を渡さない場合の
-    フォールバック。`canvas_utils.py` / `box_cli.py` のガードと同じ形にそろえてある。
+    フォールバック。`canvas_utils.py` / `box_cli.py` のガードもこの関数を呼ぶ
+    （差し替え点をここ1箇所に集約するため）。
 
     失敗したら None を返す。**黙って握りつぶさない** — 検査が効いていないのに
     効いているように見える状態を作らないため、必ず WARNING を出す（P6）。
+
+    テスト中に本番 `data/pm.db` を開こうとした場合は fail-closed で `RuntimeError`
+    を送出する（二重の防御。主対策は `tests/conftest.py` の autouse フィクスチャで
+    この関数自体を差し替えること）。判定には `PYTEST_CURRENT_TEST` を使う —
+    これは pytest が各テスト実行中にのみ自動設定する環境変数であり、本番実行では
+    一切設定されないため、**この分岐は本番実行時には効かない**。
     """
     from pathlib import Path as _Path
 
+    repo_root = _Path(__file__).resolve().parents[2]
+    db_path = repo_root / "data" / "pm.db"
+
+    if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+        raise RuntimeError(
+            "テストから本番 pm.db への監査書き込みを止めた。"
+            "tests/conftest.py の autouse フィクスチャを確認すること"
+        )
+
     try:
         from db_utils import open_db
-        repo_root = _Path(__file__).resolve().parents[2]
-        return open_db(repo_root / "data" / "pm.db", encrypt=True)
+        return open_db(db_path, encrypt=True)
     except Exception as exc:
         logger.warning(
             "[EGRESS] canary 台帳用の pm.db を開けませんでした。"
@@ -162,6 +178,12 @@ def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
     `conn` が渡されなかった場合は `_open_audit_conn()` で自分で pm.db を開く。
     自分で開いた接続は必ず閉じる（呼び出し側から渡された接続は所有権を持たないため
     閉じない）。
+
+    **fail-open**: `_open_audit_conn()` が接続を得られなかった場合（pm.db が
+    無い・鍵が読めない等）、`conn` は None のままになり、canary 検査は行わず
+    ゼロ幅文字だけを見て通す（`scan_text_for_egress` が `conn is None` のとき
+    canary チェックをスキップするため）。ただし WARNING は必ず出る
+    （`_open_audit_conn()` 側）ため、検査が効いていないことは分かる。
     """
     owns_conn = conn is None
     if owns_conn:
@@ -230,6 +252,10 @@ def guard_outbound_text(text: str, *, transport: str, dest: str = "",
 
     `conn` が渡されなかった場合は `_open_audit_conn()` で自分で pm.db を開く
     （`_guard()` と同じ）。自分で開いた接続は必ず閉じる。
+
+    **fail-open**: `conn` が得られなかった場合、canary 検査は行わずゼロ幅文字
+    だけを見て通す（`_guard()` と同じ挙動。詳細はそちらの docstring 参照）。
+    ただし WARNING は必ず出る。
     """
     owns_conn = conn is None
     if owns_conn:

@@ -33,6 +33,48 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
+# LLM 判定の監査記録（docs/security-architecture.md §4.4）
+# --------------------------------------------------------------------------- #
+def _record_llm_judgment(
+    ctx, tool_name: str, content: str, evidence_texts: list[str], *,
+    ai_id: int | None = None, outcome: str, result_summary: str,
+    raw_response: str | None = None,
+) -> None:
+    """完了/方針転換/外部シグナルの LLM 判定を tool_calls / reasoning_traces へ記録する。
+
+    `tool_calls.args_json` は平文の監査台帳に残り続けるため、本文そのものは
+    入れず sha256 のみを残す。生応答は reasoning_traces（既定90日で purge）側に
+    記録し、その sha256 だけを tool_calls に紐づける。ctx が None（呼び出し元が
+    未対応、または投機的な単体呼び出し）なら何もしない。
+    """
+    if ctx is None:
+        return
+    import hashlib
+
+    from .audit import record_call, record_reasoning
+
+    args: dict = {
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "content_chars": len(content),
+        "evidence_count": len(evidence_texts),
+        "evidence_sha256": hashlib.sha256(
+            "\n".join(evidence_texts).encode("utf-8")
+        ).hexdigest(),
+    }
+    if ai_id is not None:
+        args["ai_id"] = ai_id
+
+    reasoning_sha256 = None
+    if raw_response:
+        reasoning_sha256 = record_reasoning(ctx, ctx.tool_seq, raw_response)
+
+    record_call(
+        ctx, tool_name, args, outcome,
+        plane="read", result=result_summary, reasoning_sha256=reasoning_sha256,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # カテゴリ1: 完了シグナル検出
 # --------------------------------------------------------------------------- #
 def detect_completion_signals(ctx) -> int:
@@ -130,7 +172,9 @@ def detect_completion_signals(ctx) -> int:
         if not evidence_list:
             continue
 
-        judged = _llm_judge_completion(row["content"], evidence_list, row["extracted_at"])
+        judged = _llm_judge_completion(
+            row["content"], evidence_list, row["extracted_at"], ctx=ctx, ai_id=ai_id,
+        )
         if judged is None:
             continue
         is_complete, confidence, reason = judged
@@ -572,6 +616,7 @@ def detect_external_signals(ctx) -> int:
             judgment = _llm_judge_external_signal(
                 a["content"], a["monitor_target"],
                 art.get("title") or "", art.get("summary") or art.get("content") or "",
+                ctx=ctx,
             )
 
         # neutral 判定はノイズとみなし、通知せず cooldown も消費しない
@@ -646,12 +691,15 @@ NEUTRAL: （根拠）
 
 
 def _llm_judge_external_signal(
-    assumption_content: str, monitor_target: str, article_title: str, article_summary: str
+    assumption_content: str, monitor_target: str, article_title: str, article_summary: str,
+    *, ctx=None,
 ) -> dict | None:
     """LLM に前提と外部記事を比較させ、confirms/contradicts/neutral を判定する。
 
     Returns: {"verdict": "confirms"|"contradicts"|"neutral", "reason": str} 、
     LLM 利用不可・パース失敗時は None（呼び出し側は自動判定なしにフォールバックする）。
+
+    ctx を渡すと、判定を tool_calls / reasoning_traces へ記録する（§4.4）。
     """
     try:
         from cli_utils import call_argus_llm
@@ -672,10 +720,26 @@ def _llm_judge_external_signal(
         for verdict in ("CONFIRMS", "CONTRADICTS", "NEUTRAL"):
             if result.upper().startswith(verdict):
                 reason = result[len(verdict):].strip(": 　").strip() or "(根拠なし)"
+                _record_llm_judgment(
+                    ctx, "patrol_judge_external_signal", assumption_content,
+                    [article_title, article_summary],
+                    outcome="ok", result_summary=f"verdict={verdict.lower()}",
+                    raw_response=result,
+                )
                 return {"verdict": verdict.lower(), "reason": reason}
         logger.warning("外部シグナル LLM 判定: 期待した形式で応答が得られず: %s", result[:100])
+        _record_llm_judgment(
+            ctx, "patrol_judge_external_signal", assumption_content,
+            [article_title, article_summary],
+            outcome="error", result_summary="unparseable_response", raw_response=result,
+        )
     except Exception as e:
         logger.warning("外部シグナル LLM 判定エラー: %s", e)
+        _record_llm_judgment(
+            ctx, "patrol_judge_external_signal", assumption_content,
+            [article_title, article_summary],
+            outcome="error", result_summary=f"exception:{type(e).__name__}",
+        )
 
     return None
 
@@ -824,7 +888,7 @@ def detect_obsolete_items(ctx) -> int:
             break
         llm_calls += 1
 
-        judged = _llm_judge_obsolete(row["content"], evidence)
+        judged = _llm_judge_obsolete(row["content"], evidence, ctx=ctx, ai_id=ai_id)
         if judged is None:
             continue
         is_obsolete, reason = judged
@@ -876,12 +940,16 @@ _LLM_OBSOLETE_RE = re.compile(r"^\s*OBSOLETE\s*:?\s*(.*)$", re.IGNORECASE | re.M
 _LLM_NOT_OBSOLETE_RE = re.compile(r"^\s*NOT[_\s]?OBSOLETE\s*$", re.IGNORECASE | re.MULTILINE)
 
 
-def _llm_judge_obsolete(ai_content: str, evidence: list[dict]) -> tuple[bool, str] | None:
+def _llm_judge_obsolete(
+    ai_content: str, evidence: list[dict], *, ctx=None, ai_id: int | None = None,
+) -> tuple[bool, str] | None:
     """LLM に出典付きの証拠を分析させ、AI が方針転換により不要になったか判定する。
 
     evidence: {"source_type", "held_at", "source_ref", "content"} の辞書のリスト。
     Returns: (is_obsolete, reason) のタプル。LLM 利用不可・パース失敗時は
     None（呼び出し側は判定なしとして扱う）。
+
+    ctx を渡すと、判定を tool_calls / reasoning_traces へ記録する（§4.4）。
     """
     if not evidence:
         return None
@@ -900,6 +968,7 @@ def _llm_judge_obsolete(ai_content: str, evidence: list[dict]) -> tuple[bool, st
         ai_content=ai_content[:500],
         evidence_text=evidence_text,
     )
+    evidence_texts = [e.get("content") or "" for e in evidence]
 
     try:
         # rivault(Kimi-K2-Thinking, thinking無効化不可)が優先ルートの場合、
@@ -917,16 +986,32 @@ def _llm_judge_obsolete(ai_content: str, evidence: list[dict]) -> tuple[bool, st
         ):
             m = obsolete_matches[-1]
             reason = m.group(1).strip(": 　").strip() or "LLMが方針転換と判定"
+            _record_llm_judgment(
+                ctx, "patrol_judge_obsolete", ai_content, evidence_texts, ai_id=ai_id,
+                outcome="ok", result_summary="obsolete=True", raw_response=result,
+            )
             return (True, reason)
         if not_obsolete_matches and (
             not obsolete_matches
             or not_obsolete_matches[-1].start() > obsolete_matches[-1].start()
         ):
+            _record_llm_judgment(
+                ctx, "patrol_judge_obsolete", ai_content, evidence_texts, ai_id=ai_id,
+                outcome="ok", result_summary="obsolete=False", raw_response=result,
+            )
             return (False, "")
 
         logger.warning("方針転換 LLM 判定: 期待した形式で応答が得られず: %s", result[:100])
+        _record_llm_judgment(
+            ctx, "patrol_judge_obsolete", ai_content, evidence_texts, ai_id=ai_id,
+            outcome="error", result_summary="unparseable_response", raw_response=result,
+        )
     except Exception as e:
         logger.warning("方針転換 LLM 判定エラー: %s", e)
+        _record_llm_judgment(
+            ctx, "patrol_judge_obsolete", ai_content, evidence_texts, ai_id=ai_id,
+            outcome="error", result_summary=f"exception:{type(e).__name__}",
+        )
 
     return None
 
@@ -1000,7 +1085,8 @@ _LLM_NO_RE = re.compile(r"^\s*NO\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def _llm_judge_completion(
-    ai_content: str, evidence: list[dict], extracted_at: str | None = None
+    ai_content: str, evidence: list[dict], extracted_at: str | None = None,
+    *, ctx=None, ai_id: int | None = None,
 ) -> tuple[bool, str | None, str] | None:
     """LLM に出典付きの証拠を分析させ、AI が完了したか確信度付きで判定する。
 
@@ -1011,6 +1097,8 @@ def _llm_judge_completion(
     Returns: (is_complete, confidence, reason) のタプル。confidence は
     完了時のみ "HIGH"|"LOW"、未完了時は None。LLM 利用不可・パース失敗時は
     None（呼び出し側は自動判定なしとして扱う）。
+
+    ctx を渡すと、判定を tool_calls / reasoning_traces へ記録する（§4.4）。
     """
     if not evidence:
         return None
@@ -1043,6 +1131,7 @@ def _llm_judge_completion(
         extracted_at_line=extracted_at_line,
         extracted_at_guard=extracted_at_guard,
     )
+    evidence_texts = [e.get("content") or "" for e in evidence]
 
     try:
         # rivault(Kimi-K2-Thinking, thinking無効化不可)が優先ルートの場合、
@@ -1062,10 +1151,19 @@ def _llm_judge_completion(
             m = strict_matches[-1]
             confidence = m.group(1).upper()
             reason = m.group(2).strip(": 　").strip() or "LLMが完了と判定"
+            _record_llm_judgment(
+                ctx, "patrol_judge_completion", ai_content, evidence_texts, ai_id=ai_id,
+                outcome="ok", result_summary=f"complete=True confidence={confidence}",
+                raw_response=result,
+            )
             return (True, confidence, reason)
         if no_matches and (
             not strict_matches or no_matches[-1].start() > strict_matches[-1].start()
         ):
+            _record_llm_judgment(
+                ctx, "patrol_judge_completion", ai_content, evidence_texts, ai_id=ai_id,
+                outcome="ok", result_summary="complete=False", raw_response=result,
+            )
             return (False, None, "")
 
         # フォールバック: 確信度ラベル無しの "YES" 判定行（偽陰性防止）。
@@ -1075,11 +1173,24 @@ def _llm_judge_completion(
         if loose_matches:
             m = loose_matches[-1]
             reason = m.group(1).strip(": 　").strip() or "LLMが完了と判定（確信度ラベルなし）"
+            _record_llm_judgment(
+                ctx, "patrol_judge_completion", ai_content, evidence_texts, ai_id=ai_id,
+                outcome="ok", result_summary="complete=True confidence=LOW",
+                raw_response=result,
+            )
             return (True, "LOW", reason)
 
         logger.warning("完了シグナル LLM 判定: 期待した形式で応答が得られず: %s", result[:100])
+        _record_llm_judgment(
+            ctx, "patrol_judge_completion", ai_content, evidence_texts, ai_id=ai_id,
+            outcome="error", result_summary="unparseable_response", raw_response=result,
+        )
     except Exception as e:
         logger.warning("完了シグナル LLM 判定エラー: %s", e)
+        _record_llm_judgment(
+            ctx, "patrol_judge_completion", ai_content, evidence_texts, ai_id=ai_id,
+            outcome="error", result_summary=f"exception:{type(e).__name__}",
+        )
 
     return None
 

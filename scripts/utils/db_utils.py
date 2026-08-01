@@ -148,15 +148,18 @@ def open_db(
         conn.row_factory = _sqlcipher3.Row if encrypt and SQLCIPHER_AVAILABLE else _sqlite3.Row
 
     if schema:
-        # executescript() は暗黙 COMMIT を発行するため使用しない。
-        # 個別 execute + 明示 commit を使う。
-        for stmt in schema.split(";"):
-            stmt = stmt.strip()
-            if stmt:
-                try:
-                    conn.execute(stmt)
-                except Exception:
-                    pass
+        # ここは DB 接続を新規に開いた直後の初期化専用の経路であり、呼び出し側が
+        # トランザクションを開いている状況はあり得ない（呼び出し側はこの関数が
+        # 返す conn をまだ手にしていない）。そのため executescript() の「実行前に
+        # 保留中のトランザクションを暗黙 COMMIT する」仕様は問題にならない。
+        #
+        # 以前は `schema.split(";")` で個別 execute していたが、この素朴な分割は
+        # `CREATE TRIGGER ... BEGIN ... ; END;` のようにトリガ本体に `;` を含む
+        # DDL を正しく解釈できず、_PM_SCHEMA 内の tool_calls append-only トリガ
+        # (tool_calls_no_update / tool_calls_no_delete) を**サイレントに作成し
+        # 損ねていた**（発覚時の経緯は LOG.md）。executescript() はスクリプト
+        # 全体を正しく解釈するため、この欠落が起きない。
+        conn.executescript(schema)
         conn.commit()
 
     if migrations:
@@ -503,12 +506,28 @@ def table_exists(conn: "_sqlite3.Connection", name: str) -> bool:
     return row is not None
 
 
+def trigger_exists(conn: "_sqlite3.Connection", name: str) -> bool:
+    """トリガの存在を sqlite_master で確認する（`table_exists` のトリガ版）。"""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
 def ensure_canary_table(conn: "_sqlite3.Connection") -> None:
     """canary_tokens テーブルを作成する（既存 pm.db への後付け用・冪等）。
 
     init_pm_db() を経由しない既存 DB でも動くようにするため、スキーマ定義と
     同じ DDL をここでも実行できるようにしてある。
+
+    テーブルが既にあれば何もしない（`executescript()` も呼ばない）。
+    `executescript()` は実行前に呼び出し側の保留中トランザクションを暗黙 COMMIT する
+    仕様のため、無条件に呼ぶと呼び出し側の未コミット作業を勝手に確定させてしまう。
+    DDL を実行する＝暗黙 COMMIT が起きうるのは**テーブル新設時（既存 pm.db への
+    1回きりの後付け）だけ**である。
     """
+    if table_exists(conn, "canary_tokens"):
+        return
     conn.executescript(_CANARY_DDL)
     conn.commit()
 
@@ -619,9 +638,52 @@ GENESIS_HASH = "0" * 64
 
 
 def ensure_tool_calls_table(conn: "_sqlite3.Connection") -> None:
-    """tool_calls テーブルとトリガを作成する（既存 pm.db への後付け用・冪等）。"""
+    """tool_calls テーブルとトリガを作成する（既存 pm.db への後付け用・冪等）。
+
+    テーブルと2つの append-only トリガ（`tool_calls_no_update` /
+    `tool_calls_no_delete`）が**すべて**揃っていれば何もしない
+    （`executescript()` も呼ばない）。`executescript()` は実行前に呼び出し側の
+    保留中トランザクションを暗黙 COMMIT する仕様のため、`record_tool_call()` の
+    先頭で毎回無条件に呼ぶと、呼び出し側の未コミット作業（例: Patrol の
+    action_items 更新）を勝手に確定させてしまう。
+
+    テーブルだけでなくトリガの存在も見ているのは、`open_db()` の schema 初期化が
+    かつて `str.split(";")` による素朴な分割で `CREATE TRIGGER ... BEGIN ... END;`
+    を正しく解釈できず、テーブルはあるのにトリガだけが欠けた pm.db が作られていた
+    ため（`open_db()` 側は executescript() に切り替えて修正済みだが、既に
+    その状態で作られた既存 DB は残りうる）。テーブルの存在だけで判定すると、
+    この欠落した DB に対して二度とトリガが補われない。
+
+    DDL を実行する＝暗黙 COMMIT が起きうるのは**トリガ欠落の修復時（既存 pm.db
+    への1回きりの後付け）だけ**である。修復は稀な事象（本来は起きないはずの
+    欠陥の後始末）なので、この暗黙 COMMIT は許容する。
+
+    まっさらな DB へのテーブル新設と、既存 DB のトリガ欠落修復ではログを分ける。
+    「トリガが欠落していたため再作成しました」は本来起きないはずの欠陥の後始末を
+    意味するため、新設時にまで無条件に出すと本物の修復イベントがテストのたびに
+    出る WARNING に埋もれる。WARNING は DDL 実行が成功した後に出す
+    （実行前に出すと、実際に成功したかどうかが分からないまま「再作成しました」と
+    表示してしまう）。
+    """
+    table_existed = table_exists(conn, "tool_calls")
+    if (
+        table_existed
+        and trigger_exists(conn, "tool_calls_no_update")
+        and trigger_exists(conn, "tool_calls_no_delete")
+    ):
+        return
     conn.executescript(_TOOL_CALLS_DDL)
     conn.commit()
+
+    import logging as _logging
+
+    if table_existed:
+        _logging.getLogger(__name__).warning(
+            "[AUDIT] tool_calls の append-only トリガが欠落していたため再作成しました"
+            "（追記専用が保証されていなかった期間があります）"
+        )
+    else:
+        _logging.getLogger(__name__).info("[AUDIT] tool_calls テーブルを新規作成しました")
 
 
 def shannon_entropy(s: str) -> float:
@@ -718,21 +780,25 @@ def record_tool_call(
              _args_max_entropy(args), result_bytes, result_sha256, model, model_revision,
              reasoning_sha256, outcome, block_reason, prev_hash, entry_hash),
         )
+        # commit も try の中で行う。**commit 自体の失敗（ディスクフル・SQLITE_BUSY・
+        # HMAC エラー等）でも rollback しないと、BEGIN IMMEDIATE の書き込みロックを
+        # 掴んだまま抜け、以降の追記が busy_timeout まで待たされる。**
+        if own_transaction:
+            conn.commit()
     except BaseException:
         # **どの例外でも必ず rollback する。** operational_errors() だけを拾うと、
-        # それ以外の失敗（引数の JSON 化・エントロピー計算など）で BEGIN IMMEDIATE の
-        # 書き込みロックを掴んだまま抜け、以降の追記が busy_timeout まで待たされる。
+        # それ以外の失敗（引数の JSON 化・エントロピー計算・commit 自体の失敗など）で
+        # BEGIN IMMEDIATE の書き込みロックを掴んだまま抜け、以降の追記が
+        # busy_timeout まで待たされる。
         if own_transaction:
             try:
                 conn.rollback()
-            except operational_errors():
+            except Exception:
                 import logging as _logging
                 _logging.getLogger(__name__).warning(
                     "[AUDIT] tool_calls のロールバックに失敗しました"
                 )
         raise
-    if own_transaction:
-        conn.commit()
     return {
         "call_id": call_id, "session_id": session_id, "seq": seq, "ts": ts,
         "plane": plane, "tool_name": tool_name, "outcome": outcome,
@@ -798,7 +864,15 @@ def ensure_reasoning_traces_table(conn: "_sqlite3.Connection") -> None:
     **このテーブルはモデルが見た機微データがそのまま入る新しい機微データストアである**
     （§4.4）。容量と保持期間だけの問題として扱ってはならない。pm.db 内に置くことで
     SQLCipher の適用対象とし、レポート系クエリからは除外する。
+
+    テーブルが既にあれば何もしない（`executescript()` も呼ばない）。
+    `executescript()` は実行前に呼び出し側の保留中トランザクションを暗黙 COMMIT する
+    仕様のため、無条件に呼ぶと呼び出し側の未コミット作業を勝手に確定させてしまう。
+    DDL を実行する＝暗黙 COMMIT が起きうるのは**テーブル新設時（既存 pm.db への
+    1回きりの後付け）だけ**である。
     """
+    if table_exists(conn, "reasoning_traces"):
+        return
     conn.executescript(_REASONING_DDL)
     conn.commit()
 
@@ -815,6 +889,10 @@ def record_reasoning_trace(
     """思考トレースを1件保存し、その sha256 を返す（空文字なら None）。
 
     `tool_calls` 側はこの sha256 だけを持つ（本体は容量が大きく保持期間も異なるため）。
+
+    `record_tool_call()` と同じく、呼び出し時点で既に外側のトランザクションが
+    開いている場合（`conn.in_transaction` が True）は commit しない（呼び出し側に
+    委ねる）。監査記録が呼び出し側の無関係な作業を勝手に確定させないためである。
     """
     import hashlib
     from datetime import UTC, datetime
@@ -823,13 +901,15 @@ def record_reasoning_trace(
         return None
     ensure_reasoning_traces_table(conn)
     sha = hashlib.sha256(trace.encode("utf-8")).hexdigest()
+    own_transaction = not conn.in_transaction
     conn.execute(
         "INSERT INTO reasoning_traces (session_id, step, ts, model, model_revision,"
         " trace_sha256, char_count, trace) VALUES (?,?,?,?,?,?,?,?)",
         (session_id, step, datetime.now(UTC).isoformat(), model, model_revision,
          sha, len(trace), trace),
     )
-    conn.commit()
+    if own_transaction:
+        conn.commit()
     return sha
 
 
@@ -871,14 +951,18 @@ def record_second_opinion(
     import hashlib
     from datetime import UTC, datetime
 
-    conn.executescript(
-        "CREATE TABLE IF NOT EXISTS triage_second_opinion ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,"
-        "content_sha256 TEXT NOT NULL, content_head TEXT NOT NULL,"
-        "primary_verdict TEXT NOT NULL, second_verdict TEXT NOT NULL,"
-        "agreed INTEGER NOT NULL, flagged_terms TEXT NOT NULL,"
-        "model TEXT NOT NULL DEFAULT '', raw TEXT);"
-    )
+    # テーブルが既にあれば executescript を呼ばない。executescript() は実行前に
+    # 呼び出し側の保留中トランザクションを暗黙 COMMIT する仕様のため（既存 pm.db への
+    # 1回きりの後付け時のみ暗黙 COMMIT が起きうる）。
+    if not table_exists(conn, "triage_second_opinion"):
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS triage_second_opinion ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,"
+            "content_sha256 TEXT NOT NULL, content_head TEXT NOT NULL,"
+            "primary_verdict TEXT NOT NULL, second_verdict TEXT NOT NULL,"
+            "agreed INTEGER NOT NULL, flagged_terms TEXT NOT NULL,"
+            "model TEXT NOT NULL DEFAULT '', raw TEXT);"
+        )
     conn.execute(
         "INSERT INTO triage_second_opinion (ts, kind, content_sha256, content_head,"
         " primary_verdict, second_verdict, agreed, flagged_terms, model, raw)"

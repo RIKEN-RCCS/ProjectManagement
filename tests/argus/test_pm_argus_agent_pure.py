@@ -829,7 +829,10 @@ def test_oneshot_env_knob_defaults(monkeypatch):
     monkeypatch.delenv("ARGUS_ONESHOT_TOP_K", raising=False)
     monkeypatch.delenv("ARGUS_ONESHOT_CHAR_BUDGET", raising=False)
     monkeypatch.delenv("ARGUS_ONESHOT_MAX_TOKENS", raising=False)
-    assert pm_argus_agent._effective_oneshot_top_k() == 200
+    # 2026-08-02: 既定を 200 → 50 に変更した。運用値は 50 と確定していたのに既定が 200 で、
+    # 実際の 50 は qa デーモンを起動したシェルの環境変数に入っているだけだった
+    # （別のシェルから再起動すると黙って 200 に戻る）。環境が欠けたら安全側へ倒す。
+    assert pm_argus_agent._effective_oneshot_top_k() == 50
     assert pm_argus_agent._effective_oneshot_char_budget() == 400_000
     assert pm_argus_agent._effective_oneshot_max_tokens() == 16_384
 

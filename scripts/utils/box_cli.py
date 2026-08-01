@@ -69,23 +69,10 @@ def _guard_box_payload(local_path, folder_id: str, filename: str) -> None:
         from utils.slack_post import guard_outbound_text
     except Exception:
         return
-    conn = None
-    try:
-        from db_utils import open_db
-        conn = open_db(_Path(__file__).resolve().parents[2] / "data" / "pm.db", encrypt=True)
-    except Exception as exc:
-        logger.warning(
-            "[EGRESS] canary 台帳用の pm.db を開けませんでした。"
-            "canary 検査とegress記録を行わずに送信します: %s", exc
-        )
-    try:
-        guard_outbound_text(content, transport="box", dest=f"{folder_id}/{filename}", conn=conn)
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    # conn は自前で開かない。`guard_outbound_text()` は `conn=None` のとき自分で
+    # `_open_audit_conn()` を呼んで開き、自分で閉じる。ここでも別途開くと
+    # `_open_audit_conn()` が二重に呼ばれ、接続失敗時の WARNING も二重に出る。
+    guard_outbound_text(content, transport="box", dest=f"{folder_id}/{filename}")
 
 
 def box_upload_or_version(

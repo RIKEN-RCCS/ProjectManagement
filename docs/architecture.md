@@ -60,7 +60,8 @@
 │                                                                         │
 │  /argus-today / /argus-draft / /argus-transcribe                       │
 │                                                                         │
-│  pm_argus_patrol.py: 自律巡回 (30分間隔、期限超過・停滞検出)              │
+│  pm_argus_patrol.py: 自律巡回 (期限超過・停滞検出)                        │
+│    ※ cron 未登録。手動実行のみ（下の CRON 表を参照）                       │
 └──────────────────────┬──────────────────────────────────────────────────┘
                        │
           ┌────────────┼────────────┬────────────┐
@@ -375,12 +376,22 @@ pm_qa_server.py (Socket Mode デーモン)
 | 16:00 月〜金 | `pm_from_slack_daily.sh` | Slack 走査 + embed → argus-today 前提データ | `logs/pm_from_slack_daily_*.log` |
 
 **cron に載っていないスクリプト**（存在はするが定期実行されていない）:
-`pm_argus_daily_summary.sh`、`pm_box_distill.sh`（コメントアウト）。
+`pm_argus_daily_summary.sh`、`pm_box_distill.sh`（コメントアウト）、
+**`pm_argus_patrol.sh`**（2026-08-02 に確認。ラッパーは flock 付きで存在するが crontab に無く、
+最後の実行は 2026-07-30。「Patrol は 30 分間隔で回っているので放置すれば宛先が観測できる」という
+前提で立てた計画があれば見直すこと）。
 `pm_web_update.sh` / `pm_web_fetch.py` は **2026-08-01 に削除**（`docs/security-architecture.md`
 §4.5。認証境界の外へ出る唯一の経路だった）。復活させないこと。
 
 月〜金限定のジョブがあるため、全 cron 経路を 1 周させるには**平日を通す（実質 1 週間）**必要がある。
 `net_guard` の warn フェーズで宛先を洗い出す際はこの周期が下限になる（`PLAN.md` 参照）。
+
+**`net_guard` の enforce は cron 経路には掛かっていない**（2026-08-02 時点）。
+`ARGUS_NETGUARD=enforce` を設定しているのは `pm_daemon.sh`（qa / web）だけで、
+`net_guard.py` の既定は `warn` である。上表の 5 本はいずれも enforce を設定しておらず、
+**遮断されるのは Argus のデーモン経路のみ、cron 経路は記録されるだけ**という状態。
+cron 側を enforce にするには各ラッパーが `source` している `~/.secrets/` 側に置くのが
+早いが、それは PM 作業（`PLAN.md` 参照）。
 
 ---
 

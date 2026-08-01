@@ -83,7 +83,20 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    `tool_call_chain` を追加）。**拒否された呼び出しも記録する**（モデルが何を試みたかが残る）。
    **`reasoning_traces` も同日実装**（保持期間 既定90日、`tool_calls` は sha256 で参照、
    canary 発火時は `keep_sessions` で保全）。**これで §4.3 の検知点②③が埋まった。**
-   残り: 外部アンカー（Phase 3 のブローカー待ち）、`top_k` 200→100→50 の被害半径実測（P7 の文脈軸）
+   残り: 外部アンカー（Phase 3 のブローカー待ち）。
+   ~~`top_k` 200→100→50 の被害半径実測~~ → **2026-08-02 実施**（`recall_eval.py exposure`。
+   `recall_eval.py exposure --k 50,100,200`）。**1 クエリの露出**は k=50 で 24 文書 /
+   k=100 で 40 / k=200 で 62。**17 問の union 到達率**はコーパス 3,498 文書に対し
+   7.1% / 10.1% / 14.6%。**取りこぼし**は k=50 で 19%、k=100 で 9.5%（k=200 比）。
+   **運用値 50 がコード既定になっていなかった**（環境変数任せ）ため既定を 200→50 に変更。
+   k=100 は「被害半径を半分に削りつつ取りこぼしを 1 割未満に抑える」候補だが、
+   RIKYU の 600 秒制約との兼ね合いは未評価。
+   **2026-08-02 に判明した重大な欠陥**: `_guard()` が `conn` 未指定時に canary 検査と
+   `tool_calls` 記録を丸ごとスキップしており、**Slack 経路では一度も動いていなかった**
+   （呼び出し 25 箇所すべてが未指定）。ファネル側が自分で pm.db を開く形に修正。
+   あわせて `record_tool_call` の prev_hash 読み取り〜INSERT を `BEGIN IMMEDIATE` で包み、
+   `ensure_*` の `executescript` が呼び出し側のトランザクションを暗黙 COMMIT する問題も直した。
+   **本番台帳の既存 78 行はテスト由来なので証拠にならない**（LOG.md 参照）。
 6. ~~供給網の固定（§4.6）~~ → **2026-08-01 実装**（`config/model_pin.yaml` + `scripts/utils/model_pin.py`）。
    本番3モデル（glm-5.2 / Kimi-K2-Thinking / bge-m3）＋評価2モデルの id 照合が全て OK。
    既定は warn、`ARGUS_MODEL_PIN=enforce` で拒否。**`declared_*`（revision / trust_remote_code /
@@ -98,8 +111,15 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    **第2系統の判定で主系統を上書きしない** — 小型モデルの能力差による誤りが混ざるため、
    自動で覆さずフラグを立てて人が見る。あわせて **`triage_items` の `missing_verdict` 既定を
    `DROP` → `KEEP` に統一**（判定不能時に欠落を作らない。Phase 4 の明示項目）。
+   **2026-08-02 追記**: この配線は **production から一度も呼ばれていなかった**（呼び出し元は
+   テストのみ）。トリアージが `integrated` へ移行して後段の `triage_items` が消えていたため。
+   さらに integrated では DROP された項目が出力に現れないので、**生存項目の再審査では
+   欠落が原理的に見えない**（LOG.md 参照）。
+   **同日、欠落検出型へ作り直して 2 経路に配線した**: Pass 1 抽出（同じ生入力を第2系統に
+   独立抽出させ、主系統に無い項目を `kind=*_extraction` / `primary_verdict=MISSING` で記録）と
+   Box relevance（`noise` 判定のみ再審査。索引から落とす判定だけが欠落を作るため）。
    **残り**: (a) 実運用での不一致率の観測 — 能力差による雑音がどれくらいかを実測してから
-   フラグ語の広さを調整する (b) 残る2箇所（Pass 1 抽出 / Box relevance 判定）への展開
+   フラグ語の広さを調整する。**まだ 1 度も本番で走っていないので観測はこれから**
 8. **能力分離 5b（Phase 5）** — **2026-08-01 に第1スライス実装**。
    `scripts/argus/pm_read_worker.py`（Read Plane プロセス）＋ `net_guard` の
    `ARGUS_NETGUARD_PLANES`（平面単位で許可集合を絞る）。**ゲートは実測で達成**:
@@ -108,10 +128,22 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    子プロセス側でも自己検査で二重に確認する（親が scrub を忘れても止まる）。
    **2026-08-01 に切替フラグを実装**（`ARGUS_READ_PLANE_SUBPROCESS=1`、**既定 OFF**）。
    倒す前に `tool_calls` で「調べながら中間結果を投稿する」使い方の実在を確認する。
-   **残り**: (a) 上記フラグを ON にする判断 (b) Patrol も同様に分割
+   **残り**: (a) 上記フラグを ON にする判断
    (c) **OS レベルの強制**（iptables / network namespace）— 現状は同一プロセスの
    socket フックなので、subprocess とフック解除には効かない (d) ブローカーと Artifact
    への流れの再構成（下記 9 と一体）
+
+   **(b) Patrol の Read Plane 分割は見送った（2026-08-02）**。理由を残す:
+   Patrol の LLM は**ツールを持たず、宛先も選べない**（送信先は config 由来、判定は
+   verdict 文字列を返すだけ）。つまり「読取能力と送信能力が同一プロセスに同居する」ことの
+   危険が investigate とは違って**モデルからは行使できない**。一方、分割には**親を
+   ブローカーにする IPC** が要る — 検出器は読取と送信が交互に走る構造で、送信の戻り値
+   （メッセージ ts）を承認フローが使うため、片方向の受け渡しでは成立しない。
+   **代わりに、実在した穴（LLM 判定が本番データを書き換えるのに記録が無い）を埋めた** —
+   `patrol/audit.py` で 3 つの LLM 判定と自動クローズを `tool_calls` / `reasoning_traces` に
+   記録する（本文は sha256 のみ、生応答は 90 日保持の `reasoning_traces` 側）。
+   **Patrol は cron に載っていない**（2026-08-02 確認、最終実行 2026-07-30）。
+   「Patrol は 30 分間隔なので放置で宛先が出る」という warn 期間の被覆前提は**誤りだった**。
 9. **輸送層ブローカー（Phase 3・検知点①）** — **2026-08-01 に第1スライス実装**。
    `scripts/argus/output_broker.py` + `config/egress_targets.yaml`。宛先は識別子で選ぶだけで
    モデルは構築できない。送信前に **canary 検出（検出したら遮断）・ゼロ幅文字・自由文可否・
@@ -174,6 +206,14 @@ HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0�
   `data/patrol_state.db`（設計上平文。機密を含まない前提）
 - ~~MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま~~ → **2026-07-31 に丸ごと廃止**
   （チョークポイント 2 箇所目が閉じた。再登録は pre-commit の `no-mcp-server-registration` が防ぐ）
+- **`net_guard` の enforce が cron 経路に掛かっていない**（2026-08-02 確認）。`ARGUS_NETGUARD=enforce`
+  を設定しているのは `pm_daemon.sh`（qa / web）だけで、`net_guard.py` の既定は `warn`。
+  cron 5 本は**記録されるだけで遮断されない**。各ラッパーが `source` している `~/.secrets/` 側に
+  置くのが早いが PM 作業。**Patrol を enforce で dry-run した結果は deny 0 件**（宛先は RIKYU と
+  localhost:8001 のみ）なので、Patrol に限れば enforce にしても落ちない見込み
+- **`silent_control`（`pm_selfcheck`）が本物の記録で意味を持つのは 2026-08-02 以降**。
+  それ以前の `tool_calls` は全 78 行がテスト由来（LOG.md）。台帳が観測期間より新しい間は
+  「判定不能」と出るので、`egress_other` / `read_tools` は当面その表示になる
 - `~/.claude/settings.json` の GitHub PAT 失効（PM 作業）
 - `argus_config.yaml` の `indices.pm-all.channels` は 55 件。旧ハードコード（57 件の和集合）との
   差分 2 件は PM 判断で現状維持

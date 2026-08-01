@@ -1115,9 +1115,15 @@ cd /lvs0/dne1/rccs-nghpcadu/hikaru.inoue/ProjectManagement
 crontab -l | grep argus
 ```
 
-現在の設定:
-- 平日 17:00: `pm_argus_daily_summary.sh`（`--today-only` 日次サマリー）を自動実行
-- 平日30分ごと: `pm_argus_patrol.py` を自動実行
+現在の設定（2026-08-02 に実 crontab と突き合わせ済み）:
+- **Patrol は cron に登録されていない。** ラッパー `scripts/bin/pm_argus_patrol.sh`（flock 付き）は
+  存在するが crontab には無く、最後の実行は 2026-07-30。動かすなら手動か、cron への追加が要る
+- `pm_argus_daily_summary.sh` も cron に無い（`pm_argus_daily.sh` とは別物）
+
+実際に定期実行されている 5 本は `docs/architecture.md` の CRON 表を参照。
+**この節に「自動実行されている」と書く前に `crontab -l` と突き合わせること** —
+動いていない前提の上に「放置すれば観測できる」といった判断を重ねると、
+覆えていない経路を覆えたものとして数えることになる。
 
 ### 5. 自動再起動の設定（任意）
 

@@ -30,6 +30,12 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
                              検出できるのは事故による破損まで（外部アンカーは Phase 3）
   9. canary_alive          — 植えた canary が box_docs / qa_index から消えている。
                              **発火検知だけでは餌が腐っても気づけない**ため対で要る
+ 10. silent_control        — tool_calls に「動いていれば必ず出る」種類の記録が
+                             観測期間内に1件も無い。canary / net_guard 自体は
+                             呼ばれなければ検知できない（2026-08-01 に Slack 出力
+                             ファネルの conn 未配線・第2系統トリアージの呼び出し元
+                             不在の2件が判明。共通のシグナルは「動いている証拠が
+                             一件も無い」ことだった）
 
 書き込みは一切行わない。値（channel/user ID 等）はログに出力しない
 （state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
@@ -42,6 +48,8 @@ Usage:
     python3 scripts/quality/pm_selfcheck.py --db data/pm.db --state-db data/patrol_state.db
     python3 scripts/quality/pm_selfcheck.py --logs-dir logs --days 1
     python3 scripts/quality/pm_selfcheck.py --no-security-checks
+    python3 scripts/quality/pm_selfcheck.py --silence-days 14
+    python3 scripts/quality/pm_selfcheck.py --silence-strict
 """
 from __future__ import annotations
 
@@ -622,6 +630,126 @@ def _row_contains(db_path: Path, sql: str, params: tuple) -> bool | None:
 
 
 # --------------------------------------------------------------------------- #
+# 10. 沈黙している制御の検出（docs/security-architecture.md、2026-08-01 の反省）
+# --------------------------------------------------------------------------- #
+
+# tool_calls に「動いていれば必ず出る」はずの種類と、その既定観測期間（日）。
+# where 句は tool_calls のカラムのみを参照する（values は使わない）。
+_SILENCE_SPECS: dict[str, dict] = {
+    "egress_slack": {
+        "where": "plane = 'egress' AND tool_name LIKE 'slack:%'",
+        "default_days": 7,
+        "description": "Slackへの出力（brief/risk/patrol/canvas_reportが動いていれば必ず出る）",
+    },
+    "egress_other": {
+        "where": "plane = 'egress' AND tool_name NOT LIKE 'slack:%'",
+        "default_days": 30,
+        "description": "Canvas / Box への出力",
+    },
+    "read_tools": {
+        "where": "plane = 'read'",
+        "default_days": 7,
+        "description": "investigate の調査ツール呼び出し",
+    },
+}
+
+
+def _oldest_tool_call_ts(pm_conn: sqlite3.Connection) -> datetime | None:
+    """tool_calls 全体の最古の ts を aware datetime で返す（空・解釈不能なら None）。"""
+    row = pm_conn.execute("SELECT MIN(ts) AS ts FROM tool_calls").fetchone()
+    raw = row["ts"] if row else None
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return None
+    # `datetime.fromisoformat()` はタイムゾーン無しの ts に対して naive datetime を
+    # 返す。呼び出し元は aware な cutoff と比較するため、tzinfo が無ければ UTC を
+    # 付与する（付与しないと naive/aware 比較で TypeError になり selfcheck 全体が落ちる）。
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def check_silent_control(
+    pm_conn: sqlite3.Connection, days_override: int | None = None
+) -> list[dict]:
+    """tool_calls に期待される種類の記録が観測期間内に1件も無いか検査する。
+
+    背景（2026-08-01）: Slack 出力ファネルの canary 検査と egress 記録が呼び出し
+    25 箇所で丸ごとスキップされていた欠陥と、実装・テストはあるが production の
+    呼び出し元が存在しない第2系統トリアージの欠陥が同日に見つかった。どちらも
+    テストは通り lint も通っていたが、**「動いている証拠が1件も無い」ことだけが
+    共通のシグナル**だった。この検査はそれを機械的に検出する。
+
+    **この検査が証明するのは「観測期間内に記録が無い」ことだけである。**
+    制御そのものが壊れているのか、その機能をそもそも運用上動かしていない
+    （意図的に止めている）だけなのかは、この検査では区別できない（P10: 対策が
+    何を証明するかを明示する）。運用を止めていれば沈黙は正常であり、
+    「沈黙 = 異常」と機械的に決めつけない。原因の切り分けは人が行う。
+
+    **「記録が無い」には「制御が動いていない」と「まだ観測していない」の2つが
+    あり、両者を同じ違反として扱うと、運用開始直後は必ず誤警報になる。**
+    `tool_calls` 自体が新設されたばかりで観測期間分の履歴が無い場合、期間内に
+    0件でも制御の沈黙とは断定できないため「判定不能」として区別し、違反リストには
+    入れない（黙って飛ばさず、判定できなかった旨は標準出力に出す）。
+    """
+    if not table_exists(pm_conn, "tool_calls"):
+        return []
+    violations = []
+    now = datetime.now(UTC)
+    oldest_ts = _oldest_tool_call_ts(pm_conn)
+    for key, spec in _SILENCE_SPECS.items():
+        days = days_override if days_override is not None else spec["default_days"]
+        cutoff_dt = now - timedelta(days=days)
+        cutoff = cutoff_dt.isoformat()
+
+        row = pm_conn.execute(
+            f"SELECT COUNT(*) AS n FROM tool_calls WHERE {spec['where']} AND ts >= ?",
+            (cutoff,),
+        ).fetchone()
+        count = row["n"]
+        if count > 0:
+            continue
+
+        # count == 0 だけでは「沈黙」と断定できない。台帳自体が観測期間より
+        # 若い（＝まだその期間分を観測していない）場合、期間内に0件なのは
+        # 制御の沈黙ではなく単に履歴が無いだけの可能性がある。判定不能として
+        # 区別する（黙って飛ばさず、標準出力に判定できなかった旨を出す）。
+        if oldest_ts is None:
+            print(
+                f"[INFO] silent_control: {key} は判定できません"
+                f"（tool_calls 台帳が空か最古の記録を解釈できないため。要求期間={days}日）",
+                file=sys.stderr,
+            )
+            continue
+        if oldest_ts > cutoff_dt:
+            print(
+                f"[INFO] silent_control: {key} は判定できません"
+                f"（台帳の最古の記録={oldest_ts.isoformat()} が観測期間の開始"
+                f"（{cutoff_dt.isoformat()}）より新しいため。要求期間={days}日）",
+                file=sys.stderr,
+            )
+            continue
+
+        violations.append(
+            {
+                "check": "silent_control",
+                "key": key,
+                "expected_within_days": days,
+                "description": spec["description"],
+                "note": (
+                    "観測期間内に記録が1件も無い。制御が壊れているのか、その機能を"
+                    "そもそも運用上動かしていないだけなのかはこの検査では区別できない"
+                    "（原因の切り分けは人が行う）"
+                ),
+            }
+        )
+    return violations
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 def run_checks(
@@ -631,6 +759,8 @@ def run_checks(
     today: str,
     logs_dir: Path | None = None,
     security_days: int = 1,
+    silence_days: int | None = None,
+    security_checks_enabled: bool = True,
 ) -> list[dict]:
     # audit_log.changed_at は datetime.now(UTC).isoformat()（"+00:00" 付き）で
     # 記録されるため、cutoff も UTC aware で揃える。today（ローカル暦日）基準だと
@@ -653,6 +783,12 @@ def run_checks(
         violations += check_netguard_deny(logs_dir, security_days)
         # canary の生存確認もセキュリティ検査の一部（--no-security-checks で一緒に切れる）
         violations += check_canary_alive(pm_conn, REPO_ROOT / "data")
+    # silent_control は pm.db だけで完結する検査であり、ログ走査（logs_dir）とは
+    # 無関係。`--logs-dir` に無効なディレクトリを渡した場合でも独立に実行する
+    # （そこに相乗りさせると、沈黙を検出する検査自体が logs_dir 不在で黙って
+    # 沈黙してしまう）。--no-security-checks では従来どおり一緒にスキップする。
+    if security_checks_enabled:
+        violations += check_silent_control(pm_conn, silence_days)
     return violations
 
 
@@ -687,6 +823,16 @@ def main() -> int:
         help="canary_hit / netguard_deny が走査するログの対象期間（日数、デフォルト: 1）。"
              "データ検査の --days とは独立（解消済みの deny が鳴り続けるのを避けるため）",
     )
+    parser.add_argument(
+        "--silence-days", type=int, default=None, metavar="N",
+        help="silent_control が全キー共通で使う観測期間（日数）。省略時はキーごとの既定値"
+             "（egress_slack/read_tools=7日、egress_other=30日）を使う",
+    )
+    parser.add_argument(
+        "--silence-strict", action="store_true",
+        help="silent_control の沈黙を他の検査と同じ違反として扱い exit code 1 にする"
+             "（既定では警告として出力するのみで exit code に反映しない）",
+    )
     args = parser.parse_args()
 
     db_path = resolve_db_path(args.db, REPO_ROOT / "data" / "pm.db")
@@ -713,22 +859,33 @@ def main() -> int:
         )
 
     today = date.today().isoformat()
+    security_checks_enabled = not args.no_security_checks
     logs_dir = None
-    if not args.no_security_checks:
+    if security_checks_enabled:
         logs_dir = Path(args.logs_dir) if args.logs_dir else REPO_ROOT / "logs"
         if not logs_dir.is_dir():
             print(
-                f"[WARN] ログディレクトリが見つかりません（canary_hit / netguard_deny はスキップ）: {logs_dir}",
+                "[WARN] ログディレクトリが見つかりません"
+                "（canary_hit / netguard_deny / canary_alive はスキップ）: "
+                f"{logs_dir}",
                 file=sys.stderr,
             )
             logs_dir = None
     violations = run_checks(
-        pm_conn, state_conn, args.days, today, logs_dir, args.security_days
+        pm_conn, state_conn, args.days, today, logs_dir, args.security_days,
+        args.silence_days, security_checks_enabled,
     )
 
     pm_conn.close()
     if state_conn is not None:
         state_conn.close()
+
+    # silent_control は既定では警告扱い（沈黙 = 異常と決めつけない。運用を止めて
+    # いれば沈黙は正常なので、誤警報で監視全体が無効化される方向に圧力がかかる
+    # のを避ける）。--silence-strict を付けたときだけ他の検査と同じ exit 1 対象。
+    silent_violations = [v for v in violations if v["check"] == "silent_control"]
+    hard_violations = [v for v in violations if v["check"] != "silent_control"]
+    exit_violations = violations if args.silence_strict else hard_violations
 
     if args.json:
         print(json.dumps(violations, ensure_ascii=False, indent=2))
@@ -739,14 +896,22 @@ def main() -> int:
             by_check: dict[str, list[dict]] = {}
             for v in violations:
                 by_check.setdefault(v["check"], []).append(v)
-            print(f"NG: {len(violations)} 件の違反を検出しました（--days {args.days}, today={today}）")
+            if exit_violations:
+                print(
+                    f"NG: {len(exit_violations)} 件の違反を検出しました（--days {args.days}, today={today}）"
+                )
+            else:
+                print(
+                    f"OK: 違反なし。ただし {len(silent_violations)} 件の沈黙警告があります"
+                    f"（--silence-strict を付けると違反として扱われます）（--days {args.days}, today={today}）"
+                )
             for check_name, items in sorted(by_check.items()):
                 print(f"\n[{check_name}] {len(items)} 件")
                 for item in items:
                     detail = {k: v for k, v in item.items() if k != "check"}
                     print(f"  {detail}")
 
-    return 1 if violations else 0
+    return 1 if exit_violations else 0
 
 
 if __name__ == "__main__":

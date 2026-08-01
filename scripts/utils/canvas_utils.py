@@ -542,31 +542,16 @@ def _guard_canvas_payload(canvas_id: str, content: str) -> None:
 
     **記録用の pm.db 接続に失敗しても検査自体は行う**（canary 無しで通す）。
     検査の失敗で本番の Canvas 更新を止めるほうが損失が大きいため。
+
+    conn は自前で開かない。`guard_outbound_text()` は `conn=None` のとき自分で
+    `_open_audit_conn()` を呼んで開き、自分で閉じる。ここでも別途開くと
+    `_open_audit_conn()` が二重に呼ばれ、接続失敗時の WARNING も二重に出る。
     """
     try:
         from utils.slack_post import guard_outbound_text
     except Exception:
         return
-    conn = None
-    try:
-        from pathlib import Path as _Path
-
-        from db_utils import open_db
-        _repo = _Path(__file__).resolve().parents[2]
-        conn = open_db(_repo / "data" / "pm.db", encrypt=True)
-    except Exception as exc:
-        logger.warning(
-            "[EGRESS] canary 台帳用の pm.db を開けませんでした。"
-            "canary 検査とegress記録を行わずに送信します: %s", exc
-        )
-    try:
-        guard_outbound_text(content, transport="canvas", dest=canvas_id, conn=conn)
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    guard_outbound_text(content, transport="canvas", dest=canvas_id)
 
 
 def post_to_canvas(canvas_id: str, content: str) -> None:

@@ -37,9 +37,11 @@ import logging
 import os
 import re
 import sqlite3
+import statistics
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +62,13 @@ from argus.retrieval import (  # noqa: E402
 DEFAULT_INDEX_DB = Path(os.environ.get("RECALL_INDEX_DB") or (REPO / "data" / "qa_index.db"))
 DEFAULT_EVAL_DB = Path(os.environ.get("RECALL_EVAL_DB") or (REPO / "data" / "eval" / "recall_eval.db"))
 DEFAULT_GOLD = Path(os.environ.get("RECALL_GOLD") or (REPO / "scripts" / "eval" / "recall_gold.yaml"))
+# exposure サブコマンド用（P7 文脈軸: top_k の被害半径測定）。正解チャンクの定義は
+# recall_gold.yaml（--gold）の resolve 機構をそのまま使い、質問セットのみ
+# investigate_gold.yaml（17問）に切り替える。
+DEFAULT_QUESTIONS = Path(
+    os.environ.get("RECALL_QUESTIONS") or (REPO / "scripts" / "eval" / "investigate_gold.yaml")
+)
+DEFAULT_EXPOSURE_K_LIST = [50, 100, 200]
 
 DEFAULT_K_LIST = [5, 10, 30, 60]
 
@@ -418,7 +427,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
     from db_utils import open_maybe_encrypted
     conn = open_maybe_encrypted(args.index_db)
-    conn.row_factory = sqlite3.Row
+    # row_factory は open_db が既に暗号化状態に応じた正しいクラスで設定済み
+    # （sqlite3.Row で上書きすると sqlcipher3 のカーソルと型が合わず TypeError になる）
     try:
         results = resolve_all(conn, entries, index_name)
     finally:
@@ -466,7 +476,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     from db_utils import open_maybe_encrypted
     conn_idx = open_maybe_encrypted(args.index_db)
-    conn_idx.row_factory = sqlite3.Row
+    # row_factory は open_db が既に暗号化状態に応じた正しいクラスで設定済み
+    # （sqlite3.Row で上書きすると sqlcipher3 のカーソルと型が合わず TypeError になる）
     try:
         # 全エントリを resolve してスナップショット保存（陳腐化検知用）
         resolutions = resolve_all(conn_idx, all_entries, index_name)
@@ -561,6 +572,300 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     conn.close()
     print(f"done. run_id={run_id}", file=sys.stderr)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# CLI: exposure — P7 文脈軸（top_k の被害半径）実測
+# --------------------------------------------------------------------------- #
+#
+# 検索ロジックは複製しない。すべて argus.retrieval.retrieve_chunks_hybrid を
+# そのまま呼ぶ。vector_k=k を明示的に渡すのは、本番 one-shot 経路
+# （pm_argus_agent.py: _run_oneshot が retrieve_chunks_hybrid(..., k=top_k,
+# vector_k=top_k, ...) と呼んでいる）を再現するため（vector_k の既定 50 に
+# 固定したままだと、k=200 時の本番挙動と乖離する）。
+#
+# 質問セットは 2 つを使い分ける（recall_eval.py の既存実装をそのまま流用）:
+#   - investigate_gold.yaml（--questions, 17問）: 「1クエリあたりの露出」
+#     「コーパス到達率」に使う。この 2 指標は正解の有無を問わない（露出量だけを
+#     数える）ため、resolve 不要な質問セットで足りる。
+#   - recall_gold.yaml（--gold, 既存）: 「k を下げたときの取りこぼし」に使う。
+#     こちらは「正解チャンク」という概念が要るため、cmd_resolve/cmd_run が
+#     既に使っている resolve_all() の gold chunk id 解決をそのまま再利用する
+#     （独自の正解定義を作らない）。
+
+
+def _doc_key(chunk: dict) -> tuple:
+    """chunk 1件が属する「文書」の識別キー。
+
+    pm_embed.py の重複排除・削除キー（source_db, record_id, source_type の組）と
+    揃えてある。同一文書（議事録1本・Slackスレッド1本・BOX文書1本）から
+    生成された複数チャンクはこのキーで束ねられる。
+    """
+    return (chunk.get("source_type"), chunk.get("source_db"), chunk.get("record_id"))
+
+
+def _safe_retrieve_hybrid(question: str, index_db: Path, k: int, vector_k: int,
+                          since_date: str | None, index_name: str | None) -> tuple[list[dict], str]:
+    """retrieve_chunks_hybrid の例外を吸収するラッパー。
+
+    2026-08-01 の qa_index.db SQLCipher 化以降、retrieval.py 内の
+    `except sqlite3.OperationalError` は sqlcipher3.dbapi2.OperationalError を
+    捕捉できず（別クラス）、FTS5 構文エラー（例: クエリ中の "/" が未エスケープの
+    ASCII複合エンティティ由来でトークン化された場合）がそのまま例外として
+    伝播する既知の問題がある（本スクリプトでは再現するが、retrieval.py 自体の
+    修正は本タスクのスコープ外）。exposure 測定を1問の失敗で止めないよう、
+    ここで吸収し空リスト+エラー文字列を返す。
+    """
+    try:
+        return retrieve_chunks_hybrid(
+            question, index_db, k=k, vector_k=vector_k,
+            since_date=since_date, index_name=index_name,
+        ), ""
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
+
+
+def _check_vector_available(index_db: Path, index_name: str) -> tuple[bool, str]:
+    """embedding 経路の疎通と qa_index.db 側の embedding 件数を確認する。
+
+    False の場合、retrieve_chunks_hybrid は vector 脚が空リストになり FTS のみへ
+    自動縮退する（例外にはならない）。露出測定の解釈が変わるため、呼び出し元で
+    必ず警告として明示すること。
+    """
+    try:
+        from embed_utils import embed_one
+        embed_one("接続確認用ダミークエリ")
+    except Exception as e:
+        return False, f"embedding API 呼び出し失敗: {type(e).__name__}: {e}"
+
+    from db_utils import open_maybe_encrypted
+    conn = open_maybe_encrypted(index_db)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM chunk_embeddings e"
+            " JOIN chunks c ON c.id = e.chunk_id"
+            " JOIN chunk_indexes ci ON ci.chunk_id = c.id"
+            " WHERE ci.index_name = ?",
+            (index_name,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    if n == 0:
+        return False, f"chunk_embeddings に index_name={index_name!r} の行が0件"
+    return True, f"embedding疎通OK・chunk_embeddings={n}件 (index_name={index_name!r})"
+
+
+def cmd_exposure(args: argparse.Namespace) -> int:
+    if not args.index_db.exists():
+        print(f"ERROR: index db が見つかりません: {args.index_db}", file=sys.stderr)
+        return 2
+    if not args.questions.exists():
+        print(f"ERROR: 質問セットが見つかりません: {args.questions}", file=sys.stderr)
+        return 2
+
+    k_list = sorted(set(args.k))
+    if not k_list:
+        print("ERROR: --k が空です", file=sys.stderr)
+        return 2
+    max_k = max(k_list)
+
+    questions_doc = load_gold(args.questions)
+    entries_q = [e for e in (questions_doc.get("entries") or []) if e.get("question")]
+    if not entries_q:
+        print(f"ERROR: {args.questions} に entries[].question がありません", file=sys.stderr)
+        return 2
+
+    index_name = args.index_name or questions_doc.get("default_index_name", "pm")
+
+    vec_ok, vec_msg = _check_vector_available(args.index_db, index_name)
+    if vec_ok:
+        print(f"[embedding] {vec_msg}（ハイブリッド = FTS + vector）", file=sys.stderr)
+    else:
+        print(
+            f"WARNING: embedding 経路が使えません（{vec_msg}）。"
+            "以降はハイブリッドの片肺（FTS のみ）で測定します。"
+            "vector 脚の寄与がゼロになるため、本番（embedding 疎通時）の"
+            "露出量とは数値の意味が異なります。",
+            file=sys.stderr,
+        )
+
+    from db_utils import open_maybe_encrypted
+
+    # --- コーパス全体のチャンク数・文書数 ---
+    conn = open_maybe_encrypted(args.index_db)
+    # row_factory は open_db が既に暗号化状態に応じた正しいクラスで設定済み
+    # （sqlite3.Row で上書きすると sqlcipher3 のカーソルと型が合わず TypeError になる）
+    try:
+        corpus_chunks = conn.execute(
+            "SELECT COUNT(*) FROM chunks c JOIN chunk_indexes ci ON ci.chunk_id = c.id"
+            " WHERE ci.index_name = ?", (index_name,),
+        ).fetchone()[0]
+        corpus_docs = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT c.source_type, c.source_db, c.record_id"
+            " FROM chunks c JOIN chunk_indexes ci ON ci.chunk_id = c.id"
+            " WHERE ci.index_name = ?)", (index_name,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    # --- 1クエリあたりの露出 + コーパス到達率（union） ---
+    per_k_chunk_counts: dict[int, list[int]] = {k: [] for k in k_list}
+    per_k_doc_counts: dict[int, list[int]] = {k: [] for k in k_list}
+    per_k_union_chunks: dict[int, set] = {k: set() for k in k_list}
+    per_k_union_docs: dict[int, set] = {k: set() for k in k_list}
+
+    exposure_errors: list[tuple[str, int, str]] = []
+    exposure_tasks = [
+        (entry.get("id", "?"), k, entry["question"], entry.get("since"))
+        for entry in entries_q for k in k_list
+    ]
+    print(
+        f"[exposure] 質問セット {args.questions.name}: {len(entries_q)}問 × k={k_list}"
+        f" = {len(exposure_tasks)} 検索を並列実行（workers={args.workers}）。"
+        " trigram FTS が遅いクエリがあるため数分かかることがある",
+        file=sys.stderr,
+    )
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        future_map = {
+            executor.submit(_safe_retrieve_hybrid, question, args.index_db, k, k, since, index_name):
+                (entry_id, k)
+            for entry_id, k, question, since in exposure_tasks
+        }
+        done = 0
+        for future in as_completed(future_map):
+            entry_id, k = future_map[future]
+            results, err = future.result()
+            done += 1
+            print(f"  [{done}/{len(exposure_tasks)}] {entry_id} k={k} 完了",
+                  file=sys.stderr, flush=True)
+            if err:
+                exposure_errors.append((entry_id, k, err))
+                print(f"    WARN: {entry_id} k={k} 検索失敗（0件扱い）: {err}", file=sys.stderr)
+            ids = {c["id"] for c in results}
+            docs = {_doc_key(c) for c in results}
+            per_k_chunk_counts[k].append(len(ids))
+            per_k_doc_counts[k].append(len(docs))
+            per_k_union_chunks[k] |= ids
+            per_k_union_docs[k] |= docs
+
+    # --- 取りこぼし: recall_gold.yaml の正解チャンクに対する recall 保持率 ---
+    recall_gold_doc = load_gold(args.gold)
+    recall_entries = recall_gold_doc.get("entries") or []
+    recall_index_name = args.index_name or recall_gold_doc.get("default_index_name", "pm")
+
+    conn2 = open_maybe_encrypted(args.index_db)
+    # row_factory は open_db が既に暗号化状態に応じた正しいクラスで設定済み
+    # （sqlite3.Row で上書きすると sqlcipher3 のカーソルと型が合わず TypeError になる）
+    try:
+        resolutions = resolve_all(conn2, recall_entries, recall_index_name)
+    finally:
+        conn2.close()
+    gold_by_entry = {r.entry_id: set(r.ids) for r in resolutions}
+
+    hits_at_max_total = 0
+    hits_at_k_total: dict[int, int] = {k: 0 for k in k_list}
+    n_queries_with_gold = 0
+    retention_errors: list[tuple[str, int, str]] = []
+
+    retention_tasks = []  # (entry_id, query_idx, k, qtext, since_date, gold_ids)
+    for entry in recall_entries:
+        entry_id = entry["id"]
+        gold_ids = gold_by_entry.get(entry_id, set())
+        if not gold_ids:
+            continue
+        since_date = entry.get("query_since")
+        for qi, q in enumerate(entry.get("queries") or []):
+            for k in k_list:
+                retention_tasks.append((entry_id, qi, k, q["text"], since_date, gold_ids))
+
+    print(
+        f"[retention] 正解チャンク定義: {args.gold.name}（{len(recall_entries)} エントリ,"
+        f" resolve 機構は recall_eval.py 既存実装をそのまま使用） = {len(retention_tasks)} 検索を"
+        f" 並列実行（workers={args.workers}）",
+        file=sys.stderr,
+    )
+    hits_by_query_k: dict[tuple[str, int, int], set] = {}
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        future_map = {
+            executor.submit(_safe_retrieve_hybrid, qtext, args.index_db, k, k, since_date,
+                            recall_index_name): (entry_id, qi, k, gold_ids)
+            for entry_id, qi, k, qtext, since_date, gold_ids in retention_tasks
+        }
+        done = 0
+        for future in as_completed(future_map):
+            entry_id, qi, k, gold_ids = future_map[future]
+            results, err = future.result()
+            done += 1
+            print(f"  [{done}/{len(retention_tasks)}] {entry_id}#{qi} k={k} 完了",
+                  file=sys.stderr, flush=True)
+            if err:
+                retention_errors.append((f"{entry_id}#{qi}", k, err))
+                print(f"    WARN: {entry_id}#{qi} k={k} 検索失敗（0件扱い）: {err}", file=sys.stderr)
+            ids = {c["id"] for c in results}
+            hits_by_query_k[(entry_id, qi, k)] = gold_ids & ids
+
+    for entry_id, qi in sorted({(e, q) for (e, q, _k) in hits_by_query_k}):
+        base_hits = hits_by_query_k.get((entry_id, qi, max_k), set())
+        if not base_hits:
+            continue
+        n_queries_with_gold += 1
+        hits_at_max_total += len(base_hits)
+        for k in k_list:
+            hits_at_k_total[k] += len(hits_by_query_k.get((entry_id, qi, k), set()) & base_hits)
+
+    # ---------------- 出力 ----------------
+    print(f"\n# top_k 露出実測（P7 文脈軸） — {datetime.now().isoformat(timespec='seconds')}")
+    print(f"index_db={args.index_db}  index_name={index_name!r}  k={k_list}")
+    print(f"embedding: {'OK — ' + vec_msg if vec_ok else 'NG（' + vec_msg + ') → FTSのみで測定'}\n")
+
+    print("## 1. コーパス全体")
+    print(f"- 総チャンク数（index_name={index_name!r}）: {corpus_chunks}")
+    print(f"- 総文書数（distinct source_type/source_db/record_id）: {corpus_docs}\n")
+
+    print(f"## 2. 1クエリあたりの露出（{args.questions.name}, {len(entries_q)}問）\n")
+    print("| k | 平均チャンク数 | 中央値 | 最大 | 平均文書数 | 中央値 | 最大 |")
+    print("|---|---|---|---|---|---|---|")
+    for k in k_list:
+        cc = per_k_chunk_counts[k]
+        dc = per_k_doc_counts[k]
+        print(
+            f"| {k} | {statistics.mean(cc):.1f} | {statistics.median(cc):.1f} | {max(cc)} |"
+            f" {statistics.mean(dc):.1f} | {statistics.median(dc):.1f} | {max(dc)} |"
+        )
+    print()
+
+    print(f"## 3. コーパス到達率（{len(entries_q)}問の union、コーパス全体に対する%）\n")
+    print("| k | unionチャンク数 | %chunks | union文書数 | %docs |")
+    print("|---|---|---|---|---|")
+    for k in k_list:
+        uc = len(per_k_union_chunks[k])
+        ud = len(per_k_union_docs[k])
+        pc = 100.0 * uc / corpus_chunks if corpus_chunks else 0.0
+        pd = 100.0 * ud / corpus_docs if corpus_docs else 0.0
+        print(f"| {k} | {uc} | {pc:.2f}% | {ud} | {pd:.2f}% |")
+    print()
+
+    print(f"## 4. k を下げたときの取りこぼし（{args.gold.name} 正解チャンク基準、k={max_k} 比）\n")
+    print(f"gold ヒットのあったクエリ数: {n_queries_with_gold} / k={max_k} での総ヒット数: {hits_at_max_total}\n")
+    print(f"| k | 保持ヒット数 | 保持率（対 k={max_k}） |")
+    print("|---|---|---|")
+    for k in k_list:
+        pct = 100.0 * hits_at_k_total[k] / hits_at_max_total if hits_at_max_total else float("nan")
+        print(f"| {k} | {hits_at_k_total[k]} | {pct:.1f}% |")
+    print()
+
+    all_errors = exposure_errors + retention_errors
+    if all_errors:
+        print(f"## WARNING: 検索呼び出し失敗 {len(all_errors)} 件（0件扱いで集計に混入）\n")
+        print("| entry/id | k | error |")
+        print("|---|---|---|")
+        for entry_id, k, err in all_errors[:20]:
+            print(f"| {entry_id} | {k} | {err} |")
+        if len(all_errors) > 20:
+            print(f"| ... | ... | 他 {len(all_errors) - 20} 件 |")
+        print()
+
     return 0
 
 
@@ -819,6 +1124,20 @@ def main() -> int:
     rp.add_argument("--baseline", type=int, default=None, help="baseline run_id（既定: 2番目に新しい）")
     rp.add_argument("--full", action="store_true", help="エントリ×クエリ×stage の詳細表も出力")
     rp.set_defaults(func=cmd_report)
+
+    ex = sub.add_parser(
+        "exposure",
+        help="top_k の被害半径を実測する（P7 文脈軸: 1クエリ露出/コーパス到達率/取りこぼし）",
+    )
+    ex.add_argument("--k", type=_csv_int_list, default=list(DEFAULT_EXPOSURE_K_LIST),
+                    help="カンマ区切り k list（既定 50,100,200）")
+    ex.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS,
+                    help="露出測定用の質問セット YAML（既定: investigate_gold.yaml、"
+                         "entries[].question / entries[].since を使用）")
+    ex.add_argument("--workers", type=int, default=6,
+                    help="検索呼び出しの並列度（既定 6。retrieve_chunks_hybrid は"
+                         "呼び出しごとに独立接続するため並列化して問題ない）")
+    ex.set_defaults(func=cmd_exposure)
 
     args = p.parse_args()
     return args.func(args)

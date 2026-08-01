@@ -1,6 +1,7 @@
 """Slack 投稿ファネル（docs/security-architecture.md §4.2）のテスト。"""
 from __future__ import annotations
 
+import os
 import sqlite3
 
 import pytest
@@ -11,6 +12,11 @@ from utils.slack_post import (
     update_message,
     upload_file,
 )
+
+# 収集（import）時点のバインディング。conftest.py の autouse フィクスチャ
+# （テスト実行フェーズで初めて発動する）より前に確定するため、モンキーパッチ前の
+# 本物の関数を指す（下の TestAuditConnProductionIsolation で使う）。
+from utils.slack_post import _open_audit_conn as _real_open_audit_conn
 
 
 class FakeClient:
@@ -148,3 +154,50 @@ class TestGuardWithoutConnArgument:
             " WHERE tool_name='slack:chat_postMessage' AND plane='egress' AND outcome='ok'"
         ).fetchall()
         assert len(rows) == 1
+
+
+class TestAuditConnProductionIsolation:
+    """本番 data/pm.db をテストが汚染しないことの回帰テスト
+    （実測: コミット b6b95e5 で `_open_audit_conn()` が conn 未指定時に自前で
+    本番 pm.db を開くようになり、テストの `post_message` 呼び出しだけで
+    本番 tool_calls にテスト由来の行が書き込まれていた）。
+    """
+
+    def test_real_open_audit_conn_refuses_production_path_under_pytest(self):
+        """副対策: PYTEST_CURRENT_TEST が立っている間、本物の `_open_audit_conn()` は
+        fail-closed で RuntimeError を送出する（本番実行時はこの環境変数自体が
+        存在しないため、この分岐は一切効かない）。
+        """
+        assert os.environ.get("PYTEST_CURRENT_TEST") is not None
+        with pytest.raises(RuntimeError, match="本番 pm.db"):
+            _real_open_audit_conn()
+
+    def test_post_message_leaves_production_tool_calls_row_count_unchanged(self):
+        """主対策: conftest.py の autouse フィクスチャが `_open_audit_conn()` を
+        一時 DB へ差し替えていること、および `post_message` を呼ぶと一時 DB
+        側の `tool_calls` に行が入ることを確認する。本番 pm.db には一切
+        アクセスしない（読み取りであっても「テストは本番 DB に触らない」
+        規約に反するため）。
+        """
+        from db_utils import ensure_tool_calls_table
+        from utils import slack_post
+
+        # autouse フィクスチャによって差し替わっていること（本物の関数ではない）
+        assert slack_post._open_audit_conn is not _real_open_audit_conn
+
+        conn = slack_post._open_audit_conn()
+        try:
+            ensure_tool_calls_table(conn)
+            before = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
+        finally:
+            conn.close()
+
+        post_message(FakeClient(), channel="C0XXXXXXX", text="監査分離の回帰テスト")
+
+        conn = slack_post._open_audit_conn()
+        try:
+            after = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
+        finally:
+            conn.close()
+
+        assert after == before + 1

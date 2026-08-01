@@ -289,21 +289,31 @@ def close_action_item(
 
     note を指定すると、既存 note に改行区切りで追記する
     （自動クローズの根拠記録用）。
+
+    tool_calls へ plane='mutate' で記録する（docs/security-architecture.md §4.4）。
+    dry_run 時は ctx.session_id が空のため自動的に記録されない。
     """
     from pm_sync_canvas import write_audit_log
+
+    from .audit import record_call
+
+    args = {"ai_id": ai_id, "closed_by": resolved_by, "note_chars": len(note or "")}
 
     row = ctx.conn.execute(
         "SELECT status FROM action_items WHERE id = ?", (ai_id,)
     ).fetchone()
     if not row:
         logger.warning("AI #%d が見つかりません", ai_id)
+        record_call(ctx, "patrol_close_action_item", args, "error", plane="mutate", result="not_found")
         return False
     if row["status"] == "closed":
         logger.info("AI #%d は既に closed", ai_id)
+        record_call(ctx, "patrol_close_action_item", args, "ok", plane="mutate", result="already_closed")
         return True
 
     if ctx.dry_run:
         logger.info("[DRY] AI #%d を closed に更新", ai_id)
+        record_call(ctx, "patrol_close_action_item", args, "ok", plane="mutate", result="dry_run")
         return True
 
     write_audit_log(ctx.conn, ai_id, "status", "open", "closed", resolved_by)
@@ -313,6 +323,9 @@ def close_action_item(
     if note:
         _append_close_note(ctx.conn, ai_id, ctx.today, note, source=resolved_by)
     logger.info("AI #%d を closed に更新 (by %s)", ai_id, resolved_by)
+    # record_call は ctx.conn がある場合はそれに相乗りする（audit.py 参照）ため、
+    # ここでの commit は不要・不可（呼び出し元 detect.py の commit と運命を共にする）。
+    record_call(ctx, "patrol_close_action_item", args, "ok", plane="mutate", result="closed")
     return True
 
 

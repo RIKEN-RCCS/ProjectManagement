@@ -570,4 +570,202 @@ def test_run_checks_uses_security_days_for_log_scan(pm_db_path, tmp_path):
     )
     conn.close()
     assert any(v["check"] == "netguard_deny" for v in v_wide)
-    assert v_narrow == []
+    assert not any(v["check"] == "netguard_deny" for v in v_narrow)
+
+
+# --------------------------------------------------------------------------- #
+# 10. 沈黙している制御の検出
+# --------------------------------------------------------------------------- #
+def _insert_tool_call(conn, *, plane, tool_name, ts=None):
+    """tool_calls に1行追記する（append-only テーブルなので ts は挿入時に直接指定する）。
+
+    check_tool_call_chain（検査8）を巻き込まないよう、prev_hash/entry_hash は
+    record_tool_call() と同じ方法で正しく連鎖させる（ts だけ差し替える）。
+    """
+    import hashlib
+    import uuid
+
+    from db_utils import GENESIS_HASH
+
+    call_id = uuid.uuid4().hex
+    ts = ts or datetime.now(UTC).isoformat()
+    args_json = "{}"
+    outcome = "ok"
+    last = conn.execute(
+        "SELECT entry_hash FROM tool_calls ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    prev_hash = last["entry_hash"] if last else GENESIS_HASH
+    payload = f"{prev_hash}{call_id}{ts}{tool_name}{args_json}{outcome}"
+    entry_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    conn.execute(
+        "INSERT INTO tool_calls (call_id, session_id, seq, ts, plane, tool_name, args_json,"
+        " model, model_revision, outcome, prev_hash, entry_hash)"
+        " VALUES (?, 'test', 0, ?, ?, ?, ?, '', '', ?, ?, ?)",
+        (call_id, ts, plane, tool_name, args_json, outcome, prev_hash, entry_hash),
+    )
+    conn.commit()
+    return {"call_id": call_id}
+
+
+def test_check_silent_control_no_violations_when_ledger_is_empty(pm_db_path):
+    """tool_calls が空（＝台帳自体が未観測）なら、どのキーも違反として報告しない。
+
+    「30日間記録が無い」が「制御の沈黙」なのか「台帳がまだ30日分存在しない」なのかは
+    区別できないため、台帳が空の場合は判定不能として扱い違反リストに入れない。
+    """
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.check_silent_control(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_silent_control_indeterminate_when_ledger_younger_than_period(pm_db_path):
+    """台帳の最古の記録が観測期間の開始より新しければ、そのキーは判定不能（違反にしない）。"""
+    conn = _open_plain(pm_db_path)
+    # 台帳の唯一の行（＝最古の行でもある）が「今」なので、egress_other(30日) /
+    # read_tools(7日) はどちらも観測期間分の履歴が無く判定不能になる。
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postMessage",
+        ts=datetime.now(UTC).isoformat(),
+    )
+    violations = pm_selfcheck.check_silent_control(conn)
+    conn.close()
+
+    assert violations == []
+
+
+def test_check_silent_control_reports_all_keys_when_ledger_old_enough_and_silent(pm_db_path):
+    """台帳が十分古く、かつ観測期間内に記録が無ければ従来どおり沈黙として報告する。"""
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    # plane='mutate' はどのキーの where 句にも一致しない。台帳の年齢だけを作るための行。
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    violations = pm_selfcheck.check_silent_control(conn)
+    conn.close()
+
+    keys = {v["key"] for v in violations}
+    assert keys == {"egress_slack", "egress_other", "read_tools"}
+    for v in violations:
+        assert v["check"] == "silent_control"
+        assert "expected_within_days" in v
+        assert "区別できない" in v["note"]
+
+
+def test_check_silent_control_not_reported_when_recent_slack_egress_exists(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    # 台帳の年齢を作ってから（十分古くしてから）検証する。
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postMessage",
+        ts=datetime.now(UTC).isoformat(),
+    )
+    violations = pm_selfcheck.check_silent_control(conn)
+    conn.close()
+
+    keys = {v["key"] for v in violations}
+    assert "egress_slack" not in keys
+    assert "egress_other" in keys
+    assert "read_tools" in keys
+
+
+def test_check_silent_control_reports_when_only_old_rows_exist(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="egress", tool_name="slack:chat_postMessage", ts=old_ts)
+    violations = pm_selfcheck.check_silent_control(conn)
+    conn.close()
+
+    keys = {v["key"] for v in violations}
+    assert "egress_slack" in keys
+
+
+def test_check_silent_control_days_override_applies_to_all_keys(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    _insert_tool_call(conn, plane="egress", tool_name="slack:chat_postMessage", ts=ts)
+    # 既定の egress_slack=7日では沈黙扱いだが、--silence-days 14 なら検出されない
+    violations_default = pm_selfcheck.check_silent_control(conn)
+    violations_override = pm_selfcheck.check_silent_control(conn, days_override=14)
+    conn.close()
+
+    assert "egress_slack" in {v["key"] for v in violations_default}
+    assert "egress_slack" not in {v["key"] for v in violations_override}
+
+
+def test_check_silent_control_without_tool_calls_table_is_noop(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    conn.execute("DROP TABLE IF EXISTS tool_calls")
+    conn.commit()
+    violations = pm_selfcheck.check_silent_control(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_run_checks_includes_silent_control_when_logs_dir_given(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    # 台帳の年齢を作らないと全キー判定不能になり silent_control が1件も出ない。
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-08-01", logs_dir=logs)
+    conn.close()
+    assert any(v["check"] == "silent_control" for v in violations)
+
+
+def test_run_checks_skips_silent_control_without_logs_dir(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-08-01")
+    conn.close()
+    assert not any(v["check"] == "silent_control" for v in violations)
+
+
+def _run_main(monkeypatch, argv):
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["pm_selfcheck.py", *argv])
+    return pm_selfcheck.main()
+
+
+def _seed_old_anchor_tool_call(db_path: Path) -> None:
+    """台帳の年齢を作るための古い行を1件入れる（main() は自前で接続するため直接書き込む）。"""
+    conn = _open_plain(db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    conn.close()
+
+
+def test_main_silent_control_is_warning_only_by_default(pm_db_path, tmp_path, monkeypatch):
+    _seed_old_anchor_tool_call(pm_db_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    state_db = tmp_path / "no_such_patrol_state.db"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--db", str(pm_db_path), "--no-encrypt",
+            "--state-db", str(state_db),
+            "--logs-dir", str(logs),
+            "--days", "7",
+        ],
+    )
+    assert rc == 0
+
+
+def test_main_silent_control_strict_fails_exit_code(pm_db_path, tmp_path, monkeypatch):
+    _seed_old_anchor_tool_call(pm_db_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    state_db = tmp_path / "no_such_patrol_state.db"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--db", str(pm_db_path), "--no-encrypt",
+            "--state-db", str(state_db),
+            "--logs-dir", str(logs),
+            "--days", "7",
+            "--silence-strict",
+        ],
+    )
+    assert rc == 1

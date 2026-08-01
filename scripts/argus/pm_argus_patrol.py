@@ -59,6 +59,7 @@ from argus.patrol.detect import (
 )
 from argus.patrol.state import PatrolState
 from argus.patrol.users import UserResolver
+from argus.pm_argus_agent import new_session_id
 
 logger = logging.getLogger("argus_patrol")
 
@@ -102,6 +103,14 @@ class PatrolContext:
     # 1 巡回サイクル（複数 pm.db を跨ぐ）で実際に自動クローズが確定した件数の共有カウンタ。
     # run_patrol() が全 pm.db 共通で1つのリストを生成し、各 PatrolContext に同じ参照を渡す。
     auto_close_tracker: list[int] = field(default_factory=lambda: [0])
+    # tool_calls / reasoning_traces 台帳（docs/security-architecture.md §4.4）。
+    # session_id が空なら記録しない（--dry-run 時の退避路。pm_argus_agent.py の
+    # CLI が `"" if args.dry_run else new_session_id("cli")` としているのと同じ扱い）。
+    session_id: str = ""
+    audit_db: Path | None = None
+    tool_seq: int = 0
+    model: str = ""
+    model_revision: str = ""
 
     @property
     def conn(self) -> Any:
@@ -160,6 +169,11 @@ def run_patrol(
     user_resolver = UserResolver(state, slack, _DATA_DIR)
     today = date.today().isoformat()
 
+    # tool_calls / reasoning_traces への記録（docs/security-architecture.md §4.4）。
+    # 1 巡回 = 1 セッション。--dry-run 時は記録しない（pm_argus_agent.py の CLI と同じ扱い）。
+    session_id = "" if dry_run else new_session_id("patrol")
+    model = os.environ.get("LOCAL_LLM_MODEL", "")
+
     detectors_to_run = DETECTORS
     if only:
         detectors_to_run = {
@@ -180,6 +194,9 @@ def run_patrol(
     # 1 巡回サイクル（複数 pm.db を跨ぐ）を通じて共有する自動クローズ件数カウンタ。
     # 各 pm.db の PatrolContext に同じ参照を渡し、実際にクローズが確定した件数を累積する。
     auto_close_tracker: list[int] = [0]
+    # tool_seq も pm.db を跨いで通し番号にする（PatrolContext は pm.db ごとに
+    # 作り直すため、直前の ctx.tool_seq を次の PatrolContext の初期値として引き継ぐ）。
+    tool_seq = 0
     for ci, conn in enumerate(conns):
         db_label = pm_db_paths[ci].name
         logger.info("Patrol 巡回: %s", db_label)
@@ -194,6 +211,9 @@ def run_patrol(
             config=config,
             data_dir=_DATA_DIR,
             auto_close_tracker=auto_close_tracker,
+            session_id=session_id,
+            tool_seq=tool_seq,
+            model=model,
         )
 
         for name, detector_fn in detectors_to_run.items():
@@ -204,6 +224,8 @@ def run_patrol(
                 total += count
             except Exception as e:
                 logger.exception("[%s][%s] エラー: %s", db_label, name, e)
+
+        tool_seq = ctx.tool_seq
 
         if not dry_run and total > 0:
             conn.commit()

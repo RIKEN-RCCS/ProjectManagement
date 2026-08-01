@@ -94,3 +94,134 @@ class TestFailDirection:
         import inspect
         sig = inspect.signature(ing.triage_items_batched)
         assert sig.parameters["missing_verdict"].default == "KEEP"
+
+
+# --------------------------------------------------------------------------- #
+# 第2系統による Pass 1 抽出の差分検査（R8 / Phase 4）
+# --------------------------------------------------------------------------- #
+
+
+class TestCompareExtractions:
+    def test_synonymous_item_above_threshold_is_not_missing(self):
+        """ratio >= 0.6（表記ゆれ）は一致とみなし、未一致に出さない。"""
+        primary = {"decisions": [{"content": "ベンチ環境を更新する"}], "action_items": []}
+        second = {"decisions": [{"content": "ベンチ環境の更新"}], "action_items": []}
+        diff = ing.compare_extractions(primary, second)
+        assert diff["decisions"] == []
+
+    def test_dissimilar_item_below_threshold_is_missing(self):
+        """ratio < 0.6 は別項目とみなし、未一致として報告する。"""
+        primary = {"decisions": [{"content": "会場を予約する"}], "action_items": []}
+        second = {"decisions": [{"content": "会場の予約を行う"}], "action_items": []}
+        diff = ing.compare_extractions(primary, second)
+        assert diff["decisions"] == ["会場の予約を行う"]
+
+    def test_empty_primary_reports_all_second_items(self):
+        primary = {"decisions": [], "action_items": []}
+        second = {
+            "decisions": [{"content": "決定A"}, {"content": "決定B"}],
+            "action_items": [],
+        }
+        diff = ing.compare_extractions(primary, second)
+        assert diff["decisions"] == ["決定A", "決定B"]
+        assert diff["primary_counts"]["decisions"] == 0
+        assert diff["second_counts"]["decisions"] == 2
+
+
+class TestSecondOpinionExtraction:
+    def test_broken_json_returns_empty_dict_without_raising(self, monkeypatch):
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: "これはJSONではない")
+        result = ing.second_opinion_extraction("スレッド本文")
+        assert result == {"decisions": [], "action_items": []}
+
+    def test_call_failure_returns_empty_dict_without_raising(self, monkeypatch):
+        import utils.llm as llm_mod
+
+        def boom(*a, **k):
+            raise RuntimeError("エンドポイント不通")
+
+        monkeypatch.setattr(llm_mod, "call_rivault", boom)
+        result = ing.second_opinion_extraction("スレッド本文")
+        assert result == {"decisions": [], "action_items": []}
+
+
+class TestApplySecondOpinionExtraction:
+    def test_no_flagged_terms_skips_second_system(self, monkeypatch):
+        import utils.llm as llm_mod
+        calls = {"n": 0}
+
+        def fake_call(*a, **k):
+            calls["n"] += 1
+            return '{"decisions": [], "action_items": []}'
+
+        monkeypatch.setattr(llm_mod, "call_rivault", fake_call)
+        result = ing.apply_second_opinion_extraction(
+            "次回までにベンチマーク結果をまとめる", {"decisions": [], "action_items": []},
+            [], log=lambda *_: None,
+        )
+        assert result == []
+        assert calls["n"] == 0
+
+    def test_disagreement_is_recorded_with_expected_kind(self, pm_db_path, monkeypatch):
+        import sqlite3
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: '{"decisions": [{"content": "中国製モデルの採用を決定した"}], "action_items": []}',
+        )
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        ing.apply_second_opinion_extraction(
+            "中国製モデルについて議論した", {"decisions": [], "action_items": []},
+            [], conn=conn, log=lambda *_: None,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "decisions_extraction"
+        assert rows[0]["primary_verdict"] == "MISSING"
+        assert rows[0]["second_verdict"] == "PRESENT"
+
+    def test_env_flag_disables(self, monkeypatch):
+        monkeypatch.setenv("ARGUS_SECOND_OPINION", "0")
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault", lambda *a, **k: pytest.fail("呼ばれてはいけない"),
+        )
+        result = ing.apply_second_opinion_extraction(
+            "中国製モデルについて議論した", {"decisions": [], "action_items": []},
+            [], log=lambda *_: None,
+        )
+        assert result == []
+
+    def test_cap_stops_further_calls_and_warns(self, monkeypatch):
+        monkeypatch.setattr(
+            ing, "_load_second_opinion_config",
+            lambda: {
+                "second_opinion": {"model": "test-model", "max_flagged_per_run": 1},
+                "terms": {"geopolitical": ["中国"]},
+            },
+        )
+        import utils.llm as llm_mod
+        calls = {"n": 0}
+
+        def fake_call(*a, **k):
+            calls["n"] += 1
+            return '{"decisions": [], "action_items": []}'
+
+        monkeypatch.setattr(llm_mod, "call_rivault", fake_call)
+        logs: list[str] = []
+        state: dict = {}
+        thread_text = "中国製モデルについて議論した"
+        extracted = {"decisions": [], "action_items": []}
+
+        ing.apply_second_opinion_extraction(
+            thread_text, extracted, [], conn=None, log=logs.append, state=state,
+        )
+        ing.apply_second_opinion_extraction(
+            thread_text, extracted, [], conn=None, log=logs.append, state=state,
+        )
+        assert calls["n"] == 1
+        assert any("[WARN]" in m and "上限" in m for m in logs)
