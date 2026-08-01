@@ -126,6 +126,11 @@ def _post_argus_voice(
     mp3_path = Path(f"/tmp/argus_{kind}_{today}_{user_id or 'anon'}.mp3")
     speaker_id = pm_tts.DEFAULT_SPEAKER
     try:
+        # **合成前にテキストを検査する（順序制約。docs/security-architecture.md §4.2）。**
+        # mp3 になってしまうと canary もゼロ幅文字も検出できない — テキスト以外の成果物は
+        # 「生成元テキストの検査をもって代える」。ここを飛ばすと DLP が原理的に効かない出口になる。
+        _assert_text_safe_for_synthesis(result_md, kind=kind)
+
         logger.info(f"[argus-{kind}] voice: 要約・合成を開始 mode={summarize_mode}")
         pm_tts.synthesize_markdown(
             result_md,
@@ -145,7 +150,9 @@ def _post_argus_voice(
             "削除する場合はこのメッセージに :wastebasket: リアクションを付けてください。"
         )
 
-        upload_resp = client.files_upload_v2(
+        from utils.slack_post import upload_file
+        upload_resp = upload_file(
+            client,
             channel=channel_id,
             file=str(mp3_path),
             filename=mp3_path.name,
@@ -230,8 +237,10 @@ def _post_argus_video(
         return
 
     try:
+        from utils.slack_post import upload_file
         client = WebClient(token=bot_token)
-        upload_resp = client.files_upload_v2(
+        upload_resp = upload_file(
+            client,
             channel=channel_id,
             file=str(mp4_path),
             filename=mp4_path.name,
@@ -375,6 +384,42 @@ def _parse_narration_message(
     return merged, len(found)
 
 
+def _post(client, **kwargs):
+    """narrate 内の Slack 投稿はすべてここを通る（§4.2 のファネル）。"""
+    from utils.slack_post import post_message
+    return post_message(client, **kwargs)
+
+
+def _update(client, **kwargs):
+    from utils.slack_post import update_message
+    return update_message(client, **kwargs)
+
+
+def _assert_text_safe_for_synthesis(text: str, *, kind: str = "") -> None:
+    """TTS へ渡す前にテキストを検査する（§4.2 の順序制約）。
+
+    **音声・動画になった後では検査できない。** canary もゼロ幅文字も文字列前提なので、
+    合成してから調べる方法が無い。したがって合成前のここが唯一の検査点になる。
+    """
+    from utils.slack_post import SlackEgressBlocked, scan_text_for_egress
+
+    reasons = scan_text_for_egress(text, conn=_open_pm_conn_quiet())
+    if reasons:
+        raise SlackEgressBlocked(
+            f"[argus-{kind}] 合成前の検査で止めました: {'; '.join(reasons)}"
+        )
+
+
+def _open_pm_conn_quiet():
+    """canary 台帳を読むための pm.db 接続（失敗しても None を返す）。"""
+    try:
+        from db_utils import open_db
+        return open_db(_REPO_ROOT / "data" / "pm.db", encrypt=True)
+    except Exception:
+        logger.debug("[narrate] canary 台帳の参照に失敗（検査は canary 無しで続行）")
+        return None
+
+
 def _narrate_action_blocks(thread_ts: str) -> list[dict]:
     """「動画を生成」「キャンセル」ボタンの Block Kit ペイロード。"""
     return [
@@ -509,7 +554,7 @@ def _run_narrate(respond, command):
     # スレッド親メッセージは「原稿レビュー用ヘッダ」1 行のみ。
     # 進捗は chat_update で上書きしてチャンネルへの追加投稿を増やさない。
     try:
-        progress = bot_client.chat_postMessage(
+        progress = _post(bot_client,
             channel=channel_id,
             text=f":scroll: `{filename}` のナレーション原稿（生成中）",
         )
@@ -559,19 +604,19 @@ def _run_narrate(respond, command):
 
         narration_text = _format_narration_message(narrations, lang=lang)
         # 1) スレッド: 原稿本文（修正は同形式で全件返信、ガイド文は親へ）
-        bot_client.chat_postMessage(
+        _post(bot_client,
             channel=channel_id, thread_ts=thread_ts,
             text=narration_text,
         )
         # 2) スレッド: 動画生成 / キャンセル ボタンのみ（テキストは fallback）
-        bot_client.chat_postMessage(
+        _post(bot_client,
             channel=channel_id, thread_ts=thread_ts,
             text="動画を生成しますか?",
             blocks=_narrate_action_blocks(thread_ts),
         )
         # 3) チャンネル親メッセージを更新（追加投稿はしない）
         try:
-            bot_client.chat_update(
+            _update(bot_client,
                 channel=channel_id, ts=thread_ts,
                 text=(
                     f":scroll: `{filename}` のナレーション原稿（{len(narrations)} 枚）— "
@@ -584,7 +629,7 @@ def _run_narrate(respond, command):
     except Exception as exc:
         logger.exception("[argus-narrate] Phase1 エラー")
         try:
-            bot_client.chat_postMessage(
+            _post(bot_client,
                 channel=channel_id, thread_ts=thread_ts,
                 text=f":warning: 原稿生成に失敗しました: {exc}",
             )
@@ -713,7 +758,7 @@ def _run_narrate_build(thread_ts: str, user_id: str) -> None:
                 note = f"（直近 {edited_count}/{expected} 枚を修正）"
             else:
                 note = ""
-            bot_client.chat_update(
+            _update(bot_client,
                 channel=channel_id, ts=thread_ts,
                 text=(
                     f":white_check_mark: `{filename}` Round {iteration} 完了{note} — "
@@ -725,7 +770,7 @@ def _run_narrate_build(thread_ts: str, user_id: str) -> None:
     except Exception as exc:
         logger.exception("[argus-narrate] Phase2 エラー")
         try:
-            bot_client.chat_postMessage(
+            _post(bot_client,
                 channel=channel_id, thread_ts=thread_ts,
                 text=f":warning: 動画生成に失敗しました: {exc}",
             )
@@ -752,7 +797,7 @@ def _run_narrate_cancel(thread_ts: str, user_id: str) -> None:
         from slack_sdk import WebClient
         rounds = session.iteration
         suffix = f"（{rounds} 回生成）" if rounds else "（動画は生成されませんでした）"
-        WebClient(token=bot_token).chat_update(
+        _update(WebClient(token=bot_token),
             channel=session.channel_id, ts=thread_ts,
             text=f":checkered_flag: `{session.filename}` のナレーション編集を終了しました{suffix}",
         )

@@ -128,13 +128,17 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    移送済みは**パイプライン型（自動投稿）** — `output_tools` / `patrol/actions`（2）/
    `pm_argus`（録音進捗）/ `transcribe_pipeline`（2）/ `pm_minutes_import`。
    設計文書が「出力量の大半かつ人間の介在なし」と名指しした側を先に通した。
-   **残る直叩き 15 箇所**: `narrate.py` 9（うち多くは進捗の chat_update と mp3/mp4 の
-   files_upload_v2）、`pm_qa_server.py` 4（ephemeral 応答）、`transcribe_pipeline` 1、
-   `patrol/confirm.py` 1。
-   **残り**: (a) 上記 15 箇所の移送 → 完了したら pre-commit lint で直叩きを禁止する
-   （**全部通してから lint を入れる** — 途中で入れると既存箇所で恒常的に落ちる）
-   (b) 既存の Canvas / Box 呼び出し（8 / 9 モジュール）をブローカー経由に切り替え
-   (c) 承認フロー (d) 外部アンカー（`tool_calls` の最新ハッシュを日次投稿）
+   **2026-08-01 に 25 箇所すべての移送が完了し、直叩きはゼロ**（`narrate.py` 10 /
+   `pm_qa_server.py` 4 / `transcribe_pipeline` 3 / `pm_argus` 3 / `patrol` 3 /
+   `output_tools` 1 / `pm_minutes_import` 1）。**pre-commit の `slack-egress-funnel` で
+   直叩きを禁止した**（移送が全部終わってから入れた。途中で入れると恒常的に落ち、
+   lint を無効化する方向に圧力がかかるため）。
+   **`/argus-narrate` の順序制約も実装**: TTS へ渡す前に `scan_text_for_egress` で
+   合成前テキストを検査する。mp3 になった後では canary もゼロ幅文字も検出できないため、
+   **テキスト以外の成果物は生成元テキストの検査をもって代える**（§4.2 の原則）。
+   **残り**: (a) 既存の Canvas / Box 呼び出し（8 / 9 モジュール）をブローカー経由に切り替え
+   (b) 承認フロー (c) 外部アンカー（`tool_calls` の最新ハッシュを日次投稿）
+   (d) **canary の植え付け** — 出力側の検知点が揃ったので、ここで初めて実効が出る
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 

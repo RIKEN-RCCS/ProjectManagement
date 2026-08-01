@@ -144,7 +144,9 @@ def _update_message(client, body: dict, text: str) -> None:
         channel = body.get("channel", {}).get("id") or body.get("container", {}).get("channel_id", "")
         ts = body.get("message", {}).get("ts") or body.get("container", {}).get("message_ts", "")
         if channel and ts:
-            client.chat_update(
+            from utils.slack_post import update_message
+            update_message(
+                client,
                 channel=channel,
                 ts=ts,
                 text=text,

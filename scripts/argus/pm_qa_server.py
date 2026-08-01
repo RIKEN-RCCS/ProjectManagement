@@ -579,7 +579,9 @@ def build_app():
         if errors:
             user_id = event.get("user") or ""
             try:
-                client.chat_postEphemeral(
+                from utils.slack_post import post_ephemeral
+                post_ephemeral(
+                    client,
                     channel=channel_id, user=user_id,
                     text=":warning: 削除失敗:\n" + "\n".join(f"• {e}" for e in errors[:5]),
                 )
@@ -609,7 +611,9 @@ def build_app():
 
         # 受付通知（スレッドに公開）
         try:
-            client.chat_postMessage(
+            from utils.slack_post import post_message
+            post_message(
+                client,
                 channel=channel_id,
                 thread_ts=ts_for_reply,
                 text=f":mag: 調査中... `{question[:80]}`",
@@ -782,7 +786,9 @@ def build_app():
             for i, part in enumerate(parts):
                 suffix = f"\n\n（{i+1}/{len(parts)}）" if len(parts) > 1 else ""
                 text_part = part + suffix
-                client.chat_postMessage(
+                from utils.slack_post import post_message
+                post_message(
+                    client,
                     channel=channel_id, thread_ts=thread_ts, text=text_part,
                     blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text_part}}],
                 )
@@ -791,7 +797,9 @@ def build_app():
         except Exception as e:
             logger.exception(f"[mention] エラー: {e}")
             try:
-                client.chat_postMessage(
+                from utils.slack_post import post_message
+                post_message(
+                    client,
                     channel=channel_id, thread_ts=thread_ts,
                     text=f":warning: 調査中にエラーが発生しました: {e}",
                 )

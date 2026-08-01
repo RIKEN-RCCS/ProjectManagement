@@ -110,13 +110,12 @@ def _payload_text(kwargs: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
-    """送信前の検査と記録。**拒否は例外**（戻り値だと呼び出し側が無視できる）。
+def scan_text_for_egress(text: str, conn=None) -> list[str]:
+    """送信・合成の前にテキストを検査し、問題の理由を返す（空なら通過）。
 
-    検査するのは canary とゼロ幅文字だけである。**自然な散文に符号化されたものは
-    通る**（TrojanStego 型）ので、これで内容が安全になるわけではない（P10）。
+    **公開関数にしてあるのは、TTS のようにテキストが別形式へ変換される経路から
+    合成前に呼ぶため**（§4.2 の順序制約）。mp3 になった後では検査できない。
     """
-    text = _payload_text(kwargs)
     reasons = []
     try:
         from db_utils import active_canary_tokens
@@ -127,6 +126,17 @@ def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
         logger.exception("[SLACK-EGRESS] canary 台帳の読み取りに失敗（検査は続行）")
     if any(ch in text for ch in _ZERO_WIDTH):
         reasons.append("ゼロ幅文字が含まれています（不可視の埋め込みの可能性）")
+    return reasons
+
+
+def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
+    """送信前の検査と記録。**拒否は例外**（戻り値だと呼び出し側が無視できる）。
+
+    検査するのは canary とゼロ幅文字だけである。**自然な散文に符号化されたものは
+    通る**（TrojanStego 型）ので、これで内容が安全になるわけではない（P10）。
+    """
+    text = _payload_text(kwargs)
+    reasons = scan_text_for_egress(text, conn)
 
     outcome = "blocked" if reasons else "ok"
     if conn is not None:

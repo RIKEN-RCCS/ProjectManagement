@@ -692,7 +692,9 @@ def run_pipeline(client, channel_id, filename, thread_ts, consensus_n=1):
                 "LLM の呼び出しに失敗した可能性があります。ログを確認してください。"
             )
 
-        client.files_upload_v2(
+        from utils.slack_post import upload_file
+        upload_file(
+            client,
             channel=channel_id,
             thread_ts=thread_ts,
             file=str(minutes_path),

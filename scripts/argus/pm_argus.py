@@ -1747,7 +1747,9 @@ def _run_direction(respond, command, *, no_encrypt: bool = False):
             if bot_token and channel_id:
                 try:
                     from slack_sdk import WebClient
-                    WebClient(token=bot_token).files_upload_v2(
+                    from utils.slack_post import upload_file
+                    upload_file(
+                        WebClient(token=bot_token),
                         channel=channel_id,
                         file=str(graph_path),
                         filename="argus_direction_graph.png",

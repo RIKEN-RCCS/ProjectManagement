@@ -135,6 +135,37 @@ repos:
         stages: [pre-commit]
         always_run: true
         pass_filenames: false
+      - id: slack-egress-funnel
+        # Slack への投稿は utils/slack_post.py のファネル（post_message /
+        # post_ephemeral / update_message / upload_file）だけを通ること。
+        # SDK の直叩きを禁止する（docs/security-architecture.md §4.2）。
+        #
+        # ファネルを通さないと、送信前の canary・ゼロ幅文字の検査と egress ログが
+        # 素通りする。**25箇所の移送が完了した 2026-08-01 に有効化した** — 移送の
+        # 途中で入れると恒常的に落ち、lint を無効化する方向に圧力がかかるため。
+        #
+        # 除外: scripts/utils/slack_post.py 自身（ファネルの実装）、scripts/eval/
+        # （開発用の評価ツールで本番経路ではない）。
+        #
+        # 検出範囲の限界（既知）: リテラル一致なので `getattr(client, "chat_" + x)()`
+        # のような間接呼び出しは検出できない。fail-closed 方針は他の lint と同じ。
+        name: slack egress funnel lint (SDK 直叩き禁止)
+        entry: >-
+          bash -c '
+          out=$(grep -rnE "\.(chat_postMessage|chat_postEphemeral|chat_update|files_upload_v2)\(" scripts --include="*.py" | grep -v "^scripts/utils/slack_post.py:" | grep -v "^scripts/eval/");
+          rc=$?;
+          if [ "$rc" -ge 2 ]; then echo "[slack-funnel-lint] grep 実行エラー"; exit 1; fi;
+          if [ -n "$out" ]; then
+            echo "[slack-funnel-lint] Slack SDK の直叩きが見つかりました。utils/slack_post.py のファネルを使ってください:";
+            echo "$out";
+            exit 1;
+          fi;
+          exit 0
+          '
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false
       - id: no-mcp-server-registration
         # MCP Server（旧 pm_mcp_server.py / FastMCP "pm-multi-agent"）は 2026-07-31 に
         # 廃止した。READ ツールと EGRESS ツールが同一プロセスに同居する唯一の経路であり、
