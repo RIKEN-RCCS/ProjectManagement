@@ -182,7 +182,8 @@ def slack_post_message(
         kwargs["thread_ts"] = thread_ts
 
     try:
-        resp = client.chat_postMessage(**kwargs)
+        from utils.slack_post import post_message
+        resp = post_message(client, **kwargs)
         ts = resp.get("ts", "")
         return f"メッセージを投稿しました: {channel}\n  タイムスタンプ: {ts}"
     except Exception as e:

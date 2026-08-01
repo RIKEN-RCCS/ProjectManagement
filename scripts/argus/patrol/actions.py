@@ -270,7 +270,8 @@ def send_channel_alert(ctx, channel_id: str, text: str) -> bool:
         return False
 
     try:
-        ctx.slack.chat_postMessage(channel=channel_id, text=text)
+        from utils.slack_post import post_message
+        post_message(ctx.slack, channel=channel_id, text=text)
         return True
     except Exception as e:
         logger.error("チャンネル通知失敗 (%s): %s", channel_id, e)
@@ -392,7 +393,8 @@ def _send_dm_or_fallback(
         kwargs: dict = {"channel": target_channel, "text": text}
         if blocks and target_channel != leader_ch:
             kwargs["blocks"] = blocks
-        resp = ctx.slack.chat_postMessage(**kwargs)
+        from utils.slack_post import post_message
+        resp = post_message(ctx.slack, **kwargs)
         time.sleep(1)
         return (target_channel, resp.get("ts", ""))
     except Exception as e:

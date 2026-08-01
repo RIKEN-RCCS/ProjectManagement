@@ -1177,7 +1177,8 @@ def upload_md_file(client, channel_id: str, md_path: Path | None,
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
     try:
-        resp = client.files_upload_v2(**kwargs)
+        from utils.slack_post import upload_file
+        resp = upload_file(client, **kwargs)
         # レスポンスから permalink を取得（"file" キーが dict またはリストの場合に対応）
         file_obj = resp.get("file") or (resp.get("files") or [None])[0]
         permalink = file_obj.get("permalink") if file_obj else None

@@ -2062,7 +2062,9 @@ def _run_transcribe(respond, command):
         return
 
     try:
-        post = bot_client.chat_postMessage(
+        from utils.slack_post import post_message
+        post = post_message(
+            bot_client,
             channel=channel_id,
             text=f":hourglass_flowing_sand: `{filename}` の処理を開始します...",
         )

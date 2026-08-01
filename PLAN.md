@@ -122,9 +122,19 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    **被覆率は Canvas と Box のみ**（既存ファネルがあるため安い）。**Slack は SDK 直叩き
    25 箇所 / 7 モジュールの移送が未完了**で、`_dispatch` は slack を明示的に拒否する
    （黙って成功させない）。**「ブローカーがあるから守られている」と読んではいけない**段階。
-   **残り**: (a) `slack_post.py` に投稿関数を新設し 25 箇所を移送 (b) 既存の Canvas / Box
-   呼び出し（8 / 9 モジュール）をブローカー経由に切り替え (c) 承認フロー (d) 外部アンカー
-   （`tool_calls` の最新ハッシュを日次投稿。ブローカー経由なので新しい egress は増えない）
+   **Slack ファネルの新設と第1陣の移送は 2026-08-01 に完了**（`slack_post.py` に
+   `post_message` / `post_ephemeral` / `update_message` / `upload_file`）。
+   **設計文書が「輸送層ではない」と指摘した `slack_post.py` が輸送層になった。**
+   移送済みは**パイプライン型（自動投稿）** — `output_tools` / `patrol/actions`（2）/
+   `pm_argus`（録音進捗）/ `transcribe_pipeline`（2）/ `pm_minutes_import`。
+   設計文書が「出力量の大半かつ人間の介在なし」と名指しした側を先に通した。
+   **残る直叩き 15 箇所**: `narrate.py` 9（うち多くは進捗の chat_update と mp3/mp4 の
+   files_upload_v2）、`pm_qa_server.py` 4（ephemeral 応答）、`transcribe_pipeline` 1、
+   `patrol/confirm.py` 1。
+   **残り**: (a) 上記 15 箇所の移送 → 完了したら pre-commit lint で直叩きを禁止する
+   （**全部通してから lint を入れる** — 途中で入れると既存箇所で恒常的に落ちる）
+   (b) 既存の Canvas / Box 呼び出し（8 / 9 モジュール）をブローカー経由に切り替え
+   (c) 承認フロー (d) 外部アンカー（`tool_calls` の最新ハッシュを日次投稿）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 

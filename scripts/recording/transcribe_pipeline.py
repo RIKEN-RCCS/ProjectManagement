@@ -97,7 +97,8 @@ def _get_hugging_face_token() -> str:
 
 
 def _post(client, channel_id, thread_ts, text):
-    client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=text)
+    from utils.slack_post import post_message
+    post_message(client, channel=channel_id, thread_ts=thread_ts, text=text)
 
 
 def _post_minutes_voice(client, channel_id: str, thread_ts: str, minutes_path: Path) -> None:
@@ -129,7 +130,9 @@ def _post_minutes_voice(client, channel_id: str, thread_ts: str, minutes_path: P
             quiet=True,
         )
         credit = pm_tts.credit_line(speaker_id)
-        client.files_upload_v2(
+        from utils.slack_post import upload_file
+        upload_file(
+            client,
             channel=channel_id,
             thread_ts=thread_ts,
             file=str(mp3_path),
