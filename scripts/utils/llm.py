@@ -103,6 +103,27 @@ def _extract_think_fallback(content: str) -> str:
 # vLLM モデル自動検出
 # --------------------------------------------------------------------------- #
 
+def _assert_model_pin(model_id: str | None) -> None:
+    """本番経路で使うモデルが model_pin.yaml の宣言内にあるか照合する（§4.6）。
+
+    既定は warn（記録のみ）。`ARGUS_MODEL_PIN=enforce` で拒否に切り替わる。
+    **照合の失敗そのものでは落とさない** — pin の読み込み不良で本番が止まる方が損失が
+    大きいため。ただし enforce の ModelPinError は素通しする（それが目的なので）。
+    """
+    if not model_id:
+        return
+    try:
+        from utils.model_pin import ModelPinError, assert_model_allowed
+    except Exception:
+        return
+    try:
+        assert_model_allowed(model_id)
+    except ModelPinError:
+        raise
+    except Exception:
+        logger.exception("[MODELPIN] 照合に失敗しました（続行）")
+
+
 def detect_vllm_model(base_url: str, api_key: str | None = None) -> str:
     """vLLM の /v1/models エンドポイントからモデル名を自動取得する。"""
     import json
@@ -691,6 +712,7 @@ def call_rivault(
     api_key = os.environ.get("RIVAULT_TOKEN", "dummy")
     if model is None:
         model = os.environ.get("RIVAULT_MODEL")
+        _assert_model_pin(model)
         if not model:
             raise RuntimeError(
                 "RIVAULT_MODEL が未設定。source ~/.secrets/rivault_tokens.sh を実行してください"
@@ -952,6 +974,7 @@ def call_argus_llm(
         except Exception as exc:
             raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません: {exc}") from exc
         model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
+        _assert_model_pin(model)
         # ARGUS_REASONING_EFFORT: 未設定/不正値時は None のまま payload に送らない（既存挙動維持）
         reasoning_effort = _resolve_reasoning_effort_env()
         # ARGUS_LLM_TEMPERATURE: temperature 引数が明示された場合はそちらを優先し、

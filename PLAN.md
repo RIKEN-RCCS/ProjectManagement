@@ -16,6 +16,13 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 （Slack Connect・ゲスト不在、パートナーチャンネルには非投稿、Box 実効 `company`）/
 **MCP Server（`pm_mcp_server.py`）の廃止** — チョークポイントは `agent_tools.py` の 1 箇所に集約。
 
+> [!note] Kimi-K3 再開との関係（2026-08-01）
+> K3 の6提案のうち**優先度1（APIクライアント層の再設計）はこの節の `tool_calls` /
+> `reasoning_traces` と同一コードパス**であり、セキュリティ側の残作業と K3 側の第一歩が
+> 一致する。一方**優先度2（視覚入力）・優先度3（長時間自律）は Phase 5（5b）完了がゲート**で、
+> R8（改竄の集中リスク）も未着手。**「対策が完了したから K3」ではなく「K3 の本命機能を
+> 使うために 5b と R8 をやる」**という順序（設計文書 §6）。
+
 **次にやること**（優先順）:
 1. **`config/network_allowlist.yaml` の実値化** — `ingest_plane`（docling `127.0.0.1:5001`）は
    pm_box_update.sh の既定と pm_daemon.sh の bind 両方に一致することを確認済み（確定値）。
@@ -71,8 +78,20 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
      `netguard_deny` が拾う
 4. **Box 既存共有リンクの正規化** — 事前に「読ませたい人が全員 collaborator か」を Box 側で
    揃える（順序を逆にすると一時的にリンク切れ）
-5. `tool_calls` 記録 / `top_k` 200→100→50 の被害半径実測（P7 の文脈軸）
-6. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
+5. ~~`tool_calls` 記録~~ → **2026-08-01 実装**（pm.db `tool_calls`、ハッシュ連鎖＋追記専用
+   トリガ、`execute_tool` の唯一のチョークポイントで記録、`pm_selfcheck` に連鎖検証
+   `tool_call_chain` を追加）。**拒否された呼び出しも記録する**（モデルが何を試みたかが残る）。
+   **`reasoning_traces` も同日実装**（保持期間 既定90日、`tool_calls` は sha256 で参照、
+   canary 発火時は `keep_sessions` で保全）。**これで §4.3 の検知点②③が埋まった。**
+   残り: 外部アンカー（Phase 3 のブローカー待ち）、`top_k` 200→100→50 の被害半径実測（P7 の文脈軸）
+6. ~~供給網の固定（§4.6）~~ → **2026-08-01 実装**（`config/model_pin.yaml` + `scripts/utils/model_pin.py`）。
+   本番3モデル（glm-5.2 / Kimi-K2-Thinking / bge-m3）＋評価2モデルの id 照合が全て OK。
+   既定は warn、`ARGUS_MODEL_PIN=enforce` で拒否。**`declared_*`（revision / trust_remote_code /
+   engine）は検証不能なので判定に使わない** — 申告の記録として git 差分で変更を検知する（R12）。
+   **残り**: (a) 運用主体からのモデル更新通知の取り決め（Phase 0、技術ではなく合意）
+   (b) K3 の `declared_engine` / `declared_trust_remote_code` の確認 — **これが取れるまで
+   K3 は `production: false`**（§1.3 攻撃者2 に直接該当するため）(c) enforce への切り替え
+7. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
    SDK 直叩き 25 箇所の移送が必要**（工数の大半）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:

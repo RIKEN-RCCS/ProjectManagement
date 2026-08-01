@@ -28,7 +28,8 @@ _ARM_CONTROLLED_ENV_KEYS 方式の親 env 打ち消し、機密ホワイトリ�
   全段再実行する（無ければそのアームを arm_failed として記録しスキップする）
 - judge は scripts/eval/argus_ab_judge.py の call_judge/parse_judge_output を
   import 流用する。judge モデルは比較対象に kimi 系が含まれるため中立性確保の目的で
-  既定 DeepSeek-V4-Flash を明示指定する（RiVault 経由）
+  既定 deepseek-ai/DeepSeek-V4-Flash を明示指定する（RiVault 経由。org 接頭辞まで含めた
+  id でないと /v1/models に一致しない — model_pin.py --check で判明、2026-08-01）
 - アーム env の JSONL 記録はホワイトリスト方式（トークンは一切記録しない）
 
 例:
@@ -1085,7 +1086,7 @@ def main() -> int:
     j.add_argument("--workspace", default=str(DEFAULT_WORKSPACE), metavar="PATH")
     j.add_argument("--jsonl", default=str(DEFAULT_JSONL), metavar="PATH")
     j.add_argument("--judges-jsonl", default=str(DEFAULT_JUDGES_JSONL), metavar="PATH")
-    j.add_argument("--judge-model", default="DeepSeek-V4-Flash",
+    j.add_argument("--judge-model", default="deepseek-ai/DeepSeek-V4-Flash",
                    help="比較対象に kimi 系を含むため中立性確保のため既定 DeepSeek-V4-Flash")
     j.add_argument("--judge-max-tokens", type=int, default=4096)
     j.add_argument("--judge-timeout", type=int, default=300)

@@ -1,0 +1,113 @@
+# config/model_pin.yaml
+#
+# 供給網の固定（docs/security-architecture.md §4.6）。
+# 「どのモデルを本番経路で使ってよいか」を宣言する allow-list。
+#
+# ★ 検証できるものと、申告にすぎないものを分けて書く ★
+#
+#   verified 系   — Argus 側で確認できる。`/v1/models` の id と照合する。
+#                   不一致なら enforce で起動を拒否する（fail-closed）
+#   declared 系   — **Argus 側では検証できない。** OpenAI 互換の `/v1/models` は
+#                   id しか返さないため、チェックポイントの sha も trust_remote_code の
+#                   設定も取得できない。**運用主体の申告を記録しているだけ**であり、
+#                   「検証済み」と読んではいけない（§4.6 の警告、R12）
+#
+# 申告値が変われば git の diff に現れる。これが実質的な変更検知になる。
+# モデル更新の通知を運用主体から受ける取り決めは Phase 0 の宿題（技術ではなく合意で埋める）。
+#
+# モード切り替え: 環境変数 ARGUS_MODEL_PIN
+#   warn (既定) — pin に無いモデルでも通す。ログに残すだけ
+#   enforce     — pin に無い / verified_at が null のモデルは PermissionError で拒否
+#   off         — 照合しない（テスト用）
+#
+# 運用手順:
+#   1. `python3 scripts/utils/model_pin.py --list` で宣言内容を確認
+#   2. `python3 scripts/utils/model_pin.py --check` で `/v1/models` の id と突き合わせる
+#   3. warn で運用して差分がゼロになったら enforce へ
+
+models:
+  # --- 本番の主経路 -------------------------------------------------------
+  glm-5.2:
+    role: "investigate / brief / risk の主モデル（RIKYU）"
+    served_model_name: glm-5.2
+    endpoint_env: [RIKYU_URL, LOCAL_LLM_URL, ARGUS_ONESHOT_LLM_URL]
+    token_env: [RIKYU_TOKEN, LOCAL_LLM_TOKEN]
+    production: true
+    verified_at: "2026-08-01"      # model_pin.py --check で id 一致を確認
+    verified_by: "model_pin.py --check"
+    declared_revision: null     # 取得手段が無い。運用主体から聞いて記録する
+    declared_weights_format: safetensors
+    declared_trust_remote_code: false
+    declared_engine: vllm
+    declared_by: null
+    declared_at: null
+
+  Kimi-K2-Thinking:
+    role: "RiVault 経由の議事録生成・Slack 抽出・トリアージ"
+    served_model_name: Kimi-K2-Thinking
+    endpoint_env: [RIVAULT_URL]
+    token_env: [RIVAULT_TOKEN]
+    production: true
+    # R8: K3 と同一提供元（Moonshot）であり、かつ R5（改竄）の発生場所を担う集中リスク。
+    # 第2系統の投入（Phase 4）が未着手であることを承知の上で使っている。
+    concentration_risk: R8
+    verified_at: "2026-08-01"
+    verified_by: "model_pin.py --check"
+    declared_revision: null
+    declared_weights_format: safetensors
+    declared_trust_remote_code: false
+    declared_engine: vllm
+    declared_by: null
+    declared_at: null
+
+  bge-m3:
+    role: "埋め込み（ローカル vLLM, port 8001）"
+    served_model_name: BAAI/bge-m3
+    endpoint_env: [EMBED_API_BASE]
+    token_env: [EMBED_API_KEY, LOCAL_LLM_TOKEN]
+    production: true
+    verified_at: "2026-08-01"
+    verified_by: "model_pin.py --check"
+    declared_revision: null
+    declared_weights_format: safetensors
+    declared_trust_remote_code: false
+    declared_engine: vllm
+    declared_by: null
+    declared_at: null
+
+  # --- 評価専用（本番経路では使わない） -----------------------------------
+  DeepSeek-V4-Flash:
+    role: "オフライン評価の judge（scripts/eval/ 配下のみ。pm.db に欠落を作れない）"
+    served_model_name: deepseek-ai/DeepSeek-V4-Flash
+    endpoint_env: [RIVAULT_URL]
+    token_env: [RIVAULT_TOKEN]
+    production: false
+    verified_at: "2026-08-01"
+    verified_by: "model_pin.py --check"
+    declared_revision: null
+    declared_weights_format: safetensors
+    declared_trust_remote_code: false
+    declared_engine: vllm
+    declared_by: null
+    declared_at: null
+
+  kimi-k3:
+    role: "評価用（2026-07-31 に PM 判断で活用停止中。本番経路では使わない）"
+    served_model_name: kimi-k3
+    endpoint_env: [ARGUS_ONESHOT_LLM_URL, RIKYU_URL]
+    token_env: [ARGUS_ONESHOT_LLM_TOKEN, RIKYU_TOKEN]
+    production: false
+    # §4.6 の K3 固有の注意: HuggingFace 上で `custom_code` タグ付きで、モデルカードの
+    # transformers 使用例は trust_remote_code=True。KDA が新規アーキテクチャのため
+    # transformers 経路では必須になる。**これは §1.3 の攻撃者2に直接該当する現在形のリスク。**
+    # 理究が vLLM / SGLang のネイティブ対応で動かしていることの確認を declared_* に記録する。
+    # 確認が取れるまで production: false のまま。
+    requires_native_engine: true
+    verified_at: "2026-08-01"      # id は実在を確認。ただし engine/trust_remote_code は未確認
+    verified_by: "model_pin.py --check"
+    declared_revision: null
+    declared_weights_format: safetensors
+    declared_trust_remote_code: null   # ★未確認。ここが false と確認できるまで本番不可
+    declared_engine: null              # ★未確認（vllm または sglang であること）
+    declared_by: null
+    declared_at: null
