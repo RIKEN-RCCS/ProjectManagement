@@ -833,6 +833,26 @@ def record_second_opinion(
     conn.commit()
 
 
+def tool_call_anchor(conn: "_sqlite3.Connection") -> dict | None:
+    """`tool_calls` の連鎖の頭（最新 entry_hash）と件数を返す（§4.4 の外部アンカー用）。
+
+    **これを外部の追記専用の場所に日次で固定することで、内部で完結した連鎖の弱点を補う。**
+    連鎖の検証者が改竄されうる側と同じプロセス・同じ UNIX ユーザで動く以上、
+    エントリと連鎖の頭を両方書き換えられてしまう。外に置いた過去の値と矛盾すれば、
+    その日以降の改竄が確定する。
+    """
+    if not table_exists(conn, "tool_calls"):
+        return None
+    row = conn.execute(
+        "SELECT entry_hash, ts FROM tool_calls ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    n = conn.execute("SELECT count(*) FROM tool_calls").fetchone()[0]
+    d = dict(row)
+    return {"entry_hash": d["entry_hash"], "ts": d["ts"], "count": n}
+
+
 def normalize_assignee(name: str | None) -> str | None:
     """担当者名を正規化する。
     - 未展開の Slack メンション ID (<@UXXX> / @UXXX / 生の UXXX) を除去

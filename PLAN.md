@@ -106,8 +106,9 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    scrub した環境で起動した Read Plane プロセスから `slack.com` / `api.box.com` の
    名前解決が遮断され、LLM エンドポイントのみ到達可能。トークンは environ から除き、
    子プロセス側でも自己検査で二重に確認する（親が scrub を忘れても止まる）。
-   **残り**: (a) `pm_qa_server` の investigate 経路を `run_in_read_plane` へ切り替え
-   （既定 OFF のまま。UX 影響を tool_calls ログで確認してから）(b) Patrol も同様に分割
+   **2026-08-01 に切替フラグを実装**（`ARGUS_READ_PLANE_SUBPROCESS=1`、**既定 OFF**）。
+   倒す前に `tool_calls` で「調べながら中間結果を投稿する」使い方の実在を確認する。
+   **残り**: (a) 上記フラグを ON にする判断 (b) Patrol も同様に分割
    (c) **OS レベルの強制**（iptables / network namespace）— 現状は同一プロセスの
    socket フックなので、subprocess とフック解除には効かない (d) ブローカーと Artifact
    への流れの再構成（下記 9 と一体）
@@ -141,8 +142,11 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    `guard_outbound_text` を入れる形にした。**2 箇所の編集で 8 / 9 モジュールを覆える**ため。
    Box はテキスト系拡張子のみ中身を検査し、**xlsx/pptx 等は「検査した」と記録しない**
    （検査できていないものを通過扱いにすると誤った根拠になる）。
-   **残り**: (a) 承認フロー（`EgressPendingApproval` の受け皿。UX の決めが要る）
-   (b) 外部アンカー（`tool_calls` の最新ハッシュを日次投稿）
+   **残り**: (a) **承認フロー** — `EgressPendingApproval` を投げるところまでは実装済みだが、
+   受け皿（誰がどこで承認するか）は**UX の決めが要るので未実装**。現状 `external_visible` の
+   宛先は送信されず例外になる (b) **外部アンカー** — `db_utils.tool_call_anchor()` で
+   連鎖の頭を取り出せるようにした。**日次投稿の cron 化は未実施**（投稿先チャンネルの
+   決めが要る。ブローカー経由なので新しい egress は増えない）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 

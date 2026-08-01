@@ -178,3 +178,19 @@ class TestReasoningTraces:
         c.execute("DROP TABLE IF EXISTS reasoning_traces"); c.commit()
         assert purge_reasoning_traces(c) == 0
         c.close()
+
+
+class TestAnchor:
+    def test_anchor_returns_latest_hash_and_count(self, conn):
+        from db_utils import tool_call_anchor
+
+        _rec(conn)
+        last = _rec(conn, name="search_decisions")
+        a = tool_call_anchor(conn)
+        assert a["entry_hash"] == last["entry_hash"]
+        assert a["count"] == 2
+
+    def test_anchor_is_none_when_empty(self, conn):
+        from db_utils import tool_call_anchor
+
+        assert tool_call_anchor(conn) is None

@@ -752,9 +752,17 @@ def build_app():
                 )
             seed_data = build_seed_data(ctx) + user_info + thread_context
 
-            result = run_agent(
-                question=question, seed_data=seed_data, respond=None, ctx=ctx,
-            )
+            # 能力分離 5b: ARGUS_READ_PLANE_SUBPROCESS=1 で調査を Read Plane の
+            # 別プロセス（Slack/Box トークンを持たない）へ出す。**既定は OFF** —
+            # 「調べながら中間結果を投稿する」使い方が消えるため、tool_calls ログで
+            # その使い方の実在を確認してから倒す（docs/security-architecture.md Phase 5）。
+            if os.environ.get("ARGUS_READ_PLANE_SUBPROCESS", "").strip() in ("1", "true", "yes"):
+                from argus.pm_read_worker import run_in_read_plane
+                result = run_in_read_plane(question, index_name=ctx.index_name)
+            else:
+                result = run_agent(
+                    question=question, seed_data=seed_data, respond=None, ctx=ctx,
+                )
             result = _expand_id_references(result, conns)
             for c in conns:
                 c.close()
