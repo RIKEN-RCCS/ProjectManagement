@@ -2118,6 +2118,37 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             pass
 
 
+def run_investigate_for_worker(
+    *, question: str, days: int = 30, max_steps: int = _DEFAULT_MAX_STEPS,
+    timeout: float = _DEFAULT_TIMEOUT, index_name: str = "pm",
+    no_encrypt: bool = False,
+) -> str:
+    """Read Plane ワーカー（pm_read_worker.py）から呼ばれる調査のエントリポイント。
+
+    CLI と同じ組み立てを行うが、**出力先フラグを一切持たない** — Read Plane は
+    外へ出さないので、結果は戻り値として親（Write Plane）に返すだけである
+    （docs/security-architecture.md §3.2）。
+    """
+    today = date.today().isoformat()
+    since_date = (date.today() - timedelta(days=days)).isoformat()
+    index_db, channels, pm_db_paths, resolved_index = _resolve_index_and_channels()
+    conns = [open_pm_db(pth, no_encrypt=no_encrypt) for pth in pm_db_paths]
+    try:
+        ctx = AgentContext(
+            conns=conns, today=today, since=since_date, no_encrypt=no_encrypt,
+            data_dir=_DATA_DIR, minutes_dir=_MINUTES_DIR, index_db=index_db,
+            index_name=index_name or resolved_index, channels=channels,
+            session_id=new_session_id("read"),
+        )
+        return run_agent(
+            question=question, seed_data=build_seed_data(ctx), respond=None,
+            ctx=ctx, max_steps=max_steps, timeout=timeout,
+        )
+    finally:
+        for c in conns:
+            c.close()
+
+
 # =========================================================================== #
 #  CLI Mode
 # =========================================================================== #

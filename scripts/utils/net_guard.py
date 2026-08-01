@@ -40,6 +40,12 @@ enforce モードでは以下も fail-closed にする（warn/off は従来ど�
 allow-list ファイルの場所は環境変数 ARGUS_NETGUARD_ALLOWLIST で上書きできる
 （既定は <repo_root>/config/network_allowlist.yaml）。テスト用途を想定。
 
+`ARGUS_NETGUARD_PLANES` で許可する平面を絞れる（能力分離 5b）。例えば
+`ARGUS_NETGUARD_PLANES=read_plane` で起動したプロセスは、allow-list の
+`write_plane`（slack.com / box.com）が許可集合に入らないため、enforce では
+**DNS 解決の段階で外部サービスに到達できない**。Phase 5 のゲートはこれで満たす
+（iptables / network namespace による強制が理想だが、運用制約次第。§3.2）。
+
 install() は上記フックの設置に加え、`verify_endpoints()` により allow-list の
 `from_env` に指定された環境変数の実行時値をエントリのリテラル値と照合する
 （§4.7 層1・P9）。これは「allow-list が固定でも実際の接続先が別ホストに
@@ -111,6 +117,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _MODE_ENV = "ARGUS_NETGUARD"
 _ALLOWLIST_ENV = "ARGUS_NETGUARD_ALLOWLIST"
+_PLANES_ENV = "ARGUS_NETGUARD_PLANES"
 _DEFAULT_ALLOWLIST_PATH = _REPO_ROOT / "config" / "network_allowlist.yaml"
 
 _state_lock = threading.Lock()
@@ -170,8 +177,27 @@ def _load_allowlist_file(path: Path) -> list[dict]:
     return entries
 
 
+def _restricted_planes() -> set[str] | None:
+    """`ARGUS_NETGUARD_PLANES` で許可する平面を絞る（能力分離 5b）。
+
+    例: Read Plane のワーカーは `ARGUS_NETGUARD_PLANES=read_plane` で起動する。
+    こうすると allow-list のうち `write_plane`（slack.com / box.com）が**そもそも
+    許可集合に入らない**ため、enforce では DNS 解決の段階で遮断される。
+
+    **トークンの不在と対で使う。** トークンだけ外しても到達性は残り、到達性だけ
+    塞いでもトークンがあれば別経路が生まれる（P1 → P2 の依存関係）。
+    """
+    raw = os.environ.get(_PLANES_ENV, "").strip()
+    if not raw:
+        return None
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
 def _get_allowlist() -> list[dict]:
-    """allow-list を mtime キャッシュ付きで返す。パス・mtime が変われば再読み込みする。"""
+    """allow-list を mtime キャッシュ付きで返す。パス・mtime が変われば再読み込みする。
+
+    `ARGUS_NETGUARD_PLANES` が設定されていれば、その平面のエントリだけに絞る。
+    """
     global _allowlist_cache
     path = _resolve_allowlist_path()
     try:
@@ -179,10 +205,14 @@ def _get_allowlist() -> list[dict]:
     except OSError:
         mtime = None
     if _allowlist_cache is not None and _allowlist_cache[0] == path and _allowlist_cache[1] == mtime:
-        return _allowlist_cache[2]
-    entries = _load_allowlist_file(path)
-    _allowlist_cache = (path, mtime, entries)
-    return entries
+        entries = _allowlist_cache[2]
+    else:
+        entries = _load_allowlist_file(path)
+        _allowlist_cache = (path, mtime, entries)
+    planes = _restricted_planes()
+    if planes is None:
+        return entries
+    return [e for e in entries if e.get("plane") in planes]
 
 
 def _host_allowed(host: str, port: int, entries: list[dict] | None = None) -> bool:

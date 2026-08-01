@@ -7,6 +7,28 @@
 
 ---
 
+## 2026-08-01 能力分離 5b の第1スライス — Read Plane をトークン無しの別プロセスに割る
+
+**背景**: 設計文書 §3.2 が「**Read Plane が Slack トークンを持たないという一点で P1 の大半が
+達成される**」と書いている箇所。これまで `pm_qa_server.py` が全トークンを持ったまま調査も投稿も
+担っていた。
+**決定**: `pm_read_worker.py` を新設し、調査を別プロセスで走らせる。分離は2重にした。
+(1) **トークンの不在** — `scrub_env()` で SLACK_* / BOX_* / PM_BOX_* / CANVAS / TTS / GITHUB_* を
+除く。**DB 鍵と LLM トークンは残す**（Read Plane の仕事は pm.db を読むことで、LLM トークンは
+read_plane の宛先にしか使えない）。(2) **到達性** — `net_guard` に `ARGUS_NETGUARD_PLANES` を
+足し、`read_plane` だけを許可集合に入れる。allow-list が元から平面別だったのでほぼ無改造で済んだ。
+**ゲートを実測で確認**: Read Plane プロセスから `slack.com` / `api.box.com` は resolve 段で遮断、
+`api.rikyu.r-ccs.riken.jp` は到達可能。
+**設計判断**: 子プロセス側にも自己検査を置いた（トークンが残っていれば起動を拒否）。**分離を
+「呼び出し側が scrub する作法」に依存させると、1箇所の書き忘れで静かに崩れる** — P8 と同じ型。
+また親が失敗を握りつぶして in-process へフォールバックしないよう、`run_in_read_plane` は
+例外を上げる。**「分離があるように見えて無い」状態が最悪**だから。
+**限界**: `net_guard` は同一プロセスの socket フックなので、subprocess（box CLI）とフック解除には
+効かない。**OS レベルの強制（iptables / network namespace）が本来の姿**で、そこは運用調整が要る。
+**未切替**: `pm_qa_server` の investigate は in-process のまま。UX 影響（「調べながら中間結果を
+投稿する」使い方が消える）を tool_calls ログで確認してから倒す — その判断材料を得るのが
+Phase 5 をここに置いた理由でもある。
+
 ## 2026-08-01 R8（改竄の集中リスク）へ第2系統を投入 — 全件ではなくフラグ付き項目に当てる
 
 **背景**: 設計文書で唯一「受容しない」と書いた項目。RiVault の Kimi-K2-Thinking が K3 と同一

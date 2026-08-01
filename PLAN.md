@@ -100,7 +100,18 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    `DROP` → `KEEP` に統一**（判定不能時に欠落を作らない。Phase 4 の明示項目）。
    **残り**: (a) 実運用での不一致率の観測 — 能力差による雑音がどれくらいかを実測してから
    フラグ語の広さを調整する (b) 残る2箇所（Pass 1 抽出 / Box relevance 判定）への展開
-8. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
+8. **能力分離 5b（Phase 5）** — **2026-08-01 に第1スライス実装**。
+   `scripts/argus/pm_read_worker.py`（Read Plane プロセス）＋ `net_guard` の
+   `ARGUS_NETGUARD_PLANES`（平面単位で許可集合を絞る）。**ゲートは実測で達成**:
+   scrub した環境で起動した Read Plane プロセスから `slack.com` / `api.box.com` の
+   名前解決が遮断され、LLM エンドポイントのみ到達可能。トークンは environ から除き、
+   子プロセス側でも自己検査で二重に確認する（親が scrub を忘れても止まる）。
+   **残り**: (a) `pm_qa_server` の investigate 経路を `run_in_read_plane` へ切り替え
+   （既定 OFF のまま。UX 影響を tool_calls ログで確認してから）(b) Patrol も同様に分割
+   (c) **OS レベルの強制**（iptables / network namespace）— 現状は同一プロセスの
+   socket フックなので、subprocess とフック解除には効かない (d) ブローカーと Artifact
+   への流れの再構成（下記 9 と一体）
+9. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
    SDK 直叩き 25 箇所の移送が必要**（工数の大半）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
