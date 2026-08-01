@@ -111,8 +111,20 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    (c) **OS レベルの強制**（iptables / network namespace）— 現状は同一プロセスの
    socket フックなので、subprocess とフック解除には効かない (d) ブローカーと Artifact
    への流れの再構成（下記 9 と一体）
-9. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
-   SDK 直叩き 25 箇所の移送が必要**（工数の大半）
+9. **輸送層ブローカー（Phase 3・検知点①）** — **2026-08-01 に第1スライス実装**。
+   `scripts/argus/output_broker.py` + `config/egress_targets.yaml`。宛先は識別子で選ぶだけで
+   モデルは構築できない。送信前に **canary 検出（検出したら遮断）・ゼロ幅文字・自由文可否・
+   承認要否**を検査し、可否にかかわらず `tool_calls` に記録する（連鎖を1本に保つため
+   新テーブルは作らない）。
+   **実 ID は `egress_targets.yaml` に置かず `argus_config.yaml` への参照（`config_ref`）にした** —
+   origin が public で `no-slack-id-literals` があるため。方針（外部可視性・自由文可否・承認要否）
+   だけが git 差分に出る形。
+   **被覆率は Canvas と Box のみ**（既存ファネルがあるため安い）。**Slack は SDK 直叩き
+   25 箇所 / 7 モジュールの移送が未完了**で、`_dispatch` は slack を明示的に拒否する
+   （黙って成功させない）。**「ブローカーがあるから守られている」と読んではいけない**段階。
+   **残り**: (a) `slack_post.py` に投稿関数を新設し 25 箇所を移送 (b) 既存の Canvas / Box
+   呼び出し（8 / 9 モジュール）をブローカー経由に切り替え (c) 承認フロー (d) 外部アンカー
+   （`tool_calls` の最新ハッシュを日次投稿。ブローカー経由なので新しい egress は増えない）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 

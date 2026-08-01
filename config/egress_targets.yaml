@@ -1,0 +1,43 @@
+# config/egress_targets.yaml
+#
+# 出力ブローカーの宛先 allow-list（docs/security-architecture.md §4.2、層3）。
+# **モデルは宛先を構築できない。** ここに書かれた識別子を選ぶだけである。
+#
+# ★ 実 ID をこのファイルに書かないこと ★
+#
+# 設計文書 §4.2 の例は canvas_id / channel_id / folder_id を直書きしているが、
+# **origin は public な GitHub** であり、`no-slack-id-literals` の lint もある。
+# したがって実値は `data/argus_config.yaml`（gitignore 対象）に置き、ここからは
+# **キーのパスで参照する**（`config_ref`）。
+#
+#   利点: 宛先の**方針**（外部から見えるか・自由文を許すか・承認が要るか）は
+#         git 管理下でレビューでき、差分にも現れる。実値だけが外に出ない。
+#
+# フィールド:
+#   type                     canvas | box | slack
+#   config_ref               data/argus_config.yaml 内のドット区切りキー
+#   visibility               internal | external_visible
+#                            **external_visible は必ず requires_human_approval: true にする**
+#   free_text_allowed        false なら自由文を拒否する（表の列更新のような定型のみ）
+#   requires_human_approval  true なら送信せず承認待ちとして扱う（Phase 3 の承認フロー）
+
+targets:
+  report_canvas:
+    type: canvas
+    config_ref: report.canvas_id
+    visibility: internal
+    free_text_allowed: true
+    requires_human_approval: false
+
+  pm_reports_box:
+    type: box
+    config_ref: box.upload_folder_id
+    visibility: internal
+    free_text_allowed: true
+    requires_human_approval: false
+
+# 宛先を足すときの原則:
+#   - **外部が閲覧可能な宛先は必ず requires_human_approval: true**
+#   - 定型の更新しかしない宛先は free_text_allowed: false にする。自由文を許さない方が
+#     符号化の余地が減る（ただし覆えるのは「自由文を許さない宛先」だけで、
+#     大半の宛先は自由文が本質なので、これ単独では被覆率が低い — P8）
