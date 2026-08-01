@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -240,9 +241,10 @@ from argus.agent_tools import (  # noqa: F401 — 後方互換のため再 expor
     AgentContext,
     ToolDef,
     _build_tool_descriptions,
-    registry_for,
+    plane_of,
     # 従来の _tool_* 関数は agent_tools.py 内で mcp_tools 委譲となったため
     # 個別 export は不要（必要なのは AgentContext / TOOLS / _TOOL_MAP のみ）
+    registry_for,
 )
 
 # =========================================================================== #
@@ -517,35 +519,126 @@ def _loop_exclude_tools(ctx: AgentContext, command: str = "investigate_loop") ->
     return frozenset(t.name for t in TOOLS) - allowed
 
 
+def new_session_id(prefix: str = "inv") -> str:
+    """tool_calls のセッション識別子。1回の investigate 実行＝1セッション（§4.4）。"""
+    import uuid
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+_AUDIT_LOCK = threading.Lock()
+
+
+def _record_tool_call(
+    ctx: AgentContext, name: str, args: dict, outcome: str,
+    result: str | None = None, block_reason: str | None = None,
+) -> None:
+    """ツール呼び出しを pm.db の tool_calls に追記する（§4.4）。
+
+    ハッシュ連鎖の prev_hash 読み取りと INSERT はロックで直列化する
+    （ツールは ThreadPool で並列実行されるため）。接続はツールごとに開いて閉じる —
+    暗号化 DB の open は安くないが、スレッド間で接続を共有するより安全side に倒す。
+
+    **記録の失敗はツール実行を止めない（fail-open）。** 監査ログの不調で本番機能を
+    落とす方が損失が大きいため。ただし例外は必ずログに出す（P6：静かに失敗させない）。
+    """
+    if not ctx.session_id:
+        return
+    try:
+        from db_utils import open_db, record_tool_call
+
+        db_path = ctx.audit_db or (ctx.data_dir / "pm.db")
+        with _AUDIT_LOCK:
+            ctx.tool_seq += 1
+            conn = open_db(db_path, encrypt=not ctx.no_encrypt)
+            try:
+                record_tool_call(
+                    conn, session_id=ctx.session_id, seq=ctx.tool_seq,
+                    plane=plane_of(name), tool_name=name, args=args,
+                    outcome=outcome, result=result, block_reason=block_reason,
+                    model=ctx.model, model_revision=ctx.model_revision,
+                    reasoning_sha256=ctx.reasoning_sha256,
+                )
+            finally:
+                conn.close()
+    except Exception:
+        logger.exception("[AUDIT] tool_calls への記録に失敗しました（実行は継続）: %s", name)
+
+
+def _record_reasoning(ctx: AgentContext, step: int, trace: str) -> str | None:
+    """思考トレースを reasoning_traces に保存し sha256 を返す（§4.4）。
+
+    session_id が空なら何もしない。**記録の失敗はループを止めない**（fail-open）。
+    セッションの最初のステップで保持期間を過ぎた分を掃除する（既定90日）。
+    """
+    if not ctx.session_id or not trace:
+        return None
+    try:
+        from db_utils import open_db, purge_reasoning_traces, record_reasoning_trace
+
+        db_path = ctx.audit_db or (ctx.data_dir / "pm.db")
+        with _AUDIT_LOCK:
+            conn = open_db(db_path, encrypt=not ctx.no_encrypt)
+            try:
+                sha = record_reasoning_trace(
+                    conn, session_id=ctx.session_id, step=step, trace=trace,
+                    model=ctx.model, model_revision=ctx.model_revision,
+                )
+                if step <= 1:
+                    n = purge_reasoning_traces(conn)
+                    if n:
+                        logger.info("[AUDIT] 保持期間切れの思考トレースを %d 件削除しました", n)
+                return sha
+            finally:
+                conn.close()
+    except Exception:
+        logger.exception("[AUDIT] reasoning_traces への記録に失敗しました（実行は継続）")
+        return None
+
+
 def execute_tool(name: str, args: dict, ctx: AgentContext, command: str = "investigate_loop") -> str:
     """コマンドの allow-list に載っているツールだけを実行する（fail-closed）。
 
     載っていなければ理由を問わず拒否する（deny-list 時代の「EGRESS なら拒否」判定は
     廃止。載っていなければ拒否、が本質。docs/security-architecture.md §4.1）。
+
+    実行結果は outcome（ok / blocked / error）とともに tool_calls に追記する（§4.4）。
+    **拒否された呼び出しこそ記録する価値がある** — モデルが何を試みたかが残る。
     """
     allowed = _loop_allowed_tools(ctx, command)
     if name not in allowed:
         if name in EGRESS_TOOL_NAMES:
-            return (
+            msg = (
                 f"エラー: ツール『{name}』は investigate ループでは使用できません"
                 "（EGRESS、Write Plane 専用。docs/security-architecture.md §4.1）。"
             )
+            _record_tool_call(ctx, name, args, "blocked", msg, block_reason="egress_not_in_allowlist")
+            return msg
         if name in _FILE_PINNED_EXCLUDED_TOOLS and ctx.record_ids:
-            return (
+            msg = (
                 f"エラー: 対象ファイル固定中はツール『{name}』は使用できません"
                 "（全文/資料検索のみ有効）。search_text / search_text_hybrid を使ってください。"
             )
+            _record_tool_call(ctx, name, args, "blocked", msg, block_reason="file_pinned")
+            return msg
         available = ", ".join(sorted(allowed))
-        return f"エラー: ツール「{name}」は存在しません。利用可能なツール: {available}"
+        msg = f"エラー: ツール「{name}」は存在しません。利用可能なツール: {available}"
+        _record_tool_call(ctx, name, args, "blocked", msg, block_reason="not_in_allowlist")
+        return msg
     tool = _TOOL_MAP.get(name)
     if tool is None:
         # allow-list に載っているのに _TOOL_MAP に無い状態は registry_for の不変条件違反
         available = ", ".join(sorted(allowed))
-        return f"エラー: ツール「{name}」は存在しません。利用可能なツール: {available}"
+        msg = f"エラー: ツール「{name}」は存在しません。利用可能なツール: {available}"
+        _record_tool_call(ctx, name, args, "blocked", msg, block_reason="registry_invariant_violation")
+        return msg
     try:
-        return tool.fn(args, ctx)
+        result = tool.fn(args, ctx)
     except Exception as e:
-        return f"エラー: {name} の実行に失敗しました — {e}"
+        msg = f"エラー: {name} の実行に失敗しました — {e}"
+        _record_tool_call(ctx, name, args, "error", msg, block_reason=type(e).__name__)
+        return msg
+    _record_tool_call(ctx, name, args, "ok", result)
+    return result
 
 
 _QUERY_REWRITE_PROMPT = """\
@@ -1109,6 +1202,9 @@ def run_agent(
                 response, prev_step_reasoning = (
                     llm_result if isinstance(llm_result, tuple) else (llm_result, "")
                 )
+                # 思考トレースを保存し、以降のツール記録に sha256 で紐づける（§4.4）。
+                # 本体は reasoning_traces（保持期間つき）、tool_calls 側はハッシュのみ。
+                ctx.reasoning_sha256 = _record_reasoning(ctx, step, prev_step_reasoning)
             else:
                 response = call_argus_llm(
                     prompt, system=system_prompt,
@@ -1938,6 +2034,7 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             channels=channels,
             record_ids=record_ids,
             scoped_file_names=scoped_file_names,
+            session_id=new_session_id(),
         )
 
         if record_ids:
@@ -2095,6 +2192,7 @@ def main():
         channels=channels,
         record_ids=record_ids,
         scoped_file_names=scoped_file_names,
+        session_id="" if args.dry_run else new_session_id("cli"),
     )
 
     if args.dry_run:

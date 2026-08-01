@@ -710,10 +710,13 @@ def build_app():
                 except Exception as e:
                     logger.warning(f"[mention] スレッド取得失敗: {e}")
 
+            from argus.pm_argus_agent import new_session_id
+
             ctx = AgentContext(
                 conns=conns, today=today, since=since_date,
                 no_encrypt=False, data_dir=_DATA_DIR, minutes_dir=_MINUTES_DIR,
                 index_db=index_db, index_name=index_name, channels=channels,
+                session_id=new_session_id("mention"),
             )
 
             # 実行者情報をシードに注入（search_mentions ツールに使わせる）

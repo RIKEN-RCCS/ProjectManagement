@@ -26,6 +26,8 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
   7. netguard_deny         — net_guard が allow-list 外の宛先を記録した。warn モード
                              では通ってしまうため、この検査が唯一の気づき方になる。
                              enforce 後は 1 件でも異常
+  8. tool_call_chain       — tool_calls のハッシュ連鎖が壊れている（§4.4）。
+                             検出できるのは事故による破損まで（外部アンカーは Phase 3）
 
 書き込みは一切行わない。値（channel/user ID 等）はログに出力しない
 （state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
@@ -529,6 +531,24 @@ def check_canary_hits(
     ]
 
 
+def check_tool_call_chain(pm_conn: sqlite3.Connection) -> list[dict]:
+    """tool_calls のハッシュ連鎖が壊れていないか検査する（§4.4）。
+
+    **検出できるのは事故による破損であって、意図的な改竄ではない。**
+    検証者は改竄されうる側と同じプロセス・同じ UNIX ユーザで動くため、コード実行を
+    取られればエントリと連鎖の頭の両方を書き換えられる。外部アンカー（日次のハッシュ
+    投稿）は Phase 3 のブローカー待ち。
+    """
+    if not table_exists(pm_conn, "tool_calls"):
+        return []
+    from db_utils import verify_tool_call_chain
+
+    return [
+        {"check": "tool_call_chain", "call_id": b["call_id"], "reason": b["reason"]}
+        for b in verify_tool_call_chain(pm_conn)
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
@@ -552,6 +572,7 @@ def run_checks(
     violations += check_missing_close_note(pm_conn, cutoff)
     if state_conn is not None:
         violations += check_state_key_drift(state_conn)
+    violations += check_tool_call_chain(pm_conn)
     if logs_dir is not None:
         # セキュリティ監視のログ走査は独立した窓（既定 1 日）で行う。データ検査の
         # --days 7 と同じ窓にすると、解消済みの deny が 1 週間鳴り続けて監視が

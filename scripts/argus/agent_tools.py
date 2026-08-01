@@ -69,6 +69,15 @@ class AgentContext:
     scoped_file_names: list[str] = field(default_factory=list)
     # run_agent の time.monotonic() 基準デッドライン（read_document 等のツール内タイムアウト計算用）
     deadline: float | None = None
+    # tool_calls 台帳（docs/security-architecture.md §4.4）。session_id が空なら記録しない
+    # （CLI の dry-run やテストで pm.db に書きたくない場合の退避路）。
+    session_id: str = ""
+    audit_db: Path | None = None
+    model: str = ""
+    model_revision: str = ""
+    tool_seq: int = 0
+    # 直前の LLM ステップの思考トレースの sha256（§4.4）
+    reasoning_sha256: str | None = None
 
 
 # =========================================================================== #
@@ -581,6 +590,15 @@ COMMAND_TOOLS: dict[str, frozenset[str]] = {
     # 唯一ツールを持つ経路。READ 13 のみ。EGRESS 3 は含めない
     "investigate_loop": READ_TOOL_NAMES,
 }
+
+
+def plane_of(tool_name: str) -> str:
+    """ツールの Plane を返す（§4.1 の3分割）。MUTATE ツールは現在0件。"""
+    if tool_name in EGRESS_TOOL_NAMES:
+        return "egress"
+    if tool_name in READ_TOOL_NAMES:
+        return "read"
+    return "mutate"
 
 
 class ToolRegistryError(RuntimeError):

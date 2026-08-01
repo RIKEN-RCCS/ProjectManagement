@@ -316,6 +316,56 @@ CREATE TABLE IF NOT EXISTS canary_tokens (
     notes       TEXT
 );
 
+-- ツール呼び出し台帳（docs/security-architecture.md §4.4）。
+-- audit_log は「DB の列がどう変わったか」の記録で、ツール名・引数は残らない。
+-- egress ログとして不十分なため、LLM のツール呼び出しを別テーブルに追記専用で残す。
+-- entry_hash = sha256(prev_hash || call_id || ts || tool_name || args_json || outcome)
+-- のハッシュ連鎖により、過去エントリの改竄が検出できる。
+CREATE TABLE IF NOT EXISTS tool_calls (
+    call_id          TEXT PRIMARY KEY,
+    session_id       TEXT NOT NULL,
+    seq              INTEGER NOT NULL,
+    ts               TEXT NOT NULL,
+    plane            TEXT NOT NULL,   -- 'read' | 'mutate' | 'egress'
+    tool_name        TEXT NOT NULL,
+    args_json        TEXT NOT NULL,
+    args_max_entropy REAL,
+    result_bytes     INTEGER,
+    result_sha256    TEXT,
+    model            TEXT NOT NULL DEFAULT '',
+    model_revision   TEXT NOT NULL DEFAULT '',
+    reasoning_sha256 TEXT,
+    outcome          TEXT NOT NULL,   -- 'ok' | 'blocked' | 'error'
+    block_reason     TEXT,
+    prev_hash        TEXT NOT NULL,
+    entry_hash       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, seq);
+
+CREATE TRIGGER IF NOT EXISTS tool_calls_no_update BEFORE UPDATE ON tool_calls
+BEGIN SELECT RAISE(ABORT, 'tool_calls is append-only'); END;
+
+CREATE TRIGGER IF NOT EXISTS tool_calls_no_delete BEFORE DELETE ON tool_calls
+BEGIN SELECT RAISE(ABORT, 'tool_calls is append-only'); END;
+
+-- 思考トレース（docs/security-architecture.md §4.4）。
+-- **モデルが見た機微データがそのまま入る機微データストア**なので、pm.db 内に置いて
+-- SQLCipher の対象とし、保持期間を定める（既定90日、purge_reasoning_traces）。
+-- レポート系クエリからは除外する。tool_calls 側は sha256 のみを持つ。
+CREATE TABLE IF NOT EXISTS reasoning_traces (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL,
+    step           INTEGER NOT NULL,
+    ts             TEXT NOT NULL,
+    model          TEXT NOT NULL DEFAULT '',
+    model_revision TEXT NOT NULL DEFAULT '',
+    trace_sha256   TEXT NOT NULL,
+    char_count     INTEGER NOT NULL,
+    trace          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reasoning_session ON reasoning_traces(session_id, step);
+CREATE INDEX IF NOT EXISTS idx_reasoning_ts ON reasoning_traces(ts);
+
 -- 変更履歴（pm_relink.py / pm_sync_canvas.py / pm_xlsx_sync.py 等が共有）。
 -- pm_xlsx_sync.py の鮮度ガードが SELECT するため、pm.db 生成時から必ず存在させる。
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -481,6 +531,254 @@ def revoke_canary(conn: "_sqlite3.Connection", token: str) -> bool:
 def active_canary_tokens(conn: "_sqlite3.Connection") -> list[str]:
     """active な canary の token 文字列（＝スキャン対象）を返す。"""
     return [row["token"] for row in list_canaries(conn, active_only=True)]
+
+
+# --------------------------------------------------------------------------- #
+# tool_calls 台帳（docs/security-architecture.md §4.4）
+# --------------------------------------------------------------------------- #
+
+_TOOL_CALLS_DDL = """
+CREATE TABLE IF NOT EXISTS tool_calls (
+    call_id          TEXT PRIMARY KEY,
+    session_id       TEXT NOT NULL,
+    seq              INTEGER NOT NULL,
+    ts               TEXT NOT NULL,
+    plane            TEXT NOT NULL,
+    tool_name        TEXT NOT NULL,
+    args_json        TEXT NOT NULL,
+    args_max_entropy REAL,
+    result_bytes     INTEGER,
+    result_sha256    TEXT,
+    model            TEXT NOT NULL DEFAULT '',
+    model_revision   TEXT NOT NULL DEFAULT '',
+    reasoning_sha256 TEXT,
+    outcome          TEXT NOT NULL,
+    block_reason     TEXT,
+    prev_hash        TEXT NOT NULL,
+    entry_hash       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, seq);
+CREATE TRIGGER IF NOT EXISTS tool_calls_no_update BEFORE UPDATE ON tool_calls
+BEGIN SELECT RAISE(ABORT, 'tool_calls is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS tool_calls_no_delete BEFORE DELETE ON tool_calls
+BEGIN SELECT RAISE(ABORT, 'tool_calls is append-only'); END;
+"""
+
+GENESIS_HASH = "0" * 64
+
+
+def ensure_tool_calls_table(conn: "_sqlite3.Connection") -> None:
+    """tool_calls テーブルとトリガを作成する（既存 pm.db への後付け用・冪等）。"""
+    conn.executescript(_TOOL_CALLS_DDL)
+    conn.commit()
+
+
+def shannon_entropy(s: str) -> float:
+    """文字列のシャノンエントロピー（bits/文字）。
+
+    Base64 で符号化された機微データは自然文より高いエントロピーを持つため、
+    引数の異常検知の手がかりに使う（§4.4 の `args_max_entropy`）。
+    **これは検知の補助であって判定ではない** — 高エントロピー＝流出ではないし、
+    低エントロピーなら安全でもない（自然な散文で運ぶ TrojanStego 型がある）。
+    """
+    if not s:
+        return 0.0
+    from collections import Counter
+    from math import log2
+
+    n = len(s)
+    return -sum((c / n) * log2(c / n) for c in Counter(s).values())
+
+
+def _args_max_entropy(args: dict) -> float:
+    """引数のうち文字列値の最大エントロピー。数値・真偽値は対象外。"""
+    vals = [v for v in args.values() if isinstance(v, str) and v]
+    return max((shannon_entropy(v) for v in vals), default=0.0)
+
+
+def record_tool_call(
+    conn: "_sqlite3.Connection",
+    *,
+    session_id: str,
+    seq: int,
+    plane: str,
+    tool_name: str,
+    args: dict,
+    outcome: str,
+    result: str | None = None,
+    block_reason: str | None = None,
+    model: str = "",
+    model_revision: str = "",
+    reasoning_sha256: str | None = None,
+) -> dict:
+    """ツール呼び出しを1件追記し、書いた行を返す（§4.4）。
+
+    ハッシュ連鎖の計算と INSERT は**呼び出し側で直列化すること**（並列ツール実行が
+    あるため、prev_hash の読み取りと INSERT の間に他の追記が入ると連鎖が壊れる）。
+
+    > 連鎖の頭が同じ信頼領域内にあると、意図的な改竄は検出できない（§4.4 の警告）。
+    > 検出できるのは事故による破損まで。外部アンカー（日次のハッシュ投稿）は Phase 3。
+    """
+    import hashlib
+    import json as _json
+    import uuid
+    from datetime import UTC, datetime
+
+    if plane not in ("read", "mutate", "egress"):
+        raise ValueError(f"plane は 'read' | 'mutate' | 'egress': {plane!r}")
+    if outcome not in ("ok", "blocked", "error"):
+        raise ValueError(f"outcome は 'ok' | 'blocked' | 'error': {outcome!r}")
+
+    ensure_tool_calls_table(conn)
+    row = conn.execute(
+        "SELECT entry_hash FROM tool_calls ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    prev_hash = (row[0] if not hasattr(row, "keys") else row["entry_hash"]) if row else GENESIS_HASH
+
+    call_id = uuid.uuid4().hex
+    ts = datetime.now(UTC).isoformat()
+    args_json = _json.dumps(args, ensure_ascii=False, sort_keys=True)
+    payload = f"{prev_hash}{call_id}{ts}{tool_name}{args_json}{outcome}"
+    entry_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    result_bytes = len(result.encode("utf-8")) if result is not None else None
+    result_sha256 = (
+        hashlib.sha256(result.encode("utf-8")).hexdigest() if result is not None else None
+    )
+
+    conn.execute(
+        "INSERT INTO tool_calls (call_id, session_id, seq, ts, plane, tool_name, args_json,"
+        " args_max_entropy, result_bytes, result_sha256, model, model_revision,"
+        " reasoning_sha256, outcome, block_reason, prev_hash, entry_hash)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (call_id, session_id, seq, ts, plane, tool_name, args_json,
+         _args_max_entropy(args), result_bytes, result_sha256, model, model_revision,
+         reasoning_sha256, outcome, block_reason, prev_hash, entry_hash),
+    )
+    conn.commit()
+    return {
+        "call_id": call_id, "session_id": session_id, "seq": seq, "ts": ts,
+        "plane": plane, "tool_name": tool_name, "outcome": outcome,
+        "prev_hash": prev_hash, "entry_hash": entry_hash,
+    }
+
+
+def verify_tool_call_chain(conn: "_sqlite3.Connection") -> list[dict]:
+    """tool_calls のハッシュ連鎖を検証し、壊れている箇所を返す（空なら健全）。
+
+    検出できるのは**事故による破損**であって意図的な改竄ではない（§4.4）。
+    コード実行を取られたらエントリと連鎖の頭の両方を書き換えられる。
+    """
+    import hashlib
+
+    if not table_exists(conn, "tool_calls"):
+        return []
+    rows = conn.execute(
+        "SELECT call_id, ts, tool_name, args_json, outcome, prev_hash, entry_hash"
+        " FROM tool_calls ORDER BY rowid"
+    ).fetchall()
+    broken = []
+    expected_prev = GENESIS_HASH
+    for r in rows:
+        d = dict(r)
+        payload = f"{d['prev_hash']}{d['call_id']}{d['ts']}{d['tool_name']}{d['args_json']}{d['outcome']}"
+        recomputed = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        if d["prev_hash"] != expected_prev:
+            broken.append({"call_id": d["call_id"], "reason": "prev_hash が直前の entry_hash と一致しない"})
+        elif recomputed != d["entry_hash"]:
+            broken.append({"call_id": d["call_id"], "reason": "entry_hash が内容から再計算した値と一致しない"})
+        expected_prev = d["entry_hash"]
+    return broken
+
+
+# --------------------------------------------------------------------------- #
+# reasoning_traces（思考トレース。docs/security-architecture.md §4.4）
+# --------------------------------------------------------------------------- #
+
+# 既定の保持期間。canary 発火時は該当セッションを別途保全する（§4.4 のランブック）。
+REASONING_RETENTION_DAYS = 90
+
+_REASONING_DDL = """
+CREATE TABLE IF NOT EXISTS reasoning_traces (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL,
+    step           INTEGER NOT NULL,
+    ts             TEXT NOT NULL,
+    model          TEXT NOT NULL DEFAULT '',
+    model_revision TEXT NOT NULL DEFAULT '',
+    trace_sha256   TEXT NOT NULL,
+    char_count     INTEGER NOT NULL,
+    trace          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reasoning_session ON reasoning_traces(session_id, step);
+CREATE INDEX IF NOT EXISTS idx_reasoning_ts ON reasoning_traces(ts);
+"""
+
+
+def ensure_reasoning_traces_table(conn: "_sqlite3.Connection") -> None:
+    """reasoning_traces テーブルを作成する（冪等）。
+
+    **このテーブルはモデルが見た機微データがそのまま入る新しい機微データストアである**
+    （§4.4）。容量と保持期間だけの問題として扱ってはならない。pm.db 内に置くことで
+    SQLCipher の適用対象とし、レポート系クエリからは除外する。
+    """
+    conn.executescript(_REASONING_DDL)
+    conn.commit()
+
+
+def record_reasoning_trace(
+    conn: "_sqlite3.Connection",
+    *,
+    session_id: str,
+    step: int,
+    trace: str,
+    model: str = "",
+    model_revision: str = "",
+) -> str | None:
+    """思考トレースを1件保存し、その sha256 を返す（空文字なら None）。
+
+    `tool_calls` 側はこの sha256 だけを持つ（本体は容量が大きく保持期間も異なるため）。
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    if not trace:
+        return None
+    ensure_reasoning_traces_table(conn)
+    sha = hashlib.sha256(trace.encode("utf-8")).hexdigest()
+    conn.execute(
+        "INSERT INTO reasoning_traces (session_id, step, ts, model, model_revision,"
+        " trace_sha256, char_count, trace) VALUES (?,?,?,?,?,?,?,?)",
+        (session_id, step, datetime.now(UTC).isoformat(), model, model_revision,
+         sha, len(trace), trace),
+    )
+    conn.commit()
+    return sha
+
+
+def purge_reasoning_traces(
+    conn: "_sqlite3.Connection", *, days: int = REASONING_RETENTION_DAYS,
+    keep_sessions: "list[str] | None" = None,
+) -> int:
+    """保持期間を過ぎた思考トレースを削除し、削除件数を返す。
+
+    `keep_sessions` に挙げたセッションは期間を過ぎても残す（canary 発火時の保全用）。
+    **無期限に持つ理由はない** — canary 調査に要るのは直近だけである（§4.4）。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    if not table_exists(conn, "reasoning_traces"):
+        return 0
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    sql = "DELETE FROM reasoning_traces WHERE ts < ?"
+    params: list = [cutoff]
+    if keep_sessions:
+        placeholders = ",".join("?" * len(keep_sessions))
+        sql += f" AND session_id NOT IN ({placeholders})"
+        params += list(keep_sessions)
+    cur = conn.execute(sql, params)
+    conn.commit()
+    return cur.rowcount
 
 
 def normalize_assignee(name: str | None) -> str | None:
