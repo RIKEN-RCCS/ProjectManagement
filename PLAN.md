@@ -136,9 +136,13 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    **`/argus-narrate` の順序制約も実装**: TTS へ渡す前に `scan_text_for_egress` で
    合成前テキストを検査する。mp3 になった後では canary もゼロ幅文字も検出できないため、
    **テキスト以外の成果物は生成元テキストの検査をもって代える**（§4.2 の原則）。
-   **残り**: (a) 既存の Canvas / Box 呼び出し（8 / 9 モジュール）をブローカー経由に切り替え
-   (b) 承認フロー (c) 外部アンカー（`tool_calls` の最新ハッシュを日次投稿）
-   (d) **canary の植え付け** — 出力側の検知点が揃ったので、ここで初めて実効が出る
+   **Canvas / Box も 2026-08-01 に対応済み** — ブローカー経由への全面移行ではなく、
+   **既存の単一ファネル**（`canvas_utils.post_to_canvas` / `box_cli.box_upload_or_version`）に
+   `guard_outbound_text` を入れる形にした。**2 箇所の編集で 8 / 9 モジュールを覆える**ため。
+   Box はテキスト系拡張子のみ中身を検査し、**xlsx/pptx 等は「検査した」と記録しない**
+   （検査できていないものを通過扱いにすると誤った根拠になる）。
+   **残り**: (a) 承認フロー（`EgressPendingApproval` の受け皿。UX の決めが要る）
+   (b) 外部アンカー（`tool_calls` の最新ハッシュを日次投稿）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 
@@ -159,6 +163,13 @@ HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0�
   除去範囲が確定してから 1 回で実施する
 
 **その他の懸案**:
+- **`data/qa_index.db` が平文（2026-08-01 実測、要対処）** — `box_docs.db` / `pm.db` /
+  `minutes/*.db` は暗号化されているのに、そこから作る索引だけ平文。`chunks.content` に
+  議事録・Slack・Box の**本文がそのまま入る**（29,313 チャンク）。`data/processing/` の
+  録音 mp4 が平文だったのと同じ「**派生物の保護レベルが下がる**」型。
+  対処は `db_utils.migrate_db` での暗号化移行だが、**`pm_embed` の全再構築と
+  検索経路（retrieval / achievements / pm_selfcheck）の接続確認**を伴うため、
+  影響範囲を確認してから実施する
 - ~~MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま~~ → **2026-07-31 に丸ごと廃止**
   （チョークポイント 2 箇所目が閉じた。再登録は pre-commit の `no-mcp-server-registration` が防ぐ）
 - `~/.claude/settings.json` の GitHub PAT 失効（PM 作業）

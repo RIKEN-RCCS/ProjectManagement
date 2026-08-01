@@ -534,6 +534,35 @@ def _cleanup_stale_sections_after_replace(
               file=sys.stderr)
 
 
+def _guard_canvas_payload(canvas_id: str, content: str) -> None:
+    """Canvas 更新の送信前検査。canary・ゼロ幅文字を見て、egress として記録する。
+
+    **記録用の pm.db 接続に失敗しても検査自体は行う**（canary 無しで通す）。
+    検査の失敗で本番の Canvas 更新を止めるほうが損失が大きいため。
+    """
+    try:
+        from utils.slack_post import guard_outbound_text
+    except Exception:
+        return
+    conn = None
+    try:
+        from pathlib import Path as _Path
+
+        from db_utils import open_db
+        _repo = _Path(__file__).resolve().parents[2]
+        conn = open_db(_repo / "data" / "pm.db", encrypt=True)
+    except Exception:
+        pass
+    try:
+        guard_outbound_text(content, transport="canvas", dest=canvas_id, conn=conn)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def post_to_canvas(canvas_id: str, content: str) -> None:
     """Canvas の既存コンテンツを文書全体 replace で置換する。
 
@@ -545,6 +574,10 @@ def post_to_canvas(canvas_id: str, content: str) -> None:
     （_cleanup_stale_sections_after_replace）。残存セクションがなければ追加の削除呼び出しは
     発生しない（通常パスのコストは files_info 2回分のみ）。
     """
+    # 送信前の検査（docs/security-architecture.md §4.2）。Canvas は単一ファネルなので
+    # ここ1箇所で 8 モジュールの呼び出しを覆える。
+    _guard_canvas_payload(canvas_id, content)
+
     token = os.getenv("SLACK_USER_TOKEN")
     if not token:
         print("ERROR: SLACK_USER_TOKEN を設定してください", file=sys.stderr)

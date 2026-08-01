@@ -28,6 +28,8 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
                              enforce 後は 1 件でも異常
   8. tool_call_chain       — tool_calls のハッシュ連鎖が壊れている（§4.4）。
                              検出できるのは事故による破損まで（外部アンカーは Phase 3）
+  9. canary_alive          — 植えた canary が box_docs / qa_index から消えている。
+                             **発火検知だけでは餌が腐っても気づけない**ため対で要る
 
 書き込みは一切行わない。値（channel/user ID 等）はログに出力しない
 （state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
@@ -549,6 +551,76 @@ def check_tool_call_chain(pm_conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def check_canary_alive(pm_conn: sqlite3.Connection, data_dir: Path) -> list[dict]:
+    """植えた canary がまだ「モデルが読む場所」に居るかを検査する（§4.3）。
+
+    **発火検知だけでは不十分**。植えた行が消える／索引から落ちると、監視は
+    「異常なし」を出し続ける — 餌が腐っても気づけない状態になる。
+    `planted_in='box_docs'` の canary について、box_docs.db に本文が残っていることと、
+    qa_index.db にチャンクがあることを確認する。
+    """
+    if not table_exists(pm_conn, "canary_tokens"):
+        return []
+    rows = pm_conn.execute(
+        "SELECT token, planted_in, row_ref FROM canary_tokens"
+        " WHERE active = 1 AND planted_in = 'box_docs'"
+    ).fetchall()
+    if not rows:
+        return []
+
+    violations = []
+    box_db = data_dir / "box_docs.db"
+    index_db = data_dir / "qa_index.db"
+    for r in rows:
+        token, row_ref = r["token"], r["row_ref"]
+        in_box = _row_contains(box_db, "SELECT 1 FROM doc_content WHERE content_md LIKE ? LIMIT 1",
+                               (f"%{token}%",))
+        in_index = _row_contains(index_db, "SELECT 1 FROM chunks WHERE content LIKE ? LIMIT 1",
+                                 (f"%{token}%",))
+        if in_box is False or in_index is False:
+            violations.append({
+                "check": "canary_alive", "token": token, "row_ref": row_ref or "-",
+                "in_box_docs": in_box, "in_qa_index": in_index,
+                "note": "植えた canary が読める場所から消えています（監視が空振りします）",
+            })
+        elif in_box is None or in_index is None:
+            # **判定不能を「異常なし」に含めない。** 検査できていないことこそ報告する
+            # （黙って通すと、生存確認が動いていないのに動いているように見える）
+            violations.append({
+                "check": "canary_alive", "token": token, "row_ref": row_ref or "-",
+                "in_box_docs": in_box, "in_qa_index": in_index,
+                "note": "canary の生存を確認できませんでした（DB を開けない／表が無い）",
+            })
+    return violations
+
+
+def _row_contains(db_path: Path, sql: str, params: tuple) -> bool | None:
+    """存在確認。開けない／問い合わせ不能なら None（判定不能）を返す。
+
+    **暗号化と平文の両方を試す。** `qa_index.db` は平文で、`box_docs.db` は暗号化という
+    実態がある（2026-08-01 実測。docs/architecture.md の表は誤り）。片方だけ試すと
+    「判定不能」を量産し、生存確認が黙って空振りする。
+    """
+    if not db_path.exists():
+        return None
+    from db_utils import open_db
+
+    for encrypt in (True, False):
+        conn = None
+        try:
+            conn = open_db(db_path, encrypt=encrypt)
+            return conn.execute(sql, params).fetchone() is not None
+        except Exception:
+            continue
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
@@ -579,6 +651,8 @@ def run_checks(
         # ノイズになる（2026-08-01 に実際に起きた）。
         violations += check_canary_hits(pm_conn, logs_dir, security_days)
         violations += check_netguard_deny(logs_dir, security_days)
+        # canary の生存確認もセキュリティ検査の一部（--no-security-checks で一緒に切れる）
+        violations += check_canary_alive(pm_conn, REPO_ROOT / "data")
     return violations
 
 

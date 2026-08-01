@@ -43,11 +43,57 @@ def box_download(file_id: str, dest: Path, log: Callable[[str], None]) -> None:
     )
 
 
+# テキストとして検査できる拡張子。これ以外（xlsx/pptx/mp4 等）は中身を見ない。
+_TEXT_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
+
+
+def _guard_box_payload(local_path, folder_id: str, filename: str) -> None:
+    """Box アップロードの送信前検査。テキストファイルのみ中身を見る。
+
+    **バイナリを「検査した」と記録しない。** 検査できていないものを通過扱いにすると、
+    後から「ブローカーを通った」という誤った根拠に使われる（P10）。
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(local_path)
+    if path.suffix.lower() not in _TEXT_SUFFIXES:
+        return
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+    try:
+        from utils.slack_post import guard_outbound_text
+    except Exception:
+        return
+    conn = None
+    try:
+        from db_utils import open_db
+        conn = open_db(_Path(__file__).resolve().parents[2] / "data" / "pm.db", encrypt=True)
+    except Exception:
+        pass
+    try:
+        guard_outbound_text(content, transport="box", dest=f"{folder_id}/{filename}", conn=conn)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def box_upload_or_version(
     local_path: Path, folder_id: str, filename: str,
     log: Callable[[str], None],
 ) -> str:
-    """新規アップロード or 既存ファイルへのバージョン更新。file_id を返す。"""
+    """新規アップロード or 既存ファイルへのバージョン更新。file_id を返す。
+
+    **送信前にテキストファイルの中身を検査する**（docs/security-architecture.md §4.2）。
+    Box は単一ファネルなので、ここ1箇所で 9 モジュールの呼び出しを覆える。
+    xlsx / pptx のようなバイナリは中身を検査できない — その場合は**生成元テキストの
+    検査をもって代える**（生成側の責務）。
+    """
+    _guard_box_payload(local_path, folder_id, filename)
     existing = box_find_file(folder_id, filename)
     if existing:
         log(f"  [BOX] 既存ファイル (id={existing}) のバージョン更新: {filename}")

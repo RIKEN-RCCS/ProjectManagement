@@ -113,8 +113,9 @@ def _payload_text(kwargs: dict) -> str:
 def scan_text_for_egress(text: str, conn=None) -> list[str]:
     """送信・合成の前にテキストを検査し、問題の理由を返す（空なら通過）。
 
-    **公開関数にしてあるのは、TTS のようにテキストが別形式へ変換される経路から
-    合成前に呼ぶため**（§4.2 の順序制約）。mp3 になった後では検査できない。
+    **公開関数にしてあるのは、Slack 以外の出口からも呼ぶため** — Canvas / Box の
+    ファネルと、TTS のようにテキストが別形式へ変換される経路（§4.2 の順序制約）。
+    mp3 になった後では検査できないので、合成前が唯一の検査点になる。
     """
     reasons = []
     try:
@@ -182,3 +183,26 @@ def upload_file(client, *, conn=None, source: str = "", **kwargs):
     """
     _guard(kwargs, conn, method="files_upload_v2", source=source)
     return client.files_upload_v2(**kwargs)
+
+def guard_outbound_text(text: str, *, transport: str, dest: str = "",
+                        conn=None, source: str = "") -> None:
+    """Slack 以外の輸送（Canvas / Box）から呼ぶ共通ガード。
+
+    検査して記録し、問題があれば例外を投げる。**Slack のファネルと同じ検査・同じ台帳**を
+    使うのは、出口ごとに基準が違うと「どの出口なら通るか」を探せてしまうため。
+    """
+    reasons = scan_text_for_egress(text, conn)
+    if conn is not None:
+        try:
+            from db_utils import record_tool_call
+            record_tool_call(
+                conn, session_id=source or transport, seq=0, plane="egress",
+                tool_name=f"{transport}:post",
+                args={"dest": dest, "chars": len(text)},
+                outcome="blocked" if reasons else "ok",
+                block_reason="; ".join(reasons) or None,
+            )
+        except Exception:
+            logger.exception("[EGRESS] tool_calls への記録に失敗（送信判断は継続）")
+    if reasons:
+        raise SlackEgressBlocked(f"[EGRESS] {transport}: {'; '.join(reasons)}")
