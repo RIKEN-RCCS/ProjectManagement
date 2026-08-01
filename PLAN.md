@@ -167,13 +167,11 @@ HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0�
   除去範囲が確定してから 1 回で実施する
 
 **その他の懸案**:
-- **`data/qa_index.db` が平文（2026-08-01 実測、要対処）** — `box_docs.db` / `pm.db` /
-  `minutes/*.db` は暗号化されているのに、そこから作る索引だけ平文。`chunks.content` に
-  議事録・Slack・Box の**本文がそのまま入る**（29,313 チャンク）。`data/processing/` の
-  録音 mp4 が平文だったのと同じ「**派生物の保護レベルが下がる**」型。
-  対処は `db_utils.migrate_db` での暗号化移行だが、**`pm_embed` の全再構築と
-  検索経路（retrieval / achievements / pm_selfcheck）の接続確認**を伴うため、
-  影響範囲を確認してから実施する
+- ~~`data/qa_index.db` が平文~~ → **2026-08-01 に暗号化へ移行済み**（321MB / 29,313 チャンク）。
+  検索経路 6 箇所を `open_maybe_encrypted`（暗号化優先・平文なら WARNING）に切替。
+  **性能への影響は実測で FTS5 2.4→4.8ms、embedding 読み 23.5→33.9ms** で許容範囲。
+  **残る平文の機微データ**: `data/processing/` の会議録音 mp4（§1.2）と
+  `data/patrol_state.db`（設計上平文。機密を含まない前提）
 - ~~MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま~~ → **2026-07-31 に丸ごと廃止**
   （チョークポイント 2 箇所目が閉じた。再登録は pre-commit の `no-mcp-server-registration` が防ぐ）
 - `~/.claude/settings.json` の GitHub PAT 失効（PM 作業）

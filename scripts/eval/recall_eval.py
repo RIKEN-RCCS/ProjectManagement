@@ -416,7 +416,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         print(f"ERROR: index db が見つかりません: {args.index_db}", file=sys.stderr)
         return 2
 
-    conn = sqlite3.connect(f"file:{args.index_db}?mode=ro", uri=True)
+    from db_utils import open_maybe_encrypted
+    conn = open_maybe_encrypted(args.index_db)
     conn.row_factory = sqlite3.Row
     try:
         results = resolve_all(conn, entries, index_name)
@@ -463,7 +464,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     all_entries = gold.get("entries") or []
     target_entries = select_entries(gold, args.entry)
 
-    conn_idx = sqlite3.connect(f"file:{args.index_db}?mode=ro", uri=True)
+    from db_utils import open_maybe_encrypted
+    conn_idx = open_maybe_encrypted(args.index_db)
     conn_idx.row_factory = sqlite3.Row
     try:
         # 全エントリを resolve してスナップショット保存（陳腐化検知用）

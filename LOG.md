@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-08-01 qa_index.db を暗号化へ移行 — migrate_db が FTS5 を扱えないことも判明
+
+**背景**: canary の生存確認を実装した際に平文と判明した（同日の別エントリ）。
+`chunks.content` に議事録・Slack・Box の本文が入る 321MB の索引が、元 DB は暗号化されているのに
+平文という**保護レベルの逆転**だった。
+**踏んだ問題 3 件**:
+①**`migrate_db` が FTS5 を移行できなかった** — テーブル単位の CREATE+INSERT では、
+仮想テーブルの CREATE が影テーブル（`fts_data` 等）を自動生成するため後続の INSERT が衝突する。
+**`sqlcipher_export()` 方式に書き換えた**（SQLCipher 自身の複製機能で仮想テーブルも忠実に写る）。
+②**`except sqlite3.OperationalError` が暗号化 DB で効かない** — `pm_embed` の DDL 冪等化が
+素通りして落ちた。**同じ型を今日 2 度踏んだ**ので `db_utils.operational_errors()` に共通化した。
+③**`conn.row_factory = sqlite3.Row` の上書きで TypeError** — sqlcipher3 のカーソルと型が合わない。
+`open_db` が既に設定しているので上書き自体が不要だった。
+**設計判断**: 接続を `encrypt=True` 固定にせず `open_maybe_encrypted`（暗号化優先・平文なら
+WARNING）にした。テストの一時 DB は平文で作られるため固定すると 34 件落ちる。**平文を黙って
+受け入れないよう警告は必ず出す** — 今回まさに「平文のまま運用されていたのに気づかなかった」
+のが問題だったので、次は気づけるようにした。
+**性能**: FTS5 2.4→4.8ms、embedding 読み 23.5→33.9ms。investigate は秒単位なので許容範囲。
+
 ## 2026-08-01 残作業を一括で進めた — 承認フローと外部アンカーの cron 化だけ残した
 
 **実施**: Canvas / Box のファネルへの検査追加、canary の植え付けと生存確認、

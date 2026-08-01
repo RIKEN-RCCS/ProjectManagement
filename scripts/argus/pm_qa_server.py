@@ -23,7 +23,6 @@ import logging
 import os
 import re
 import signal
-import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -848,7 +847,8 @@ def _init_common() -> None:
     qa_index = _REPO_ROOT / "data" / "qa_index.db"
     if qa_index.exists():
         try:
-            ic = sqlite3.connect(str(qa_index))
+            from db_utils import open_maybe_encrypted
+            ic = open_maybe_encrypted(qa_index)
             counts = dict(ic.execute(
                 "SELECT index_name, COUNT(*) FROM chunk_indexes GROUP BY index_name"
             ).fetchall())

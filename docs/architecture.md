@@ -355,7 +355,7 @@ pm_qa_server.py (Socket Mode デーモン)
 | `data/docs_*.db` | BOX ドキュメントメタデータ | `pm_slack_box_links.py` | `pm_box_crawl.py` | ✅ |
 | `data/box_docs.db` | BOX ドキュメント本文 (Markdown) | `pm_box_crawl.py` | `pm_embed.py` | ✅ |
 | `data/web_articles.db` | 外部 Web 記事（**収集は 2026-08-01 に廃止**。既存データのみ保持） | -（`pm_web_fetch.py` 削除済み） | `pm_embed.py` | ✅ |
-| `data/qa_index.db` | FTS5 全文検索 + embedding | `pm_embed.py` | Argus (investigate/ask) | **❌ 平文（2026-08-01 実測）**。議事録・Slack・Box の本文チャンクが入るため**保護レベルが逆転している**（元の DB は暗号化されているのに索引は平文）。要対処 |
+| `data/qa_index.db` | FTS5 全文検索 + embedding | `pm_embed.py` | Argus (investigate/ask) | ✅（**2026-08-01 に平文から移行**。本文チャンクが入るため元 DB と保護レベルを揃えた） |
 | `data/patrol_state.db` | Patrol 冪等性・承認待ち | `pm_argus_patrol.py` | `pm_argus_patrol.py` | -（平文設計。機密情報を含まないため暗号化不要） |
 | `data/voice_uploads.db` | TTS 音声ファイル投稿履歴 | `pm_tts.py` | `pm_tts.py` | ✅ |
 | `data/admin_jobs.db` | 非同期ジョブ管理 | `web_admin.py` | `pm_api.py` | - |

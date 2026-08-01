@@ -360,10 +360,10 @@ def fetch_recent_web_articles(
     max_chars: int = 4000,
 ) -> str:
     """brief プロンプト同梱用: qa_index.db から source_type='web' の直近記事を取得する。"""
-    import sqlite3
     if not qa_index_path.exists():
         return ""
-    conn = sqlite3.connect(str(qa_index_path))
+    from db_utils import open_maybe_encrypted
+    conn = open_maybe_encrypted(qa_index_path)
     try:
         rows = conn.execute(
             "SELECT c.content, c.source_ref, c.held_at "

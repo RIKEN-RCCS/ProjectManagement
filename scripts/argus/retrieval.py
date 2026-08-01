@@ -428,8 +428,10 @@ def retrieve_chunks(question: str, index_db: Path, k: int = TOP_K_RETRIEVE,
         logger.warning(f"インデックスDBが見つかりません: {index_db}")
         return ([], STAGE_NO_INDEX) if return_stage else []
 
-    conn = sqlite3.connect(str(index_db))
-    conn.row_factory = sqlite3.Row
+    from db_utils import open_maybe_encrypted
+    conn = open_maybe_encrypted(index_db)
+    # row_factory は open_db が設定済み（sqlite3.Row を上書きすると sqlcipher3 の
+    # カーソルと型が合わず TypeError になる）
     try:
         date_filter, date_params = _build_date_filter(since_date, exempt_box=exempt_box)
 
@@ -801,8 +803,10 @@ def retrieve_chunks_hybrid(
                                              since_date=since_date, index_name=index_name,
                                              record_ids=record_ids, exempt_box=exempt_box,
                                              return_stage=True)
-    conn = sqlite3.connect(str(index_db))
-    conn.row_factory = sqlite3.Row
+    from db_utils import open_maybe_encrypted
+    conn = open_maybe_encrypted(index_db)
+    # row_factory は open_db が設定済み（sqlite3.Row を上書きすると sqlcipher3 の
+    # カーソルと型が合わず TypeError になる）
     try:
         vec_results = retrieve_chunks_vector(question, conn,
                                              k=(vector_k if vector_k is not None else _VECTOR_K),

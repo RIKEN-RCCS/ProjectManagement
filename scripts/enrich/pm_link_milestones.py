@@ -289,7 +289,8 @@ def fetch_item_fts_context(
         return None
     import sqlite3 as _sqlite3
     try:
-        conn = _sqlite3.connect(str(qa_index_path))
+        from db_utils import open_maybe_encrypted
+        conn = open_maybe_encrypted(qa_index_path)
         conn.row_factory = _sqlite3.Row
         try:
             fts_q = re.sub(r'["\'\*\^\(\)\[\]]', " ", content[:60]).strip()

@@ -458,6 +458,38 @@ CREATE TABLE IF NOT EXISTS canary_tokens (
 """
 
 
+# 暗号化／平文の両方の OperationalError。**SQLCipher の例外は標準 sqlite3 の派生ではない**
+# ため、`except sqlite3.OperationalError` だけでは暗号化 DB でのみ素通りする（2026-08-01 に
+# 2 度踏んだ）。DDL の冪等化などで例外を握る箇所はこれを使う。
+def open_maybe_encrypted(db_path: "Path | str", **kwargs) -> "_sqlite3.Connection":
+    """暗号化で開き、駄目なら平文で開く（平文なら WARNING を出す）。
+
+    `qa_index.db` のように**移行の途中や環境によって暗号化状態が違う DB** 用。
+    本番は暗号化、テストの一時 DB は平文、という差を吸収する。
+
+    **平文を黙って受け入れない。** 平文で開けたら警告を出す — 本番で平文の索引が
+    再生成された場合（`pm_embed` を平文で作り直す等）に気づけるようにするため。
+    2026-08-01 に qa_index.db が平文のまま運用されていたのを見落としていた反省による。
+    """
+    import logging as _logging
+
+    try:
+        return open_db(db_path, encrypt=True, **kwargs)
+    except Exception:
+        conn = open_db(db_path, encrypt=False, **kwargs)
+        _logging.getLogger(__name__).warning(
+            "[DB] %s を平文で開きました（暗号化されていません）", db_path
+        )
+        return conn
+
+
+def operational_errors() -> tuple:
+    errs: list = [_sqlite3.OperationalError]
+    if SQLCIPHER_AVAILABLE:
+        errs.append(_sqlcipher3.OperationalError)
+    return tuple(errs)
+
+
 def table_exists(conn: "_sqlite3.Connection", name: str) -> bool:
     """テーブルの存在を sqlite_master で確認する。
 
@@ -1300,33 +1332,21 @@ def migrate_db(db_path: Path, *, backup: bool = True, dry_run: bool = False) -> 
         tmp_path = Path(tmp_f.name)
 
     try:
-        enc_conn = _sqlcipher3.connect(tmp_path)
-        enc_conn.execute(f"PRAGMA key='{escaped}'")
-
-        schema_rows = plain_conn.execute(
-            "SELECT sql FROM sqlite_master"
-            " WHERE sql IS NOT NULL AND tbl_name != 'sqlite_sequence'"
-            " ORDER BY rootpage"
-        ).fetchall()
-        for row in schema_rows:
-            enc_conn.execute(row[0])
-        enc_conn.commit()
-
-        for t in tables:
-            if t == "sqlite_sequence":
-                continue
-            rows = plain_conn.execute(f"SELECT * FROM [{t}]").fetchall()
-            if not rows:
-                continue
-            placeholders = ", ".join(["?"] * len(rows[0]))
-            enc_conn.executemany(
-                f"INSERT INTO [{t}] VALUES ({placeholders})",
-                [tuple(r) for r in rows],
-            )
-        enc_conn.commit()
-
+        # **sqlcipher_export() を使う。** テーブルを1つずつ CREATE + INSERT で複製すると
+        # **FTS5 の影テーブル（fts_data / fts_idx / fts_docsize / fts_config）で衝突する** —
+        # 仮想テーブルの CREATE が影テーブルを自動生成するため、その後に同名を作れない。
+        # 2026-08-01 に qa_index.db（FTS5 2本）の移行で実際に踏んだ。
+        # sqlcipher_export は SQLCipher 自身が提供する複製機能で、仮想テーブルを含めて
+        # ページ単位で忠実に写す。
         plain_conn.close()
-        enc_conn.close()
+        src = _sqlcipher3.connect(db_path)
+        try:
+            # 平文ソースには PRAGMA key を発行しない（鍵無しで開いたものが平文扱いになる）
+            src.execute(f"ATTACH DATABASE '{tmp_path}' AS encrypted KEY '{escaped}'")
+            src.execute("SELECT sqlcipher_export('encrypted')")
+            src.execute("DETACH DATABASE encrypted")
+        finally:
+            src.close()
 
         if backup:
             bak_path = db_path.with_suffix(".db.bak")
@@ -1338,7 +1358,10 @@ def migrate_db(db_path: Path, *, backup: bool = True, dry_run: bool = False) -> 
 
     except Exception as e:
         tmp_path.unlink(missing_ok=True)
-        plain_conn.close()
+        try:
+            plain_conn.close()
+        except Exception:
+            pass
         print(f"  [ERROR] 変換失敗: {e}")
         return False
 

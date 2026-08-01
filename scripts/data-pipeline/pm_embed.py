@@ -182,9 +182,13 @@ def load_qa_config(config_path: Path) -> dict:
 
 
 def open_index_db(index_db_path: Path) -> sqlite3.Connection:
-    """統合インデックスDB qa_index.db（平文sqlite3）を開く。"""
-    conn = sqlite3.connect(str(index_db_path))
-    conn.row_factory = sqlite3.Row
+    """統合インデックス qa_index.db を開く（2026-08-01 に暗号化へ移行）。
+
+    **row_factory は open_db が設定済み**。ここで `sqlite3.Row` を上書きすると
+    sqlcipher3 のカーソルと型が合わず TypeError になる。
+    """
+    from db_utils import open_maybe_encrypted, operational_errors
+    conn = open_maybe_encrypted(index_db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -196,8 +200,8 @@ def open_index_db(index_db_path: Path) -> sqlite3.Connection:
     # tokens カラムの追加（既存DBの移行）
     try:
         conn.execute(SCHEMA_ADD_TOKENS_COLUMN)
-    except sqlite3.OperationalError:
-        pass  # already exists
+    except operational_errors():
+        pass  # already exists（暗号化 DB では sqlcipher3 側の例外が飛ぶ）
     conn.execute(SCHEMA_FTS_TOKENS)
     conn.commit()
     return conn
