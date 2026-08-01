@@ -491,7 +491,7 @@ def triage_items(
     *,
     context_note: str = "",
     return_verdicts: bool = False,
-    missing_verdict: str = "DROP",
+    missing_verdict: str = "KEEP",
 ) -> dict:
     """Extractor が抽出した候補を 3 ゲートで審査し、マイルストーン達成に
     実質的に必要な項目だけを残す。
@@ -693,6 +693,139 @@ def triage_items_batched(
         "n_chunks": n_chunks,
         "n_skipped_chunks": n_skipped,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 第2系統（独立系統）による差分検査 — docs/security-architecture.md §4.9 対策3+5
+# --------------------------------------------------------------------------- #
+
+_SENSITIVE_TERMS_PATH = Path(__file__).resolve().parents[2] / "config" / "sensitive_terms.yaml"
+_second_opinion_cache: dict | None = None
+
+
+def _load_second_opinion_config() -> dict:
+    """config/sensitive_terms.yaml を読む（読めなければ空 dict）。"""
+    global _second_opinion_cache
+    if _second_opinion_cache is not None:
+        return _second_opinion_cache
+    cfg: dict = {}
+    try:
+        import yaml
+        if _SENSITIVE_TERMS_PATH.is_file():
+            cfg = yaml.safe_load(_SENSITIVE_TERMS_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        cfg = {}
+    _second_opinion_cache = cfg
+    return cfg
+
+
+def flag_sensitive_terms(text: str) -> list[str]:
+    """テキストに含まれるフラグ語を返す（§4.9 対策5）。
+
+    **「機微そうな語」ではなく「トリガになりうる語」を拾う。** 目的は情報の秘匿ではなく、
+    *特定の語で挙動が変わる* という条件付きの偏りを探すための絞り込みである。
+    """
+    if not text:
+        return []
+    terms = _load_second_opinion_config().get("terms") or {}
+    found = []
+    for group in terms.values():
+        for t in group or []:
+            if t and t in text:
+                found.append(t)
+    return sorted(set(found))
+
+
+def second_opinion_verdict(content: str, milestones: list[dict], *,
+                           context_note: str = "", model: str | None = None) -> tuple[str, str]:
+    """独立系統（非中国系モデル）に KEEP / DROP を単独で問う。
+
+    主系統と同じ 3 ゲートの基準を渡すが、**モデルの出自が異なる**ことが唯一の狙い。
+    返り値は (verdict, raw)。判定不能なら ("UNKNOWN", raw)。
+    """
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    model = model or cfg.get("model")
+    ms = "\n".join(f"- {m.get('name', '')}" for m in (milestones or [])[:20])
+    prompt = (
+        "次の項目が、下記マイルストーンの達成に実質的に必要かを判定してください。\n"
+        "判定は KEEP（必要）か DROP（不要）のどちらか1語だけを1行目に出力し、\n"
+        "2行目に理由を1文で書いてください。\n\n"
+        f"## マイルストーン\n{ms or '(なし)'}\n\n"
+        f"## 文脈\n{context_note or '(なし)'}\n\n"
+        f"## 判定対象\n{content}\n"
+    )
+    from utils.llm import call_rivault
+
+    raw = call_rivault(prompt, model=model, max_tokens=512, timeout=120)
+    head = (raw or "").strip().splitlines()[0].upper() if raw else ""
+    verdict = "KEEP" if "KEEP" in head else ("DROP" if "DROP" in head else "UNKNOWN")
+    return verdict, (raw or "")[:500]
+
+
+def apply_second_opinion(results: dict, milestones: list[dict], *,
+                         context_note: str = "", conn=None, log=None) -> list[dict]:
+    """トリアージ結果のうち**フラグ語が立った項目だけ**に第2系統を当てる（§4.9）。
+
+    全件に当てない理由は config/sensitive_terms.yaml の冒頭に書いてある
+    （小型モデルの能力差による不一致が支配的になり、探している信号が埋もれる）。
+
+    不一致は握りつぶさず、`triage_second_opinion` テーブルに記録して**人が見る**。
+    第2系統の判定で主系統の結果を上書きはしない — 能力差による誤りが混ざるため、
+    **自動で覆すのではなくフラグを立てるに留める**。
+
+    戻り値: 不一致だった項目の一覧。
+    """
+    log = log or _default_batch_log
+    if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
+        return []
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    cap = int(cfg.get("max_flagged_per_run") or 30)
+
+    flagged: list[tuple[str, dict, str, str, list[str]]] = []
+    for kind in ("action_items", "decisions"):
+        for item, verdict, _reason in results.get(kind, []):
+            content = (item or {}).get("content", "") or ""
+            terms = flag_sensitive_terms(content)
+            if terms:
+                flagged.append((kind, item, verdict, content, terms))
+
+    if not flagged:
+        return []
+    if len(flagged) > cap:
+        log(f"[WARN] フラグ付き項目が {len(flagged)} 件で上限 {cap} を超えました。"
+            "フラグ語が広すぎる可能性があります（全件差分に近づくと信号が埋もれます）。"
+            f"上位 {cap} 件のみ第2系統に当てます")
+        flagged = flagged[:cap]
+
+    disagreements = []
+    for kind, _item, primary, content, terms in flagged:
+        try:
+            second, raw = second_opinion_verdict(
+                content, milestones, context_note=context_note)
+        except Exception as e:
+            log(f"[WARN] 第2系統の呼び出しに失敗（この項目はスキップ）: {e}")
+            continue
+        agree = (second == primary)
+        if conn is not None:
+            try:
+                from db_utils import record_second_opinion
+                record_second_opinion(
+                    conn, kind=kind, content=content, primary_verdict=primary,
+                    second_verdict=second, flagged_terms=terms,
+                    model=(cfg.get("model") or ""), raw=raw,
+                )
+            except Exception:
+                log("[WARN] 第2系統の結果を記録できませんでした（判定は継続）")
+        if not agree:
+            disagreements.append({
+                "kind": kind, "content": content[:120],
+                "primary": primary, "second": second, "terms": terms,
+            })
+
+    if disagreements:
+        log(f"[SECOND-OPINION] フラグ付き {len(flagged)} 件中 {len(disagreements)} 件で"
+            "主系統と不一致。**自動では覆さない** — pm.db の triage_second_opinion を確認してください")
+    return disagreements
 
 
 def _sample_extractions(prompt: str, n: int) -> list[dict]:

@@ -366,6 +366,25 @@ CREATE TABLE IF NOT EXISTS reasoning_traces (
 CREATE INDEX IF NOT EXISTS idx_reasoning_session ON reasoning_traces(session_id, step);
 CREATE INDEX IF NOT EXISTS idx_reasoning_ts ON reasoning_traces(ts);
 
+-- 第2系統（独立系統）による差分検査の記録（docs/security-architecture.md §4.9 対策3+5）。
+-- フラグ語が立った項目にだけ非中国系モデルを当て、主系統との一致／不一致を残す。
+-- **第2系統の判定で主系統を上書きはしない** — 小型モデルの能力差による誤りが混ざるため、
+-- 自動で覆さずフラグを立てるに留め、人が見る。
+CREATE TABLE IF NOT EXISTS triage_second_opinion (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT NOT NULL,
+    kind            TEXT NOT NULL,   -- 'action_items' | 'decisions'
+    content_sha256  TEXT NOT NULL,
+    content_head    TEXT NOT NULL,   -- 先頭のみ（全文は pm.db 本体にある）
+    primary_verdict TEXT NOT NULL,
+    second_verdict  TEXT NOT NULL,   -- 'KEEP' | 'DROP' | 'UNKNOWN'
+    agreed          INTEGER NOT NULL,
+    flagged_terms   TEXT NOT NULL,
+    model           TEXT NOT NULL DEFAULT '',
+    raw             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_second_opinion_agreed ON triage_second_opinion(agreed, ts);
+
 -- 変更履歴（pm_relink.py / pm_sync_canvas.py / pm_xlsx_sync.py 等が共有）。
 -- pm_xlsx_sync.py の鮮度ガードが SELECT するため、pm.db 生成時から必ず存在させる。
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -779,6 +798,39 @@ def purge_reasoning_traces(
     cur = conn.execute(sql, params)
     conn.commit()
     return cur.rowcount
+
+
+def record_second_opinion(
+    conn: "_sqlite3.Connection", *, kind: str, content: str,
+    primary_verdict: str, second_verdict: str, flagged_terms: list[str],
+    model: str = "", raw: str | None = None,
+) -> None:
+    """第2系統の判定結果を記録する（§4.9 対策3+5）。
+
+    一致・不一致の**両方**を残す。不一致だけ記録すると「何件中の不一致か」が
+    分からず、能力差による雑音の割合を後から評価できないため。
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS triage_second_opinion ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,"
+        "content_sha256 TEXT NOT NULL, content_head TEXT NOT NULL,"
+        "primary_verdict TEXT NOT NULL, second_verdict TEXT NOT NULL,"
+        "agreed INTEGER NOT NULL, flagged_terms TEXT NOT NULL,"
+        "model TEXT NOT NULL DEFAULT '', raw TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO triage_second_opinion (ts, kind, content_sha256, content_head,"
+        " primary_verdict, second_verdict, agreed, flagged_terms, model, raw)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (datetime.now(UTC).isoformat(), kind,
+         hashlib.sha256(content.encode("utf-8")).hexdigest(), content[:200],
+         primary_verdict, second_verdict, int(primary_verdict == second_verdict),
+         ",".join(flagged_terms), model, raw),
+    )
+    conn.commit()
 
 
 def normalize_assignee(name: str | None) -> str | None:

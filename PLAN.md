@@ -91,7 +91,16 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    **残り**: (a) 運用主体からのモデル更新通知の取り決め（Phase 0、技術ではなく合意）
    (b) K3 の `declared_engine` / `declared_trust_remote_code` の確認 — **これが取れるまで
    K3 は `production: false`**（§1.3 攻撃者2 に直接該当するため）(c) enforce への切り替え
-7. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
+7. ~~**R8: 第2系統をトリアージへ（Phase 4）**~~ → **2026-08-01 実装**
+   （`config/sensitive_terms.yaml` + `ingest/slack.py` の `flag_sensitive_terms` /
+   `apply_second_opinion` + pm.db `triage_second_opinion`）。**フラグ語が立った項目だけ**に
+   非中国系モデル（Llama-4-Scout-17B）を当て、一致・不一致の両方を記録する。
+   **第2系統の判定で主系統を上書きしない** — 小型モデルの能力差による誤りが混ざるため、
+   自動で覆さずフラグを立てて人が見る。あわせて **`triage_items` の `missing_verdict` 既定を
+   `DROP` → `KEEP` に統一**（判定不能時に欠落を作らない。Phase 4 の明示項目）。
+   **残り**: (a) 実運用での不一致率の観測 — 能力差による雑音がどれくらいかを実測してから
+   フラグ語の広さを調整する (b) 残る2箇所（Pass 1 抽出 / Box relevance 判定）への展開
+8. 輸送層ブローカー — Canvas と Box は既存ファネルに 1 箇所ずつ。**Slack はファネルが無く
    SDK 直叩き 25 箇所の移送が必要**（工数の大半）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:

@@ -1,0 +1,62 @@
+# config/sensitive_terms.yaml
+#
+# 第2系統（独立系統）を当てる対象を絞るためのフラグ語（docs/security-architecture.md §4.9 対策5）。
+#
+# ★ なぜ全件ではなくフラグ付き項目だけなのか ★
+#
+# 利用できる非中国系モデルは 17B / 12B と小さく、全件に当てると**能力差による不一致が
+# 支配的**になって、探している信号が埋もれる。**懸念しているのは平均的な性能差ではなく、
+# 特定の語で挙動が変わるという条件付きの偏り**（CAISI / CrowdStrike が観測したのはこれ）。
+# 弱いモデルでもその条件は共有していないので、**トリガ付き入力での不一致こそが信号**になる。
+#
+# 件数が小さければ不一致を人間が全部見られる。能力差による雑音は人手で落とせる。
+#
+# ここに挙げるのは「политически 機微そう」な語ではなく、**トリガになりうる語**である。
+# 増やしすぎると全件に近づき、上の利点が消える。追加するときは件数への影響を見ること。
+
+# 第2系統に使うモデル（RiVault 配信、非中国系）。
+# model_pin.yaml の宣言と一致していること。
+second_opinion:
+  model: "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+  fallback_model: "gemma3:12b"
+  # 1回の実行でこの件数を超えたらフラグ語が広すぎる可能性が高い。警告を出す。
+  max_flagged_per_run: 30
+
+# 地政学・国・組織。トリガとして観測例のある領域に絞る。
+terms:
+  geopolitical:
+    - 中国
+    - 中国製
+    - 台湾
+    - 香港
+    - 新疆
+    - ウイグル
+    - チベット
+    - 南シナ海
+    - 尖閣
+    - 一帯一路
+  export_control:
+    - 輸出規制
+    - 輸出管理
+    - エンティティリスト
+    - EAR
+    - 安全保障貿易
+    - 経済安全保障
+    - デュアルユース
+  vendor:
+    - Moonshot
+    - DeepSeek
+    - Alibaba
+    - Huawei
+    - SMIC
+    - ZTE
+    - Tencent
+    - Baidu
+  # 英語表記も拾う（議事録・Slack は日英混在する）
+  geopolitical_en:
+    - China
+    - Chinese
+    - Taiwan
+    - Hong Kong
+    - Xinjiang
+    - Uyghur
