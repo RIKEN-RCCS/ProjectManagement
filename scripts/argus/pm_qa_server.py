@@ -87,6 +87,37 @@ def _check_local_llm_startup() -> None:
         logger.warning(f"vLLM モデル自動検出に失敗: {e}")
 
 
+def _check_model_pin_startup() -> None:
+    """起動時に 1 回 model_pin（供給網の固定、§4.6）の状態をログに出す。
+
+    per-call の enforce（`assert_model_allowed()`）はネットワークに出ないため、
+    宣言と実際のエンドポイントのズレは日次の pm_selfcheck.py（model_pin_drift）が
+    本来の検知経路を担う。ここは「デーモン起動時にも気づけるようにする」ための
+    追加のシグナルにすぎない。
+
+    **起動は止めない。** RIKYU 側の予告なき変更で本チェックが失敗しても、
+    デーモンが上がらなくなると復旧手段まで失うため、ログを出すだけに留める。
+    """
+    from utils.model_pin import check_endpoints
+    try:
+        rows = check_endpoints(timeout=10)
+    except Exception as e:
+        logger.warning(f"[MODELPIN] 起動時チェックに失敗しました（続行）: {e}")
+        return
+
+    mismatches = [r for r in rows if r["status"] == "mismatch"]
+    unreachable = [r for r in rows if r["status"] == "error"]
+
+    if mismatches:
+        detail = "; ".join(f"{r['model']}: {r['detail']}" for r in mismatches)
+        logger.error(f"[MODELPIN] 宣言と実際のエンドポイントが一致しません: {detail}")
+    if unreachable:
+        detail = "; ".join(f"{r['model']}: {r['detail']}" for r in unreachable)
+        logger.warning(f"[MODELPIN] エンドポイントに到達できませんでした: {detail}")
+    if not mismatches and not unreachable:
+        logger.info("[MODELPIN] 起動時チェック: 宣言どおりのモデルが確認できました")
+
+
 # --- 設定ロード ---
 
 _channel_index_map: dict[str, str] = {}   # channel_id → index_name
@@ -871,6 +902,7 @@ def main() -> None:
     logger.info("pm_qa_server 起動中...")
     _init_common()
     _check_local_llm_startup()
+    _check_model_pin_startup()
 
     if not os.environ.get("SLACK_BOT_TOKEN"):
         logger.error("SLACK_BOT_TOKEN が未設定です")

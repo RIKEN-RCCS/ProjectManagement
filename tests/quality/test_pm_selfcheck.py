@@ -769,3 +769,161 @@ def test_main_silent_control_strict_fails_exit_code(pm_db_path, tmp_path, monkey
         ],
     )
     assert rc == 1
+
+
+# --------------------------------------------------------------------------- #
+# 11. モデル pin ドリフト（実ネットワークアクセスは行わない。check_endpoints をモック）
+# --------------------------------------------------------------------------- #
+def test_check_model_pin_drift_reports_mismatch(monkeypatch):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "glm-5.2", "status": "mismatch",
+             "detail": "served=glm-5.2 実在=なし（0件）"},
+        ],
+    )
+    violations = pm_selfcheck.check_model_pin_drift()
+    assert len(violations) == 1
+    assert violations[0]["check"] == "model_pin_drift"
+    assert violations[0]["model"] == "glm-5.2"
+
+
+def test_check_model_pin_drift_error_is_not_violation_but_logged(monkeypatch, capsys):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "glm-5.2", "status": "error", "detail": "接続できません"},
+        ],
+    )
+    violations = pm_selfcheck.check_model_pin_drift()
+    assert violations == []
+    captured = capsys.readouterr()
+    assert "glm-5.2" in captured.err
+    assert "判定できません" in captured.err
+
+
+def test_check_model_pin_drift_skip_is_not_violation_but_logged(monkeypatch, capsys):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "bge-m3", "status": "skip", "detail": "endpoint_env が未設定: []"},
+        ],
+    )
+    violations = pm_selfcheck.check_model_pin_drift()
+    assert violations == []
+    captured = capsys.readouterr()
+    assert "bge-m3" in captured.err
+    assert "判定できません" in captured.err
+
+
+def test_check_model_pin_drift_ok_has_no_violations(monkeypatch):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [{"model": "glm-5.2", "status": "ok", "detail": "served=glm-5.2 実在=あり"}],
+    )
+    assert pm_selfcheck.check_model_pin_drift() == []
+
+
+def test_run_checks_includes_model_pin_drift(pm_db_path, monkeypatch):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "glm-5.2", "status": "mismatch", "detail": "served=glm-5.2 実在=なし（0件）"},
+        ],
+    )
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-08-03")
+    conn.close()
+    assert any(v["check"] == "model_pin_drift" for v in violations)
+
+
+def test_run_checks_model_pin_drift_independent_of_logs_dir(pm_db_path, monkeypatch):
+    """logs_dir が無効（None）でもこの検査は実行される（silent_control と同じ扱い）。"""
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "glm-5.2", "status": "mismatch", "detail": "served=glm-5.2 実在=なし（0件）"},
+        ],
+    )
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.run_checks(
+        conn, None, days=7, today="2026-08-03", logs_dir=None,
+    )
+    conn.close()
+    assert any(v["check"] == "model_pin_drift" for v in violations)
+
+
+def test_run_checks_skips_model_pin_drift_when_disabled(pm_db_path, monkeypatch):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "glm-5.2", "status": "mismatch", "detail": "served=glm-5.2 実在=なし（0件）"},
+        ],
+    )
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.run_checks(
+        conn, None, days=7, today="2026-08-03", model_pin_enabled=False,
+    )
+    conn.close()
+    assert not any(v["check"] == "model_pin_drift" for v in violations)
+
+
+def test_main_skip_model_pin_flag_skips_the_check(pm_db_path, tmp_path, monkeypatch):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "glm-5.2", "status": "mismatch", "detail": "served=glm-5.2 実在=なし（0件）"},
+        ],
+    )
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    state_db = tmp_path / "no_such_patrol_state.db"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--db", str(pm_db_path), "--no-encrypt",
+            "--state-db", str(state_db),
+            "--logs-dir", str(logs),
+            "--days", "7",
+            "--skip-model-pin",
+        ],
+    )
+    assert rc == 0
+
+
+def test_main_no_security_checks_also_skips_model_pin_drift(pm_db_path, tmp_path, monkeypatch):
+    from utils import model_pin
+
+    monkeypatch.setattr(
+        model_pin, "check_endpoints",
+        lambda timeout=10: [
+            {"model": "glm-5.2", "status": "mismatch", "detail": "served=glm-5.2 実在=なし（0件）"},
+        ],
+    )
+    state_db = tmp_path / "no_such_patrol_state.db"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--db", str(pm_db_path), "--no-encrypt",
+            "--state-db", str(state_db),
+            "--days", "7",
+            "--no-security-checks",
+        ],
+    )
+    assert rc == 0

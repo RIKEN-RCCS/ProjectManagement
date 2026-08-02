@@ -15,6 +15,14 @@
 # 申告値が変われば git の diff に現れる。これが実質的な変更検知になる。
 # モデル更新の通知を運用主体から受ける取り決めは Phase 0 の宿題（技術ではなく合意で埋める）。
 #
+#   verified_max_input_tokens / verified_max_output_tokens — こちらも verified 系。
+#     `/v1/models` が返す max_input_tokens / max_output_tokens と照合する
+#     （model_pin.py --check / pm_selfcheck.py の model_pin_drift 検査）。
+#     API がこの項目を返さないエンドポイント（RiVault の一部・embedding 等）は null にし、
+#     照合をスキップする。
+#     ★限界: id 単独より強い指紋にすぎない。文脈長が同じ別モデルへの差し替えは
+#     通ってしまう。同一性の証明ではない。
+#
 # モード切り替え: 環境変数 ARGUS_MODEL_PIN
 #   warn (既定) — pin に無いモデルでも通す。ログに残すだけ
 #   enforce     — pin に無い / verified_at が null のモデルは PermissionError で拒否
@@ -35,6 +43,8 @@ models:
     production: true
     verified_at: "2026-08-01"      # model_pin.py --check で id 一致を確認
     verified_by: "model_pin.py --check"
+    verified_max_input_tokens: 1000000    # /v1/models 実測（2026-08-01）
+    verified_max_output_tokens: 1048576
     declared_revision: null     # 取得手段が無い。運用主体から聞いて記録する
     declared_weights_format: safetensors
     declared_trust_remote_code: false
@@ -53,6 +63,9 @@ models:
     concentration_risk: R8
     verified_at: "2026-08-01"
     verified_by: "model_pin.py --check"
+    # RiVault の /v1/models は max_input_tokens/max_output_tokens を返さない（2026-08-01実測）。
+    verified_max_input_tokens: null
+    verified_max_output_tokens: null
     declared_revision: null
     declared_weights_format: safetensors
     declared_trust_remote_code: false
@@ -68,6 +81,9 @@ models:
     production: true
     verified_at: "2026-08-01"
     verified_by: "model_pin.py --check"
+    # embedding の /v1/models も max_input_tokens/max_output_tokens を返さない（2026-08-01実測）。
+    verified_max_input_tokens: null
+    verified_max_output_tokens: null
     declared_revision: null
     declared_weights_format: safetensors
     declared_trust_remote_code: false
@@ -84,6 +100,9 @@ models:
     production: false
     verified_at: "2026-08-01"
     verified_by: "model_pin.py --check"
+    # RiVault の /v1/models は max_input_tokens/max_output_tokens を返さない（2026-08-01実測）。
+    verified_max_input_tokens: null
+    verified_max_output_tokens: null
     declared_revision: null
     declared_weights_format: safetensors
     declared_trust_remote_code: false
@@ -105,6 +124,8 @@ models:
     requires_native_engine: true
     verified_at: "2026-08-01"      # id は実在を確認。ただし engine/trust_remote_code は未確認
     verified_by: "model_pin.py --check"
+    verified_max_input_tokens: 928000     # /v1/models 実測（2026-08-01）
+    verified_max_output_tokens: 977408
     declared_revision: null
     declared_weights_format: safetensors
     declared_trust_remote_code: null   # ★未確認。ここが false と確認できるまで本番不可

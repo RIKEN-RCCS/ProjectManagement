@@ -35,6 +35,12 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo ""
 echo "======== pm_selfcheck.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
 
+# モデル pin のドリフト検査（model_pin_drift）がエンドポイントへ到達するために必要。
+# source しないと常に判定不能になり、検査が入っているのに何も見ていない状態になる。
+[[ -f "$HOME/.secrets/rikyu_token.sh" ]] && source "$HOME/.secrets/rikyu_token.sh"
+[[ -f "$HOME/.secrets/localLLM.sh" ]] && source "$HOME/.secrets/localLLM.sh"
+[[ -f "$HOME/.secrets/rivault_tokens.sh" ]] && source "$HOME/.secrets/rivault_tokens.sh"
+
 "$PYTHON3" "$SCRIPT_DIR/quality/pm_selfcheck.py" --days 7 "$@"
 STATUS=$?
 

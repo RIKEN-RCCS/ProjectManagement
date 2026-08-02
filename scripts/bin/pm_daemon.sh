@@ -154,6 +154,31 @@ cmd_start() {
     if [[ "$name" == "qa" || "$name" == "web" ]]; then
         export ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"
         echo "net_guard mode: ${ARGUS_NETGUARD}"
+
+        # モデル pin（供給網の固定、docs/security-architecture.md §4.6）。
+        # net_guard と同様に enforce にする予定だったが、**2026-08-03 の実測で
+        # 宣言と実態が一致していないことが判明したため warn のまま据え置く。**
+        #
+        #   - `RIVAULT_MODEL=deepseek-ai/DeepSeek-V4-Flash` が本番デーモンに設定されており、
+        #     `call_argus_llm` の rivault 経路（llm.py の _try_rivault）は model 引数を
+        #     渡さないのでこれが使われる。だが pin では **production: false（評価専用）**。
+        #     enforce にすると **RiVault 経路が全滅する**
+        #   - 第2系統（config/sensitive_terms.yaml の Llama-4-Scout / gemma3:12b）は
+        #     **pin に宣言が無い**。同ファイルには「model_pin.yaml の宣言と一致していること」と
+        #     書いてあるが一致していない。enforce にすると R8 対策が全滅する
+        #
+        # **先に pin を実態へ合わせること。** そのためには「RIVAULT_MODEL が
+        # DeepSeek-V4-Flash なのは意図か、それとも judge 用の設定が残っているのか」という
+        # 運用上の判断が要る（PM 作業）。判断が付いたらここを enforce に変える。
+        #
+        # 差分の検知は既に日次で回っている（pm_selfcheck.py の model_pin_drift）ので、
+        # warn のままでも RIKYU 側の変更には気づける。
+        #
+        # 緊急退避: enforce にした後に全 LLM 呼び出しが ModelPinError になった場合は、
+        # `ARGUS_MODEL_PIN=warn ./scripts/bin/pm_daemon.sh start qa` で退避してから
+        # `python3 scripts/utils/model_pin.py --check` の結果を見て config/model_pin.yaml を更新する。
+        export ARGUS_MODEL_PIN="${ARGUS_MODEL_PIN:-warn}"
+        echo "model_pin mode: ${ARGUS_MODEL_PIN}"
     fi
 
     if [[ "$name" == "docling" ]]; then

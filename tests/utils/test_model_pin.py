@@ -105,3 +105,105 @@ class TestRealPinFile:
         """declared_* は判定に使わない（検証できないものを根拠にしない・P10）。"""
         monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
         assert_model_allowed("glm-5.2")  # declared_revision が null でも通る
+
+
+# --------------------------------------------------------------------------- #
+# check_endpoints（実ネットワークアクセスなし。fetch_served_models をモンキーパッチ）
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def endpoints_pin(tmp_path, monkeypatch):
+    p = tmp_path / "model_pin.yaml"
+    p.write_text(
+        """
+models:
+  glm-5.2:
+    served_model_name: glm-5.2
+    endpoint_env: [FAKE_RIKYU_URL]
+    token_env: [FAKE_RIKYU_TOKEN]
+    production: true
+    verified_at: "2026-08-01"
+    verified_max_input_tokens: 1000000
+    verified_max_output_tokens: 1048576
+  Kimi-K2-Thinking:
+    served_model_name: Kimi-K2-Thinking
+    endpoint_env: [FAKE_RIVAULT_URL]
+    token_env: [FAKE_RIVAULT_TOKEN]
+    production: true
+    verified_at: "2026-08-01"
+    verified_max_input_tokens: null
+    verified_max_output_tokens: null
+  no-endpoint:
+    served_model_name: no-endpoint
+    endpoint_env: [FAKE_UNSET_URL]
+    production: true
+    verified_at: "2026-08-01"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ARGUS_MODEL_PIN_PATH", str(p))
+    monkeypatch.setenv("FAKE_RIKYU_URL", "http://fake-rikyu.invalid/v1")
+    monkeypatch.setenv("FAKE_RIVAULT_URL", "http://fake-rivault.invalid/v1")
+    return p
+
+
+class TestCheckEndpoints:
+    def test_ok_when_id_and_max_tokens_match(self, endpoints_pin, monkeypatch):
+        def fake_fetch(base_url, api_key=None, timeout=10):
+            if "rikyu" in base_url:
+                return [{"id": "glm-5.2", "max_input_tokens": 1000000, "max_output_tokens": 1048576}]
+            return [{"id": "Kimi-K2-Thinking", "max_input_tokens": None, "max_output_tokens": None}]
+
+        monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
+        rows = {r["model"]: r for r in model_pin.check_endpoints()}
+        assert rows["glm-5.2"]["status"] == "ok"
+        assert rows["Kimi-K2-Thinking"]["status"] == "ok"
+
+    def test_max_input_tokens_mismatch_is_a_violation(self, endpoints_pin, monkeypatch):
+        def fake_fetch(base_url, api_key=None, timeout=10):
+            if "rikyu" in base_url:
+                # max_input_tokens が宣言と異なる（context 長が変わっている）
+                return [{"id": "glm-5.2", "max_input_tokens": 500000, "max_output_tokens": 1048576}]
+            return [{"id": "Kimi-K2-Thinking", "max_input_tokens": None, "max_output_tokens": None}]
+
+        monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
+        rows = {r["model"]: r for r in model_pin.check_endpoints()}
+        assert rows["glm-5.2"]["status"] == "mismatch"
+        assert "max_input_tokens" in rows["glm-5.2"]["detail"]
+
+    def test_id_mismatch_is_a_violation(self, endpoints_pin, monkeypatch):
+        def fake_fetch(base_url, api_key=None, timeout=10):
+            return [{"id": "some-other-model", "max_input_tokens": 1, "max_output_tokens": 1}]
+
+        monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
+        rows = {r["model"]: r for r in model_pin.check_endpoints()}
+        assert rows["glm-5.2"]["status"] == "mismatch"
+
+    def test_api_not_returning_max_tokens_skips_that_comparison(self, endpoints_pin, monkeypatch):
+        """API が max_input_tokens/max_output_tokens を返さないエントリは、
+        verified_* が null なので照合をスキップし ok を維持、かつその旨を detail に残す。"""
+        def fake_fetch(base_url, api_key=None, timeout=10):
+            if "rikyu" in base_url:
+                return [{"id": "glm-5.2", "max_input_tokens": 1000000, "max_output_tokens": 1048576}]
+            return [{"id": "Kimi-K2-Thinking", "max_input_tokens": None, "max_output_tokens": None}]
+
+        monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
+        rows = {r["model"]: r for r in model_pin.check_endpoints()}
+        assert rows["Kimi-K2-Thinking"]["status"] == "ok"
+        assert "スキップ" in rows["Kimi-K2-Thinking"]["detail"]
+
+    def test_unreachable_endpoint_is_error_not_raised(self, endpoints_pin, monkeypatch):
+        def fake_fetch(base_url, api_key=None, timeout=10):
+            raise TimeoutError("接続できません")
+
+        monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
+        rows = {r["model"]: r for r in model_pin.check_endpoints()}
+        assert rows["glm-5.2"]["status"] == "error"
+        assert rows["Kimi-K2-Thinking"]["status"] == "error"
+
+    def test_missing_endpoint_env_is_skip(self, endpoints_pin, monkeypatch):
+        def fake_fetch(base_url, api_key=None, timeout=10):
+            return [{"id": "glm-5.2", "max_input_tokens": 1000000, "max_output_tokens": 1048576}]
+
+        monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
+        rows = {r["model"]: r for r in model_pin.check_endpoints()}
+        assert rows["no-endpoint"]["status"] == "skip"

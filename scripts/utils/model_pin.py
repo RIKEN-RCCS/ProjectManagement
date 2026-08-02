@@ -10,12 +10,17 @@
 
 証明しない:
   - **チェックポイントが宣言どおりのものであること。** OpenAI 互換の `/v1/models` は
-    `id` しか返さないため、revision（sha）を Argus 側から取得する手段がない。
+    `id` の他に一部エンドポイントで `max_input_tokens` / `max_output_tokens` を返すが、
+    revision（sha）を Argus 側から取得する手段は無い。
     `declared_*` は**運用主体の申告の記録**であって検証結果ではない（R12）。
   - `trust_remote_code` や engine の実際の設定。これもサービス側にあり取得できない。
 
-したがって pin の実効は「id の一致」と「**申告値の変更が git の diff に現れること**」の
-2つに限られる。モデル更新の通知を運用主体から受ける取り決め（Phase 0）が対で必要になる。
+したがって pin の実効は「id の一致」「取得できる範囲での max_input_tokens /
+max_output_tokens の一致（`verified_max_input_tokens` / `verified_max_output_tokens`）」
+「**申告値の変更が git の diff に現れること**」の3つに限られる。
+**max_tokens の一致は id 単独より強い指紋にすぎず、同一性の証明ではない** —
+文脈長が同じ別モデルへ黙って差し替えられた場合はこれも通ってしまう。
+モデル更新の通知を運用主体から受ける取り決め（Phase 0）が対で必要になる。
 
 モード（環境変数 `ARGUS_MODEL_PIN`）:
 
@@ -131,6 +136,12 @@ def assert_model_allowed(model_id: str, *, production: bool = True,
 
     **`declared_*` の値は判定に使わない** — 検証できないものを根拠にすると、
     「pin が通った＝安全」という誤った確信を与えるため（P10）。
+
+    **この関数はネットワークに一切出ない**（yaml を読むだけ）。この関数は
+    LLM 呼び出しのたびに評価されるため、ここでエンドポイント疎通を行うと
+    エンドポイント障害時に本番呼び出し自体が引きずられて落ちる。id / max_tokens の
+    実照合（ネットワークが要る）は `check_endpoints()` に分離し、日次の
+    pm_selfcheck.py（`model_pin_drift`）からだけ呼ぶ。
     """
     mode = _mode()
     if mode == "off" or not model_id:
@@ -161,8 +172,13 @@ def assert_model_allowed(model_id: str, *, production: bool = True,
 
 
 def fetch_served_models(base_url: str, api_key: str | None = None,
-                        timeout: int = 10) -> list[str]:
-    """`/v1/models` の id 一覧を返す。取得できなければ例外。"""
+                        timeout: int = 10) -> list[dict]:
+    """`/v1/models` のエントリ一覧を返す。取得できなければ例外。
+
+    各要素は {"id", "max_input_tokens", "max_output_tokens"}。後者2つを
+    返さない API（RiVault の一部・embedding 等）では None になる
+    （呼び出し側はこれを「取得不能＝照合スキップ」として扱う）。
+    """
     url = base_url.rstrip("/")
     if not url.endswith("/models"):
         url += "/models"
@@ -176,11 +192,26 @@ def fetch_served_models(base_url: str, api_key: str | None = None,
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         data = json.loads(resp.read())
-    return [m["id"] for m in data.get("data", []) if isinstance(m, dict) and "id" in m]
+    return [
+        {
+            "id": m["id"],
+            "max_input_tokens": m.get("max_input_tokens"),
+            "max_output_tokens": m.get("max_output_tokens"),
+        }
+        for m in data.get("data", []) if isinstance(m, dict) and "id" in m
+    ]
 
 
 def check_endpoints(path: Path | None = None, timeout: int = 10) -> list[dict]:
     """宣言した served_model_name が実際のエンドポイントに存在するか照合する。
+
+    id の一致に加え、`verified_max_input_tokens` / `verified_max_output_tokens` が
+    yaml で null でないエントリについては `/v1/models` の同名フィールドとも照合する。
+    API がそもそも返さないエントリ（yaml 側も null）は照合をスキップし、その旨を
+    detail に含める。
+
+    **限界**: max_tokens が同じ別モデルへの差し替えは通る。id 単独より強い指紋に
+    すぎず、同一性の証明ではない（R12 と同じ限界。トップの docstring参照）。
 
     endpoint_env が未設定のエントリは skip（環境によって使わないモデルがあるため）。
     """
@@ -202,16 +233,41 @@ def check_endpoints(path: Path | None = None, timeout: int = 10) -> list[dict]:
             token_envs = [token_envs]
         api_key = next((os.environ[e] for e in token_envs if os.environ.get(e)), None)
         try:
-            ids = fetch_served_models(base, api_key)
+            served_models = fetch_served_models(base, api_key, timeout=timeout)
         except Exception as e:
             results.append({"model": key, "status": "error", "detail": str(e)[:120]})
             continue
-        results.append({
-            "model": key,
-            "status": "ok" if served in ids else "mismatch",
-            "detail": f"served={served} 実在={'あり' if served in ids else 'なし'}"
-                      f"（{len(ids)}件）",
-        })
+        ids = {m["id"] for m in served_models}
+        if served not in ids:
+            results.append({
+                "model": key, "status": "mismatch",
+                "detail": f"served={served} 実在=なし（{len(ids)}件）",
+            })
+            continue
+
+        matched = next(m for m in served_models if m["id"] == served)
+        mismatches = []
+        skipped_fields = []
+        for field, expected_key in (
+            ("max_input_tokens", "verified_max_input_tokens"),
+            ("max_output_tokens", "verified_max_output_tokens"),
+        ):
+            expected = entry.get(expected_key)
+            if expected is None:
+                skipped_fields.append(field)
+                continue
+            actual = matched.get(field)
+            if actual != expected:
+                mismatches.append(f"{field}: 期待={expected} 実際={actual}")
+
+        detail = f"served={served} 実在=あり（{len(ids)}件）"
+        if skipped_fields:
+            detail += f" ／ max_tokens照合スキップ（API未提供 or 未記録）: {skipped_fields}"
+        if mismatches:
+            detail += f" ／ max_tokens不一致: {'; '.join(mismatches)}"
+            results.append({"model": key, "status": "mismatch", "detail": detail})
+        else:
+            results.append({"model": key, "status": "ok", "detail": detail})
     return results
 
 
@@ -250,8 +306,10 @@ def main(argv: list[str] | None = None) -> int:
             if r["status"] == "mismatch":
                 bad += 1
         print()
-        print("※ id の一致しか確認していない。revision / trust_remote_code / engine は"
-              "取得手段が無く、model_pin.yaml の declared_* は申告の記録である（R12）。")
+        print("※ id と（取得できる範囲の）max_input_tokens/max_output_tokens しか"
+              "確認していない。revision / trust_remote_code / engine は取得手段が無く、"
+              "model_pin.yaml の declared_* は申告の記録である（R12）。"
+              "max_tokens が同じ別モデルへの差し替えは検出できない。")
         return 1 if bad else 0
     parser.print_help()
     return 1

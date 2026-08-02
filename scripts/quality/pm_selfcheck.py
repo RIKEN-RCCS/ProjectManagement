@@ -36,10 +36,21 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
                              ファネルの conn 未配線・第2系統トリアージの呼び出し元
                              不在の2件が判明。共通のシグナルは「動いている証拠が
                              一件も無い」ことだった）
+ 11. model_pin_drift       — config/model_pin.yaml の宣言（served_model_name /
+                             max_input_tokens / max_output_tokens）と実際の
+                             エンドポイント（/v1/models）が一致しているか
+                             （docs/security-architecture.md §4.6）。
+                             `assert_model_allowed()` は呼び出しのたびに評価される
+                             一方でネットワークに出ないため、宣言と実際のズレは
+                             この日次検査だけが検知できる。**この検査だけは
+                             ネットワークに出る**（他は全て読み取り専用）。
 
 書き込みは一切行わない。値（channel/user ID 等）はログに出力しない
 （state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
 canary トークン・宛先ホスト・呼び出し元を出力するが、いずれも秘匿値ではない）。
+model_pin_drift のみ `/v1/models` への通信を行う（本ファイルは元来ネットワークに
+出ない読み取り専用の検査だったが、この検査だけ性格が異なる。`--skip-model-pin` で
+この検査だけを退避できる）。
 
 Usage:
     python3 scripts/quality/pm_selfcheck.py
@@ -50,6 +61,7 @@ Usage:
     python3 scripts/quality/pm_selfcheck.py --no-security-checks
     python3 scripts/quality/pm_selfcheck.py --silence-days 14
     python3 scripts/quality/pm_selfcheck.py --silence-strict
+    python3 scripts/quality/pm_selfcheck.py --skip-model-pin
 """
 from __future__ import annotations
 
@@ -750,6 +762,63 @@ def check_silent_control(
 
 
 # --------------------------------------------------------------------------- #
+# 11. モデル pin ドリフト（config/model_pin.yaml、docs/security-architecture.md §4.6）
+# --------------------------------------------------------------------------- #
+def check_model_pin_drift() -> list[dict]:
+    """宣言したモデル（id・max_input/output_tokens）が実際のエンドポイントと
+    一致しているかを検査する。
+
+    **この検査だけがネットワークに出る。** `assert_model_allowed()`（呼び出しの
+    たびに評価される関数）はネットワークに出ないため、宣言と実際のズレは
+    この日次検査だけが検知できる。供給元（RIKYU）に更新通知の取り決めを
+    依頼できないため、これが唯一の気づき手段になる。
+
+    endpoint_env 未設定（skip）・到達不能（error）は違反にしない。ただし
+    **判定不能を黙って通さない** — 理由を必ず標準出力に出す。判定不能の
+    理由を握りつぶすと、検査が入っているのに何も見ていない状態（no-op）に
+    なる（2026-08-01 に別の検査で複数回踏んだ型）。
+
+    タイムアウトは短め（10秒）にし、エンドポイント障害で selfcheck 全体が
+    落ちないよう例外はすべてこの関数の中で吸収する。
+    """
+    try:
+        from utils.model_pin import check_endpoints
+    except Exception as e:
+        print(
+            f"[WARN] model_pin_drift: model_pin モジュールの読み込みに失敗しました"
+            f"（この検査をスキップします）: {e}",
+            file=sys.stderr,
+        )
+        return []
+
+    try:
+        rows = check_endpoints(timeout=10)
+    except Exception as e:
+        print(
+            f"[WARN] model_pin_drift: check_endpoints の実行に失敗しました"
+            f"（この検査をスキップします）: {e}",
+            file=sys.stderr,
+        )
+        return []
+
+    violations = []
+    for row in rows:
+        status = row.get("status")
+        if status == "ok":
+            continue
+        if status == "mismatch":
+            violations.append({"check": "model_pin_drift", **row})
+            continue
+        # skip（endpoint_env 未設定）・error（到達不能）は判定不能。違反にはしない。
+        print(
+            f"[INFO] model_pin_drift: {row.get('model')} は判定できません"
+            f"（status={status}）: {row.get('detail')}",
+            file=sys.stderr,
+        )
+    return violations
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 def run_checks(
@@ -761,6 +830,7 @@ def run_checks(
     security_days: int = 1,
     silence_days: int | None = None,
     security_checks_enabled: bool = True,
+    model_pin_enabled: bool = True,
 ) -> list[dict]:
     # audit_log.changed_at は datetime.now(UTC).isoformat()（"+00:00" 付き）で
     # 記録されるため、cutoff も UTC aware で揃える。today（ローカル暦日）基準だと
@@ -789,6 +859,10 @@ def run_checks(
     # 沈黙してしまう）。--no-security-checks では従来どおり一緒にスキップする。
     if security_checks_enabled:
         violations += check_silent_control(pm_conn, silence_days)
+    # model_pin_drift も logs_dir / pm.db とは無関係（silent_control と同じ扱い）。
+    # ネットワークに出る検査のため、--skip-model-pin で個別に退避できるようにする。
+    if security_checks_enabled and model_pin_enabled:
+        violations += check_model_pin_drift()
     return violations
 
 
@@ -833,6 +907,10 @@ def main() -> int:
         help="silent_control の沈黙を他の検査と同じ違反として扱い exit code 1 にする"
              "（既定では警告として出力するのみで exit code に反映しない）",
     )
+    parser.add_argument(
+        "--skip-model-pin", action="store_true",
+        help="model_pin_drift だけをスキップする（ネットワークに出たくない場合の退避路）",
+    )
     args = parser.parse_args()
 
     db_path = resolve_db_path(args.db, REPO_ROOT / "data" / "pm.db")
@@ -873,7 +951,7 @@ def main() -> int:
             logs_dir = None
     violations = run_checks(
         pm_conn, state_conn, args.days, today, logs_dir, args.security_days,
-        args.silence_days, security_checks_enabled,
+        args.silence_days, security_checks_enabled, not args.skip_model_pin,
     )
 
     pm_conn.close()
