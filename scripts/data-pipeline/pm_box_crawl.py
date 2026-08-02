@@ -1058,6 +1058,20 @@ def _ocr_image(
         except Exception:
             return None
 
+    # ここは llm.py を経由しない唯一の本番 LLM 呼び出しなので、pin の照合を
+    # 明示的に呼ぶ必要がある（docs/security-architecture.md §4.6）。この関数は
+    # 失敗時に None を返す設計であり、呼び出し元は endpoints をループしてフォール
+    # バックしたり（_convert_via_multimodal）、ThreadPoolExecutor 内の広い
+    # except Exception で吸収したりする（_verbalize_figures）。素通しすると
+    # そちらの WARNING に紛れて pin 違反と分からなくなるため、ここで拾って
+    # ERROR ログを出してから None を返す（「OCR失敗」に丸めるが、原因は失わない）。
+    from utils.model_pin import ModelPinError, assert_model_allowed
+    try:
+        assert_model_allowed(model)
+    except ModelPinError as e:
+        logger.error(f"    [MODELPIN] OCRモデル {model!r} は pin 違反のため中止: {e}")
+        return None
+
     payload = {
         "model": model,
         "messages": [{

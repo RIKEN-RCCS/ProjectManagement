@@ -35,6 +35,16 @@
 
 models:
   # --- 本番の主経路 -------------------------------------------------------
+  # ★R8（集中リスク）について、2026-08-03 時点の全体像 ★
+  #
+  # 本番経路の主要モデルは glm-5.2（Zhipu）/ DeepSeek-V4-Flash（DeepSeek）/
+  # qwen3.6-35b・Qwen3.6-35B（Alibaba）で、**すべて同系統の供給元**である。
+  # R8 が想定しているのは個々のモデルの善悪ではなく「依存が一系統に寄っていること」なので、
+  # **この構成では R8 は緩和されていない。**
+  # 緩和にあたるのは第2系統（Llama-4-Scout / gemma3）だけで、それも
+  # config/sensitive_terms.yaml のフラグ語が立った項目にしか当たらない（全件ではない）。
+  # 「pin が全部 ok だから供給網は健全」と読まないこと（P10）。
+
   glm-5.2:
     role: "investigate / brief / risk の主モデル（RIKYU）"
     served_model_name: glm-5.2
@@ -53,15 +63,25 @@ models:
     declared_at: null
 
   Kimi-K2-Thinking:
-    role: "RiVault 経由の議事録生成・Slack 抽出・トリアージ"
+    # 2026-08-03 に PM 判断で退役: thinking のログが応答に滲み出して使いものにならず、
+    # RiVault 経由の議事録生成・Slack 抽出・トリアージから外した。エントリは削除せず
+    # production: false で残す（かつて本番で使っていた記録・再検討時の参照のため）。
+    role: "退役（RiVault 経由の議事録生成・Slack 抽出・トリアージの旧主モデル。2026-08-03廃止）"
     served_model_name: Kimi-K2-Thinking
     endpoint_env: [RIVAULT_URL]
     token_env: [RIVAULT_TOKEN]
-    production: true
+    production: false
     # R8: K3 と同一提供元（Moonshot）であり、かつ R5（改竄）の発生場所を担う集中リスク。
-    # 第2系統の投入（Phase 4）が未着手であることを承知の上で使っている。
+    # 第2系統の投入（Phase 4）が未着手であることを承知の上で使っていた。
+    #
+    # ★訂正（2026-08-03）: 「退役により R8 は解消」と書いたが**誤り**。
+    # R8 は「特定の供給元系統に依存が集中していること」であって、個々のモデルの性質ではない。
+    # 退役後の本番構成は glm-5.2（Zhipu）/ DeepSeek-V4-Flash（DeepSeek）/
+    # qwen3.6-35b・Qwen3.6-35B（Alibaba）で、**本番経路の主要モデルは依然すべて同系統**である。
+    # 集中リスクは解消したのではなく**移動した**。緩和しているのは第2系統
+    # （Llama-4-Scout / gemma3）だけで、それもフラグ語が立った項目にしか当たらない。
     concentration_risk: R8
-    verified_at: "2026-08-01"
+    verified_at: "2026-08-03"
     verified_by: "model_pin.py --check"
     # RiVault の /v1/models は max_input_tokens/max_output_tokens を返さない（2026-08-01実測）。
     verified_max_input_tokens: null
@@ -91,14 +111,18 @@ models:
     declared_by: null
     declared_at: null
 
-  # --- 評価専用（本番経路では使わない） -----------------------------------
   DeepSeek-V4-Flash:
-    role: "オフライン評価の judge（scripts/eval/ 配下のみ。pm.db に欠落を作れない）"
+    # 訂正: 2026-08-03 に PM から「RiVault の本番モデルは DeepSeek-V4-Flash である」との
+    # 回答があり判明。旧 role「オフライン評価の judge（scripts/eval/ 配下のみ。pm.db に
+    # 欠落を作れない）」は誤りだった — 実際には RIVAULT_MODEL がこのモデルに設定されており
+    # llm.py の _try_rivault（model 引数を渡さず RIVAULT_MODEL を使う）経由で本番の
+    # 議事録生成・Slack 抽出・トリアージを担っていた。pm.db に欠落を作れない、は事実誤認。
+    role: "RiVault 経由の議事録生成・Slack 抽出・トリアージの主モデル"
     served_model_name: deepseek-ai/DeepSeek-V4-Flash
     endpoint_env: [RIVAULT_URL]
     token_env: [RIVAULT_TOKEN]
-    production: false
-    verified_at: "2026-08-01"
+    production: true
+    verified_at: "2026-08-03"
     verified_by: "model_pin.py --check"
     # RiVault の /v1/models は max_input_tokens/max_output_tokens を返さない（2026-08-01実測）。
     verified_max_input_tokens: null
@@ -110,6 +134,80 @@ models:
     declared_by: null
     declared_at: null
 
+  # --- 第2系統（R8対策。config/sensitive_terms.yaml の second_opinion） -----
+  Llama-4-Scout-17B-16E-Instruct:
+    role: "R8 対策の第2系統（非中国系の独立系統）。主系統の判定を上書きせず不一致を記録する"
+    served_model_name: meta-llama/Llama-4-Scout-17B-16E-Instruct
+    endpoint_env: [RIVAULT_URL]
+    token_env: [RIVAULT_TOKEN]
+    production: true
+    verified_at: "2026-08-03"
+    verified_by: "model_pin.py --check"
+    # RiVault の /v1/models は max_input_tokens/max_output_tokens を返さない（2026-08-03実測）。
+    verified_max_input_tokens: null
+    verified_max_output_tokens: null
+    declared_revision: null
+    declared_weights_format: null
+    declared_trust_remote_code: null
+    declared_engine: null
+    declared_by: null
+    declared_at: null
+
+  gemma3:12b:
+    role: "R8 対策の第2系統のフォールバック（非中国系の独立系統）。主系統の判定を上書きせず不一致を記録する"
+    served_model_name: gemma3:12b
+    endpoint_env: [RIVAULT_URL]
+    token_env: [RIVAULT_TOKEN]
+    production: true
+    verified_at: "2026-08-03"
+    verified_by: "model_pin.py --check"
+    # RiVault の /v1/models は max_input_tokens/max_output_tokens を返さない（2026-08-03実測）。
+    verified_max_input_tokens: null
+    verified_max_output_tokens: null
+    declared_revision: null
+    declared_weights_format: null
+    declared_trust_remote_code: null
+    declared_engine: null
+    declared_by: null
+    declared_at: null
+
+  # --- OCR（マルチモーダル。glm-5.2 は非マルチモーダルのため分離） -----------
+  qwen3.6-35b:
+    role: "スライド / Box 文書の OCR（マルチモーダル）。glm-5.2 は非マルチモーダルのため分離"
+    served_model_name: qwen3.6-35b
+    endpoint_env: [LOCAL_LLM_URL, RIKYU_URL]
+    token_env: [LOCAL_LLM_TOKEN, RIKYU_TOKEN]
+    production: true
+    verified_at: "2026-08-03"
+    verified_by: "model_pin.py --check"
+    verified_max_input_tokens: 262144    # /v1/models 実測（2026-08-03）
+    verified_max_output_tokens: 262144
+    declared_revision: null
+    declared_weights_format: null
+    declared_trust_remote_code: null
+    declared_engine: null
+    declared_by: null
+    declared_at: null
+
+  Qwen3.6-35B-A3B-FP8:
+    role: "スライド / Box 文書の OCR（マルチモーダル、RiVault側）。glm-5.2 は非マルチモーダルのため分離"
+    served_model_name: Qwen/Qwen3.6-35B-A3B-FP8
+    endpoint_env: [RIVAULT_URL]
+    token_env: [RIVAULT_TOKEN]
+    production: true
+    verified_at: "2026-08-03"
+    verified_by: "model_pin.py --check"
+    # RiVault の /v1/models は max_input_tokens/max_output_tokens を返さない（2026-08-03実測）。
+    verified_max_input_tokens: null
+    verified_max_output_tokens: null
+    declared_revision: null
+    declared_weights_format: null
+    declared_trust_remote_code: null
+    declared_engine: null
+    declared_by: null
+    declared_at: null
+
+  # --- 評価専用（本番経路では使わない） -----------------------------------
   kimi-k3:
     role: "評価用（2026-07-31 に PM 判断で活用停止中。本番経路では使わない）"
     served_model_name: kimi-k3

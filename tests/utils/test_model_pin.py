@@ -106,6 +106,27 @@ class TestRealPinFile:
         monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
         assert_model_allowed("glm-5.2")  # declared_revision が null でも通る
 
+    def test_all_production_models_pass_enforce(self, monkeypatch):
+        """本番経路の全モデルが enforce で通ること（2026-08-03 pin 実態合わせ）。
+
+        リポジトリの実 config/model_pin.yaml を対象に、production: true の
+        エントリすべてが enforce モードで例外を投げないことを確認する。
+        ネットワークアクセスは行わない（assert_model_allowed はここに出ない）。
+        """
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        for key, entry in model_pin.models().items():
+            if not entry.get("production"):
+                continue
+            served = entry.get("served_model_name") or key
+            assert_model_allowed(served)
+
+    def test_deepseek_v4_flash_is_production_and_kimi_k2_is_retired(self):
+        """PM 回答（2026-08-03）に基づく訂正: DeepSeek-V4-Flash が本番、
+        Kimi-K2-Thinking は退役（production: false）。"""
+        m = model_pin.models()
+        assert m["DeepSeek-V4-Flash"]["production"] is True
+        assert m["Kimi-K2-Thinking"]["production"] is False
+
 
 # --------------------------------------------------------------------------- #
 # check_endpoints（実ネットワークアクセスなし。fetch_served_models をモンキーパッチ）
