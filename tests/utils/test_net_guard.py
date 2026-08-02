@@ -9,6 +9,7 @@ AF_UNIX ソケットのみを使う。
 """
 import logging
 import socket
+import sys
 import threading
 
 import pytest
@@ -157,6 +158,99 @@ def test_install_is_idempotent(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", sentinel)
     net_guard.install()  # 既にインストール済みなので no-op のはず
     assert socket.getaddrinfo is sentinel
+
+
+# --------------------------------------------------------------------------- #
+# ログの可視性確保（_ensure_log_visible / install() 経由）
+#
+# net_guard は import 時に一度だけ install() が走るため、プロセス起動時点で
+# 既に _ensure_log_visible() が実行済みになっている。ここでは
+# `utils.net_guard` ロガーの状態（handlers/level/propagate）を退避・復元する
+# フィクスチャで「basicConfig を呼んでいないまっさらな状態」を再現する。
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def _isolated_net_guard_logger():
+    orig_handlers = list(net_guard.logger.handlers)
+    orig_level = net_guard.logger.level
+    orig_propagate = net_guard.logger.propagate
+    for h in list(net_guard.logger.handlers):
+        net_guard.logger.removeHandler(h)
+    net_guard.logger.setLevel(logging.NOTSET)
+    net_guard.logger.propagate = True
+    try:
+        yield
+    finally:
+        for h in list(net_guard.logger.handlers):
+            net_guard.logger.removeHandler(h)
+        for h in orig_handlers:
+            net_guard.logger.addHandler(h)
+        net_guard.logger.setLevel(orig_level)
+        net_guard.logger.propagate = orig_propagate
+
+
+def test_ensure_log_visible_adds_handler_when_no_basicconfig(
+    _isolated_net_guard_logger, monkeypatch, capsys
+):
+    """basicConfig 未設定（ルートロガー既定 WARNING で INFO が捨てられる状態）を
+    模した状態で install() すると、net_guard の INFO 記録が stderr に出ること。
+
+    これが今回の回帰（cron 5 本中 2 本で NETGUARD 記録が 0 件だった問題）の
+    検出テストになる。
+    """
+    # ロガー自身に WARNING を明示し、getEffectiveLevel() が INFO より
+    # 緩い（basicConfig 未設定と同じ状況）ことを保証する。
+    net_guard.logger.setLevel(logging.WARNING)
+    monkeypatch.setattr(net_guard, "_installed", False)
+
+    net_guard.install()
+
+    net_guard.logger.info(
+        "[NETGUARD] verdict=allow host=example.com ip=- port=443 caller=test stage=connect"
+    )
+    captured = capsys.readouterr()
+    assert "verdict=allow" in captured.err
+    assert "[utils.net_guard]" in captured.err
+
+
+def test_ensure_log_visible_noop_when_basicconfig_done(
+    _isolated_net_guard_logger, monkeypatch, capsys
+):
+    """logging.basicConfig 済み相当（effectiveLevel が INFO 以下）の環境では、
+    install() してもこのロガーにハンドラを追加せず、二重出力にもならないこと。
+    """
+    root_logger = logging.getLogger()
+    root_handler = logging.StreamHandler(sys.stderr)
+    root_logger.addHandler(root_handler)
+    orig_root_level = root_logger.level
+    root_logger.setLevel(logging.INFO)
+    monkeypatch.setattr(net_guard, "_installed", False)
+    try:
+        net_guard.install()
+
+        assert net_guard.logger.handlers == []
+        assert net_guard.logger.propagate is True
+
+        net_guard.logger.info(
+            "[NETGUARD] verdict=allow host=example.com ip=- port=443 caller=test stage=connect"
+        )
+        captured = capsys.readouterr()
+        assert captured.err.count("verdict=allow") == 1
+    finally:
+        root_logger.removeHandler(root_handler)
+        root_logger.setLevel(orig_root_level)
+
+
+def test_ensure_log_visible_is_idempotent(_isolated_net_guard_logger, monkeypatch):
+    """install() を複数回呼んでもハンドラが増えないこと。"""
+    net_guard.logger.setLevel(logging.WARNING)
+    monkeypatch.setattr(net_guard, "_installed", False)
+    net_guard.install()
+    assert len(net_guard.logger.handlers) == 1
+
+    monkeypatch.setattr(net_guard, "_installed", False)
+    net_guard.install()
+    assert len(net_guard.logger.handlers) == 1
 
 
 # --------------------------------------------------------------------------- #

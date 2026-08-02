@@ -29,6 +29,10 @@ import すると自動的に install() が走る（プロセスにつき一度�
 ログの `stage` フィールドで遮断・記録がどちらの段で起きたかを区別する
 （`stage=resolve` は `getaddrinfo`、`stage=connect` は `socket.connect`）。
 
+この記録は、呼び出し元のエントリスクリプトが `logging.basicConfig()` を呼んで
+いるかどうかに関わらず出力される（`install()` が `_ensure_log_visible()` で
+保証する。詳細はその docstring を参照）。
+
 enforce モードでは以下も fail-closed にする（warn/off は従来どおり fail-open）。
 
     - フック内部の判定ロジックが例外を送出した場合 → 通さず PermissionError で遮断する。
@@ -521,6 +525,44 @@ def verify_endpoints(entries: list[dict] | None = None, mode: str | None = None)
 
 
 # --------------------------------------------------------------------------- #
+# ログの可視性確保
+# --------------------------------------------------------------------------- #
+
+def _ensure_log_visible() -> None:
+    """net_guard 自身の記録（verdict=allow/deny）が確実に出力されるようにする。
+
+    記録が見えるかどうかを各エントリスクリプトの `logging.basicConfig()` 呼び出しに
+    依存させると、1 箇所の書き忘れで静かに観測が消える。実際に cron 5 本中 2 本
+    （`pm_argus_daily.sh` / `canvas_report.sh` が呼ぶ `pm_argus.py` / `pm_xlsx_report.py` /
+    `pm_xlsx_sync.py`）で `basicConfig` が呼ばれておらず、ルートロガー既定の
+    WARNING で INFO 記録が捨てられ NETGUARD 行が 0 件になっていた。
+    「warn で 1 周して宛先を洗い出してから enforce にする」という運用手順は、
+    この観測の欠落によって cron 経路の一部で成立していなかった。
+    **遮断が効いていても、観測できなければ enforce へ進む判断ができない。**
+
+    このロガーの記録が現状では出力されない見込みのとき（ハンドラが無く、かつ
+    有効レベルが INFO より緩い＝ INFO が捨てられる）にだけ、自前の
+    `StreamHandler(sys.stderr)` を付ける。既に `basicConfig` 済み等で INFO が
+    通る環境では何もしない（二重出力を避ける）。ハンドラが付けば以降の呼び出し
+    では条件に当たらないため冪等。
+    """
+    if logger.handlers or logger.getEffectiveLevel() <= logging.INFO:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    # ルートにもハンドラがある環境（basicConfig 済みの他プロセス等）で二重出力に
+    # ならないよう、このロガー独自のハンドラのみに出力先を限定する。
+    logger.propagate = False
+
+
+# --------------------------------------------------------------------------- #
 # install
 # --------------------------------------------------------------------------- #
 
@@ -528,6 +570,10 @@ def install() -> None:
     """socket.getaddrinfo / socket.socket.connect にフックを設置する。
 
     プロセス内で何度呼ばれても一度しか適用しない（冪等）。
+
+    最初に `_ensure_log_visible()` を呼び、net_guard 自身の記録が
+    エントリスクリプトの `basicConfig` 有無に関わらず出力されることを保証する
+    （理由は `_ensure_log_visible` の docstring を参照）。
 
     enforce モードの場合は、allow-list が読めない・空であれば例外を送出して
     起動そのものを止める（修正4）。runtime に全通信が死ぬより起動時に落ちる方が
@@ -541,6 +587,7 @@ def install() -> None:
     with _install_lock:
         if _installed:
             return
+        _ensure_log_visible()
         mode = _current_mode()
         entries = _get_allowlist()
         if mode == "enforce" and not entries:
