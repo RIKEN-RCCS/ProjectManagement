@@ -1116,8 +1116,14 @@ crontab -l | grep argus
 ```
 
 現在の設定（2026-08-02 に実 crontab と突き合わせ済み）:
-- **Patrol は cron に登録されていない。** ラッパー `scripts/bin/pm_argus_patrol.sh`（flock 付き）は
-  存在するが crontab には無く、最後の実行は 2026-07-30。動かすなら手動か、cron への追加が要る
+- **Patrol は cron から意図的に外してある（PM 判断）。** ラッパー
+  `scripts/bin/pm_argus_patrol.sh`（flock 付き）は存在するが crontab には無く、
+  最後の実行は 2026-07-30。
+  **理由: Patrol はアクション保有者へ DM を送るが、その判定にまだ十分な信頼が置けていない。**
+  cron を止めているのが DM を保留する手段そのものである。
+  **勝手に cron へ戻さないこと。手動実行も同じ理由で行わないこと**（`--dry-run` は送信前に
+  return し、そもそも Slack クライアントを生成しないので安全）。
+  再開の判断は DM の信頼性が確認できてから。
 - `pm_argus_daily_summary.sh` も cron に無い（`pm_argus_daily.sh` とは別物）
 
 実際に定期実行されている 5 本は `docs/architecture.md` の CRON 表を参照。

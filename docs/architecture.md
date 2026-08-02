@@ -377,8 +377,10 @@ pm_qa_server.py (Socket Mode デーモン)
 
 **cron に載っていないスクリプト**（存在はするが定期実行されていない）:
 `pm_argus_daily_summary.sh`、`pm_box_distill.sh`（コメントアウト）、
-**`pm_argus_patrol.sh`**（2026-08-02 に確認。ラッパーは flock 付きで存在するが crontab に無く、
-最後の実行は 2026-07-30。「Patrol は 30 分間隔で回っているので放置すれば宛先が観測できる」という
+**`pm_argus_patrol.sh`**（**PM 判断で意図的に外してある**。ラッパーは flock 付きで存在するが
+crontab に無く、最後の実行は 2026-07-30。理由は Patrol がアクション保有者へ DM を送るためで、
+その判定にまだ十分な信頼が置けていない — **cron を止めていることが DM を保留する手段である**。
+勝手に戻さないこと。「Patrol は 30 分間隔で回っているので放置すれば宛先が観測できる」という
 前提で立てた計画があれば見直すこと）。
 `pm_web_update.sh` / `pm_web_fetch.py` は **2026-08-01 に削除**（`docs/security-architecture.md`
 §4.5。認証境界の外へ出る唯一の経路だった）。復活させないこと。
