@@ -86,22 +86,29 @@ HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0�
   ③ Patrol（cron から意図的に外してある。DM の信頼性の問題が別途未解決のため。
   経緯は LOG.md 参照）
 
-### 議事録生成への Kimi-K3 視覚入力の組み込み（2026-07-31 着手）
+### Kimi-K3 の議事録への適用 — 読み手として恒常運用へ、書き手は中止
 
-**ステータス**: **中断（2026-07-31、セキュリティ懸念による PM 判断 — LOG.md 参照）**。
-実装（call_vision_llm / --slide-images / minutes_ab）はレビュー済み・テストグリーンで
-**コミット済み（既定 OFF の opt-in）**。有効化の判断のみ保留。
-ベンチは 20 本中 8 本完了時点で停止（data/eval/minutes_ab/ に保存）。
-再開時は本エントリの下記内容がそのまま有効。詳細計画は `~/.claude/plans/rustling-pondering-starlight.md`。
+**ステータス（2026-08-03、PM 判断）**: **画像入力は中止。読み手（欠落検出）に限定して恒常運用へ。**
+経緯と判断理由は LOG.md 2026-08-03 のエントリを参照。
 
-**内容**: 文字起こし + スライド画像を直接 kimi-k3 に渡す議事録生成。
-(1) llm.py に call_vision_llm 新設（複数画像・常時ストリーミング・usage/image_tokens 記録・
-ctx 超過時の画像間引き梯子）、(2) generate_minutes_local に `--slide-images` +
-`MINUTES_VISION_LLM_*` opt-in（Stage 2/3 のみ視覚化・失敗時テキストフォールバック・既定不変）、
-(3) scripts/eval/minutes_ab.py で 4 アーム盲検 A/B（A=glm+OCR / B=K3+OCR / C=K3+画像 /
-D=K3+画像+OCR、judge は中立の DeepSeek-V4-Flash）。
-**Phase 2（本番 opt-in 配線）はベンチ勝利（C or D が A に ≥60% + 形式崩壊 0）が条件。**
-OCR は視覚化後も廃止しない（Whisper initial_prompt の terminology が依存）。
+**恒常運用に入ったもの**:
+- `pm_screen.py --second-opinion-minutes --reader both`（K3=recall / Llama-4-Scout=R8）
+- `scripts/bin/pm_second_opinion_minutes.sh`（flock・enforce 既定）
+- `model_pin.yaml` で `kimi-k3` を `production: true`（**読み手専用**。
+  `declared_trust_remote_code` は null のまま。`risk_accepted` に経緯）
+
+**残っている作業**:
+1. **crontab への登録**（PM 作業）。週 1 回を推奨（会議は週数本、直近 30 日で 37 件のため日次は過剰）。
+   登録例はラッパーのヘッダにある
+2. **所見のレビュー** — 現在 134 行すべて未レビュー。14 日を過ぎると `pm_selfcheck` の
+   `second_opinion_findings_stale` が違反を出す（**読まれない所見が溜まるのは検査が動いていないのと同じ**）
+3. **judge の再現性** — 同じ出力を再判定して勝敗が反転する（C:B が 0%→66.7%）。`--seed` が
+   既定で固定されていない。**この A/B 設計では K3 の優劣を判定できない**ので、
+   生成用途を再検討するなら先にここを直す必要がある
+
+**中止したもの（実装は残す）**: 視覚入力（`call_vision_llm` / `--slide-images` / `minutes_ab`）は
+コミット済み・既定 OFF のまま。再検討する場合は上記 3 が前提。
+ベンチ結果は `data/eval/minutes_ab/`（混在期のデータは `*_pre_20260803_mixed_period.jsonl` に隔離）。
 
 ### Kimi-K3 の実力を引き出す investigate 実装の検証（one-shot 長文脈 2×2 実験）
 
