@@ -50,5 +50,9 @@ echo "======== pm_selfcheck.sh 開始: $(date '+%Y-%m-%d %H:%M:%S') ========"
 "$PYTHON3" "$SCRIPT_DIR/quality/pm_selfcheck.py" --days 7 "$@"
 STATUS=$?
 
+# 外部アンカー（§4.4）の記録は検査の成否によらず行う。検査が壊れているときこそ
+# 「連鎖の頭が動いているか」の記録が要るため、STATUS が非0でもここは実行する。
+"$PYTHON3" "$SCRIPT_DIR/quality/pm_selfcheck.py" --emit-anchor
+
 echo "======== pm_selfcheck.sh 完了: $(date '+%Y-%m-%d %H:%M:%S') (exit=$STATUS) ========"
 exit "$STATUS"

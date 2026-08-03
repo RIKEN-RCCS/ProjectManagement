@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -124,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         answer = run_investigate_for_worker(
             question=args.investigate, days=args.days, max_steps=args.max_steps,
             timeout=args.timeout, index_name=args.index_name, no_encrypt=args.no_encrypt,
+            progress=_print_progress,
         )
     except Exception as e:  # 親に伝えるため JSON で返す（stderr にも出す）
         print(f"[READ-PLANE] 調査に失敗しました: {e}", file=sys.stderr)
@@ -134,6 +136,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _print_progress(text: str) -> None:
+    """調査中の進捗を JSON 行として stdout へ流す。
+
+    子は Slack トークンを持たないので自分では投稿できない。進捗は
+    `{"progress": "..."}` の1行1レコードで流すだけにし、実際の投稿は
+    親（Write Plane、トークンを持つ）が代わりに行う。**最終結果の行
+    （`{"ok": ...}`）と混ざらないよう、キーを `progress` に固定する**
+    （親側は行を JSON として解釈し `ok` キーの有無で仕分ける）。
+    トークンや DB の中身を流さないよう 500 文字で切る
+    （`update()` が渡す文言はツール名と件数程度なので実害はないが、上限として設ける）。
+    """
+    print(json.dumps({"progress": str(text)[:500]}, ensure_ascii=False), flush=True)
+
+
 # --------------------------------------------------------------------------- #
 # 親（Write Plane）側から使うヘルパ
 # --------------------------------------------------------------------------- #
@@ -141,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
 def run_in_read_plane(
     question: str, *, days: int = 30, max_steps: int = 20, timeout: int = 480,
     index_name: str = "pm", no_encrypt: bool = False, spawn_timeout: int = 900,
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """調査を Read Plane のサブプロセスで実行し、回答テキストを返す。
 
@@ -148,10 +165,20 @@ def run_in_read_plane(
     **子には渡さない** — `scrub_env()` で除き、`ARGUS_NETGUARD_PLANES=read_plane` で
     write_plane の宛先を許可集合から外す。子は起動時に自己検査で二重に確認する。
 
+    子は進捗を stdout に `{"progress": "..."}` の JSON 行で流すだけで、
+    戻り値は要らない（片方向）。**完全な IPC ブローカーは不要** — ここでは
+    行単位で読みながら `progress` キーを見つけるたびに `on_progress` を
+    呼ぶだけの最小実装で足りる。`progress` 行が最終結果の行より後に来ても
+    正しく扱えるよう、**全行を走査し `ok` キーを持つ最後の行を結果とする**
+    （最後の1行だけを結果とみなす実装だと progress 行が後に来て壊れるため）。
+
     失敗時は RuntimeError。**親は失敗を握りつぶさないこと** — 分離が壊れたまま
     in-process にフォールバックすると、分離が「あるように見えて無い」状態になる。
     """
+    import queue as _queue
     import subprocess
+    import threading
+    import time as _time
 
     env = scrub_env()
     env["PYTHONPATH"] = str(_SCRIPT_DIR)
@@ -167,14 +194,78 @@ def run_in_read_plane(
     if no_encrypt:
         cmd.append("--no-encrypt")
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=spawn_timeout)
-    line = (proc.stdout or "").strip().splitlines()
-    if not line:
-        raise RuntimeError(f"Read Plane ワーカーが応答を返しませんでした: {proc.stderr[-300:]}")
-    try:
-        payload = json.loads(line[-1])
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Read Plane ワーカーの応答が JSON ではありません: {e}") from e
+    proc = subprocess.Popen(
+        cmd, env=env, text=True, bufsize=1,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    stdout_queue: _queue.Queue[str | None] = _queue.Queue()
+    stderr_chunks: list[str] = []
+
+    def _drain_stdout() -> None:
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                stdout_queue.put(line)
+        finally:
+            stdout_queue.put(None)  # EOF 通知
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stderr_chunks.append(line)
+
+    stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    deadline = _time.monotonic() + spawn_timeout
+    payload: dict | None = None
+    timed_out = False
+
+    while True:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            line = stdout_queue.get(timeout=remaining)
+        except _queue.Empty:
+            timed_out = True
+            break
+        if line is None:  # 子プロセスの stdout が閉じた（正常終了・異常終了とも）
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "ok" in rec:
+            payload = rec
+        elif "progress" in rec and on_progress is not None:
+            try:
+                on_progress(rec["progress"])
+            except Exception as e:
+                print(f"[READ-PLANE] on_progress エラー: {e}", file=sys.stderr)
+
+    if timed_out:
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        raise RuntimeError(f"Read Plane ワーカーがタイムアウトしました（{spawn_timeout}s）")
+
+    proc.wait()
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+    stderr_text = "".join(stderr_chunks)
+
+    if payload is None:
+        raise RuntimeError(f"Read Plane ワーカーが応答を返しませんでした: {stderr_text[-300:]}")
     if not payload.get("ok"):
         raise RuntimeError(f"Read Plane ワーカーが失敗しました: {payload.get('error')}")
     return payload["answer"]

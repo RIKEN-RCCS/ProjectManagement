@@ -31,7 +31,9 @@
 """
 from __future__ import annotations
 
+import argparse
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -158,7 +160,20 @@ def post(
 
     if outcome == "blocked":
         if spec.get("requires_human_approval") and not reasons:
-            raise EgressPendingApproval(f"[BROKER] {target}: {block_reason}")
+            egress_id = None
+            if conn is not None:
+                from db_utils import record_pending_egress
+                egress_id = record_pending_egress(
+                    conn, target=target, content=content, block_reason=block_reason,
+                )
+            if egress_id is not None:
+                approve_hint = (
+                    f"（保留 id={egress_id}。承認するには"
+                    f" `python3 scripts/argus/output_broker.py --approve {egress_id}`）"
+                )
+            else:
+                approve_hint = "（conn が渡されなかったため保留台帳には記録していません）"
+            raise EgressPendingApproval(f"[BROKER] {target}: {block_reason}{approve_hint}")
         raise EgressBlocked(f"[BROKER] {target}: {block_reason}")
 
     if dry_run:
@@ -213,3 +228,124 @@ def _dispatch(kind: str, dest: str, content: str, *, title: str = "") -> None:
         )
     else:
         raise EgressBlocked(f"未知の輸送種別: {kind!r}")
+
+
+# --------------------------------------------------------------------------- #
+# 承認フローの受け皿（CLI）。§4.2 の `requires_human_approval` は「投げるところまで」
+# しか実装がなかった（`EgressPendingApproval` を受け取る側が無かった）ため、
+# Slack のボタン UI ではなく CLI で完結する最小の受け皿を用意する。
+# --------------------------------------------------------------------------- #
+def main(argv: list[str] | None = None) -> int:
+    from cli_utils import add_db_arg, add_no_encrypt_arg, resolve_db_path
+    from db_utils import (
+        decide_pending_egress,
+        list_pending_egress,
+        open_db,
+        record_tool_call,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="出力ブローカーの承認キュー CLI（§4.2 の承認フローの受け皿）"
+    )
+    add_db_arg(parser)
+    add_no_encrypt_arg(parser)
+    parser.add_argument("--list-pending", action="store_true",
+                        help="承認待ちの egress を一覧表示する（本文は先頭200文字まで）")
+    parser.add_argument("--approve", type=int, metavar="ID", help="指定 id を承認し実際に送信する")
+    parser.add_argument("--reject", type=int, metavar="ID", help="指定 id を却下する（送信しない）")
+    parser.add_argument("--decided-by", default=None, metavar="NAME",
+                        help="承認/却下の実施者名（未指定なら環境変数 USER）")
+    args = parser.parse_args(argv)
+
+    if not (args.list_pending or args.approve is not None or args.reject is not None):
+        parser.print_help()
+        return 1
+
+    db_path = resolve_db_path(args.db, _REPO_ROOT / "data" / "pm.db")
+    if not db_path.exists():
+        print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
+        return 1
+    conn = open_db(db_path, encrypt=not args.no_encrypt)
+    decided_by = args.decided_by or os.environ.get("USER", "unknown")
+
+    try:
+        if args.list_pending:
+            rows = list_pending_egress(conn)
+            if not rows:
+                print("承認待ちはありません")
+                return 0
+            for r in rows:
+                print(
+                    f"id={r['id']} ts={r['ts']} target={r['target']} chars={r['chars']}"
+                    f" status={r['status']} block_reason={r['block_reason']}"
+                )
+                print(f"  本文（先頭200文字）: {(r['content'] or '')[:200]}")
+            return 0
+
+        if args.approve is not None:
+            row = next(
+                (r for r in list_pending_egress(conn) if r["id"] == args.approve), None,
+            )
+            if row is None:
+                print(f"ERROR: id={args.approve} は見つかりません", file=sys.stderr)
+                return 1
+            if row["status"] != "pending":
+                print(f"ERROR: id={args.approve} は既に {row['status']} 済みです", file=sys.stderr)
+                return 1
+
+            # 送信前に既存の検査（canary・ゼロ幅文字）を必ず通す。承認は
+            # 「宛先」に対する人間の判断であって、DLP を代替しない。
+            reasons = scan_payload(row["content"], _active_canaries(conn))
+            if reasons:
+                print(
+                    f"ERROR: 承認を中断しました（送信前検査に失敗）: {'; '.join(reasons)}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            targets = load_targets()
+            spec = targets.get(row["target"])
+            if not spec:
+                print(
+                    f"ERROR: 宛先 {row['target']!r} が egress_targets.yaml に見つかりません"
+                    "（承認までの間に設定が変わった可能性）",
+                    file=sys.stderr,
+                )
+                return 1
+
+            decide_pending_egress(conn, args.approve, approve=True, decided_by=decided_by)
+            record_tool_call(
+                conn, session_id="broker-cli", seq=0, plane="egress",
+                tool_name="broker:approve",
+                args={"id": args.approve, "target": row["target"], "decided_by": decided_by},
+                outcome="ok",
+            )
+            dest = _resolve_config_ref(spec["config_ref"])
+            _dispatch(spec["type"], dest, row["content"])
+            print(f"承認・送信しました: id={args.approve} target={row['target']}")
+            return 0
+
+        if args.reject is not None:
+            try:
+                row = decide_pending_egress(
+                    conn, args.reject, approve=False, decided_by=decided_by,
+                )
+            except ValueError as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                return 1
+            record_tool_call(
+                conn, session_id="broker-cli", seq=0, plane="egress",
+                tool_name="broker:reject",
+                args={"id": args.reject, "target": row["target"], "decided_by": decided_by},
+                outcome="blocked", block_reason="human_rejected",
+            )
+            print(f"却下しました: id={args.reject} target={row['target']}")
+            return 0
+    finally:
+        conn.close()
+
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

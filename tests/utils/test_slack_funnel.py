@@ -201,3 +201,152 @@ class TestAuditConnProductionIsolation:
             conn.close()
 
         assert after == before + 1
+
+
+# --------------------------------------------------------------------------- #
+# 層3（宛先粒度）の照合（docs/security-architecture.md §4.7）
+#
+# `tests/conftest.py` の autouse フィクスチャ（`_isolate_dest_config`）が
+# `_argus_config_path()` を既定で存在しないパスへ差し替え、`_dest_cache` も
+# 毎テストでリセットしている。ここではさらに特定の宛先集合を持つ一時 yaml へ
+# 差し替える（本番 data/argus_config.yaml は一切読まない）。
+#
+# チャンネル/ユーザー/Canvas の識別子はプレースホルダ表記（pre-commit の
+# no-slack-id-literals が許容する `[CUFG]0[XY]+` 形式）のみを使い、区別は
+# X/Y の個数（＝文字列長）で付ける。
+# --------------------------------------------------------------------------- #
+
+_LEADER_CHANNEL = "C0XXXXXXX"          # 9文字
+_PM_CHANNEL = "C0XXXXXXXX"             # 10文字（leader とは別の宛先）
+_UNKNOWN_CHANNEL = "C0XXXXXXXXX"       # 11文字（config に含めない）
+_REDIRECT_USER = "U0XXXXXXX"
+_REPORT_CANVAS = "F0YYYYYYY"           # 9文字
+_CATALOG_CANVAS = "F0YYYYYYYY"         # 10文字（report とは別の宛先）
+
+
+@pytest.fixture
+def dest_config_path(tmp_path, monkeypatch):
+    """テスト用の一時 argus_config.yaml。本番 data/argus_config.yaml は一切読まない。"""
+    p = tmp_path / "argus_config.yaml"
+    p.write_text(
+        f"""
+patrol:
+  leader_channel: "{_LEADER_CHANNEL}"
+  dm_redirect_user: "{_REDIRECT_USER}"
+indices:
+  pm:
+    channels: ["{_PM_CHANNEL}"]
+report:
+  canvas_id: "{_REPORT_CANVAS}"
+  box_folder_id: "111111"
+meetings:
+  Leader_Meeting:
+    box_folder_id: "222222"
+    catalog_canvas_id: "{_CATALOG_CANVAS}"
+""",
+        encoding="utf-8",
+    )
+    from utils import slack_post
+    monkeypatch.setattr(slack_post, "_argus_config_path", lambda: p)
+    monkeypatch.setattr(slack_post, "_dest_cache", None)
+    return p
+
+
+class TestConfiguredSlackDestinations:
+    def test_collects_destinations_from_tmp_yaml(self, dest_config_path):
+        from utils.slack_post import configured_slack_destinations
+
+        dests = configured_slack_destinations()
+        assert dests == {
+            _LEADER_CHANNEL, _REDIRECT_USER, _PM_CHANNEL,
+            _REPORT_CANVAS, "111111", "222222", _CATALOG_CANVAS,
+        }
+
+    def test_missing_file_returns_empty_set_and_warns(self, tmp_path, monkeypatch, caplog):
+        from utils import slack_post
+
+        monkeypatch.setattr(slack_post, "_argus_config_path", lambda: tmp_path / "no_such.yaml")
+        monkeypatch.setattr(slack_post, "_dest_cache", None)
+        with caplog.at_level("WARNING"):
+            dests = slack_post.configured_slack_destinations()
+        assert dests == set()
+        assert "見つかりません" in caplog.text
+
+
+class TestDestinationMatch:
+    def test_known_destination_is_recorded_as_dest_known_true(self, conn, dest_config_path, monkeypatch):
+        import json
+
+        monkeypatch.setenv("ARGUS_EGRESS_TARGETS", "warn")
+        post_message(FakeClient(), channel=_LEADER_CHANNEL, text="本文", conn=conn)
+        r = conn.execute("SELECT args_json FROM tool_calls").fetchone()
+        assert json.loads(r["args_json"])["dest_known"] is True
+
+    def test_unknown_destination_warns_and_passes_in_warn_mode(
+        self, conn, dest_config_path, monkeypatch, caplog,
+    ):
+        import json
+
+        monkeypatch.setenv("ARGUS_EGRESS_TARGETS", "warn")
+        with caplog.at_level("WARNING"):
+            post_message(FakeClient(), channel=_UNKNOWN_CHANNEL, text="本文", conn=conn)
+        r = conn.execute("SELECT args_json, outcome FROM tool_calls").fetchone()
+        assert json.loads(r["args_json"])["dest_known"] is False
+        assert r["outcome"] == "ok"
+        assert "EGRESS-L3" in caplog.text
+
+    def test_unknown_destination_blocks_in_enforce_mode(self, conn, dest_config_path, monkeypatch):
+        monkeypatch.setenv("ARGUS_EGRESS_TARGETS", "enforce")
+        with pytest.raises(SlackEgressBlocked, match="宛先"):
+            post_message(FakeClient(), channel=_UNKNOWN_CHANNEL, text="本文", conn=conn)
+        r = conn.execute("SELECT outcome, block_reason FROM tool_calls").fetchone()
+        assert r["outcome"] == "blocked"
+        assert "宛先" in r["block_reason"]
+
+    def test_ephemeral_never_blocks_even_in_enforce_mode(self, conn, dest_config_path, monkeypatch):
+        """ephemeral はコマンド実行チャンネルへ正当に返るため、enforce でも遮断しない
+        （分布観測のため記録は行う）。"""
+        import json
+
+        monkeypatch.setenv("ARGUS_EGRESS_TARGETS", "enforce")
+        post_ephemeral(
+            FakeClient(), channel=_UNKNOWN_CHANNEL, user=_REDIRECT_USER, text="本文", conn=conn,
+        )
+        r = conn.execute("SELECT args_json, outcome FROM tool_calls").fetchone()
+        assert json.loads(r["args_json"])["dest_known"] is False
+        assert r["outcome"] == "ok"
+
+    def test_off_mode_skips_matching_entirely(self, conn, dest_config_path, monkeypatch):
+        import json
+
+        from utils import slack_post
+
+        monkeypatch.setenv("ARGUS_EGRESS_TARGETS", "off")
+
+        def _boom(conn=None):
+            raise AssertionError("mode=off では照合自体が行われないはず")
+
+        monkeypatch.setattr(slack_post, "configured_slack_destinations", _boom)
+        post_message(FakeClient(), channel=_UNKNOWN_CHANNEL, text="本文", conn=conn)
+        r = conn.execute("SELECT args_json FROM tool_calls").fetchone()
+        assert "dest_known" not in json.loads(r["args_json"])
+
+    def test_guard_outbound_text_matches_canvas_destination(self, conn, dest_config_path, monkeypatch):
+        import json
+
+        from utils.slack_post import guard_outbound_text
+
+        monkeypatch.setenv("ARGUS_EGRESS_TARGETS", "warn")
+        guard_outbound_text("本文", transport="canvas", dest=_REPORT_CANVAS, conn=conn)
+        r = conn.execute("SELECT args_json FROM tool_calls").fetchone()
+        assert json.loads(r["args_json"])["dest_known"] is True
+
+    def test_guard_outbound_text_flags_unknown_box_folder(self, conn, dest_config_path, monkeypatch):
+        import json
+
+        from utils.slack_post import guard_outbound_text
+
+        monkeypatch.setenv("ARGUS_EGRESS_TARGETS", "warn")
+        guard_outbound_text("本文", transport="box", dest="999999999", conn=conn)
+        r = conn.execute("SELECT args_json FROM tool_calls").fetchone()
+        assert json.loads(r["args_json"])["dest_known"] is False

@@ -243,6 +243,82 @@ class TestAnchor:
 
 
 # --------------------------------------------------------------------------- #
+# pending_egress（承認フローの受け皿。docs/security-architecture.md §4.2）
+# --------------------------------------------------------------------------- #
+class TestPendingEgress:
+    def test_record_returns_id_and_stores_body(self, conn):
+        from db_utils import record_pending_egress
+
+        egress_id = record_pending_egress(
+            conn, target="collab_shared_slack", content="外部宛の本文",
+            block_reason="人間の承認が必要な宛先です",
+        )
+        assert isinstance(egress_id, int)
+        row = conn.execute("SELECT * FROM pending_egress WHERE id = ?", (egress_id,)).fetchone()
+        assert row["target"] == "collab_shared_slack"
+        assert row["content"] == "外部宛の本文"
+        assert row["status"] == "pending"
+        assert row["chars"] == len("外部宛の本文")
+
+    def test_record_also_writes_tool_calls(self, conn):
+        from db_utils import record_pending_egress
+
+        record_pending_egress(conn, target="t", content="本文", block_reason="reason")
+        r = conn.execute("SELECT plane, tool_name, outcome FROM tool_calls").fetchone()
+        assert r["plane"] == "egress"
+        assert r["tool_name"] == "broker:pending"
+        assert r["outcome"] == "blocked"
+
+    def test_list_returns_newest_first(self, conn):
+        from db_utils import list_pending_egress, record_pending_egress
+
+        record_pending_egress(conn, target="a", content="1件目", block_reason="r")
+        record_pending_egress(conn, target="b", content="2件目", block_reason="r")
+        rows = list_pending_egress(conn)
+        assert [r["target"] for r in rows] == ["b", "a"]
+
+    def test_list_on_missing_table_is_empty(self, conn):
+        from db_utils import list_pending_egress
+
+        assert list_pending_egress(conn) == []
+
+    def test_decide_approve_updates_status(self, conn):
+        from db_utils import decide_pending_egress, record_pending_egress
+
+        egress_id = record_pending_egress(conn, target="a", content="本文", block_reason="r")
+        row = decide_pending_egress(conn, egress_id, approve=True, decided_by="tester")
+        assert row["status"] == "approved"
+        assert row["decided_by"] == "tester"
+        assert row["decided_at"] is not None
+        stored = conn.execute(
+            "SELECT status, decided_by FROM pending_egress WHERE id = ?", (egress_id,)
+        ).fetchone()
+        assert stored["status"] == "approved"
+        assert stored["decided_by"] == "tester"
+
+    def test_decide_reject_updates_status(self, conn):
+        from db_utils import decide_pending_egress, record_pending_egress
+
+        egress_id = record_pending_egress(conn, target="a", content="本文", block_reason="r")
+        row = decide_pending_egress(conn, egress_id, approve=False, decided_by="tester")
+        assert row["status"] == "rejected"
+
+    def test_decide_unknown_id_raises(self, conn):
+        from db_utils import decide_pending_egress
+
+        with pytest.raises(ValueError, match="見つかりません"):
+            decide_pending_egress(conn, 9999, approve=True, decided_by="tester")
+
+    def test_decide_twice_raises(self, conn):
+        from db_utils import decide_pending_egress, record_pending_egress
+
+        egress_id = record_pending_egress(conn, target="a", content="本文", block_reason="r")
+        decide_pending_egress(conn, egress_id, approve=True, decided_by="tester")
+        with pytest.raises(ValueError, match="既に"):
+            decide_pending_egress(conn, egress_id, approve=False, decided_by="tester")
+
+
+# --------------------------------------------------------------------------- #
 # ensure_tool_calls_table() が呼び出し側の未コミットトランザクションを
 # 暗黙 COMMIT してしまう欠陥の回帰テスト（executescript() の implicit commit）。
 # --------------------------------------------------------------------------- #

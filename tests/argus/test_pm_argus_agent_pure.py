@@ -1127,3 +1127,249 @@ def test_run_agent_explicit_timeout_bypasses_env(monkeypatch, agent_context):
     pm_argus_agent.run_agent("質問", "シード", None, agent_context, timeout=30)
 
     assert captured["timeout"] == 30
+
+
+# --------------------------------------------------------------------------- #
+# run_investigate_for_worker — Read Plane への progress 橋渡し
+# （能力分離 5b、docs/security-architecture.md §3.2）
+# --------------------------------------------------------------------------- #
+
+
+def test_progress_as_respond_returns_none_for_none():
+    assert pm_argus_agent._progress_as_respond(None) is None
+
+
+def test_progress_as_respond_forwards_text_only():
+    received = []
+    respond = pm_argus_agent._progress_as_respond(received.append)
+
+    respond(text="ステップ1")
+    respond(blocks=[{"type": "section"}], response_type="ephemeral", replace_original=True)
+
+    assert received == ["ステップ1"]
+
+
+def _patch_run_investigate_for_worker_deps(monkeypatch, tmp_path, run_agent):
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        pm_argus_agent, "_resolve_index_and_channels",
+        lambda *a, **kw: (tmp_path / "qa_index.db", [], [tmp_path / "pm.db"], "pm"),
+    )
+    monkeypatch.setattr(pm_argus_agent, "open_pm_db", lambda *a, **kw: _FakeConn())
+    monkeypatch.setattr(pm_argus_agent, "build_seed_data", lambda ctx: "シード")
+    monkeypatch.setattr(pm_argus_agent, "run_agent", run_agent)
+
+
+def test_run_investigate_for_worker_backward_compatible_without_progress(monkeypatch, tmp_path):
+    """progress 未指定時は従来どおり respond=None で run_agent が呼ばれる（後方互換）。"""
+    captured = {}
+
+    def fake_run_agent(*, question, seed_data, respond, ctx, max_steps, timeout):
+        captured["respond"] = respond
+        return "回答"
+
+    _patch_run_investigate_for_worker_deps(monkeypatch, tmp_path, fake_run_agent)
+
+    result = pm_argus_agent.run_investigate_for_worker(question="質問")
+
+    assert result == "回答"
+    assert captured["respond"] is None
+
+
+def test_run_investigate_for_worker_bridges_progress_to_run_agent_respond(monkeypatch, tmp_path):
+    """progress を渡すと run_agent の respond 経由の text= が progress に橋渡しされる。"""
+    received = []
+
+    def fake_run_agent(*, question, seed_data, respond, ctx, max_steps, timeout):
+        respond(text="STEP 1")
+        respond(blocks=[{"type": "section"}], response_type="ephemeral", replace_original=True)
+        return "回答"
+
+    _patch_run_investigate_for_worker_deps(monkeypatch, tmp_path, fake_run_agent)
+
+    result = pm_argus_agent.run_investigate_for_worker(question="質問", progress=received.append)
+
+    assert result == "回答"
+    assert received == ["STEP 1"]
+
+
+# --------------------------------------------------------------------------- #
+# _make_progress_updater / run_agent — respond への配線
+# （2026-08-01 導入以来 respond が握りつぶされていたバグの修正）
+# --------------------------------------------------------------------------- #
+
+
+def test_make_progress_updater_calls_respond_up_to_limit():
+    calls = []
+
+    def respond(**kwargs):
+        calls.append(kwargs)
+
+    update = pm_argus_agent._make_progress_updater(respond, max_respond_calls=2)
+    update("STEP1")
+    update("STEP2")
+    update("STEP3")
+
+    assert len(calls) == 2
+    assert calls[0]["text"] == ":mag: Argus 調査中...\nSTEP1"
+    assert calls[1]["text"] == ":mag: Argus 調査中...\nSTEP1\nSTEP2"
+    assert all(c["response_type"] == "ephemeral" and c["replace_original"] for c in calls)
+
+
+def test_make_progress_updater_with_none_respond_does_not_raise():
+    update = pm_argus_agent._make_progress_updater(None)
+    update("STEP1")  # 例外にならないこと
+
+
+def test_run_agent_with_respond_none_does_not_raise(monkeypatch, agent_context):
+    """respond=None のときは従来どおり例外にならない（メンション経路と同じ状況）。"""
+    monkeypatch.setattr(pm_argus_agent, "_rewrite_query", lambda q: None)
+    monkeypatch.setattr(
+        pm_argus_agent, "call_argus_llm",
+        lambda prompt, **kwargs: "<final_answer>調査完了</final_answer>",
+    )
+
+    result = pm_argus_agent.run_agent(
+        "テスト質問", "", None, agent_context, max_steps=3, timeout=30,
+    )
+
+    assert "調査完了" in result
+
+
+def test_run_agent_wires_respond_and_respects_max_respond_calls(monkeypatch, agent_context):
+    """run_agent は自身の respond 引数を progress へ橋渡しする
+    （旧: L1050 `_make_progress_updater(None)` 固定で respond が無視されていた）。
+    複数回の進捗イベントが起きても、実際の respond 呼び出しは
+    `_make_progress_updater` の既定 max_respond_calls=2 を超えない。
+    """
+    monkeypatch.setattr(pm_argus_agent, "_rewrite_query", lambda q: None)
+
+    call_count = {"n": 0}
+
+    def fake_llm(prompt, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return '<tool_call>{"name": "__no_such_tool__", "args": {"i": 1}}</tool_call>'
+        return "<final_answer>調査完了</final_answer>"
+
+    monkeypatch.setattr(pm_argus_agent, "call_argus_llm", fake_llm)
+
+    respond_calls = []
+
+    def respond(**kwargs):
+        respond_calls.append(kwargs)
+
+    result = pm_argus_agent.run_agent(
+        "テスト質問", "", respond, agent_context, max_steps=3, timeout=30,
+    )
+
+    assert "調査完了" in result
+    assert 1 <= len(respond_calls) <= 2
+    for c in respond_calls:
+        assert c["response_type"] == "ephemeral"
+        assert c["replace_original"] is True
+
+
+# --------------------------------------------------------------------------- #
+# _run_investigate — Read Plane への経路切り替え（能力分離 5b）
+# --------------------------------------------------------------------------- #
+
+
+def _patch_run_investigate_deps(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        pm_argus_agent, "_resolve_index_and_channels",
+        lambda channel_id="": (tmp_path / "qa_index.db", [], [], "pm"),
+    )
+    monkeypatch.setattr(pm_argus_agent, "build_seed_data", lambda ctx: "シード")
+
+
+def test_run_investigate_flag_off_uses_in_process_run_agent(monkeypatch, tmp_path):
+    monkeypatch.delenv("ARGUS_READ_PLANE_SUBPROCESS", raising=False)
+    _patch_run_investigate_deps(monkeypatch, tmp_path)
+
+    captured = {}
+
+    def fake_run_agent(*, question, seed_data, respond, ctx):
+        captured["called"] = True
+        return "回答"
+
+    monkeypatch.setattr(pm_argus_agent, "run_agent", fake_run_agent)
+
+    import argus.pm_read_worker as pm_read_worker
+
+    def fail_run_in_read_plane(*a, **kw):
+        raise AssertionError("フラグ OFF なのに Read Plane サブプロセスが呼ばれた")
+
+    monkeypatch.setattr(pm_read_worker, "run_in_read_plane", fail_run_in_read_plane)
+
+    pm_argus_agent._run_investigate(lambda **kw: None, {"text": "質問", "channel_id": "C1"})
+
+    assert captured.get("called") is True
+
+
+def test_run_investigate_flag_on_uses_read_plane_subprocess(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARGUS_READ_PLANE_SUBPROCESS", "1")
+    _patch_run_investigate_deps(monkeypatch, tmp_path)
+
+    def fail_run_agent(*a, **kw):
+        raise AssertionError("フラグ ON なのに in-process run_agent が呼ばれた")
+
+    monkeypatch.setattr(pm_argus_agent, "run_agent", fail_run_agent)
+
+    captured = {}
+
+    def fake_run_in_read_plane(question, *, index_name="pm", on_progress=None):
+        captured["question"] = question
+        captured["index_name"] = index_name
+        captured["on_progress"] = on_progress
+        return "回答"
+
+    import argus.pm_read_worker as pm_read_worker
+    monkeypatch.setattr(pm_read_worker, "run_in_read_plane", fake_run_in_read_plane)
+
+    respond_calls = []
+    pm_argus_agent._run_investigate(
+        lambda **kw: respond_calls.append(kw), {"text": "質問", "channel_id": "C1"},
+    )
+
+    assert captured["question"] == "質問"
+    assert captured["index_name"] == "pm"
+    assert captured["on_progress"] is not None
+    # 最終結果は respond(blocks=..., replace_original=True) で投稿される
+    assert any(c.get("blocks") for c in respond_calls)
+
+
+def test_run_investigate_file_scope_uses_document_qa_even_when_flag_on(monkeypatch, tmp_path):
+    """--file スコープ（record_ids あり）はフラグ ON でも in-process の run_document_qa のまま。"""
+    monkeypatch.setenv("ARGUS_READ_PLANE_SUBPROCESS", "1")
+    _patch_run_investigate_deps(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        "argus.mcp_tools._resolve_box_file_ids",
+        lambda file_arg, record_ids: (["rec1"], ["資料.pdf"]),
+    )
+
+    import argus.pm_read_worker as pm_read_worker
+
+    def fail_run_in_read_plane(*a, **kw):
+        raise AssertionError("--file スコープなのに Read Plane サブプロセスが呼ばれた")
+
+    monkeypatch.setattr(pm_read_worker, "run_in_read_plane", fail_run_in_read_plane)
+
+    captured = {}
+
+    def fake_run_document_qa(*, question, respond, ctx):
+        captured["called"] = True
+        assert ctx.record_ids == ["rec1"]
+        return "回答"
+
+    monkeypatch.setattr(pm_argus_agent, "run_document_qa", fake_run_document_qa)
+
+    pm_argus_agent._run_investigate(
+        lambda **kw: None, {"text": "質問 --file 資料.pdf", "channel_id": "C1"},
+    )
+
+    assert captured.get("called") is True

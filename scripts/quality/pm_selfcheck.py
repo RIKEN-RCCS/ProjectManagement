@@ -44,13 +44,32 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
                              一方でネットワークに出ないため、宣言と実際のズレは
                              この日次検査だけが検知できる。**この検査だけは
                              ネットワークに出る**（他は全て読み取り専用）。
+ 12. egress_dest_unknown   — 設定に無い宛先（層3、docs/security-architecture.md
+                             §4.7）への送信件数・宛先種類数の観測。層3はまだ
+                             warn 段階（`ARGUS_EGRESS_TARGETS`）のため、
+                             **これは違反ではなく enforce へ進める判断材料**。
+                             `--silence-strict` を付けても exit code には
+                             影響しない。
+ 13. anchor_consistency    — 外部アンカー（`--emit-anchor` が追記する
+                             config/anchors/tool_call_anchor.jsonl）の各行が、
+                             その行数時点の tool_calls.entry_hash と一致するか
+                             （§4.4）。アンカー無し／空は判定不能（違反にしない）。
+                             台帳が縮んでいる場合も違反にする。
+ 14. pending_egress_stale  — `pending_egress`（§4.2 の承認フロー）で
+                             status='pending' のまま 7 日以上放置された行がある。
+                             滞留は承認フローが機能していない証拠なので黙って溜めない。
 
-書き込みは一切行わない。値（channel/user ID 等）はログに出力しない
+本ファイルの通常の検査（1〜14）は書き込みを一切行わない。値（channel/user ID 等）はログに出力しない
 （state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
 canary トークン・宛先ホスト・呼び出し元を出力するが、いずれも秘匿値ではない）。
 model_pin_drift のみ `/v1/models` への通信を行う（本ファイルは元来ネットワークに
 出ない読み取り専用の検査だったが、この検査だけ性格が異なる。`--skip-model-pin` で
 この検査だけを退避できる）。
+
+`--emit-anchor` は上記14検査とは独立した動作モードで、通常検査を一切行わず
+外部アンカーファイル（config/anchors/tool_call_anchor.jsonl）へ1行追記するだけで
+終了する。**このアンカーはファイルがこのマシンの外へ出て初めて意味を持つ**
+（詳細は `emit_anchor()` の docstring を参照）。
 
 Usage:
     python3 scripts/quality/pm_selfcheck.py
@@ -59,6 +78,7 @@ Usage:
     python3 scripts/quality/pm_selfcheck.py --db data/pm.db --state-db data/patrol_state.db
     python3 scripts/quality/pm_selfcheck.py --logs-dir logs --days 1
     python3 scripts/quality/pm_selfcheck.py --no-security-checks
+    python3 scripts/quality/pm_selfcheck.py --emit-anchor
     python3 scripts/quality/pm_selfcheck.py --silence-days 14
     python3 scripts/quality/pm_selfcheck.py --silence-strict
     python3 scripts/quality/pm_selfcheck.py --skip-model-pin
@@ -80,6 +100,13 @@ from cli_utils import add_db_arg, add_no_encrypt_arg, resolve_db_path
 from db_utils import open_db, table_exists
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+# 外部アンカー（§4.4）の既定パス。`data/` は .gitignore 対象（機密DBを含むため）
+# なので、git 管理下に置けて実値を含まない config/ 配下に置く。
+_DEFAULT_ANCHOR_PATH = REPO_ROOT / "config" / "anchors" / "tool_call_anchor.jsonl"
+
+# pending_egress（§4.2 の承認フロー）が pending のまま放置されたとみなす日数。
+_PENDING_EGRESS_STALE_DAYS = 7
 
 # patrol_state.db notifications.event_type の歴史的キー
 # （現行ソースには存在しないが過去に記録されたことがあるキー）
@@ -819,6 +846,250 @@ def check_model_pin_drift() -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# 12. 宛先粒度（層3）の未知送信の観測（docs/security-architecture.md §4.7）
+# --------------------------------------------------------------------------- #
+
+# egress_dest_unknown の既定観測期間（日）。silent_control の egress_slack と
+# 揃える（`tool_calls` plane='egress' を見る点が同じであるため）。
+_EGRESS_DEST_UNKNOWN_DEFAULT_DAYS = 7
+
+
+def check_egress_dest_unknown(
+    pm_conn: sqlite3.Connection, days_override: int | None = None
+) -> list[dict]:
+    """設定に無い宛先（層3）への送信が観測期間内にどれだけあったかを集計する。
+
+    層1（ホスト）は net_guard、層2（ツール）は agent_tools.py の registry で
+    allow-list を持つが、層3（どのチャンネル・どの相手か）はまだ warn 段階
+    （`ARGUS_EGRESS_TARGETS`）で `dest_known` を記録しているだけであり、
+    enforce にはしていない。
+
+    **これは観測であり違反ではない。** enforce へ進めるかどうかを判断する
+    ための分布（件数・宛先の種類数）を報告するだけで、`--silence-strict` を
+    付けても exit code には一切影響しない（`main()` 側で常に除外する）。
+    宛先の実値はログに出さない（件数・種類数のみ）。
+
+    silent_control と同じく、台帳（`tool_calls`）が観測期間より新しい場合は
+    判定不能として扱い、違反リストには入れない（標準出力に理由だけ出す）。
+    """
+    if not table_exists(pm_conn, "tool_calls"):
+        return []
+    days = days_override if days_override is not None else _EGRESS_DEST_UNKNOWN_DEFAULT_DAYS
+    cutoff_dt = datetime.now(UTC) - timedelta(days=days)
+    cutoff = cutoff_dt.isoformat()
+
+    oldest_ts = _oldest_tool_call_ts(pm_conn)
+    if oldest_ts is None:
+        print(
+            "[INFO] egress_dest_unknown: 判定できません"
+            "（tool_calls 台帳が空か最古の記録を解釈できないため）",
+            file=sys.stderr,
+        )
+        return []
+    if oldest_ts > cutoff_dt:
+        print(
+            f"[INFO] egress_dest_unknown: 判定できません"
+            f"（台帳の最古の記録={oldest_ts.isoformat()} が観測期間の開始"
+            f"（{cutoff_dt.isoformat()}）より新しいため。要求期間={days}日）",
+            file=sys.stderr,
+        )
+        return []
+
+    rows = pm_conn.execute(
+        "SELECT args_json FROM tool_calls WHERE plane = 'egress' AND ts >= ?",
+        (cutoff,),
+    ).fetchall()
+
+    count = 0
+    destinations: set[str] = set()
+    for row in rows:
+        raw = row["args_json"]
+        if not raw:
+            continue
+        try:
+            args = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(args, dict) or args.get("dest_known") is not False:
+            continue
+        count += 1
+        dest = args.get("channel") or args.get("dest") or ""
+        if dest:
+            destinations.add(dest)
+
+    if count == 0:
+        return []
+
+    return [
+        {
+            "check": "egress_dest_unknown",
+            "count": count,
+            "distinct_destinations": len(destinations),
+            "observed_within_days": days,
+            "note": (
+                "設定に無い宛先（層3）への送信の観測。enforce へ進める判断の"
+                "材料であり、違反ではない（warn段階、ARGUS_EGRESS_TARGETS）"
+            ),
+        }
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# 13. 外部アンカー（docs/security-architecture.md §4.4）
+# --------------------------------------------------------------------------- #
+def emit_anchor(
+    pm_conn: sqlite3.Connection, anchor_path: Path = _DEFAULT_ANCHOR_PATH,
+) -> dict | None:
+    """`tool_calls` の連鎖の頭を外部アンカーファイルへ1行追記する（§4.4）。
+
+    `--emit-anchor` からのみ呼ばれる、通常の検査（read-only）とは独立した書き込みモード。
+
+    **このアンカーは、ファイルがこのマシンの外へ出て初めて意味を持つ。**
+    同じファイルシステム上にある限り、台帳を書き換えられる攻撃者はアンカーも書き換えられる。
+    **git へコミットして push した時点で外部（third-party hosted・追記的）に出る。**
+    push は自動化していない（公開リポジトリへの自動 push は別の判断が要るため）。
+    したがって現状これが証明するのは「**push 済みのアンカーより後に過去分が
+    書き換えられていないこと**」に限られる。
+
+    本文・チャンネル・モデル名などは一切含めない（ハッシュと件数だけ）。
+    直前の行と `entry_hash` が同じなら追記しない（台帳が動いていない日は行を増やさない）。
+    台帳（`tool_calls`）が空なら None を返す。
+    """
+    from db_utils import tool_call_anchor
+
+    anchor = tool_call_anchor(pm_conn)
+    if anchor is None:
+        return None
+
+    last_hash = None
+    if anchor_path.is_file():
+        for line in reversed(anchor_path.read_text(encoding="utf-8").splitlines()):
+            if not line.strip():
+                continue
+            try:
+                last_hash = json.loads(line).get("entry_hash")
+            except (ValueError, TypeError):
+                last_hash = None
+            break
+
+    if last_hash == anchor["entry_hash"]:
+        return None  # 台帳が動いていない。追記しない。
+
+    record = {
+        "ts": datetime.now(UTC).isoformat(),
+        "rows": anchor["count"],
+        "entry_hash": anchor["entry_hash"],
+    }
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    with anchor_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def check_anchor_consistency(
+    pm_conn: sqlite3.Connection, anchor_path: Path = _DEFAULT_ANCHOR_PATH,
+) -> list[dict]:
+    """外部アンカーファイルの各行が現在の tool_calls 台帳と整合するか検証する（§4.4）。
+
+    行ごとに「`rows` 行目までの連鎖の頭の `entry_hash`」が記録値と一致するかを見る。
+    一致しなければ違反（過去のアンカーと現在の台帳が食い違う＝過去分が書き換えられた）。
+    台帳の行数がアンカーの `rows` より少ない場合も違反（台帳が縮んでいる）。
+
+    アンカーファイルが無い／空なら判定不能として扱い、違反リストには入れない
+    （黙って飛ばさず、標準出力に理由を出す）。
+    """
+    if not anchor_path.is_file():
+        print(
+            f"[INFO] anchor_consistency: 判定できません"
+            f"（アンカーファイルがありません: {anchor_path}）",
+            file=sys.stderr,
+        )
+        return []
+
+    lines = [ln for ln in anchor_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    if not lines:
+        print(
+            f"[INFO] anchor_consistency: 判定できません"
+            f"（アンカーファイルが空です: {anchor_path}）",
+            file=sys.stderr,
+        )
+        return []
+
+    if not table_exists(pm_conn, "tool_calls"):
+        return []
+
+    total_rows = pm_conn.execute("SELECT count(*) FROM tool_calls").fetchone()[0]
+
+    violations = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            violations.append({
+                "check": "anchor_consistency",
+                "reason": "アンカー行の解析に失敗しました（形式不正）",
+            })
+            continue
+        rows = entry.get("rows")
+        expected_hash = entry.get("entry_hash")
+        if not isinstance(rows, int) or not expected_hash:
+            violations.append({
+                "check": "anchor_consistency",
+                "reason": "アンカー行に rows / entry_hash が欠けています",
+            })
+            continue
+        if total_rows < rows:
+            violations.append({
+                "check": "anchor_consistency", "rows": rows,
+                "reason": (
+                    f"台帳の行数（{total_rows}）がアンカー記録時（{rows}）より"
+                    "少ない（台帳が縮んでいる）"
+                ),
+            })
+            continue
+        row = pm_conn.execute(
+            "SELECT entry_hash FROM tool_calls ORDER BY rowid LIMIT 1 OFFSET ?",
+            (rows - 1,),
+        ).fetchone()
+        actual_hash = row["entry_hash"] if row else None
+        if actual_hash != expected_hash:
+            violations.append({
+                "check": "anchor_consistency", "rows": rows,
+                "reason": "過去に固定したアンカーと現在の台帳が食い違う（過去分が書き換えられた可能性）",
+            })
+    return violations
+
+
+# --------------------------------------------------------------------------- #
+# 14. 承認待ち egress の滞留（docs/security-architecture.md §4.2）
+# --------------------------------------------------------------------------- #
+def check_pending_egress_stale(
+    pm_conn: sqlite3.Connection, days: int = _PENDING_EGRESS_STALE_DAYS,
+) -> list[dict]:
+    """`pending_egress` に `days` 日以上 pending のまま滞留した行がないか検査する。
+
+    滞留は「承認フローが機能していない」ことの証拠なので黙って溜めない。
+    """
+    if not table_exists(pm_conn, "pending_egress"):
+        return []
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    rows = pm_conn.execute(
+        "SELECT id, ts, target FROM pending_egress WHERE status = 'pending' AND ts < ?",
+        (cutoff,),
+    ).fetchall()
+    return [
+        {
+            "check": "pending_egress_stale",
+            "id": row["id"],
+            "target": row["target"],
+            "ts": row["ts"],
+            "note": f"{days}日以上未承認のまま滞留しています（承認フローが機能していない可能性）",
+        }
+        for row in rows
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 def run_checks(
@@ -831,6 +1102,7 @@ def run_checks(
     silence_days: int | None = None,
     security_checks_enabled: bool = True,
     model_pin_enabled: bool = True,
+    anchor_path: Path | None = None,
 ) -> list[dict]:
     # audit_log.changed_at は datetime.now(UTC).isoformat()（"+00:00" 付き）で
     # 記録されるため、cutoff も UTC aware で揃える。today（ローカル暦日）基準だと
@@ -845,6 +1117,11 @@ def run_checks(
     if state_conn is not None:
         violations += check_state_key_drift(state_conn)
     violations += check_tool_call_chain(pm_conn)
+    # anchor_consistency / pending_egress_stale は tool_call_chain と同じく
+    # logs_dir / --no-security-checks とは無関係な pm.db（＋アンカーファイル）
+    # 単独の検査であり、無条件に実行する。
+    violations += check_anchor_consistency(pm_conn, anchor_path or _DEFAULT_ANCHOR_PATH)
+    violations += check_pending_egress_stale(pm_conn)
     if logs_dir is not None:
         # セキュリティ監視のログ走査は独立した窓（既定 1 日）で行う。データ検査の
         # --days 7 と同じ窓にすると、解消済みの deny が 1 週間鳴り続けて監視が
@@ -859,6 +1136,10 @@ def run_checks(
     # 沈黙してしまう）。--no-security-checks では従来どおり一緒にスキップする。
     if security_checks_enabled:
         violations += check_silent_control(pm_conn, silence_days)
+        # egress_dest_unknown も pm.db だけで完結し logs_dir とは無関係
+        # （silent_control と同じ扱い）。観測であり違反ではないため main() 側で
+        # 常に exit code から除外する。
+        violations += check_egress_dest_unknown(pm_conn, silence_days)
     # model_pin_drift も logs_dir / pm.db とは無関係（silent_control と同じ扱い）。
     # ネットワークに出る検査のため、--skip-model-pin で個別に退避できるようにする。
     if security_checks_enabled and model_pin_enabled:
@@ -911,12 +1192,22 @@ def main() -> int:
         "--skip-model-pin", action="store_true",
         help="model_pin_drift だけをスキップする（ネットワークに出たくない場合の退避路）",
     )
+    parser.add_argument(
+        "--emit-anchor", action="store_true",
+        help="通常の検査を行わず、tool_calls の連鎖の頭を外部アンカーファイルへ1行追記する"
+             "（既存の検査とは独立した動作モード。§4.4。詳細は emit_anchor() の docstring）",
+    )
+    parser.add_argument(
+        "--anchor-path", default=None, metavar="PATH",
+        help="外部アンカーファイルのパス（既定: config/anchors/tool_call_anchor.jsonl）",
+    )
     args = parser.parse_args()
 
     db_path = resolve_db_path(args.db, REPO_ROOT / "data" / "pm.db")
     state_db_path = (
         Path(args.state_db) if args.state_db else REPO_ROOT / "data" / "patrol_state.db"
     )
+    anchor_path = Path(args.anchor_path) if args.anchor_path else _DEFAULT_ANCHOR_PATH
 
     if not db_path.exists():
         print(f"ERROR: pm.db が見つかりません: {db_path}", file=sys.stderr)
@@ -924,6 +1215,21 @@ def main() -> int:
 
     pm_conn = open_db(db_path, encrypt=not args.no_encrypt)
     pm_conn.execute("PRAGMA query_only = ON")
+
+    if args.emit_anchor:
+        record = emit_anchor(pm_conn, anchor_path)
+        pm_conn.close()
+        if record is None:
+            print(
+                "OK: アンカーは追記しませんでした"
+                "（tool_calls が空、または直前のアンカーと entry_hash が同じです）"
+            )
+        else:
+            print(
+                f"OK: アンカーを追記しました rows={record['rows']}"
+                f" entry_hash={record['entry_hash']} -> {anchor_path}"
+            )
+        return 0
 
     state_conn = None
     if state_db_path.exists():
@@ -952,6 +1258,7 @@ def main() -> int:
     violations = run_checks(
         pm_conn, state_conn, args.days, today, logs_dir, args.security_days,
         args.silence_days, security_checks_enabled, not args.skip_model_pin,
+        anchor_path,
     )
 
     pm_conn.close()
@@ -961,9 +1268,16 @@ def main() -> int:
     # silent_control は既定では警告扱い（沈黙 = 異常と決めつけない。運用を止めて
     # いれば沈黙は正常なので、誤警報で監視全体が無効化される方向に圧力がかかる
     # のを避ける）。--silence-strict を付けたときだけ他の検査と同じ exit 1 対象。
+    #
+    # egress_dest_unknown は観測であり違反ではない（層3は warn 段階）。
+    # --silence-strict を付けても exit code には一切影響させない。
     silent_violations = [v for v in violations if v["check"] == "silent_control"]
-    hard_violations = [v for v in violations if v["check"] != "silent_control"]
-    exit_violations = violations if args.silence_strict else hard_violations
+    egress_dest_violations = [v for v in violations if v["check"] == "egress_dest_unknown"]
+    hard_violations = [
+        v for v in violations
+        if v["check"] not in ("silent_control", "egress_dest_unknown")
+    ]
+    exit_violations = hard_violations + (silent_violations if args.silence_strict else [])
 
     if args.json:
         print(json.dumps(violations, ensure_ascii=False, indent=2))
@@ -979,10 +1293,22 @@ def main() -> int:
                     f"NG: {len(exit_violations)} 件の違反を検出しました（--days {args.days}, today={today}）"
                 )
             else:
-                print(
-                    f"OK: 違反なし。ただし {len(silent_violations)} 件の沈黙警告があります"
-                    f"（--silence-strict を付けると違反として扱われます）（--days {args.days}, today={today}）"
-                )
+                extra = []
+                if silent_violations:
+                    extra.append(f"{len(silent_violations)} 件の沈黙警告")
+                if egress_dest_violations:
+                    extra.append(
+                        f"{len(egress_dest_violations)} 件の宛先未知観測"
+                        "（enforceへ進める判断材料、違反ではない）"
+                    )
+                if extra:
+                    print(
+                        f"OK: 違反なし。ただし {'、'.join(extra)} があります"
+                        f"（--silence-strict は沈黙警告のみを違反として扱います）"
+                        f"（--days {args.days}, today={today}）"
+                    )
+                else:
+                    print(f"OK: 違反なし（--days {args.days}, today={today}）")
             for check_name, items in sorted(by_check.items()):
                 print(f"\n[{check_name}] {len(items)} 件")
                 for item in items:

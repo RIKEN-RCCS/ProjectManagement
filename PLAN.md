@@ -126,9 +126,19 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    scrub した環境で起動した Read Plane プロセスから `slack.com` / `api.box.com` の
    名前解決が遮断され、LLM エンドポイントのみ到達可能。トークンは environ から除き、
    子プロセス側でも自己検査で二重に確認する（親が scrub を忘れても止まる）。
-   **2026-08-01 に切替フラグを実装**（`ARGUS_READ_PLANE_SUBPROCESS=1`、**既定 OFF**）。
-   倒す前に `tool_calls` で「調べながら中間結果を投稿する」使い方の実在を確認する。
-   **残り**: (a) 上記フラグを ON にする判断
+   **2026-08-03 に既定 ON へ**（`pm_daemon.sh` の qa。退避は `ARGUS_READ_PLANE_SUBPROCESS=0`）。
+   **OFF に留めていた理由「調べながら中間結果を投稿する使い方が消える」は誤りだった** —
+   ①メンション経路には Bolt の `respond` が無い ②`run_agent` は L1050 で
+   `_make_progress_updater(None)` と**受け取った `respond` を握りつぶしていた**（2026-05-26 の
+   導入以来）。つまり調査ループの進捗更新は最初から存在していなかった。
+   **型: コードにある引数を、それが使われている証拠として扱った。**
+   あわせて `run_agent` の握りつぶしを修正し、親子で進捗を中継する仕組みを入れた
+   （子は stdout に `{"progress": ...}` を流し、**トークンを持つ親が代わりに投稿する**。
+   片方向で戻り値が要らないので完全な IPC ブローカーは不要）。
+   **被覆も狭かった**: `run_in_read_plane` の呼び出しはメンション経路 1 箇所だけで、
+   `/argus-investigate` は常に in-process だった。スラッシュコマンド経路にも通した。
+   **残り**: **`--file` スコープ（`run_document_qa`）は未分離**。`respond` と `record_ids` に
+   強く結びついているため今回は対象外にした
    (c) **OS レベルの強制**（iptables / network namespace）— 現状は同一プロセスの
    socket フックなので、subprocess とフック解除には効かない (d) ブローカーと Artifact
    への流れの再構成（下記 9 と一体）
@@ -180,11 +190,25 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    `guard_outbound_text` を入れる形にした。**2 箇所の編集で 8 / 9 モジュールを覆える**ため。
    Box はテキスト系拡張子のみ中身を検査し、**xlsx/pptx 等は「検査した」と記録しない**
    （検査できていないものを通過扱いにすると誤った根拠になる）。
-   **残り**: (a) **承認フロー** — `EgressPendingApproval` を投げるところまでは実装済みだが、
-   受け皿（誰がどこで承認するか）は**UX の決めが要るので未実装**。現状 `external_visible` の
-   宛先は送信されず例外になる (b) **外部アンカー** — `db_utils.tool_call_anchor()` で
-   連鎖の頭を取り出せるようにした。**日次投稿の cron 化は未実施**（投稿先チャンネルの
-   決めが要る。ブローカー経由なので新しい egress は増えない）
+   **2026-08-03 に残り 3 項目を実装**:
+   - **層3（宛先粒度）** — `slack_post.configured_slack_destinations()` が
+     `argus_config.yaml` から正当な宛先集合（実測 **275 件**）を導出し、送信時に照合して
+     `tool_calls` に `dest_known` を記録する。**既定は warn**（`ARGUS_EGRESS_TARGETS`）—
+     `/argus-*` の ephemeral はコマンド実行チャンネルへ返るため、正当な宛先の集合を
+     いま確定できない。分布を観測してから enforce を判断する。
+     観測は `pm_selfcheck` の `egress_dest_unknown`（**違反にはしない**）
+   - **承認フロー** — Slack のボタン UI ではなく **CLI で完結する最小の受け皿**にした
+     （投稿先の決めが要らないため）。`pending_egress` 台帳 +
+     `output_broker.py --list-pending / --approve <id> / --reject <id>`。
+     滞留は `pm_selfcheck` の `pending_egress_stale`（7 日）が検知する
+   - **外部アンカー** — `pm_selfcheck.py --emit-anchor` が連鎖の頭を
+     `config/anchors/tool_call_anchor.jsonl` へ追記し（`data/` は gitignore のため config 側）、
+     `anchor_consistency` が過去のアンカーと現在の台帳の整合を検証する。
+     **このアンカーはファイルがマシンの外へ出て初めて意味を持つ** — 同じ FS 上にある限り、
+     台帳を書き換えられる攻撃者はアンカーも書き換えられる。**git へ commit + push した時点で
+     外部に出る。push は自動化していない**（公開リポジトリへの自動 push は別の判断）。
+     したがって現状証明できるのは「**push 済みのアンカーより後に過去分が書き換えられていない**」に限る
+   **残り**: 層3 の enforce 判断（観測待ち）。**アンカーの commit + push を運用に載せるかの判断**
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 

@@ -180,6 +180,15 @@ cmd_start() {
         echo "model_pin mode: ${ARGUS_MODEL_PIN}"
     fi
 
+    # 能力分離 5b（Phase 5、docs/security-architecture.md §3.2）: 調査を
+    # Read Plane の別プロセス（Slack/Box トークンを持たない）で実行する。
+    # qa デーモンのみで有効化する（mention/investigate の調査経路がここでしか動かないため）。
+    # 退避が必要なときは ARGUS_READ_PLANE_SUBPROCESS=0 を環境に置いて再起動すればこの既定を上書きできる。
+    if [[ "$name" == "qa" ]]; then
+        export ARGUS_READ_PLANE_SUBPROCESS="${ARGUS_READ_PLANE_SUBPROCESS:-1}"
+        echo "read_plane subprocess: ${ARGUS_READ_PLANE_SUBPROCESS}"
+    fi
+
     if [[ "$name" == "docling" ]]; then
         # MAX_SYNC_WAIT はサーバ側同期待ちの上限。既定 120s のままだと大型 PDF
         # （table_mode=accurate）が途中で 404 を返しクライアントがフォールバックする。

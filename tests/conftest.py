@@ -107,6 +107,32 @@ def _isolate_audit_conn(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Fixture: redirect the layer-3 destination allow-list (slack_post.
+# configured_slack_destinations) away from the production data/argus_config.yaml
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _isolate_dest_config(tmp_path, monkeypatch):
+    """`utils.slack_post._argus_config_path()` を存在しない一時パスへ差し替える。
+
+    層3（宛先粒度）の照合（`configured_slack_destinations()`）は既定 warn モードで
+    有効なため、`post_message` 等を呼ぶだけで `data/argus_config.yaml` を読みに行く。
+    ここで差し替えないと、全テストスイートが実行環境の実ファイルの有無に依存して
+    しまう上、本番の機密ファイルを読まない運用にも反する。存在しないパスを既定に
+    することで、宛先照合は「常に不明（dest_known=False, warn ログのみ）」という
+    決定的な結果になる。特定の宛先集合を検証したいテストは、さらに
+    `slack_post._argus_config_path` を上書きする。
+    """
+    from utils import slack_post
+
+    monkeypatch.setattr(
+        slack_post, "_argus_config_path", lambda: tmp_path / "_no_argus_config.yaml"
+    )
+    monkeypatch.setattr(slack_post, "_dest_cache", None)
+    yield
+
+
+# --------------------------------------------------------------------------- #
 # Fixture: in-memory pm.db via init_pm_db schema
 # --------------------------------------------------------------------------- #
 

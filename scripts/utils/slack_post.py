@@ -11,6 +11,9 @@ GitHub Flavored Markdown を Slack mrkdwn に変換し、Slack section block の
 import logging
 import os
 import re
+from pathlib import Path
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +96,147 @@ _ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
 
 
 class SlackEgressBlocked(RuntimeError):
-    """送信前の検査で止めた（canary 検出・ゼロ幅文字）。"""
+    """送信前の検査で止めた（canary 検出・ゼロ幅文字・宛先照合）。"""
+
+
+# --------------------------------------------------------------------------- #
+# 層3（宛先粒度）の照合（docs/security-architecture.md §4.7）
+#
+# 層1（ホスト）は net_guard、層2（ツール）は agent_tools.py の registry で
+# 実装済み。`slack.com` は層1で丸ごと許可されているため、許可済みホストの内側で
+# どのチャンネル・どの相手に出すかは誰も見ていなかった。
+#
+# **まだ enforce にはしない。** 正当な宛先の集合（Argus 自身が知らない、
+# コマンド実行チャンネルへの ephemeral 応答等）を今の時点で確定できないため、
+# 既定は warn（観測のみ）。`ARGUS_EGRESS_TARGETS=enforce` で拒否に切り替えられる。
+# --------------------------------------------------------------------------- #
+
+_EGRESS_TARGETS_MODE_ENV = "ARGUS_EGRESS_TARGETS"
+
+# ephemeral はコマンドが実行されたチャンネルへ返るため「設定に無い」が正常な
+# 場合が多い。enforce でここまで遮断すると本番が壊れるので、常に warn 扱いに
+# 固定する（記録・ログは他の method と同じく行い、分布は観測し続ける）。
+_ALWAYS_WARN_METHODS = {"chat_postEphemeral"}
+
+_dest_cache: tuple[Path, float | None, frozenset] | None = None
+
+
+def _egress_targets_mode() -> str:
+    m = os.environ.get(_EGRESS_TARGETS_MODE_ENV, "warn").strip().lower()
+    return m if m in ("warn", "enforce", "off") else "warn"
+
+
+def _argus_config_path() -> Path:
+    """`data/argus_config.yaml` のパス。テストはこの関数を monkeypatch して差し替える。"""
+    repo_root = Path(__file__).resolve().parents[2]
+    return repo_root / "data" / "argus_config.yaml"
+
+
+def configured_slack_destinations(conn=None) -> set[str]:
+    """Argus が設定として持っている宛先（チャンネルID / ユーザーID / Canvas ID /
+    Box folder_id）の集合を返す。
+
+    `data/argus_config.yaml` から以下を集める（キー構造は `pm-argus-config-schema`
+    Skill 参照。実値は機密のためこの関数の本文は Claude から読まない運用にすること）:
+
+      - `patrol.leader_channel` / `patrol.dm_redirect_user`
+      - `indices.*.channels` / `channel_map` のキー / `mention_allowed_channels`
+      - `channel_names` のキー / `user_names` のキー
+      - `report.canvas_id` / `report.box_folder_id`
+      - `argus_daily.brief_canvas_id` / `argus_daily.risk_canvas_id`
+      - `meetings.*.box_folder_id` / `meetings.*.catalog_canvas_id`
+
+    mtime キャッシュ付き（`model_pin.load_pin` と同じ書き方）。**この関数は値を
+    ログに出さない**。読み込み結果の件数だけを INFO で出す。
+
+    `conn` は現状未使用（呼び出し元のガード関数と同じシグネチャに揃えるため
+    受け取っている。将来 DB 由来の宛先集合を足す場合の拡張点）。
+    """
+    global _dest_cache
+    path = _argus_config_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _dest_cache is not None and _dest_cache[0] == path and _dest_cache[1] == mtime:
+        return set(_dest_cache[2])
+
+    cfg: dict = {}
+    if path.is_file():
+        try:
+            cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            logger.exception("[EGRESS-L3] argus_config.yaml の読み込みに失敗しました")
+            cfg = {}
+    else:
+        logger.warning("[EGRESS-L3] argus_config.yaml が見つかりません: %s", path)
+
+    dests: set[str] = set()
+
+    def _add(value) -> None:
+        if value is None or value == "":
+            return
+        dests.add(str(value))
+
+    patrol = cfg.get("patrol") or {}
+    _add(patrol.get("leader_channel"))
+    _add(patrol.get("dm_redirect_user"))
+
+    for entry in (cfg.get("indices") or {}).values():
+        if isinstance(entry, dict):
+            for ch in entry.get("channels") or []:
+                _add(ch)
+
+    for ch in cfg.get("channel_map") or {}:
+        _add(ch)
+
+    for ch in cfg.get("mention_allowed_channels") or []:
+        _add(ch)
+
+    for ch in cfg.get("channel_names") or {}:
+        _add(ch)
+
+    for uid in cfg.get("user_names") or {}:
+        _add(uid)
+
+    report = cfg.get("report") or {}
+    _add(report.get("canvas_id"))
+    _add(report.get("box_folder_id"))
+
+    argus_daily = cfg.get("argus_daily") or {}
+    _add(argus_daily.get("brief_canvas_id"))
+    _add(argus_daily.get("risk_canvas_id"))
+
+    for entry in (cfg.get("meetings") or {}).values():
+        if isinstance(entry, dict):
+            _add(entry.get("box_folder_id"))
+            _add(entry.get("catalog_canvas_id"))
+
+    _dest_cache = (path, mtime, frozenset(dests))
+    logger.info("[EGRESS-L3] 設定済み宛先を読み込みました（%d 件）", len(dests))
+    return set(dests)
+
+
+def _check_destination(dest: str, method: str, conn) -> tuple[bool | None, str | None]:
+    """宛先照合（層3）。`(dest_known, enforce時のブロック理由 or None)` を返す。
+
+    mode=off なら照合自体を行わず `(None, None)`（呼び出し側はこれを「dest_known を
+    記録しない」の意味で扱う）。
+    """
+    mode = _egress_targets_mode()
+    if mode == "off":
+        return None, None
+
+    dest_known = dest in configured_slack_destinations(conn)
+    if dest_known:
+        return True, None
+
+    detail = f"method={method} dest={dest!r}"
+    effective_mode = "warn" if method in _ALWAYS_WARN_METHODS else mode
+    if effective_mode == "enforce":
+        return False, f"設定に無い宛先です（{detail}）"
+    logger.warning("[EGRESS-L3] 設定に無い宛先です: %s", detail)
+    return False, None
 
 
 def _open_audit_conn():
@@ -172,8 +315,10 @@ def scan_text_for_egress(text: str, conn=None) -> list[str]:
 def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
     """送信前の検査と記録。**拒否は例外**（戻り値だと呼び出し側が無視できる）。
 
-    検査するのは canary とゼロ幅文字だけである。**自然な散文に符号化されたものは
-    通る**（TrojanStego 型）ので、これで内容が安全になるわけではない（P10）。
+    検査するのは canary・ゼロ幅文字・宛先照合（層3）である。**自然な散文に
+    符号化されたものは通る**（TrojanStego 型）ので、これで内容が安全になる
+    わけではない（P10）。宛先照合も同様に、既知の宛先集合に無いことだけを見る
+    観測（warn 既定）であり、enforce にしても内容までは保証しない。
 
     `conn` が渡されなかった場合は `_open_audit_conn()` で自分で pm.db を開く。
     自分で開いた接続は必ず閉じる（呼び出し側から渡された接続は所有権を持たないため
@@ -192,6 +337,14 @@ def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
         text = _payload_text(kwargs)
         reasons = scan_text_for_egress(text, conn)
 
+        channel = str(kwargs.get("channel") or "")
+        args: dict = {"channel": channel, "chars": len(text)}
+        dest_known, dest_block_reason = _check_destination(channel, method, conn)
+        if dest_known is not None:
+            args["dest_known"] = dest_known
+            if dest_block_reason:
+                reasons.append(dest_block_reason)
+
         outcome = "blocked" if reasons else "ok"
         if conn is not None:
             try:
@@ -199,7 +352,7 @@ def _guard(kwargs: dict, conn=None, *, method: str, source: str = "") -> None:
                 record_tool_call(
                     conn, session_id=source or "slack", seq=0, plane="egress",
                     tool_name=f"slack:{method}",
-                    args={"channel": str(kwargs.get("channel") or ""), "chars": len(text)},
+                    args=args,
                     outcome=outcome, block_reason="; ".join(reasons) or None,
                 )
             except Exception:
@@ -248,7 +401,8 @@ def guard_outbound_text(text: str, *, transport: str, dest: str = "",
     """Slack 以外の輸送（Canvas / Box）から呼ぶ共通ガード。
 
     検査して記録し、問題があれば例外を投げる。**Slack のファネルと同じ検査・同じ台帳**を
-    使うのは、出口ごとに基準が違うと「どの出口なら通るか」を探せてしまうため。
+    使うのは、出口ごとに基準が違うと「どの出口なら通るか」を探せてしまうため
+    （canary・ゼロ幅文字・宛先照合（層3）のいずれも共通）。
 
     `conn` が渡されなかった場合は `_open_audit_conn()` で自分で pm.db を開く
     （`_guard()` と同じ）。自分で開いた接続は必ず閉じる。
@@ -262,13 +416,21 @@ def guard_outbound_text(text: str, *, transport: str, dest: str = "",
         conn = _open_audit_conn()
     try:
         reasons = scan_text_for_egress(text, conn)
+
+        args: dict = {"dest": dest, "chars": len(text)}
+        dest_known, dest_block_reason = _check_destination(dest, transport, conn)
+        if dest_known is not None:
+            args["dest_known"] = dest_known
+            if dest_block_reason:
+                reasons.append(dest_block_reason)
+
         if conn is not None:
             try:
                 from db_utils import record_tool_call
                 record_tool_call(
                     conn, session_id=source or transport, seq=0, plane="egress",
                     tool_name=f"{transport}:post",
-                    args={"dest": dest, "chars": len(text)},
+                    args=args,
                     outcome="blocked" if reasons else "ok",
                     block_reason="; ".join(reasons) or None,
                 )

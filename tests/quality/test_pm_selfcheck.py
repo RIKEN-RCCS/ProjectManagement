@@ -5,7 +5,24 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from quality import pm_selfcheck
+
+
+@pytest.fixture(autouse=True)
+def _isolate_anchor_path(tmp_path, monkeypatch):
+    """`pm_selfcheck._DEFAULT_ANCHOR_PATH` を一時パスへ差し替える。
+
+    既定値はリポジトリ実体の `config/anchors/tool_call_anchor.jsonl` を指すため、
+    `--anchor-path` を明示しないテスト（および main() 経由のテスト）が実ファイルの
+    状態（`--emit-anchor` の運用実行で書かれた行数等）に依存してしまう。特に
+    `anchor_consistency` は「台帳の行数がアンカーの rows より少なければ違反」を
+    見るため、テストの小さな一時 DB と実ファイルの rows が食い違うと誤検出になる。
+    """
+    monkeypatch.setattr(
+        pm_selfcheck, "_DEFAULT_ANCHOR_PATH", tmp_path / "tool_call_anchor.jsonl",
+    )
+    yield
 
 
 def _insert_action_item(conn, **kwargs):
@@ -576,7 +593,7 @@ def test_run_checks_uses_security_days_for_log_scan(pm_db_path, tmp_path):
 # --------------------------------------------------------------------------- #
 # 10. 沈黙している制御の検出
 # --------------------------------------------------------------------------- #
-def _insert_tool_call(conn, *, plane, tool_name, ts=None):
+def _insert_tool_call(conn, *, plane, tool_name, ts=None, args_json="{}", outcome="ok"):
     """tool_calls に1行追記する（append-only テーブルなので ts は挿入時に直接指定する）。
 
     check_tool_call_chain（検査8）を巻き込まないよう、prev_hash/entry_hash は
@@ -589,8 +606,6 @@ def _insert_tool_call(conn, *, plane, tool_name, ts=None):
 
     call_id = uuid.uuid4().hex
     ts = ts or datetime.now(UTC).isoformat()
-    args_json = "{}"
-    outcome = "ok"
     last = conn.execute(
         "SELECT entry_hash FROM tool_calls ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
@@ -927,3 +942,370 @@ def test_main_no_security_checks_also_skips_model_pin_drift(pm_db_path, tmp_path
         ],
     )
     assert rc == 0
+
+
+# --------------------------------------------------------------------------- #
+# 12. 宛先粒度（層3）の未知送信の観測（docs/security-architecture.md §4.7）
+# --------------------------------------------------------------------------- #
+def test_check_egress_dest_unknown_no_violations_when_ledger_is_empty(pm_db_path):
+    """台帳が空（＝まだ観測していない）なら判定不能として扱い、報告しない。"""
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.check_egress_dest_unknown(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_egress_dest_unknown_indeterminate_when_ledger_younger_than_period(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postEphemeral",
+        ts=datetime.now(UTC).isoformat(),
+        args_json='{"channel": "C0XXXXXXX", "chars": 10, "dest_known": false}',
+    )
+    violations = pm_selfcheck.check_egress_dest_unknown(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_egress_dest_unknown_reports_count_and_distinct_destinations(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    recent_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postEphemeral", ts=recent_ts,
+        args_json='{"channel": "C0XXXXXXX", "chars": 10, "dest_known": false}',
+    )
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postEphemeral", ts=recent_ts,
+        args_json='{"channel": "C0XXXXXXXX", "chars": 10, "dest_known": false}',
+    )
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postEphemeral", ts=recent_ts,
+        args_json='{"channel": "C0XXXXXXX", "chars": 10, "dest_known": false}',
+    )
+    # dest_known=true の行は集計対象外
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postMessage", ts=recent_ts,
+        args_json='{"channel": "C0XXXXXXXXX", "chars": 10, "dest_known": true}',
+    )
+    violations = pm_selfcheck.check_egress_dest_unknown(conn)
+    conn.close()
+
+    assert len(violations) == 1
+    v = violations[0]
+    assert v["check"] == "egress_dest_unknown"
+    assert v["count"] == 3
+    assert v["distinct_destinations"] == 2
+    assert "違反ではない" in v["note"]
+
+
+def test_check_egress_dest_unknown_no_report_when_all_destinations_known(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    recent_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postMessage", ts=recent_ts,
+        args_json='{"channel": "C0XXXXXXXXX", "chars": 10, "dest_known": true}',
+    )
+    violations = pm_selfcheck.check_egress_dest_unknown(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_egress_dest_unknown_days_override_applies(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postEphemeral", ts=ts,
+        args_json='{"channel": "C0XXXXXXX", "chars": 10, "dest_known": false}',
+    )
+    violations_default = pm_selfcheck.check_egress_dest_unknown(conn)
+    violations_override = pm_selfcheck.check_egress_dest_unknown(conn, days_override=14)
+    conn.close()
+    assert violations_default == []  # 既定 7 日では窓の外
+    assert len(violations_override) == 1
+
+
+def test_check_egress_dest_unknown_without_tool_calls_table_is_noop(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    conn.execute("DROP TABLE IF EXISTS tool_calls")
+    conn.commit()
+    violations = pm_selfcheck.check_egress_dest_unknown(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_run_checks_includes_egress_dest_unknown(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    recent_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postEphemeral", ts=recent_ts,
+        args_json='{"channel": "C0XXXXXXX", "chars": 10, "dest_known": false}',
+    )
+    violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-08-03")
+    conn.close()
+    assert any(v["check"] == "egress_dest_unknown" for v in violations)
+
+
+def test_main_egress_dest_unknown_never_affects_exit_code_even_with_strict(
+    pm_db_path, tmp_path, monkeypatch,
+):
+    """egress_dest_unknown は観測であり、--silence-strict を付けても違反にならない。
+
+    silent_control（他のキー）が別途鳴らないよう、egress_slack/egress_other/
+    read_tools のいずれも直近の記録で満たしておく（この検査自体の効果だけを見る）。
+    """
+    conn = _open_plain(pm_db_path)
+    old_ts = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+    _insert_tool_call(conn, plane="mutate", tool_name="noop:anchor", ts=old_ts)
+    recent_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    _insert_tool_call(
+        conn, plane="egress", tool_name="slack:chat_postEphemeral", ts=recent_ts,
+        args_json='{"channel": "C0XXXXXXX", "chars": 10, "dest_known": false}',
+    )
+    _insert_tool_call(conn, plane="egress", tool_name="canvas:post", ts=recent_ts)
+    _insert_tool_call(conn, plane="read", tool_name="search_text", ts=recent_ts)
+    conn.close()
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    state_db = tmp_path / "no_such_patrol_state.db"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--db", str(pm_db_path), "--no-encrypt",
+            "--state-db", str(state_db),
+            "--logs-dir", str(logs),
+            "--days", "7",
+            "--silence-strict",
+        ],
+    )
+    assert rc == 0
+
+
+# --------------------------------------------------------------------------- #
+# 13. 外部アンカー（emit_anchor / anchor_consistency、docs/security-architecture.md §4.4）
+# --------------------------------------------------------------------------- #
+def test_emit_anchor_appends_one_line(pm_db_path, tmp_path):
+    from db_utils import ensure_tool_calls_table, record_tool_call
+
+    conn = _open_plain(pm_db_path)
+    ensure_tool_calls_table(conn)
+    record_tool_call(conn, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+
+    anchor_path = tmp_path / "anchor.jsonl"
+    record = pm_selfcheck.emit_anchor(conn, anchor_path)
+    conn.close()
+
+    assert record is not None
+    assert record["rows"] == 1
+    lines = [ln for ln in anchor_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+
+
+def test_emit_anchor_does_not_duplicate_when_chain_unchanged(pm_db_path, tmp_path):
+    from db_utils import ensure_tool_calls_table, record_tool_call
+
+    conn = _open_plain(pm_db_path)
+    ensure_tool_calls_table(conn)
+    record_tool_call(conn, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+
+    anchor_path = tmp_path / "anchor.jsonl"
+    first = pm_selfcheck.emit_anchor(conn, anchor_path)
+    second = pm_selfcheck.emit_anchor(conn, anchor_path)
+    conn.close()
+
+    assert first is not None
+    assert second is None
+    lines = [ln for ln in anchor_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+
+
+def test_emit_anchor_appends_again_when_chain_grows(pm_db_path, tmp_path):
+    from db_utils import ensure_tool_calls_table, record_tool_call
+
+    conn = _open_plain(pm_db_path)
+    ensure_tool_calls_table(conn)
+    record_tool_call(conn, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+    anchor_path = tmp_path / "anchor.jsonl"
+    pm_selfcheck.emit_anchor(conn, anchor_path)
+
+    record_tool_call(conn, session_id="s", seq=2, plane="read", tool_name="b", args={}, outcome="ok")
+    second = pm_selfcheck.emit_anchor(conn, anchor_path)
+    conn.close()
+
+    assert second is not None
+    assert second["rows"] == 2
+    lines = [ln for ln in anchor_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 2
+
+
+def test_emit_anchor_is_none_when_ledger_empty(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    assert pm_selfcheck.emit_anchor(conn, tmp_path / "anchor.jsonl") is None
+    conn.close()
+
+
+def test_check_anchor_consistency_indeterminate_without_file(pm_db_path, tmp_path, capsys):
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.check_anchor_consistency(conn, tmp_path / "missing.jsonl")
+    conn.close()
+    assert violations == []
+    assert "判定できません" in capsys.readouterr().err
+
+
+def test_check_anchor_consistency_indeterminate_when_file_empty(pm_db_path, tmp_path, capsys):
+    anchor_path = tmp_path / "anchor.jsonl"
+    anchor_path.write_text("", encoding="utf-8")
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.check_anchor_consistency(conn, anchor_path)
+    conn.close()
+    assert violations == []
+    assert "判定できません" in capsys.readouterr().err
+
+
+def test_check_anchor_consistency_no_violation_when_matching(pm_db_path, tmp_path):
+    from db_utils import ensure_tool_calls_table, record_tool_call
+
+    conn = _open_plain(pm_db_path)
+    ensure_tool_calls_table(conn)
+    record_tool_call(conn, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+    record_tool_call(conn, session_id="s", seq=2, plane="read", tool_name="b", args={}, outcome="ok")
+    anchor_path = tmp_path / "anchor.jsonl"
+    pm_selfcheck.emit_anchor(conn, anchor_path)
+
+    violations = pm_selfcheck.check_anchor_consistency(conn, anchor_path)
+    conn.close()
+    assert violations == []
+
+
+def test_check_anchor_consistency_detects_rewritten_history(pm_db_path, tmp_path):
+    """台帳を改変した状態で違反を出すこと。
+
+    append-only トリガがあるので UPDATE では再現できない。テーブルごと
+    作り直す（DROP TABLE → 再作成）ことで「新しい DB を作り直す」改竄を再現する。
+    """
+    from db_utils import ensure_tool_calls_table, record_tool_call
+
+    conn = _open_plain(pm_db_path)
+    ensure_tool_calls_table(conn)
+    record_tool_call(conn, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+    record_tool_call(conn, session_id="s", seq=2, plane="read", tool_name="b", args={}, outcome="ok")
+    anchor_path = tmp_path / "anchor.jsonl"
+    pm_selfcheck.emit_anchor(conn, anchor_path)
+    conn.close()
+
+    conn2 = _open_plain(pm_db_path)
+    conn2.execute("DROP TABLE tool_calls")
+    conn2.commit()
+    ensure_tool_calls_table(conn2)
+    record_tool_call(conn2, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+    record_tool_call(
+        conn2, session_id="s", seq=2, plane="read", tool_name="tampered", args={}, outcome="ok",
+    )
+
+    violations = pm_selfcheck.check_anchor_consistency(conn2, anchor_path)
+    conn2.close()
+
+    assert len(violations) == 1
+    assert violations[0]["check"] == "anchor_consistency"
+
+
+def test_check_anchor_consistency_detects_shrunk_ledger(pm_db_path, tmp_path):
+    from db_utils import ensure_tool_calls_table, record_tool_call
+
+    conn = _open_plain(pm_db_path)
+    ensure_tool_calls_table(conn)
+    record_tool_call(conn, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+    record_tool_call(conn, session_id="s", seq=2, plane="read", tool_name="b", args={}, outcome="ok")
+    anchor_path = tmp_path / "anchor.jsonl"
+    pm_selfcheck.emit_anchor(conn, anchor_path)
+    conn.close()
+
+    conn2 = _open_plain(pm_db_path)
+    conn2.execute("DROP TABLE tool_calls")
+    conn2.commit()
+    ensure_tool_calls_table(conn2)
+    record_tool_call(conn2, session_id="s", seq=1, plane="read", tool_name="a", args={}, outcome="ok")
+
+    violations = pm_selfcheck.check_anchor_consistency(conn2, anchor_path)
+    conn2.close()
+
+    assert len(violations) == 1
+    assert "縮んでいる" in violations[0]["reason"]
+
+
+def test_run_checks_includes_anchor_consistency_indeterminate_as_no_violation(pm_db_path, tmp_path):
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.run_checks(
+        conn, None, days=7, today="2026-08-03", anchor_path=tmp_path / "missing.jsonl",
+    )
+    conn.close()
+    assert not any(v["check"] == "anchor_consistency" for v in violations)
+
+
+# --------------------------------------------------------------------------- #
+# 14. 承認待ち egress の滞留（pending_egress_stale、docs/security-architecture.md §4.2）
+# --------------------------------------------------------------------------- #
+def _insert_pending_egress(conn, *, ts, status="pending", target="t"):
+    from db_utils import ensure_pending_egress_table
+
+    ensure_pending_egress_table(conn)
+    conn.execute(
+        "INSERT INTO pending_egress (ts, target, content_sha256, content, chars,"
+        " block_reason, status) VALUES (?, ?, 'sha', 'content', 7, 'reason', ?)",
+        (ts, target, status),
+    )
+    conn.commit()
+
+
+def test_check_pending_egress_stale_detects_old_pending(pm_db_path):
+    old_ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_pending_egress(conn, ts=old_ts)
+    violations = pm_selfcheck.check_pending_egress_stale(conn)
+    conn.close()
+    assert len(violations) == 1
+    assert violations[0]["check"] == "pending_egress_stale"
+
+
+def test_check_pending_egress_stale_ignores_recent_pending(pm_db_path):
+    recent_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_pending_egress(conn, ts=recent_ts)
+    violations = pm_selfcheck.check_pending_egress_stale(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_pending_egress_stale_ignores_decided_rows(pm_db_path):
+    old_ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_pending_egress(conn, ts=old_ts, status="approved")
+    violations = pm_selfcheck.check_pending_egress_stale(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_pending_egress_stale_without_table_is_noop(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.check_pending_egress_stale(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_run_checks_includes_pending_egress_stale(pm_db_path, tmp_path):
+    old_ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_pending_egress(conn, ts=old_ts)
+    violations = pm_selfcheck.run_checks(
+        conn, None, days=7, today="2026-08-03", anchor_path=tmp_path / "missing.jsonl",
+    )
+    conn.close()
+    assert any(v["check"] == "pending_egress_stale" for v in violations)

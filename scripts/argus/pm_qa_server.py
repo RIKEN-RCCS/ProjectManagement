@@ -782,10 +782,22 @@ def build_app():
                 )
             seed_data = build_seed_data(ctx) + user_info + thread_context
 
-            # 能力分離 5b: ARGUS_READ_PLANE_SUBPROCESS=1 で調査を Read Plane の
-            # 別プロセス（Slack/Box トークンを持たない）へ出す。**既定は OFF** —
-            # 「調べながら中間結果を投稿する」使い方が消えるため、tool_calls ログで
-            # その使い方の実在を確認してから倒す（docs/security-architecture.md Phase 5）。
+            # 能力分離 5b: ARGUS_READ_PLANE_SUBPROCESS=1（既定 ON、2026-08-03〜）で
+            # 調査を Read Plane の別プロセス（Slack/Box トークンを持たない）へ出す
+            # （docs/security-architecture.md §3.2、退避は pm_daemon.sh 参照）。
+            #
+            # 導入当初は「進捗更新が失われるから既定 OFF」としていたが誤りだった。
+            # この app_mention 経路には Slack Bolt の respond（ephemeral 応答）がそもそも
+            # 存在せず（event ハンドラには client/event しか渡らない）、加えて
+            # run_agent 自身が respond 引数を無視していた（別修正で解消済み）ため、
+            # in-process でも段階的な進捗表示は最初から無かった（受付通知1回＋完了時の
+            # 投稿1回のみ）。subprocess 化しても見た目は変わらないため on_progress は
+            # 渡していない（None のまま）。
+            #
+            # なお --file スコープ（record_ids 固定・全文読込 map-reduce QA）はこの
+            # 経路には存在しない（mention は常に全文検索）。--file 相当の分岐がある
+            # /argus-investigate スラッシュコマンド側（pm_argus_agent._run_investigate）
+            # では --file 経路のみ意図的に in-process のまま残している。
             if os.environ.get("ARGUS_READ_PLANE_SUBPROCESS", "").strip() in ("1", "true", "yes"):
                 from argus.pm_read_worker import run_in_read_plane
                 result = run_in_read_plane(question, index_name=ctx.index_name)

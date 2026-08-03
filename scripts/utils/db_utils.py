@@ -995,6 +995,116 @@ def tool_call_anchor(conn: "_sqlite3.Connection") -> dict | None:
     return {"entry_hash": d["entry_hash"], "ts": d["ts"], "count": n}
 
 
+# --------------------------------------------------------------------------- #
+# pending_egress（承認待ち egress 台帳。docs/security-architecture.md §4.2）
+# --------------------------------------------------------------------------- #
+
+_PENDING_EGRESS_DDL = """
+CREATE TABLE IF NOT EXISTS pending_egress (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             TEXT NOT NULL,
+    target         TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    content        TEXT NOT NULL,
+    chars          INTEGER NOT NULL,
+    block_reason   TEXT,
+    status         TEXT NOT NULL DEFAULT 'pending',
+    decided_at     TEXT,
+    decided_by     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_egress_status ON pending_egress(status, ts);
+"""
+
+
+def ensure_pending_egress_table(conn: "_sqlite3.Connection") -> None:
+    """pending_egress テーブルを作成する（既存 pm.db への後付け用・冪等）。
+
+    テーブルが既にあれば何もしない（`executescript()` も呼ばない）。理由は
+    `ensure_canary_table()` / `ensure_tool_calls_table()` と同じ
+    （呼び出し側の未コミットトランザクションを暗黙 COMMIT しないため）。
+    """
+    if table_exists(conn, "pending_egress"):
+        return
+    conn.executescript(_PENDING_EGRESS_DDL)
+    conn.commit()
+
+
+def record_pending_egress(
+    conn: "_sqlite3.Connection", *, target: str, content: str, block_reason: str | None,
+) -> int:
+    """承認待ちの egress を1件記録し、その id を返す（§4.2 の承認フロー）。
+
+    **本文も保持する**（`pending_egress.content`）。承認時に実際の送信へそのまま渡す
+    ため、`content_sha256` だけでは足りない。
+
+    `tool_calls` にも記録する（`plane='egress'`, `tool_name='broker:pending'`,
+    `outcome='blocked'`）。連鎖を1本に保つため（新しい台帳を分けない）。
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    ensure_pending_egress_table(conn)
+    ts = datetime.now(UTC).isoformat()
+    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    cur = conn.execute(
+        "INSERT INTO pending_egress (ts, target, content_sha256, content, chars,"
+        " block_reason, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+        (ts, target, sha, content, len(content), block_reason),
+    )
+    conn.commit()
+    egress_id = cur.lastrowid
+
+    record_tool_call(
+        conn, session_id="broker", seq=0, plane="egress", tool_name="broker:pending",
+        args={"target": target, "chars": len(content), "content_sha256": sha},
+        outcome="blocked", block_reason=block_reason,
+    )
+    return egress_id
+
+
+def list_pending_egress(conn: "_sqlite3.Connection") -> list[dict]:
+    """pending_egress を新しい順に返す。テーブルが無い場合は空リスト。"""
+    if not table_exists(conn, "pending_egress"):
+        return []
+    rows = conn.execute(
+        "SELECT id, ts, target, content_sha256, content, chars, block_reason,"
+        " status, decided_at, decided_by FROM pending_egress ORDER BY ts DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def decide_pending_egress(
+    conn: "_sqlite3.Connection", egress_id: int, *, approve: bool, decided_by: str,
+) -> dict:
+    """保留中の egress を承認/却下し、決定後の行を返す。
+
+    `status` が既に `pending` でなければ二重決定として拒否する。
+    """
+    from datetime import UTC, datetime
+
+    ensure_pending_egress_table(conn)
+    row = conn.execute(
+        "SELECT id, ts, target, content_sha256, content, chars, block_reason, status"
+        " FROM pending_egress WHERE id = ?",
+        (egress_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"pending_egress id={egress_id} が見つかりません")
+    d = dict(row)
+    if d["status"] != "pending":
+        raise ValueError(f"pending_egress id={egress_id} は既に {d['status']} 済みです")
+
+    status = "approved" if approve else "rejected"
+    decided_at = datetime.now(UTC).isoformat()
+    conn.execute(
+        "UPDATE pending_egress SET status = ?, decided_at = ?, decided_by = ? WHERE id = ?",
+        (status, decided_at, decided_by, egress_id),
+    )
+    conn.commit()
+    d.update(status=status, decided_at=decided_at, decided_by=decided_by)
+    return d
+
+
 def normalize_assignee(name: str | None) -> str | None:
     """担当者名を正規化する。
     - 未展開の Slack メンション ID (<@UXXX> / @UXXX / 生の UXXX) を除去

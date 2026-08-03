@@ -1047,7 +1047,7 @@ def run_agent(
         today=ctx.today, since=ctx.since,
     )
 
-    progress = _make_progress_updater(None)
+    progress = _make_progress_updater(respond)
     progress("質問の意図を解釈中...")
 
     rewrite = _rewrite_query(question)
@@ -2049,11 +2049,22 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
         )
 
         if record_ids:
+            # 能力分離 5b: --file スコープ（全文読込 map-reduce QA）は respond と
+            # record_ids に強く結びついているため今回は分離対象外。in-process のまま
+            # （docs/security-architecture.md §3.2、PLAN.md 参照）。
             result = run_document_qa(
                 question=cmd_text,
                 respond=respond,
                 ctx=ctx,
             )
+        elif os.environ.get("ARGUS_READ_PLANE_SUBPROCESS", "").strip() in ("1", "true", "yes"):
+            # 能力分離 5b: --file なしの通常調査は Read Plane の別プロセス
+            # （Slack/Box トークンを持たない）へ出す。進捗はスラッシュコマンドには
+            # respond（ephemeral）があるので、_make_progress_updater 経由で従来と
+            # 同じ見た目（:mag: Argus 調査中... の replace_original 更新）にする。
+            from argus.pm_read_worker import run_in_read_plane
+            progress = _make_progress_updater(respond)
+            result = run_in_read_plane(cmd_text, index_name=index_name, on_progress=progress)
         else:
             seed_data = build_seed_data(ctx)
             result = run_agent(
@@ -2129,16 +2140,40 @@ def _run_investigate(respond, command, *, no_encrypt: bool = False):
             pass
 
 
+def _progress_as_respond(progress: Callable[[str], None] | None) -> Callable | None:
+    """`progress(text)` コールバックを `run_agent` の `respond` 互換に変換する。
+
+    `run_agent` の `respond` は Slack の respond 互換（`text=` / `blocks=` /
+    `response_type=` / `replace_original=` をキーワードで受ける）を前提にしている。
+    Read Plane の `progress` は「進捗テキストを受け取るだけ」の片方向コールバックなので、
+    `text=` が渡されたときだけ橋渡しし、`blocks=` のみの最終結果呼び出しは無視する
+    （最終結果は戻り値で返るため、respond 経由で二重に扱う必要はない）。
+    """
+    if progress is None:
+        return None
+
+    def _respond(*, text: str | None = None, **_kwargs) -> None:
+        if text is not None:
+            progress(text)
+
+    return _respond
+
+
 def run_investigate_for_worker(
     *, question: str, days: int = 30, max_steps: int = _DEFAULT_MAX_STEPS,
     timeout: float = _DEFAULT_TIMEOUT, index_name: str = "pm",
-    no_encrypt: bool = False,
+    no_encrypt: bool = False, progress: Callable[[str], None] | None = None,
 ) -> str:
     """Read Plane ワーカー（pm_read_worker.py）から呼ばれる調査のエントリポイント。
 
     CLI と同じ組み立てを行うが、**出力先フラグを一切持たない** — Read Plane は
     外へ出さないので、結果は戻り値として親（Write Plane）に返すだけである
     （docs/security-architecture.md §3.2）。
+
+    `progress` は調査中の途中経過を受け取るコールバック（省略可）。子（このプロセス）は
+    Slack トークンを持たないため自分では投稿できず、`pm_read_worker.py` 側で
+    stdout への JSON 行出力に変換される。未指定時は従来どおり `respond=None`
+    （後方互換、既存の呼び出しを壊さない）。
     """
     today = date.today().isoformat()
     since_date = (date.today() - timedelta(days=days)).isoformat()
@@ -2152,7 +2187,8 @@ def run_investigate_for_worker(
             session_id=new_session_id("read"),
         )
         return run_agent(
-            question=question, seed_data=build_seed_data(ctx), respond=None,
+            question=question, seed_data=build_seed_data(ctx),
+            respond=_progress_as_respond(progress),
             ctx=ctx, max_steps=max_steps, timeout=timeout,
         )
     finally:
