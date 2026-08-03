@@ -6,6 +6,7 @@ LLM への実アクセスは行わない（utils.llm.call_rivault を monkeypatc
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -36,7 +37,8 @@ def _make_minutes_db(path, meetings: list[dict]) -> None:
     """data/minutes/{kind}.db 相当の最小スキーマで会議を書き込む。
 
     meetings の各要素: {"meeting_id", "held_at", "file_path",
-                         "decisions": [content...], "action_items": [content...]}
+                         "decisions": [content...], "action_items": [content...],
+                         "minutes_content": 議事録本文（省略可）}
     """
     conn = sqlite3.connect(str(path))
     conn.execute(
@@ -45,6 +47,10 @@ def _make_minutes_db(path, meetings: list[dict]) -> None:
     )
     conn.execute("CREATE TABLE decisions (meeting_id TEXT, content TEXT)")
     conn.execute("CREATE TABLE action_items (meeting_id TEXT, content TEXT)")
+    conn.execute(
+        "CREATE TABLE minutes_content (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " meeting_id TEXT, content TEXT)"
+    )
     for m in meetings:
         conn.execute(
             "INSERT INTO instances (meeting_id, held_at, kind, file_path, imported_at)"
@@ -59,6 +65,11 @@ def _make_minutes_db(path, meetings: list[dict]) -> None:
             conn.execute(
                 "INSERT INTO action_items (meeting_id, content) VALUES (?,?)",
                 (m["meeting_id"], c),
+            )
+        if m.get("minutes_content"):
+            conn.execute(
+                "INSERT INTO minutes_content (meeting_id, content) VALUES (?,?)",
+                (m["meeting_id"], m["minutes_content"]),
             )
     conn.commit()
     conn.close()
@@ -338,7 +349,10 @@ class TestReaderK3:
         assert len(rows) == 1
         assert rows[0]["kind"] == "minutes_extraction_recall"
         assert "reader=k3" in rows[0]["content_head"]
-        assert any("production: false" in m for m in logs)
+        # 2026-08-03 に PM 判断で production: true（読み手専用）になった。
+        # 検証するのは「pin の注意が黙って消えていないこと」であって、
+        # production の値そのものではない（値は model_pin.yaml 側のテストで検証する）。
+        assert any("recall" in m and "Llama-4-Scout" in m for m in logs)
 
 
 class TestReaderBoth:
@@ -599,3 +613,217 @@ class TestDryRun:
         assert rows == []
         assert any("対象会議数" in m for m in logs)
         assert any("推定LLM呼び出し回数" in m for m in logs)
+
+
+class TestMaxFindingsPerMeeting:
+    """1会議・1読み手あたりの記録件数の上限（--max-findings-per-meeting）。
+
+    読み手の粒度が主系統より細かい場合（K3が日程調整・事務連絡まで拾う等）に
+    大量の「欠落」を記録してしまう問題への対策。上位N件のみ記録し、
+    切り捨てた件数をWARNに明示する（黙って打ち切らない）。
+    """
+
+    def _second_opinion_payload(self, n: int) -> str:
+        decisions = [{"content": f"第2系統のみが見つけた決定事項{i}"} for i in range(n)]
+        return json.dumps({"decisions": decisions, "action_items": []}, ensure_ascii=False)
+
+    def test_default_cap_truncates_and_warns(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_MeetingCap",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "m_cap", "held_at": "2026-06-30", "file_path": fp,
+            "decisions": [],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault", lambda *a, **k: self._second_opinion_payload(15),
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == pm_screen._DEFAULT_MAX_FINDINGS_PER_MEETING
+        assert any(
+            "[WARN]" in m and "10" in m and "15" in m and "粒度" in m for m in logs
+        )
+        # 切り捨てた件数（15-10=5）も明示されていること
+        assert any("5" in m and "記録しません" in m for m in logs)
+
+    def test_custom_cap_param_is_respected(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_MeetingCapCustom",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "m_cap_custom", "held_at": "2026-06-30", "file_path": fp,
+            "decisions": [],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault", lambda *a, **k: self._second_opinion_payload(5),
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, max_findings_per_meeting=2,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 2
+        assert any("[WARN]" in m and "2" in m and "5" in m for m in logs)
+
+    def test_no_warn_when_under_cap(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_MeetingNoCap",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "m_no_cap", "held_at": "2026-06-30", "file_path": fp,
+            "decisions": [],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault", lambda *a, **k: self._second_opinion_payload(3),
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 3
+        assert not any("読み手の粒度が主系統より細かい" in m for m in logs)
+
+
+# --------------------------------------------------------------------------- #
+# 突合の偽陽性対策（ratio単独では検出できない②③のパターン、docs参照）:
+# 議事録本文（extra_haystack）を突合対象に加え、分類の内訳をログに出す。
+# --------------------------------------------------------------------------- #
+
+
+class TestExtraHaystackFromMinutesContent:
+    def test_body_only_item_is_excluded_and_breakdown_is_logged(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """議事録本文（minutes_content）にはあるが抽出表に無い項目は欠落として
+        記録しない（②の再現）。抽出表にはあるが長さ違いで ratio だけでは
+        一致しない項目も包含判定で除外される（③の再現）。真の欠落だけが
+        記録され、分類の内訳がログに出ること。"""
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_MeetingHaystack",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "m_haystack", "held_at": "2026-06-30", "file_path": fp,
+            "decisions": ["計算資源を9月末までに追加割当する"],
+            "minutes_content": "## 議事内容\n今回の会議では備品を来週までに"
+                               "発注することを合意した。",
+        }])
+
+        import utils.llm as llm_mod
+        payload = json.dumps({
+            "decisions": [
+                # ③ 抽出表にもある（ratio<0.6・包含で救われる、除外）
+                {"content": "関係者間で複数回にわたり議論した結果、計算資源を9月末までに"
+                            "追加割当することが正式に決定した"},
+                # ② 本文にはあるが抽出表に無い（extra_haystack で救われる、除外）
+                {"content": "備品を来週までに発注する"},
+                # ① 本文にも抽出表にも無い（真の欠落候補）
+                {"content": "第2系統だけが見つけた本当の欠落決定事項"},
+            ],
+            "action_items": [],
+        }, ensure_ascii=False)
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: payload)
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 1
+        assert "第2系統だけが見つけた本当の欠落決定事項" in rows[0]["content_head"]
+
+        breakdown = [m for m in logs if m.startswith("所見:")]
+        assert len(breakdown) == 1
+        assert "真の欠落候補 1 件" in breakdown[0]
+        assert "本文にあり（除外） 1 件" in breakdown[0]
+        assert "抽出表にあり（除外） 1 件" in breakdown[0]
+
+    def test_without_minutes_content_body_item_is_reported_missing(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """minutes_content が無い（空）会議では、本文相当の照合ができないため、
+        本文にありそうな項目でも抽出表に無ければ欠落として記録される
+        （extra_haystack が渡らない場合の挙動確認）。"""
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_MeetingNoContent",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "m_no_content", "held_at": "2026-06-30", "file_path": fp,
+            "decisions": [],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: '{"decisions": [{"content": "備品を来週までに発注する"}],'
+                            ' "action_items": []}',
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 1
+        breakdown = [m for m in logs if m.startswith("所見:")]
+        assert "真の欠落候補 1 件" in breakdown[0]
+        assert "本文にあり（除外） 0 件" in breakdown[0]

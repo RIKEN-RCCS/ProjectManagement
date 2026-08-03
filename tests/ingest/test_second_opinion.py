@@ -1,6 +1,7 @@
 """第2系統による差分検査（docs/security-architecture.md §4.9 対策3+5）のテスト。"""
 from __future__ import annotations
 
+import difflib
 import sqlite3
 
 import pytest
@@ -128,6 +129,88 @@ class TestCompareExtractions:
         assert diff["second_counts"]["decisions"] == 2
 
 
+class TestNormalizeForExtractionMatch:
+    def test_strips_whitespace_and_punctuation(self):
+        a = ing.normalize_for_extraction_match("議事録を確認する。")
+        b = ing.normalize_for_extraction_match("議事録を　確認する")
+        assert a == b == "議事録を確認する"
+
+    def test_lowercases_ascii(self):
+        assert ing.normalize_for_extraction_match("ABC") == "abc"
+
+    def test_empty_is_empty(self):
+        assert ing.normalize_for_extraction_match("") == ""
+        assert ing.normalize_for_extraction_match(None) == ""
+
+
+class TestCompareExtractionsContainment:
+    """突合の偽陽性対策（ratio単独では長さの差に強く罰点を与える）のテスト。
+    実測: 保存済み29件の偽陽性のうち7件（③抽出表にもある）・2件（②本文にはある）が
+    ratio<0.6 のため従来ロジックでは不一致（=欠落候補）と誤判定されていた。"""
+
+    def test_long_and_short_same_item_matches_via_containment(self):
+        """K3のように主系統より詳しく長く書いた同一項目は ratio<0.6 になるが、
+        包含判定（正規化した短い方の12文字窓が長い方の70%以上に出現）で救える
+        ことを確認する（③の再現）。"""
+        primary = {
+            "decisions": [{"content": "計算資源を9月末までに追加割当する"}],
+            "action_items": [],
+        }
+        second = {
+            "decisions": [{
+                "content": "関係者間で複数回にわたり議論した結果、計算資源を9月末までに"
+                           "追加割当することが正式に決定した",
+            }],
+            "action_items": [],
+        }
+        ratio = difflib.SequenceMatcher(
+            None, primary["decisions"][0]["content"], second["decisions"][0]["content"],
+        ).ratio()
+        assert ratio < ing._EXTRACTION_MATCH_RATIO_THRESHOLD  # 従来ロジックでは不一致になる値
+        diff = ing.compare_extractions(primary, second)
+        assert diff["decisions"] == []  # 包含判定により一致、未一致（欠落候補）に出ない
+
+    def test_punctuation_and_whitespace_only_difference_matches(self):
+        primary = {"decisions": [], "action_items": [{"content": "議事録を確認する"}]}
+        second = {"decisions": [], "action_items": [{"content": "議事録を　確認する。"}]}
+        diff = ing.compare_extractions(primary, second)
+        assert diff["action_items"] == []
+
+    def test_distinct_items_with_short_shared_phrase_do_not_match(self):
+        """短い共通句（「〜について確認する」）を持つが内容が異なる別項目まで
+        包含判定で同一視してしまわないことを確認する。"""
+        primary = {
+            "decisions": [], "action_items": [{"content": "システムAの構成変更について確認する"}],
+        }
+        second = {
+            "decisions": [], "action_items": [{"content": "手順書Bの改訂内容について確認する"}],
+        }
+        diff = ing.compare_extractions(primary, second)
+        assert diff["action_items"] == ["手順書Bの改訂内容について確認する"]
+
+    def test_extra_haystack_excludes_item_present_in_body(self):
+        """本文（extra_haystack）にはあるが抽出表に無い項目は、欠落として報告しない
+        （②の再現）。"""
+        primary = {"decisions": [], "action_items": []}
+        second = {
+            "decisions": [], "action_items": [{"content": "備品を来週までに発注する"}],
+        }
+        haystack = "## 議事内容\n今回の会議では備品を来週までに発注することを合意した。"
+        diff = ing.compare_extractions(primary, second, extra_haystack=haystack)
+        assert diff["action_items"] == []
+        assert diff["matched_in_haystack_counts"]["action_items"] == 1
+
+    def test_without_extra_haystack_default_behavior_is_unchanged(self):
+        """extra_haystack を渡さない既存呼び出し（Slack Pass 1 抽出・Box）の挙動は
+        変わらない。本文相当の情報が無いため、抽出表に無ければ欠落として報告する。"""
+        primary = {"decisions": [], "action_items": []}
+        second = {
+            "decisions": [], "action_items": [{"content": "備品を来週までに発注する"}],
+        }
+        diff = ing.compare_extractions(primary, second)
+        assert diff["action_items"] == ["備品を来週までに発注する"]
+
+
 class TestSecondOpinionExtraction:
     def test_broken_json_returns_empty_dict_without_raising(self, monkeypatch):
         import utils.llm as llm_mod
@@ -144,6 +227,60 @@ class TestSecondOpinionExtraction:
         monkeypatch.setattr(llm_mod, "call_rivault", boom)
         result = ing.second_opinion_extraction("スレッド本文")
         assert result == {"decisions": [], "action_items": []}
+
+
+class TestSecondOpinionExtractionPromptContent:
+    """第2系統プロンプトの粒度調整（2026-08）: 主系統と同じ3ゲート基準・出力形式制約が
+    含まれること。route="rivault"（既定）・route="k3" のいずれでも同じ基準が入る
+    こと（両方の読み手が同じ基準で拾うべき、という要求）。"""
+
+    def test_rivault_route_prompt_includes_triage_gates(self, monkeypatch):
+        captured = {}
+
+        def fake_call_rivault(prompt, **kw):
+            captured["prompt"] = prompt
+            return '{"decisions": [], "action_items": []}'
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_rivault", fake_call_rivault)
+
+        ing._call_second_opinion_extraction("スレッド本文", route="rivault")
+        prompt = captured["prompt"]
+        assert "ゲート1" in prompt
+        assert "ゲート2" in prompt
+        assert "ゲート3" in prompt
+        # 基準文言を複製せず _TRIAGE_GATES_SECTION を参照していること
+        assert ing._TRIAGE_GATES_SECTION in prompt
+
+    def test_rivault_route_prompt_forbids_speaker_and_org_names(self, monkeypatch):
+        captured = {}
+
+        def fake_call_rivault(prompt, **kw):
+            captured["prompt"] = prompt
+            return '{"decisions": [], "action_items": []}'
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_rivault", fake_call_rivault)
+
+        ing._call_second_opinion_extraction("スレッド本文", route="rivault")
+        prompt = captured["prompt"]
+        assert "話者名・組織名を含めない" in prompt
+
+    def test_k3_route_prompt_includes_same_triage_gates(self, monkeypatch):
+        captured = {}
+
+        def fake_call_local_llm(prompt, **kw):
+            captured["prompt"] = prompt
+            return '{"decisions": [], "action_items": []}'
+
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:9999/v1")
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_local_llm", fake_call_local_llm)
+
+        ing._call_second_opinion_extraction("スレッド本文", route="k3")
+        prompt = captured["prompt"]
+        assert ing._TRIAGE_GATES_SECTION in prompt
+        assert "話者名・組織名を含めない" in prompt
 
 
 class TestApplySecondOpinionExtraction:

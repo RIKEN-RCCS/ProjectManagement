@@ -975,6 +975,68 @@ def record_second_opinion(
     conn.commit()
 
 
+# --------------------------------------------------------------------------- #
+# triage_second_opinion のレビュー状態（所見が読まれる仕組み、pending_egress と同じ形）
+# --------------------------------------------------------------------------- #
+
+def ensure_second_opinion_reviewed_column(conn: "_sqlite3.Connection") -> None:
+    """triage_second_opinion に reviewed_at 列を後付けする（既存 pm.db への追加・冪等）。
+
+    テーブルが無ければ何もしない（record_second_opinion が初回記録時にテーブルごと
+    作成するため、この関数を先に呼ぶ必要はない）。列が既にあれば何もしない
+    （`ensure_pending_egress_table` と同じ作法）。既存行の reviewed_at は NULL
+    （未レビュー）になる。
+    """
+    if not table_exists(conn, "triage_second_opinion"):
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_second_opinion)").fetchall()}
+    if "reviewed_at" in cols:
+        return
+    conn.execute("ALTER TABLE triage_second_opinion ADD COLUMN reviewed_at TEXT")
+    conn.commit()
+
+
+def list_second_opinion_findings(
+    conn: "_sqlite3.Connection", *, kind: str | None = None, unreviewed_only: bool = False,
+) -> list[dict]:
+    """triage_second_opinion の所見を新しい順に返す（`pm_screen.py --list-findings`）。"""
+    if not table_exists(conn, "triage_second_opinion"):
+        return []
+    ensure_second_opinion_reviewed_column(conn)
+    sql = "SELECT id, ts, kind, model, content_head, reviewed_at FROM triage_second_opinion"
+    conds = []
+    params: list = []
+    if kind:
+        conds.append("kind = ?")
+        params.append(kind)
+    if unreviewed_only:
+        conds.append("reviewed_at IS NULL")
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY ts DESC"
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_second_opinion_reviewed(conn: "_sqlite3.Connection", ids: list[int]) -> int:
+    """指定した id の reviewed_at を現在時刻で埋める（`pm_screen.py --mark-reviewed`）。
+
+    実際に該当した行数を返す（存在しない id は無視され件数に含まれない）。
+    """
+    from datetime import UTC, datetime
+
+    ensure_second_opinion_reviewed_column(conn)
+    ts = datetime.now(UTC).isoformat()
+    n = 0
+    for i in ids:
+        cur = conn.execute(
+            "UPDATE triage_second_opinion SET reviewed_at = ? WHERE id = ?", (ts, i),
+        )
+        n += cur.rowcount
+    conn.commit()
+    return n
+
+
 def tool_call_anchor(conn: "_sqlite3.Connection") -> dict | None:
     """`tool_calls` の連鎖の頭（最新 entry_hash）と件数を返す（§4.4 の外部アンカー用）。
 

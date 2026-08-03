@@ -94,12 +94,15 @@ class TestRealPinFile:
         m = model_pin.models()
         assert {"glm-5.2", "Kimi-K2-Thinking", "bge-m3"} <= set(m)
 
-    def test_k3_is_not_production_and_engine_unconfirmed(self):
-        """K3 は本番不可のまま、engine/trust_remote_code は未確認であること（§4.6）。"""
+    def test_k3_is_production_as_reader_only_but_engine_unconfirmed(self):
+        """K3 は 2026-08-03 に読み手（recall）専用として production: true になったが、
+        engine/trust_remote_code は依然未確認であること（嘘を書かない・§4.6）。"""
         k3 = model_pin.models()["kimi-k3"]
-        assert k3["production"] is False
+        assert k3["production"] is True
         assert k3["declared_trust_remote_code"] is None
         assert k3["declared_engine"] is None
+        assert k3["risk_accepted"]["date"] == "2026-08-03"
+        assert k3["risk_accepted"]["accepted_by"] == "PM"
 
     def test_declared_fields_are_not_used_for_decisions(self, pin, monkeypatch):
         """declared_* は判定に使わない（検証できないものを根拠にしない・P10）。"""

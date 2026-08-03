@@ -66,6 +66,13 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
                              リモートのどちらにも `anchors` が無ければ判定不能
                              （まだ運用が始まっていない）。`git ls-remote` の
                              失敗・タイムアウト（10秒）も判定不能。
+ 16. second_opinion_findings_stale — `triage_second_opinion`（議事録経路への
+                             第2系統・K3 recall の欠落検出所見）で kind が
+                             minutes_extraction 系のもののうち、reviewed_at が
+                             未設定のまま 14 日以上経過した行がある。読まれない
+                             所見が溜まるのは、検査が動いていないのと同じである。
+                             `_pretune` / `_t8192` で終わる kind（調整前の
+                             試行記録）は対象外。
 
 本ファイルの通常の検査（1〜14）は書き込みを一切行わない。値（channel/user ID 等）はログに出力しない
 （state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
@@ -119,6 +126,12 @@ _DEFAULT_ANCHOR_PATH = REPO_ROOT / "config" / "anchors" / "tool_call_anchor.json
 
 # pending_egress（§4.2 の承認フロー）が pending のまま放置されたとみなす日数。
 _PENDING_EGRESS_STALE_DAYS = 7
+
+# triage_second_opinion（第2系統・K3 recall の欠落検出所見）が未レビューのまま
+# 放置されたとみなす日数。
+_SECOND_OPINION_FINDINGS_STALE_DAYS = 14
+# 調整前の試行記録（本番運用の所見ではない）を示す kind の接尾辞。レビュー対象外。
+_SECOND_OPINION_EXEMPT_KIND_SUFFIXES = ("_pretune", "_t8192")
 
 # patrol_state.db notifications.event_type の歴史的キー
 # （現行ソースには存在しないが過去に記録されたことがあるキー）
@@ -1210,6 +1223,56 @@ def check_anchor_pushed(repo_root: Path = REPO_ROOT) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# 16. 第2系統トリアージ所見の滞留（second_opinion_findings_stale）
+# --------------------------------------------------------------------------- #
+def check_second_opinion_findings_stale(
+    pm_conn: sqlite3.Connection, days: int = _SECOND_OPINION_FINDINGS_STALE_DAYS,
+) -> list[dict]:
+    """`triage_second_opinion` の議事録経路の所見が未レビューのまま滞留していないか検査する。
+
+    **読まれない所見が溜まるのは、検査が動いていないのと同じである。**
+    K3 recall（kind=minutes_extraction_recall）・R8対策の第2系統
+    （kind=minutes_extraction）とその調整試行（`_pretune` / `_t8192` 接尾辞）を含む
+    `minutes_extraction` 系の kind のみが対象。`_pretune` / `_t8192` で終わる kind
+    は調整前の試行記録であり、本番運用の所見ではないためレビュー対象から除外する。
+
+    本ファイルの検査は読み取り専用（`main()` が `PRAGMA query_only = ON` を張る）ため、
+    ここで `reviewed_at` 列の後付け（`ensure_second_opinion_reviewed_column`、ALTER TABLE
+    を伴う）は行わない。列がまだ後付けされていない pm.db では判定不能として扱う
+    （黙って飛ばさず理由を標準出力に出す。列の後付けは別途 pm_screen.py 側の経路で行う）。
+    """
+    if not table_exists(pm_conn, "triage_second_opinion"):
+        return []
+    cols = {r[1] for r in pm_conn.execute("PRAGMA table_info(triage_second_opinion)").fetchall()}
+    if "reviewed_at" not in cols:
+        print(
+            "[INFO] second_opinion_findings_stale: 判定できません"
+            "（triage_second_opinion に reviewed_at 列がまだありません）",
+            file=sys.stderr,
+        )
+        return []
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    rows = pm_conn.execute(
+        "SELECT id, ts, kind FROM triage_second_opinion"
+        " WHERE kind LIKE 'minutes_extraction%' AND reviewed_at IS NULL AND ts < ?"
+        " ORDER BY ts ASC",
+        (cutoff,),
+    ).fetchall()
+    rows = [r for r in rows if not r["kind"].endswith(_SECOND_OPINION_EXEMPT_KIND_SUFFIXES)]
+    if not rows:
+        return []
+    return [{
+        "check": "second_opinion_findings_stale",
+        "count": len(rows),
+        "oldest_ts": rows[0]["ts"],
+        "note": (
+            f"{days}日以上未レビューの第2系統・K3recallの所見が滞留しています。"
+            "読まれない所見が溜まるのは、検査が動いていないのと同じである"
+        ),
+    }]
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 def run_checks(
@@ -1243,6 +1306,7 @@ def run_checks(
     violations += check_anchor_consistency(pm_conn, anchor_path or _DEFAULT_ANCHOR_PATH)
     violations += check_anchor_pushed()
     violations += check_pending_egress_stale(pm_conn)
+    violations += check_second_opinion_findings_stale(pm_conn)
     if logs_dir is not None:
         # セキュリティ監視のログ走査は独立した窓（既定 1 日）で行う。データ検査の
         # --days 7 と同じ窓にすると、解消済みの deny が 1 週間鳴り続けて監視が

@@ -855,19 +855,88 @@ def apply_second_opinion(results: dict, milestones: list[dict], *,
 # 変更する場合は config/sensitive_terms.yaml 同様、件数への影響を見ること。
 _EXTRACTION_MATCH_RATIO_THRESHOLD = 0.6
 
+# 突合の包含判定パラメータ。ratio() は対称で長さの差に強く罰点を与えるため、
+# 第2系統（特に K3）が主系統より詳しく長く書いた同一項目を「不一致」と誤判定する
+# （実測: 保存済み29件中7件がこれで偽陽性になっていた。ratio<0.6 だが同一項目）。
+#
+# 当初「正規化した短い方から12文字窓を4文字ステップで切り出し、その70%以上が
+# 長い方に出現する」で実装したが、実データ（保存済み29件 + 対応する議事録DB）で
+# 再検証したところ **0/7件しか救えなかった**。原因はステップ4の固定グリッドの
+# 位置ずれ: 実際に一致する連続部分文字列が12〜13文字ちょうどのことが多く、
+# その一致区間が4の倍数位置から始まっていないと、どの窓もその区間を
+# 丸ごとは切り出せずヒットしない（例: 一致区間が長さ13で開始位置が
+# グリッド位置と1〜3文字ずれているだけで hits=0 になる）。ステップ幅を保つ限り
+# 「70%以上」はほぼ満たせない値になってしまうため、判定方法そのものを
+# 「正規化した2文字列間に長さ12文字以上の連続一致部分文字列が存在するか」
+# （全オフセットを見る＝グリッドのずれに影響されない）に変更した。
+# 12文字という長さの根拠は変わらない: 短すぎる一致では「〜を実施する」等の
+# 共通する短い定型句だけで内容の異なる別項目まで同一視してしまう。
+# 変更後の値で実データを再検証し、③相当7件・②相当1件を検出、残り21件が
+# 真の欠落候補という結果を得た（元の見立て: ③7件・②2件・欠落20件前後に近い）。
+_CONTAINMENT_WINDOW = 12
 
-def compare_extractions(primary: dict, second: dict) -> dict:
+
+def normalize_for_extraction_match(text: str) -> str:
+    """突合用の正規化: 空白（半角・全角）・句読点を除去し、ASCIIは小文字化する。"""
+    if not text:
+        return ""
+    text = re.sub(r"[ \t　]+", "", text)
+    text = re.sub(r"[、。（）()「」\[\],.:：・|\-]", "", text)
+    return text.lower()
+
+
+def _is_contained_match(a: str, b: str) -> bool:
+    """正規化した a, b のうち短い方が、長い方と12文字以上の連続一致部分文字列を
+    持てば一致とみなす（_CONTAINMENT_WINDOW 上のコメント参照。ステップ付き固定
+    グリッドでの走査は位置ずれで実データの一致を検出できなかったため、
+    全オフセットを見る最長共通部分文字列で判定する）。"""
+    na = normalize_for_extraction_match(a)
+    nb = normalize_for_extraction_match(b)
+    if not na or not nb:
+        return False
+    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if len(short) <= _CONTAINMENT_WINDOW:
+        return short in long_
+    match = difflib.SequenceMatcher(None, short, long_).find_longest_match(
+        0, len(short), 0, len(long_)
+    )
+    return match.size >= _CONTAINMENT_WINDOW
+
+
+def _extraction_texts_match(a: str, b: str) -> bool:
+    """ratio または包含のいずれかを満たせば一致とみなす。
+
+    ratio は「表記ゆれの短い項目同士」に効き、包含は「長さが大きく違う同一項目」に効く。
+    どちらか一方が成立すれば十分なので、従来の ratio 判定は残したまま or 条件で足す。
+    """
+    if not a or not b:
+        return False
+    if difflib.SequenceMatcher(None, a, b).ratio() >= _EXTRACTION_MATCH_RATIO_THRESHOLD:
+        return True
+    return _is_contained_match(a, b)
+
+
+def compare_extractions(primary: dict, second: dict, *, extra_haystack: str = "") -> dict:
     """主系統・第2系統の抽出結果を突き合わせ、**第2系統にあって主系統に無い**項目を返す。
 
-    突合は SequenceMatcher.ratio() >= _EXTRACTION_MATCH_RATIO_THRESHOLD を「一致」とみなす
-    （表記ゆれは吸収しつつ、別項目を同一視しない程度の閾値。根拠は定数のコメント参照）。
+    突合は「ratio または包含」のいずれかを満たせば「一致」とみなす
+    （_extraction_texts_match 参照。根拠は各定数のコメント参照）。
+
+    extra_haystack: 抽出表には無いが本文に書かれているテキスト（例: 議事録本文）を
+    渡す省略可能引数。抽出表と一致しなかった項目についてのみ、この文字列との一致も
+    確認する（一致すれば「本文にはあるので欠落ではない」として除外する）。
+    既定は空文字列で、その場合は従来どおり抽出表のみで判定する（Slack Pass 1 抽出・
+    Box の既存呼び出しの挙動は変わらない）。
 
     戻り値: {"decisions": [未一致content...], "action_items": [...],
-             "primary_counts": {...}, "second_counts": {...}}
+             "primary_counts": {...}, "second_counts": {...},
+             "matched_in_table_counts": {...}, "matched_in_haystack_counts": {...}}
     """
     result: dict = {}
     primary_counts: dict = {}
     second_counts: dict = {}
+    matched_in_table_counts: dict = {}
+    matched_in_haystack_counts: dict = {}
     for kind in ("decisions", "action_items"):
         primary_contents = [
             (item or {}).get("content", "") or "" for item in (primary.get(kind) or [])
@@ -879,22 +948,29 @@ def compare_extractions(primary: dict, second: dict) -> dict:
         second_counts[kind] = len(second_contents)
 
         missing = []
+        n_matched_table = 0
+        n_matched_haystack = 0
         for s in second_contents:
             # 空・空白のみの content は突合対象から除外する。第2系統が
             # {"content": ""} を返すことがあり、これをそのまま扱うと空文字が
             # missing に入り、triage_second_opinion に空の所見が記録されてしまう。
             if not s.strip():
                 continue
-            matched = any(
-                difflib.SequenceMatcher(None, s, p).ratio() >= _EXTRACTION_MATCH_RATIO_THRESHOLD
-                for p in primary_contents
-            )
-            if not matched:
-                missing.append(s)
+            if any(_extraction_texts_match(s, p) for p in primary_contents):
+                n_matched_table += 1
+                continue
+            if extra_haystack and _extraction_texts_match(s, extra_haystack):
+                n_matched_haystack += 1
+                continue
+            missing.append(s)
         result[kind] = missing
+        matched_in_table_counts[kind] = n_matched_table
+        matched_in_haystack_counts[kind] = n_matched_haystack
 
     result["primary_counts"] = primary_counts
     result["second_counts"] = second_counts
+    result["matched_in_table_counts"] = matched_in_table_counts
+    result["matched_in_haystack_counts"] = matched_in_haystack_counts
     return result
 
 
@@ -926,10 +1002,24 @@ def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
         model = model or (cfg_root.get("quality_reader") or {}).get("model")
     else:
         model = model or (cfg_root.get("second_opinion") or {}).get("model")
+    # 2026-08 粒度調整: 主系統（EXTRACT_PROMPT_INTEGRATED）と同じ3ゲート基準
+    # （_TRIAGE_GATES_SECTION、複製せず参照）を入れ、日程調整・事務連絡のような
+    # 「意図した除外」まで欠落として拾ってしまう問題（問題1）を抑える。
+    # あわせて話者名・組織名を含めない旨の出力形式制約を入れる（問題2）。
+    # 突合（compare_extractions の SequenceMatcher 閾値）を緩める案もあったが、
+    # 閾値を下げると別項目の同一視が増えるため確実性が低い。出力側を主系統の
+    # 記述スタイル（簡潔・話者名なし）に寄せる方が確実、という判断。
     prompt = (
         "次のやり取りから、(1) 決定事項 (2) アクションアイテム を抜き出し、JSON で返してください。\n"
         '`{"decisions": [{"content": "..."}], "action_items": [{"content": "..."}]}` の形式で、'
         "本文は1行の日本語にしてください。該当が無ければ空配列にしてください。\n"
+        "\n"
+        + _TRIAGE_GATES_SECTION
+        + "\n## 出力形式の制約\n"
+        "- content には話者名・組織名を含めないこと"
+        "（「誰が言ったか」ではなく「何が決まったか・何をするか」を書く）\n"
+        "- 1項目1行、簡潔に記述すること\n"
+        "- 敬称・肩書（さん、氏、部長 等）を付けないこと\n"
     )
     if context:
         prompt += f"\n## 文脈\n{context}\n"
@@ -942,10 +1032,23 @@ def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
             base_url = os.environ.get("LOCAL_LLM_URL")
             if not base_url:
                 raise RuntimeError("LOCAL_LLM_URL 未設定（~/.secrets/localLLM.sh を確認）")
+            # **K3 は thinking を無効化できない**（`think=False` を渡しても効かない。
+            # 2026-07-29 実測: enable_thinking / thinking.type / reasoning_effort の
+            # 3 手段すべて無効）。thinking だけで 2〜3k トークン消費するため、
+            # RiVault 側と同じ max_tokens=1024 では**本文に到達する前に打ち切られ 0 文字が返る**
+            # （2026-08-03 実測。JSON パース失敗として現れる）。
+            # timeout も 120 秒では足りない（1 チャンクで数分かかる）。
+            # **あるモデル向けに調整した値を別のモデルへそのまま適用してはいけない** —
+            # 共用してよいのはプロンプトと突合ロジックで、thinking の有無のような
+            # モデルの性質はパラメータに現れる。
             raw = call_local_llm(
                 prompt, model=model, base_url=base_url,
                 api_key=_token_for_base(base_url),
-                max_tokens=1024, timeout=120, think=False,
+                # 8192 でも足りなかった（2026-08-03 実測）。3 ゲート節をプロンプトへ
+                # 足して入力が長くなった結果、7 チャンク中 2 件が失敗した
+                # （空応答 1 件＝thinking で使い切り、JSON 途中切れ 1 件＝出力中に上限到達）。
+                # generate_minutes_local が K3 相当の処理で使っている 16384 に合わせる。
+                max_tokens=16384, timeout=600, think=False,
             )
         else:
             from utils.llm import call_rivault

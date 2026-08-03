@@ -44,6 +44,11 @@ Usage:
     python3 scripts/pm_screen.py --second-opinion-minutes --reader second
     python3 scripts/pm_screen.py --second-opinion-minutes --reader k3 --dry-run
     python3 scripts/pm_screen.py --second-opinion-minutes --reader both
+
+    # 第2系統トリアージの所見レビュー（triage_second_opinion。誰も見ない検査は意味がない）
+    python3 scripts/pm_screen.py --list-findings --unreviewed-only
+    python3 scripts/pm_screen.py --list-findings --kind minutes_extraction_recall
+    python3 scripts/pm_screen.py --mark-reviewed 12,13,14
 """
 
 import argparse
@@ -67,7 +72,12 @@ from cli_utils import (
     make_logger,
     resolve_db_path,
 )
-from db_utils import open_db, table_exists
+from db_utils import (
+    list_second_opinion_findings,
+    mark_second_opinion_reviewed,
+    open_db,
+    table_exists,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_MINUTES_DIR = REPO_ROOT / "data" / "minutes"
@@ -837,16 +847,12 @@ def export_triage_csv(
 #       - 失敗しても議事録は既に完成済み
 #       - 出力は triage_second_opinion に記録するだけで、議事録DB・pm.dbの
 #         action_items/decisions には一切入らない
-#     kimi-k3 は model_pin.yaml で production: false（declared_trust_remote_code 未確認）
-#     のため、使用時は起動時にその旨を標準出力へ明示する（黙って使わない）。
-#     ★非対称性の注意（2026-08-03、pin 照合をチョークポイント化した際に判明）: この
-#     --reader k3 は pm_screen.py を CLI から直接実行する運用（ARGUS_MODEL_PIN 未設定
-#     ＝既定の warn）を前提にしており、この場合は警告ログのみで動作する。しかし
-#     qa/web デーモン経由（ARGUS_MODEL_PIN=enforce）で同じコードパスを実行すると、
-#     call_local_llm の HTTP 直前の pin 照合で ModelPinError となり必ず失敗する
-#     （kimi-k3 が production: false のため enforce では拒否されるのが正しい挙動）。
-#     つまり「CLI では動くがデーモン経由では落ちる」という非対称な挙動になる。
-#     model_pin.yaml を書き換えて通すのではなく、CLI からのみ実行すること。
+#     kimi-k3 は 2026-08-03 に PM 判断で production: true になった（読み手専用）。
+#     ただし declared_trust_remote_code は依然 null（未確認）であり、
+#     model_pin.yaml の risk_accepted に受容の経緯が記録されている。
+#     ★pin は役割を区別しない: production: true は「議事録生成に使ってよい」ことを
+#     意味しない。生成に使わないのは role の記述と運用規律による制約であって、
+#     pin が機械的に防いでいるわけではない。
 #   both          — 両方を順に実行し、それぞれの kind で記録する。
 #
 # 議事録DB・pm.db の action_items/decisions は一切書き換えない。記録は
@@ -875,6 +881,10 @@ _MINUTES_STEM_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)-minutes$")
 
 _DEFAULT_SECOND_OPINION_SINCE_DAYS = 30
 _DEFAULT_SECOND_OPINION_LIMIT = 10
+# 1会議（かつ1読み手）あたりの記録件数の上限。読み手の粒度が主系統より細かい場合
+# （例: K3が日程調整・事務連絡まで拾う）、突合の閾値の粗さと相まって大量の
+# 「欠落」誤検出を作ってしまうため、上位N件で打ち切りWARNを出す（2026-08 追加）。
+_DEFAULT_MAX_FINDINGS_PER_MEETING = 10
 
 # 入力階層の表示名（ログ・レポート用）
 _TIER_LABELS = {
@@ -1024,7 +1034,8 @@ def _collect_meeting_candidates(
     """data/minutes/*.db から since 以降の会議を列挙する。
 
     各要素: {"kind", "meeting_id", "held_at", "file_path",
-             "decisions": [content...], "action_items": [content...]}
+             "decisions": [content...], "action_items": [content...],
+             "minutes_content": 議事録本文（無ければ空文字）}
     """
     candidates: list[dict] = []
     if not minutes_dir.is_dir():
@@ -1040,6 +1051,7 @@ def _collect_meeting_candidates(
         try:
             if not table_exists(conn, "instances"):
                 continue
+            has_content = table_exists(conn, "minutes_content")
             rows = conn.execute(
                 "SELECT meeting_id, held_at, file_path FROM instances"
                 " WHERE held_at >= ? ORDER BY held_at DESC",
@@ -1053,6 +1065,13 @@ def _collect_meeting_candidates(
                 ais = conn.execute(
                     "SELECT content FROM action_items WHERE meeting_id=?", (meeting_id,)
                 ).fetchall()
+                minutes_content = ""
+                if has_content:
+                    mc_row = conn.execute(
+                        "SELECT content FROM minutes_content WHERE meeting_id=? ORDER BY id",
+                        (meeting_id,),
+                    ).fetchall()
+                    minutes_content = "\n".join(mc["content"] for mc in mc_row if mc["content"])
                 candidates.append({
                     "kind": kind,
                     "meeting_id": meeting_id,
@@ -1060,6 +1079,7 @@ def _collect_meeting_candidates(
                     "file_path": r["file_path"],
                     "decisions": [d["content"] for d in decs],
                     "action_items": [a["content"] for a in ais],
+                    "minutes_content": minutes_content,
                 })
         finally:
             conn.close()
@@ -1077,6 +1097,7 @@ def run_second_opinion_minutes(
     no_encrypt: bool,
     log,
     reader: str = "second",
+    max_findings_per_meeting: int = _DEFAULT_MAX_FINDINGS_PER_MEETING,
 ) -> None:
     """議事録経路への第2系統差分検査バッチ本体。
 
@@ -1101,6 +1122,10 @@ def run_second_opinion_minutes(
     reader: "second"（既定）/ "k3" / "both"。上のファイルヘッダコメント参照。
         second は R8 対策の第2系統（変更なし）、k3 は kimi-k3 による recall チェック
         （R8 の独立系統ではない。品質目的のみ）。
+
+    max_findings_per_meeting: 1会議・1読み手あたりに記録する件数の上限
+        （既定 _DEFAULT_MAX_FINDINGS_PER_MEETING）。超えた場合はチャンク処理順で
+        上位N件のみ記録し、切り捨てた件数をWARNに残す（黙って打ち切らない）。
     """
     if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
         log("[INFO] ARGUS_SECOND_OPINION が無効のため第2系統検査をスキップします")
@@ -1108,11 +1133,10 @@ def run_second_opinion_minutes(
 
     readers = _resolve_readers(reader)
     if "k3" in readers:
-        log("[INFO] --reader k3: kimi-k3 は config/model_pin.yaml 上 production: false"
-            "（評価用。declared_trust_remote_code 未確認）です。"
-            "R8 対策の第2系統（Llama-4-Scout）の代わりではなく、recall チェック専用の"
-            "読み手として使います。ARGUS_MODEL_PIN=warn（既定）では警告のみで続行し、"
-            "enforce では拒否されます。")
+        log("[INFO] --reader k3: kimi-k3 は読み手（recall 確認）専用として "
+            "production: true（PM 判断 2026-08-03）。declared_trust_remote_code は"
+            "未確認のままで、受容の経緯は config/model_pin.yaml の risk_accepted にある。"
+            "R8 対策の第2系統（Llama-4-Scout）の代わりではない — 出自が主系統と同系統のため。")
 
     since = since or _default_second_opinion_since()
     log(f"対象期間: {since} 以降")
@@ -1197,6 +1221,11 @@ def run_second_opinion_minutes(
             })
 
     n_recorded = 0
+    # ② 本文にはあるが抽出表に無い（除外） / ③ 抽出表にもある（除外）の内訳集計。
+    # ①（真の欠落候補）は n_recorded に一致する。件数は「効きすぎて真の欠落まで
+    # 落としていないか」を後から検証できるよう、除外した件数も必ずログに出す。
+    n_excluded_in_haystack = 0
+    n_excluded_in_table = 0
     for c, _path, source_kind, chunks in processed:
         base_ref = f"[{c['kind']}/{c['meeting_id']}][{source_kind}]"
         if source_kind == "combined_degraded":
@@ -1207,9 +1236,13 @@ def run_second_opinion_minutes(
             "decisions": [{"content": x} for x in c["decisions"]],
             "action_items": [{"content": x} for x in c["action_items"]],
         }
+        extra_haystack = c.get("minutes_content") or ""
         for spec in reader_specs:
             meeting_ref = base_ref + (f"[{spec['tag']}]" if spec["tag"] else "")
             seen: set[str] = set()
+            # 上限判定のため、DB記録はチャンク処理が終わってから行う
+            # （切り捨てた件数を正しくWARNに出すため、実際に見つかった総数が必要）。
+            findings: list[dict] = []
             for chunk_text in chunks:
                 try:
                     second, raw = _call_second_opinion_extraction(
@@ -1219,23 +1252,38 @@ def run_second_opinion_minutes(
                     log(f"[WARN] 第2系統(minutes, route={spec['route']}) の呼び出しに失敗"
                         f"（このチャンクはスキップ）: {e}")
                     continue
-                diff = compare_extractions(primary, second)
+                diff = compare_extractions(primary, second, extra_haystack=extra_haystack)
                 terms = flag_sensitive_terms(chunk_text)
                 for k in ("decisions", "action_items"):
+                    n_excluded_in_table += diff.get("matched_in_table_counts", {}).get(k, 0)
+                    n_excluded_in_haystack += diff.get("matched_in_haystack_counts", {}).get(k, 0)
                     for content in diff.get(k, []):
                         if not content.strip() or content in seen:
                             continue
                         seen.add(content)
-                        record_second_opinion(
-                            pm_conn, kind=spec["kind"],
-                            content=f"{meeting_ref} {content}",
-                            primary_verdict="MISSING", second_verdict="PRESENT",
-                            flagged_terms=terms, model=spec["model"], raw=raw,
-                        )
-                        n_recorded += 1
+                        findings.append({"kind": spec["kind"], "content": content,
+                                          "terms": terms, "raw": raw})
+
+            if len(findings) > max_findings_per_meeting:
+                n_over = len(findings) - max_findings_per_meeting
+                log(f"[WARN] {meeting_ref} で {max_findings_per_meeting} 件を超えました"
+                    f"（実際 {len(findings)} 件）。読み手の粒度が主系統より細かい可能性があります。"
+                    f"上位 {max_findings_per_meeting} 件のみ記録し、残り {n_over} 件は記録しません"
+                    "（黙って打ち切ると『全部見た』と誤読されるため明示します）")
+
+            for f in findings[:max_findings_per_meeting]:
+                record_second_opinion(
+                    pm_conn, kind=f["kind"],
+                    content=f"{meeting_ref} {f['content']}",
+                    primary_verdict="MISSING", second_verdict="PRESENT",
+                    flagged_terms=f["terms"], model=spec["model"], raw=f["raw"],
+                )
+                n_recorded += 1
             log(f"  {meeting_ref} チャンク{len(chunks)}件 処理完了")
 
     log("")
+    log(f"所見: 真の欠落候補 {n_recorded} 件 / 本文にあり（除外） {n_excluded_in_haystack} 件"
+        f" / 抽出表にあり（除外） {n_excluded_in_table} 件")
     log(f"完了: 読み手が保存済みに無いと判定した項目 {n_recorded} 件を"
         " triage_second_opinion に記録しました"
         "（議事録DB・pm.dbのaction_items/decisionsは変更していません）")
@@ -1290,11 +1338,27 @@ def main():
     parser.add_argument("--limit", type=int, default=_DEFAULT_SECOND_OPINION_LIMIT,
                         help="--second-opinion-minutes 時に処理する会議数の上限"
                              f"（デフォルト: {_DEFAULT_SECOND_OPINION_LIMIT}）")
+    parser.add_argument("--max-findings-per-meeting", type=int,
+                        default=_DEFAULT_MAX_FINDINGS_PER_MEETING,
+                        help="--second-opinion-minutes 時に1会議・1読み手あたり記録する"
+                             "件数の上限。超えた場合は上位N件のみ記録しWARNを出す"
+                             f"（デフォルト: {_DEFAULT_MAX_FINDINGS_PER_MEETING}）")
     parser.add_argument("--minutes-dir", default=str(DEFAULT_MINUTES_DIR),
                         help=f"議事録DBディレクトリ（デフォルト: {DEFAULT_MINUTES_DIR}）")
     parser.add_argument("--processing-dir", default=str(DEFAULT_PROCESSING_DIR),
                         help=f"文字起こし原文ディレクトリ（デフォルト: {DEFAULT_PROCESSING_DIR}）")
     add_dry_run_arg(parser)
+    parser.add_argument("--list-findings", action="store_true",
+                        help="第2系統トリアージの所見（triage_second_opinion）を一覧表示する"
+                             "（id/ts/kind/model/content_head先頭120文字）")
+    parser.add_argument("--kind", default=None, metavar="KIND",
+                        help="--list-findings で kind を絞り込む"
+                             "（例: minutes_extraction_recall）")
+    parser.add_argument("--unreviewed-only", action="store_true",
+                        help="--list-findings で reviewed_at が未設定の行のみ表示する")
+    parser.add_argument("--mark-reviewed", default=None, metavar="ID[,ID...]",
+                        help="指定した triage_second_opinion.id の reviewed_at を"
+                             "現在時刻で埋める（カンマ区切りで複数指定可）")
 
     args = parser.parse_args()
     db_path = resolve_db_path(args.db, REPO_ROOT / "data" / "pm.db")
@@ -1304,6 +1368,29 @@ def main():
     log, close = make_logger(args.output if not (args.export or args.triage) else None)
 
     conn = open_db(db_path, encrypt=not args.no_encrypt)
+
+    if args.list_findings:
+        rows = list_second_opinion_findings(
+            conn, kind=args.kind, unreviewed_only=args.unreviewed_only,
+        )
+        if not rows:
+            log("所見はありません")
+        else:
+            for r in rows:
+                head = (r["content_head"] or "")[:120]
+                log(f"id={r['id']} ts={r['ts']} kind={r['kind']} model={r['model']}"
+                    f" reviewed_at={r['reviewed_at']} content_head={head!r}")
+        conn.close()
+        close()
+        return
+
+    if args.mark_reviewed:
+        ids = [int(x) for x in args.mark_reviewed.split(",") if x.strip()]
+        n = mark_second_opinion_reviewed(conn, ids)
+        log(f"reviewed_at を設定しました: {n} 件（指定 {len(ids)} 件中）")
+        conn.close()
+        close()
+        return
 
     if args.triage:
         output = args.output or "triage.csv"
@@ -1323,6 +1410,7 @@ def main():
             no_encrypt=args.no_encrypt,
             log=log,
             reader=args.reader,
+            max_findings_per_meeting=args.max_findings_per_meeting,
         )
         conn.close()
         close()

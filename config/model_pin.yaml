@@ -207,18 +207,55 @@ models:
     declared_by: null
     declared_at: null
 
-  # --- 評価専用（本番経路では使わない） -----------------------------------
+  # --- 議事録の欠落検出の読み手（recall）専用。議事録生成には使わない -------
   kimi-k3:
-    role: "評価用（2026-07-31 に PM 判断で活用停止中。本番経路では使わない）"
+    role: >-
+      議事録の欠落検出の読み手（recall）専用。議事録生成には使わない
+      （PM判断 2026-08-03、用語一致率が glm の 4 割・所要 3.5〜4.2 倍・
+      500/504 で 20〜30% 失敗のため）。
     served_model_name: kimi-k3
     endpoint_env: [ARGUS_ONESHOT_LLM_URL, RIKYU_URL]
     token_env: [ARGUS_ONESHOT_LLM_TOKEN, RIKYU_TOKEN]
-    production: false
-    # §4.6 の K3 固有の注意: HuggingFace 上で `custom_code` タグ付きで、モデルカードの
-    # transformers 使用例は trust_remote_code=True。KDA が新規アーキテクチャのため
-    # transformers 経路では必須になる。**これは §1.3 の攻撃者2に直接該当する現在形のリスク。**
-    # 理究が vLLM / SGLang のネイティブ対応で動かしていることの確認を declared_* に記録する。
-    # 確認が取れるまで production: false のまま。
+    production: true
+    # ★ production: true は役割を区別しない ★
+    # pin が表現できるのは「どのモデルを使ってよいか」だけで、「どの役割で使ってよいか」
+    # は表現できない。ここで許可しているのは pm_screen.py --second-opinion-minutes
+    # --reader k3（読み手・recall確認）としての利用のみであり、議事録生成に使うことを
+    # この pin は防がない。役割の限定は上の role の記述と運用規律に依存する。
+    #
+    # §4.6 の K3 固有の注意（未解消）: HuggingFace 上で `custom_code` タグ付きで、
+    # モデルカードの transformers 使用例は trust_remote_code=True。KDA が新規アーキテクチャ
+    # のため transformers 経路では必須になる。**これは §1.3 の攻撃者2に直接該当する
+    # 現在形のリスクであり、この pin 変更では解消していない**（declared_trust_remote_code
+    # は下記のとおり null のまま）。
+    #
+    # risk_accepted: 2026-08-03 に PM が「読み手（recall）専用」に限定した上で受容した。
+    #   **決定は PM のもの。下記の理由は Claude が提示した分析であり、PM の発言ではない。**
+    #   PM の判断の直接の根拠は、実測 3 会議で検出した 19 件の欠落候補を読み、
+    #   「載っているべきだった」と確認したこと（日付を伴う約束が 6 件、
+    #   マイルストーン期限に関わるものが 2 件を含む）。
+    #   Claude が提示した受容の理由:
+    #     ① trust_remote_code の危険は「モデルを読み込むプロセスで任意コードが走る」ことだが、
+    #        Argus は OpenAI 互換 API のクライアントでモデルを読み込まない。コードが走る
+    #        としたら RIKYU 側である。
+    #     ② RIKYU は既に kimi-k3 を配信しており、Argus が使うかどうかとは無関係にその
+    #        危険は存在する。しかも Argus は同じ RIKYU 上の4モデルに既に依存している。
+    #     ③ 供給元への確認は依頼できない（運用上の制約）ため、ゲートを満たす手段が無い。
+    #   受容していないもの: K3 の出力が本番データに影響することのリスク（R5/R12）。
+    #     そのため読み手（recall確認）に限定し、議事録生成には使わない。
+    risk_accepted:
+      date: "2026-08-03"
+      accepted_by: "PM"
+      reason: >-
+        ① trust_remote_code の危険は「モデルを読み込むプロセスで任意コードが走る」ことだが、
+        Argus は OpenAI 互換 API のクライアントでモデルを読み込まない。コードが走るとしたら
+        RIKYU 側である。
+        ② RIKYU は既に kimi-k3 を配信しており、Argus が使うかどうかとは無関係にその危険は
+        存在する。しかも Argus は同じ RIKYU 上の4モデルに既に依存している。
+        ③ 供給元への確認は依頼できない（運用上の制約）ため、ゲートを満たす手段が無い。
+      not_accepted: >-
+        K3 の出力が本番データに影響することのリスク（R5/R12）。そのため読み手
+        （recall確認）に限定し、議事録生成には使わない。
     requires_native_engine: true
     verified_at: "2026-08-01"      # id は実在を確認。ただし engine/trust_remote_code は未確認
     verified_by: "model_pin.py --check"
@@ -226,7 +263,7 @@ models:
     verified_max_output_tokens: 977408
     declared_revision: null
     declared_weights_format: safetensors
-    declared_trust_remote_code: null   # ★未確認。ここが false と確認できるまで本番不可
+    declared_trust_remote_code: null   # ★未確認のまま。確認できていないので確認済みにしない
     declared_engine: null              # ★未確認（vllm または sglang であること）
     declared_by: null
     declared_at: null

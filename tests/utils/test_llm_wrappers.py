@@ -1067,19 +1067,20 @@ class TestChokepointModelPin:
             result = call_rivault("prompt", model="DeepSeek-V4-Flash")
         assert result == "ok"
 
-    def test_kimi_k3_rejected_in_enforce(self, monkeypatch):
-        """kimi-k3 は production: false のため enforce では拒否される（正しい挙動）。"""
+    def test_kimi_k3_allowed_in_enforce_as_reader_only(self, monkeypatch):
+        """kimi-k3 は 2026-08-03 に読み手（recall）専用として production: true に
+        なったため enforce でも通る。役割の限定は pin では表現できず、role の記述と
+        運用規律に依存する（config/model_pin.yaml 参照）。"""
         monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
         from utils.llm import call_local_llm
-        from utils.model_pin import ModelPinError
-        with patch("requests.post") as mock_post:
-            with pytest.raises(ModelPinError):
-                call_local_llm(
-                    "prompt", model="kimi-k3",
-                    base_url="http://localhost:8000/v1", api_key="dummy",
-                    _fallback_to_local=False,
-                )
-            mock_post.assert_not_called()
+        mock = _make_sse_response(["ok"])
+        with patch("requests.post", return_value=mock):
+            result = call_local_llm(
+                "prompt", model="kimi-k3",
+                base_url="http://localhost:8000/v1", api_key="dummy",
+                _fallback_to_local=False,
+            )
+        assert result == "ok"
 
     def test_off_mode_skips_pin_check_entirely(self, monkeypatch):
         """ARGUS_MODEL_PIN=off では未宣言モデルでも照合されず HTTP まで到達する。"""

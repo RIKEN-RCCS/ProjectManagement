@@ -1410,3 +1410,118 @@ def test_check_anchor_pushed_indeterminate_when_neither_side_has_anchors(monkeyp
     err = capsys.readouterr().err
     assert "判定できません" in err
     assert "まだ運用が始まっていません" in err
+
+
+# --------------------------------------------------------------------------- #
+# 16. 第2系統トリアージ所見の滞留（second_opinion_findings_stale）
+# --------------------------------------------------------------------------- #
+def _insert_second_opinion_finding(conn, *, ts, kind="minutes_extraction", reviewed_at=None):
+    from db_utils import ensure_second_opinion_reviewed_column, record_second_opinion
+
+    record_second_opinion(
+        conn, kind=kind, content="所見の本文",
+        primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+    )
+    ensure_second_opinion_reviewed_column(conn)
+    conn.execute(
+        "UPDATE triage_second_opinion SET ts = ?, reviewed_at = ?"
+        " WHERE id = (SELECT MAX(id) FROM triage_second_opinion)",
+        (ts, reviewed_at),
+    )
+    conn.commit()
+
+
+def test_check_second_opinion_findings_stale_detects_old_unreviewed(pm_db_path):
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_second_opinion_finding(conn, ts=old_ts)
+    violations = pm_selfcheck.check_second_opinion_findings_stale(conn)
+    conn.close()
+    assert len(violations) == 1
+    assert violations[0]["check"] == "second_opinion_findings_stale"
+    assert violations[0]["count"] == 1
+    assert violations[0]["oldest_ts"] == old_ts
+
+
+def test_check_second_opinion_findings_stale_ignores_recent(pm_db_path):
+    recent_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_second_opinion_finding(conn, ts=recent_ts)
+    violations = pm_selfcheck.check_second_opinion_findings_stale(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_second_opinion_findings_stale_ignores_reviewed_rows(pm_db_path):
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_second_opinion_finding(conn, ts=old_ts, reviewed_at=old_ts)
+    violations = pm_selfcheck.check_second_opinion_findings_stale(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_second_opinion_findings_stale_excludes_pretune_kind(pm_db_path):
+    """`_pretune` / `_t8192` で終わる kind（調整前の試行記録）は対象外。"""
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_second_opinion_finding(
+        conn, ts=old_ts, kind="minutes_extraction_recall_pretune",
+    )
+    _insert_second_opinion_finding(
+        conn, ts=old_ts, kind="minutes_extraction_recall_t8192",
+    )
+    violations = pm_selfcheck.check_second_opinion_findings_stale(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_second_opinion_findings_stale_reports_oldest_ts(pm_db_path):
+    older_ts = (datetime.now(UTC) - timedelta(days=25)).isoformat()
+    newer_ts = (datetime.now(UTC) - timedelta(days=15)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_second_opinion_finding(conn, ts=newer_ts)
+    _insert_second_opinion_finding(conn, ts=older_ts)
+    violations = pm_selfcheck.check_second_opinion_findings_stale(conn)
+    conn.close()
+    assert len(violations) == 1
+    assert violations[0]["count"] == 2
+    assert violations[0]["oldest_ts"] == older_ts
+
+
+def test_check_second_opinion_findings_stale_without_table_is_noop(pm_db_path):
+    conn = _open_plain(pm_db_path)
+    conn.execute("DROP TABLE IF EXISTS triage_second_opinion")
+    conn.commit()
+    violations = pm_selfcheck.check_second_opinion_findings_stale(conn)
+    conn.close()
+    assert violations == []
+
+
+def test_check_second_opinion_findings_stale_indeterminate_without_reviewed_at_column(
+    pm_db_path, capsys,
+):
+    """reviewed_at 列がまだ後付けされていない pm.db は判定不能として扱う
+    （検査自体は読み取り専用のため、この検査からは ALTER TABLE を行わない）。"""
+    from db_utils import record_second_opinion
+
+    conn = _open_plain(pm_db_path)
+    record_second_opinion(
+        conn, kind="minutes_extraction", content="content",
+        primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+    )
+    violations = pm_selfcheck.check_second_opinion_findings_stale(conn)
+    conn.close()
+    assert violations == []
+    assert "判定できません" in capsys.readouterr().err
+
+
+def test_run_checks_includes_second_opinion_findings_stale(pm_db_path, tmp_path):
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).isoformat()
+    conn = _open_plain(pm_db_path)
+    _insert_second_opinion_finding(conn, ts=old_ts)
+    violations = pm_selfcheck.run_checks(
+        conn, None, days=7, today="2026-08-03", anchor_path=tmp_path / "missing.jsonl",
+    )
+    conn.close()
+    assert any(v["check"] == "second_opinion_findings_stale" for v in violations)

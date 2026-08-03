@@ -319,6 +319,128 @@ class TestPendingEgress:
 
 
 # --------------------------------------------------------------------------- #
+# triage_second_opinion の reviewed_at 列（所見が読まれる仕組み。pending_egress と同じ形）
+# --------------------------------------------------------------------------- #
+class TestSecondOpinionReviewedColumn:
+    def test_ensure_column_is_idempotent(self, conn):
+        from db_utils import ensure_second_opinion_reviewed_column
+
+        ensure_second_opinion_reviewed_column(conn)
+        ensure_second_opinion_reviewed_column(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_second_opinion)").fetchall()}
+        assert "reviewed_at" in cols
+
+    def test_ensure_column_without_table_is_noop(self, tmp_path):
+        import sqlite3 as s3
+
+        from db_utils import ensure_second_opinion_reviewed_column
+
+        p = tmp_path / "empty.db"
+        c = s3.connect(str(p))
+        ensure_second_opinion_reviewed_column(c)  # 例外にならないこと
+        c.close()
+
+    def test_existing_rows_are_null_after_backfill(self, conn):
+        from db_utils import (
+            ensure_second_opinion_reviewed_column,
+            record_second_opinion,
+        )
+
+        record_second_opinion(
+            conn, kind="minutes_extraction", content="content",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        ensure_second_opinion_reviewed_column(conn)
+        row = conn.execute("SELECT reviewed_at FROM triage_second_opinion").fetchone()
+        assert row["reviewed_at"] is None
+
+    def test_list_findings_returns_newest_first(self, conn):
+        from db_utils import list_second_opinion_findings, record_second_opinion
+
+        record_second_opinion(
+            conn, kind="minutes_extraction", content="1件目",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        record_second_opinion(
+            conn, kind="minutes_extraction_recall", content="2件目",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        rows = list_second_opinion_findings(conn)
+        assert [r["content_head"] for r in rows] == ["2件目", "1件目"]
+
+    def test_list_findings_filters_by_kind(self, conn):
+        from db_utils import list_second_opinion_findings, record_second_opinion
+
+        record_second_opinion(
+            conn, kind="minutes_extraction", content="a",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        record_second_opinion(
+            conn, kind="minutes_extraction_recall", content="b",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        rows = list_second_opinion_findings(conn, kind="minutes_extraction_recall")
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "minutes_extraction_recall"
+
+    def test_list_findings_unreviewed_only(self, conn):
+        from db_utils import (
+            list_second_opinion_findings,
+            mark_second_opinion_reviewed,
+            record_second_opinion,
+        )
+
+        record_second_opinion(
+            conn, kind="minutes_extraction", content="a",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        record_second_opinion(
+            conn, kind="minutes_extraction", content="b",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        rows = list_second_opinion_findings(conn)
+        mark_second_opinion_reviewed(conn, [rows[0]["id"]])
+        remaining = list_second_opinion_findings(conn, unreviewed_only=True)
+        assert len(remaining) == 1
+        assert remaining[0]["id"] == rows[1]["id"]
+
+    def test_list_findings_without_table_is_empty(self, tmp_path):
+        import sqlite3 as s3
+
+        from db_utils import list_second_opinion_findings
+
+        p = tmp_path / "empty.db"
+        c = s3.connect(str(p))
+        assert list_second_opinion_findings(c) == []
+        c.close()
+
+    def test_mark_reviewed_sets_timestamp(self, conn):
+        from db_utils import mark_second_opinion_reviewed, record_second_opinion
+
+        record_second_opinion(
+            conn, kind="minutes_extraction", content="a",
+            primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+        )
+        row_id = conn.execute("SELECT id FROM triage_second_opinion").fetchone()["id"]
+        n = mark_second_opinion_reviewed(conn, [row_id])
+        assert n == 1
+        row = conn.execute(
+            "SELECT reviewed_at FROM triage_second_opinion WHERE id=?", (row_id,)
+        ).fetchone()
+        assert row["reviewed_at"] is not None
+
+    def test_mark_reviewed_unknown_id_returns_zero(self, conn):
+        from db_utils import (
+            ensure_second_opinion_reviewed_column,
+            mark_second_opinion_reviewed,
+        )
+
+        ensure_second_opinion_reviewed_column(conn)
+        n = mark_second_opinion_reviewed(conn, [9999])
+        assert n == 0
+
+
+# --------------------------------------------------------------------------- #
 # ensure_tool_calls_table() が呼び出し側の未コミットトランザクションを
 # 暗黙 COMMIT してしまう欠陥の回帰テスト（executescript() の implicit commit）。
 # --------------------------------------------------------------------------- #
