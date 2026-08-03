@@ -252,6 +252,12 @@ def _call_local_llm_inner(
     reasoning_effort: str | None = None,
     return_reasoning: bool = False,
 ) -> str | tuple[str, str]:
+    # pin 照合はここ（HTTP を投げる直前）の 1 箇所に集約する。呼び出し側に pin を通させる
+    # 作法は、1 箇所の書き忘れで静かに素通りする。実際に call_local_llm の直接呼び出し
+    # （pm_argus_agent.py / scripts/ingest/slack.py / call_argus_llm._try_local 内）の
+    # 3 経路が素通りしていた（2026-08-03 実測）。
+    _assert_model_pin(model)
+
     import json as _json
 
     import requests
@@ -508,6 +514,10 @@ def call_local_llm(
         # フォールバックは障害時にしか通らない経路なので、_try_local() (line ~976) と
         # 同じ形に揃える。ここだけ LOCAL_LLM_MODEL / pin 照合を素通りさせると、
         # 「普段は守られているが、壊れたときだけ守られない」状態になってしまう。
+        # 2026-08-03: pin 照合の本体は _call_local_llm_inner の冒頭（HTTP 直前）に
+        # 移したため、ここでの呼び出しは冗長（二重チェック）になった。ただし
+        # _assert_model_pin は冪等（warn ログは _warned セットで重複抑制）なので、
+        # フォールバック理由をログに残す意図も兼ねてそのまま残す。
         local_model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
         _assert_model_pin(local_model)
         return _call_local_llm_inner(
@@ -619,6 +629,10 @@ def call_vision_llm(
         "Content-Type": "application/json",
     }
     url = base_url.rstrip("/") + "/chat/completions"
+
+    # pin 照合は HTTP を投げる直前の 1 箇所に集約する（call_vision_llm には
+    # これまで pin 照合が無かった。2026-08-03 実測）。
+    _assert_model_pin(model)
 
     print(f"[INFO] LLM call: backend=vision model={model} url={base_url} images={n_images}",
           file=sys.stderr)
@@ -745,6 +759,8 @@ def call_rivault(
     api_key = os.environ.get("RIVAULT_TOKEN", "dummy")
     if model is None:
         model = os.environ.get("RIVAULT_MODEL")
+        # 2026-08-03: pin 照合の本体は下（HTTP 直前）に移したため、ここでの呼び出しは
+        # 冗長（二重チェック）。_assert_model_pin は冪等なのでそのまま残す。
         _assert_model_pin(model)
         if not model:
             raise RuntimeError(
@@ -774,6 +790,11 @@ def call_rivault(
         "Content-Type": "application/json",
     }
     url = base_url.rstrip("/") + "/chat/completions"
+    # pin 照合は HTTP を投げる直前の 1 箇所に集約する。748 行目の呼び出しは
+    # model=None（RIVAULT_MODEL を使う）分岐のみを覆っており、呼び出し元が
+    # model を明示指定した場合（second_opinion の Llama-4-Scout 等）は
+    # 素通りしていた（2026-08-03 実測）。ここで無条件に照合することで両分岐を覆う。
+    _assert_model_pin(model)
     resp = _requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
     if resp.status_code >= 400:
         err_text = resp.text[:500] if resp.text else f"HTTP {resp.status_code}"
@@ -1007,6 +1028,9 @@ def call_argus_llm(
         except Exception as exc:
             raise RuntimeError(f"ローカル LLM ({local_base}) に接続できません: {exc}") from exc
         model = os.environ.get("LOCAL_LLM_MODEL") or detect_vllm_model(local_base)
+        # 2026-08-03: pin 照合の本体は _call_local_llm_inner の冒頭（HTTP 直前）に移した。
+        # ここでの呼び出しは冗長（二重チェック）だが、_assert_model_pin は冪等
+        # （warn ログは _warned セットで重複抑制）なので害はなく、そのまま残す。
         _assert_model_pin(model)
         # ARGUS_REASONING_EFFORT: 未設定/不正値時は None のまま payload に送らない（既存挙動維持）
         reasoning_effort = _resolve_reasoning_effort_env()

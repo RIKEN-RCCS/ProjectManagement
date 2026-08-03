@@ -899,15 +899,33 @@ def compare_extractions(primary: dict, second: dict) -> dict:
 
 
 def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
-                                    model: str | None = None) -> tuple[dict, str]:
+                                    model: str | None = None,
+                                    route: str = "rivault") -> tuple[dict, str]:
     """第2系統モデルに同じ生入力から独立抽出させる（LLM 呼び出し本体）。
 
     `second_opinion_extraction()` の公開シグネチャは `dict` のみを返すが、
     `record_second_opinion` の `raw` には生応答が必要なため、raw も返す
     内部ヘルパーを分離してある（呼び出し元での二重 LLM 呼び出しを避ける）。
+
+    route: "rivault"（既定）は `config/sensitive_terms.yaml` の `second_opinion.model`
+        （Llama-4-Scout、RiVault配信）を `call_rivault` で呼ぶ。R8（提供元レベルの
+        集中リスク）対策の第2系統であり、**出自が主系統と独立していること**が本質。
+
+        "k3" は `config/sensitive_terms.yaml` の `quality_reader.model`（kimi-k3）を
+        `call_local_llm` で呼ぶ（K3 は RIKYU 配信で RiVault にはいないため `call_rivault`
+        では呼べない）。**これは R8 の独立系統ではない** — K3（Moonshot）は主系統の
+        glm/DeepSeek/Qwen と同じ「本番経路の主要モデルが一系統に寄っている」構図の外には
+        出られない。狙いは出自の分散ではなく、K3 の読解・網羅（recall）の高さを議事録の
+        欠落検出に使うことだけ（`scripts/quality/pm_screen.py` の
+        `--second-opinion-minutes --reader k3` から呼ばれる）。呼び出し元は record_second_opinion
+        の `kind` を `minutes_extraction_recall` にして、R8 対策の `minutes_extraction` とは
+        別集計にすること。
     """
-    cfg = (_load_second_opinion_config().get("second_opinion") or {})
-    model = model or cfg.get("model")
+    cfg_root = _load_second_opinion_config()
+    if route == "k3":
+        model = model or (cfg_root.get("quality_reader") or {}).get("model")
+    else:
+        model = model or (cfg_root.get("second_opinion") or {}).get("model")
     prompt = (
         "次のやり取りから、(1) 決定事項 (2) アクションアイテム を抜き出し、JSON で返してください。\n"
         '`{"decisions": [{"content": "..."}], "action_items": [{"content": "..."}]}` の形式で、'
@@ -917,12 +935,24 @@ def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
         prompt += f"\n## 文脈\n{context}\n"
     prompt += f"\n## やり取り\n{thread_text}\n"
 
-    from utils.llm import call_rivault
-
     try:
-        raw = call_rivault(prompt, model=model, max_tokens=1024, timeout=120)
+        if route == "k3":
+            from utils.llm import _token_for_base, call_local_llm
+
+            base_url = os.environ.get("LOCAL_LLM_URL")
+            if not base_url:
+                raise RuntimeError("LOCAL_LLM_URL 未設定（~/.secrets/localLLM.sh を確認）")
+            raw = call_local_llm(
+                prompt, model=model, base_url=base_url,
+                api_key=_token_for_base(base_url),
+                max_tokens=1024, timeout=120, think=False,
+            )
+        else:
+            from utils.llm import call_rivault
+
+            raw = call_rivault(prompt, model=model, max_tokens=1024, timeout=120)
     except Exception as e:
-        print(f"[WARN] 第2系統抽出の呼び出しに失敗: {e}", file=sys.stderr)
+        print(f"[WARN] 第2系統抽出（route={route}）の呼び出しに失敗: {e}", file=sys.stderr)
         return {"decisions": [], "action_items": []}, ""
 
     raw = raw or ""

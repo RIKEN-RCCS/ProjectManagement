@@ -249,6 +249,161 @@ class TestTranscriptNotFound:
         assert any("見つからなかった会議: 1 件" in m for m in logs)
 
 
+# --------------------------------------------------------------------------- #
+# --reader（second/k3/both）: kimi-k3 を「読み手」として追加する経路のテスト。
+#
+# k3 は R8（提供元レベルの集中リスク）の第2系統ではない — K3（Moonshot）は主系統
+# （glm/DeepSeek/Qwen）と同じく本番経路が一系統に寄っている構図の外に出られない。
+# ここで検証するのは「呼び出し経路が call_rivault と call_local_llm で正しく
+# 切り替わること」と「記録の kind が systemごとに分かれること」のみ。
+# --------------------------------------------------------------------------- #
+
+
+def _setup_single_meeting(minutes_dir, processing_dir, basename: str) -> None:
+    db_path = minutes_dir / "TestKind.db"
+    ts = "2026-07-01-120000"
+    file_path = _write_combined(processing_dir, ts, basename, "combined stage1 text")
+    _make_minutes_db(db_path, [{
+        "meeting_id": f"{ts}-{basename}-minutes",
+        "held_at": "2026-06-30",
+        "file_path": file_path,
+        "decisions": [],
+    }])
+
+
+class TestReaderSecond:
+    def test_reader_second_uses_call_rivault_and_records_minutes_extraction(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """--reader second（既定）は従来どおり call_rivault のみを使い、
+        kind="minutes_extraction" で記録される。"""
+        _setup_single_meeting(minutes_dir, processing_dir, "2026-06-30_ReaderSecond")
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: '{"decisions": [{"content": "second系統が見つけた項目"}],'
+                            ' "action_items": []}',
+        )
+        monkeypatch.setattr(
+            llm_mod, "call_local_llm", lambda *a, **k: pytest.fail("呼ばれてはいけない")
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, reader="second",
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "minutes_extraction"
+        assert not any("production: false" in m for m in logs)
+
+
+class TestReaderK3:
+    def test_reader_k3_uses_call_local_llm_and_records_recall_kind(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """--reader k3 は call_local_llm のみを使い（call_rivault は呼ばれない）、
+        kind="minutes_extraction_recall" で記録され、content に [reader=k3] タグが付く。"""
+        _setup_single_meeting(minutes_dir, processing_dir, "2026-06-30_ReaderK3")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:9999/v1")
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault", lambda *a, **k: pytest.fail("呼ばれてはいけない")
+        )
+        monkeypatch.setattr(
+            llm_mod, "call_local_llm",
+            lambda *a, **k: '{"decisions": [{"content": "k3が見つけた項目"}],'
+                            ' "action_items": []}',
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, reader="k3",
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "minutes_extraction_recall"
+        assert "reader=k3" in rows[0]["content_head"]
+        assert any("production: false" in m for m in logs)
+
+
+class TestReaderBoth:
+    def test_reader_both_calls_both_routes_and_records_two_kinds(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """--reader both は second/k3 の両方を呼び、2種類の kind が記録される。"""
+        _setup_single_meeting(minutes_dir, processing_dir, "2026-06-30_ReaderBoth")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:9999/v1")
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: '{"decisions": [{"content": "second系統が見つけた項目"}],'
+                            ' "action_items": []}',
+        )
+        monkeypatch.setattr(
+            llm_mod, "call_local_llm",
+            lambda *a, **k: '{"decisions": [{"content": "k3が見つけた項目"}],'
+                            ' "action_items": []}',
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, reader="both",
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        kinds = {r["kind"] for r in rows}
+        assert kinds == {"minutes_extraction", "minutes_extraction_recall"}
+
+
+class TestReaderEnvFlagDisablesAll:
+    @pytest.mark.parametrize("reader", ["second", "k3", "both"])
+    def test_disabled_skips_regardless_of_reader(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch, reader
+    ):
+        """ARGUS_SECOND_OPINION=0 のときは --reader の値によらずどの読み手も呼ばれない。"""
+        monkeypatch.setenv("ARGUS_SECOND_OPINION", "0")
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault", lambda *a, **k: pytest.fail("呼ばれてはいけない")
+        )
+        monkeypatch.setattr(
+            llm_mod, "call_local_llm", lambda *a, **k: pytest.fail("呼ばれてはいけない")
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, reader=reader,
+        )
+        conn.close()
+        assert any("ARGUS_SECOND_OPINION" in m for m in logs)
+
+
 class TestMissingItemRecorded:
     def test_second_system_only_item_is_recorded_as_missing(
         self, pm_db_path, minutes_dir, processing_dir, monkeypatch

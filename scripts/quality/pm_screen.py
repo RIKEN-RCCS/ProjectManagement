@@ -39,6 +39,11 @@ Usage:
 
     # closed の action_items も対象に含める（非推奨。完了実績を誤って抹消しうる）
     python3 scripts/pm_screen.py --triage --triage-include-closed --output triage.csv
+
+    # 議事録経路への第2系統差分検査（--reader で読み手を切り替え。既定: second=R8対策）
+    python3 scripts/pm_screen.py --second-opinion-minutes --reader second
+    python3 scripts/pm_screen.py --second-opinion-minutes --reader k3 --dry-run
+    python3 scripts/pm_screen.py --second-opinion-minutes --reader both
 """
 
 import argparse
@@ -817,9 +822,49 @@ def export_triage_csv(
 #     どの階層を使ったかは record_second_opinion の content プレフィックスに残す
 #     （vtt / whisper_raw / combined_degraded）。
 #
+# --reader オプション: 「読み手」を切り替える（2026-08 追加）。
+#   second（既定） — 上記の第2系統（Llama-4-Scout, RiVault配信）。R8（提供元レベルの
+#     集中リスク）対策そのもの。kind="minutes_extraction"（従来どおり）。
+#   k3            — kimi-k3（RIKYU配信、call_local_llm）を read-only の recall チェック役
+#     として追加する。kind="minutes_extraction_recall" で別集計する。
+#     **K3 は R8 の独立系統ではない** — Moonshot は主系統（glm/DeepSeek/Qwen）と同じく
+#     「本番経路が一系統に寄っている」構図の外に出られない。K3 を議事録生成そのものに
+#     使わない（書かせない）理由は、実測で判明した用語一致率の低さ・所要時間・失敗率
+#     （docs/kimi-k3-migration.md「実測との突合」節）。ここでは K3 に議事録を書かせず、
+#     欠落を指摘させるだけなので、その弱点は問題にならない：
+#       - 形式・用語を要求しない（項目を挙げるだけで指示追従の弱さが出ない）
+#       - クリティカルパス外の後追いバッチなので所要時間が問題にならない
+#       - 失敗しても議事録は既に完成済み
+#       - 出力は triage_second_opinion に記録するだけで、議事録DB・pm.dbの
+#         action_items/decisions には一切入らない
+#     kimi-k3 は model_pin.yaml で production: false（declared_trust_remote_code 未確認）
+#     のため、使用時は起動時にその旨を標準出力へ明示する（黙って使わない）。
+#     ★非対称性の注意（2026-08-03、pin 照合をチョークポイント化した際に判明）: この
+#     --reader k3 は pm_screen.py を CLI から直接実行する運用（ARGUS_MODEL_PIN 未設定
+#     ＝既定の warn）を前提にしており、この場合は警告ログのみで動作する。しかし
+#     qa/web デーモン経由（ARGUS_MODEL_PIN=enforce）で同じコードパスを実行すると、
+#     call_local_llm の HTTP 直前の pin 照合で ModelPinError となり必ず失敗する
+#     （kimi-k3 が production: false のため enforce では拒否されるのが正しい挙動）。
+#     つまり「CLI では動くがデーモン経由では落ちる」という非対称な挙動になる。
+#     model_pin.yaml を書き換えて通すのではなく、CLI からのみ実行すること。
+#   both          — 両方を順に実行し、それぞれの kind で記録する。
+#
 # 議事録DB・pm.db の action_items/decisions は一切書き換えない。記録は
 # pm.db の triage_second_opinion（record_second_opinion 経由）のみ。
 # --------------------------------------------------------------------------- #
+
+# --reader の選択肢と、各読み手の record_second_opinion kind の対応。
+_READER_KIND = {
+    "second": "minutes_extraction",
+    "k3": "minutes_extraction_recall",
+}
+
+
+def _resolve_readers(reader: str) -> list[str]:
+    """--reader の値（second/k3/both）から実行する読み手のリストを返す。"""
+    if reader == "both":
+        return ["second", "k3"]
+    return [reader]
 
 # generate_minutes_local.py の出力命名規則（同一 `now` から生成されるため ts が一致する）:
 #   {ts}-{basename}-minutes.md   … pm_minutes_import.py --no-llm がインポートする議事録
@@ -1031,6 +1076,7 @@ def run_second_opinion_minutes(
     processing_dir: Path,
     no_encrypt: bool,
     log,
+    reader: str = "second",
 ) -> None:
     """議事録経路への第2系統差分検査バッチ本体。
 
@@ -1051,10 +1097,22 @@ def run_second_opinion_minutes(
         原理的に検出できない**（Stage 2/3 の欠落のみ検出対象）。この会議は処理対象から
         除外しない（Stage2/3はK3が入る段のため検出価値がある）が、その旨をWARNで
         明示し、record_second_opinion の content にも階層タグを残す
+
+    reader: "second"（既定）/ "k3" / "both"。上のファイルヘッダコメント参照。
+        second は R8 対策の第2系統（変更なし）、k3 は kimi-k3 による recall チェック
+        （R8 の独立系統ではない。品質目的のみ）。
     """
     if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
         log("[INFO] ARGUS_SECOND_OPINION が無効のため第2系統検査をスキップします")
         return
+
+    readers = _resolve_readers(reader)
+    if "k3" in readers:
+        log("[INFO] --reader k3: kimi-k3 は config/model_pin.yaml 上 production: false"
+            "（評価用。declared_trust_remote_code 未確認）です。"
+            "R8 対策の第2系統（Llama-4-Scout）の代わりではなく、recall チェック専用の"
+            "読み手として使います。ARGUS_MODEL_PIN=warn（既定）では警告のみで続行し、"
+            "enforce では拒否されます。")
 
     since = since or _default_second_opinion_since()
     log(f"対象期間: {since} 以降")
@@ -1102,8 +1160,9 @@ def run_second_opinion_minutes(
             continue
         processed.append((c, path, source_kind, chunks))
 
-    total_calls = sum(len(chunks) for _c, _p, _k, chunks in processed)
-    log(f"推定LLM呼び出し回数: 対象会議 {len(processed)} 件 × チャンク数 合計 {total_calls} 回")
+    total_calls = sum(len(chunks) for _c, _p, _k, chunks in processed) * len(readers)
+    log(f"推定LLM呼び出し回数: 対象会議 {len(processed)} 件 × チャンク数 × 読み手{len(readers)}種"
+        f" 合計 {total_calls} 回（reader={reader}）")
 
     if dry_run:
         log("[INFO] --dry-run のためLLM呼び出し・DB書き込みは行いません")
@@ -1117,45 +1176,67 @@ def run_second_opinion_minutes(
         flag_sensitive_terms,
     )
 
-    cfg = (_load_second_opinion_config().get("second_opinion") or {})
-    model = cfg.get("model") or ""
+    cfg_root = _load_second_opinion_config()
+    # 読み手ごとの (route, model, kind, 出力タグ) を解決する。second は従来どおり
+    # タグなし（既存の record_second_opinion content 互換のため）。
+    reader_specs = []
+    for r in readers:
+        if r == "k3":
+            reader_specs.append({
+                "route": "k3",
+                "model": (cfg_root.get("quality_reader") or {}).get("model") or "",
+                "kind": _READER_KIND["k3"],
+                "tag": "reader=k3",
+            })
+        else:
+            reader_specs.append({
+                "route": "rivault",
+                "model": (cfg_root.get("second_opinion") or {}).get("model") or "",
+                "kind": _READER_KIND["second"],
+                "tag": None,
+            })
 
     n_recorded = 0
     for c, _path, source_kind, chunks in processed:
-        meeting_ref = f"[{c['kind']}/{c['meeting_id']}][{source_kind}]"
+        base_ref = f"[{c['kind']}/{c['meeting_id']}][{source_kind}]"
         if source_kind == "combined_degraded":
-            log(f"[WARN] {meeting_ref} は combined.txt（主系統のStage1出力）を入力にしています。"
+            log(f"[WARN] {base_ref} は combined.txt（主系統のStage1出力）を入力にしています。"
                 "Stage1で落ちた項目は検出できません（Stage2/3の欠落のみ検出対象）")
 
         primary = {
             "decisions": [{"content": x} for x in c["decisions"]],
             "action_items": [{"content": x} for x in c["action_items"]],
         }
-        seen: set[str] = set()
-        for chunk_text in chunks:
-            try:
-                second, raw = _call_second_opinion_extraction(chunk_text)
-            except Exception as e:
-                log(f"[WARN] 第2系統(minutes) の呼び出しに失敗（このチャンクはスキップ）: {e}")
-                continue
-            diff = compare_extractions(primary, second)
-            terms = flag_sensitive_terms(chunk_text)
-            for k in ("decisions", "action_items"):
-                for content in diff.get(k, []):
-                    if not content.strip() or content in seen:
-                        continue
-                    seen.add(content)
-                    record_second_opinion(
-                        pm_conn, kind="minutes_extraction",
-                        content=f"{meeting_ref} {content}",
-                        primary_verdict="MISSING", second_verdict="PRESENT",
-                        flagged_terms=terms, model=model, raw=raw,
+        for spec in reader_specs:
+            meeting_ref = base_ref + (f"[{spec['tag']}]" if spec["tag"] else "")
+            seen: set[str] = set()
+            for chunk_text in chunks:
+                try:
+                    second, raw = _call_second_opinion_extraction(
+                        chunk_text, model=spec["model"], route=spec["route"],
                     )
-                    n_recorded += 1
-        log(f"  {meeting_ref} チャンク{len(chunks)}件 処理完了")
+                except Exception as e:
+                    log(f"[WARN] 第2系統(minutes, route={spec['route']}) の呼び出しに失敗"
+                        f"（このチャンクはスキップ）: {e}")
+                    continue
+                diff = compare_extractions(primary, second)
+                terms = flag_sensitive_terms(chunk_text)
+                for k in ("decisions", "action_items"):
+                    for content in diff.get(k, []):
+                        if not content.strip() or content in seen:
+                            continue
+                        seen.add(content)
+                        record_second_opinion(
+                            pm_conn, kind=spec["kind"],
+                            content=f"{meeting_ref} {content}",
+                            primary_verdict="MISSING", second_verdict="PRESENT",
+                            flagged_terms=terms, model=spec["model"], raw=raw,
+                        )
+                        n_recorded += 1
+            log(f"  {meeting_ref} チャンク{len(chunks)}件 処理完了")
 
     log("")
-    log(f"完了: 第2系統が保存済みに無いと判定した項目 {n_recorded} 件を"
+    log(f"完了: 読み手が保存済みに無いと判定した項目 {n_recorded} 件を"
         " triage_second_opinion に記録しました"
         "（議事録DB・pm.dbのaction_items/decisionsは変更していません）")
 
@@ -1199,6 +1280,13 @@ def main():
                         help="議事録経路への第2系統（独立系統）差分検査バッチを実行。"
                              "重複検出・--triage とは独立したモード。"
                              "ARGUS_SECOND_OPINION=1/true/yes のときのみ動作する")
+    parser.add_argument("--reader", choices=("second", "k3", "both"), default="second",
+                        help="--second-opinion-minutes の読み手を切り替える"
+                             "（デフォルト: second）。second=R8対策の第2系統"
+                             "（Llama-4-Scout、変更なし）。k3=kimi-k3による recall"
+                             "チェック（R8の独立系統ではない。品質目的のみ、"
+                             "kind=minutes_extraction_recall で別集計）。"
+                             "both=両方を実行")
     parser.add_argument("--limit", type=int, default=_DEFAULT_SECOND_OPINION_LIMIT,
                         help="--second-opinion-minutes 時に処理する会議数の上限"
                              f"（デフォルト: {_DEFAULT_SECOND_OPINION_LIMIT}）")
@@ -1234,6 +1322,7 @@ def main():
             processing_dir=Path(args.processing_dir),
             no_encrypt=args.no_encrypt,
             log=log,
+            reader=args.reader,
         )
         conn.close()
         close()

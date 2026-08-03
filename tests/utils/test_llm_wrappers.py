@@ -994,6 +994,123 @@ class TestCallLocalLlmFallbackModelPin:
 
 
 # --------------------------------------------------------------------------- #
+# pin 照合のチョークポイント化（_call_local_llm_inner / call_rivault / call_vision_llm
+# の HTTP 直前で _assert_model_pin を呼ぶ。2026-08-03）
+# --------------------------------------------------------------------------- #
+
+class TestChokepointModelPin:
+    def test_call_local_llm_enforce_rejects_undeclared_model(self, monkeypatch):
+        """model_pin.yaml に無いモデルを直接指定した call_local_llm は enforce で拒否される。"""
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        from utils.llm import call_local_llm
+        from utils.model_pin import ModelPinError
+        with patch("requests.post") as mock_post:
+            with pytest.raises(ModelPinError):
+                call_local_llm(
+                    "prompt", model="未宣言モデル",
+                    base_url="http://localhost:8000/v1", api_key="dummy",
+                    _fallback_to_local=False,
+                )
+            mock_post.assert_not_called()
+
+    def test_call_local_llm_enforce_allows_declared_production_model(self, monkeypatch):
+        """宣言済み・production: true のモデルは enforce でも通る（実 config/model_pin.yaml）。"""
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        from utils.llm import call_local_llm
+        mock = _make_sse_response(["ok"])
+        with patch("requests.post", return_value=mock):
+            result = call_local_llm(
+                "prompt", model="glm-5.2",
+                base_url="http://localhost:8000/v1", api_key="dummy",
+                _fallback_to_local=False,
+            )
+        assert result == "ok"
+
+    def test_call_vision_llm_enforce_rejects_undeclared_model(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        from utils.llm import call_vision_llm
+        from utils.model_pin import ModelPinError
+        with patch("requests.post") as mock_post:
+            with pytest.raises(ModelPinError):
+                call_vision_llm("prompt", [img], model="未宣言モデル", base_url="http://host/v1")
+            mock_post.assert_not_called()
+
+    def test_call_vision_llm_enforce_allows_declared_production_model(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        mock = _make_vision_sse_response(["ok"])
+        from utils.llm import call_vision_llm
+        with patch("requests.post", return_value=mock):
+            result = call_vision_llm("prompt", [img], model="qwen3.6-35b", base_url="http://host/v1")
+        assert result == "ok"
+
+    def test_call_rivault_enforce_rejects_explicit_undeclared_model(self, monkeypatch):
+        """call_rivault は model 明示指定でも HTTP 直前で pin 照合される（748行の分岐を通らない経路）。"""
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        from utils.llm import call_rivault
+        from utils.model_pin import ModelPinError
+        with patch("requests.post") as mock_post:
+            with pytest.raises(ModelPinError):
+                call_rivault("prompt", model="未宣言モデル")
+            mock_post.assert_not_called()
+
+    def test_call_rivault_enforce_allows_declared_production_model(self, monkeypatch):
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        monkeypatch.setenv("RIVAULT_URL", "http://rivault.example/v1")
+        mock = _make_sse_response(["ok"])
+        from utils.llm import call_rivault
+        with patch("requests.post", return_value=mock):
+            result = call_rivault("prompt", model="DeepSeek-V4-Flash")
+        assert result == "ok"
+
+    def test_kimi_k3_rejected_in_enforce(self, monkeypatch):
+        """kimi-k3 は production: false のため enforce では拒否される（正しい挙動）。"""
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "enforce")
+        from utils.llm import call_local_llm
+        from utils.model_pin import ModelPinError
+        with patch("requests.post") as mock_post:
+            with pytest.raises(ModelPinError):
+                call_local_llm(
+                    "prompt", model="kimi-k3",
+                    base_url="http://localhost:8000/v1", api_key="dummy",
+                    _fallback_to_local=False,
+                )
+            mock_post.assert_not_called()
+
+    def test_off_mode_skips_pin_check_entirely(self, monkeypatch):
+        """ARGUS_MODEL_PIN=off では未宣言モデルでも照合されず HTTP まで到達する。"""
+        monkeypatch.setenv("ARGUS_MODEL_PIN", "off")
+        mock = _make_sse_response(["ok"])
+        from utils.llm import call_local_llm
+        with patch("requests.post", return_value=mock):
+            result = call_local_llm(
+                "prompt", model="未宣言モデル",
+                base_url="http://localhost:8000/v1", api_key="dummy",
+                _fallback_to_local=False,
+            )
+        assert result == "ok"
+
+    def test_warn_mode_logs_but_still_calls_http(self, monkeypatch, caplog):
+        """既定 (warn) では未宣言モデルでも警告のみで HTTP 呼び出しは実行される。"""
+        monkeypatch.delenv("ARGUS_MODEL_PIN", raising=False)
+        mock = _make_sse_response(["ok"])
+        from utils.llm import call_local_llm
+        with caplog.at_level("WARNING"):
+            with patch("requests.post", return_value=mock):
+                result = call_local_llm(
+                    "prompt", model="未宣言モデル",
+                    base_url="http://localhost:8000/v1", api_key="dummy",
+                    _fallback_to_local=False,
+                )
+        assert result == "ok"
+        assert "MODELPIN" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
 # call_argus_llm — routing logic
 # --------------------------------------------------------------------------- #
 

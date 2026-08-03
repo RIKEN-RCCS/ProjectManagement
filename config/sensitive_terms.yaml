@@ -22,6 +22,17 @@ second_opinion:
   # 1回の実行でこの件数を超えたらフラグ語が広すぎる可能性が高い。警告を出す。
   max_flagged_per_run: 30
 
+# 議事録欠落検出（pm_screen.py --second-opinion-minutes --reader k3）専用の「読み手」モデル。
+# **R8 の第2系統（上の second_opinion）とは別物である。** K3（Moonshot）は主系統の
+# glm/DeepSeek/Qwen と同じく本番経路の主要モデルが一系統に寄っている構図の外には出られない
+# ため、出自の独立性という意味では second_opinion の代替にはならない。
+# ここで使うのは K3 の読解・網羅（recall）の高さのみで、議事録を「書かせず」に
+# 保存済みの決定事項・アクションアイテムに無い項目を探す読み手として使う
+# （議事録生成に K3 を採用しない理由は用語一致率・所要時間・失敗率の実測、docs/kimi-k3-migration.md
+# 「実測との突合」節参照）。model_pin.yaml の kimi-k3 は production: false（評価用）のまま。
+quality_reader:
+  model: "kimi-k3"
+
 # 地政学・国・組織。トリガとして観測例のある領域に絞る。
 terms:
   geopolitical:
