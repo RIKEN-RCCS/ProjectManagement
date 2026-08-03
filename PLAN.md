@@ -8,268 +8,83 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
 
 ### セキュリティ対策（docs/security-architecture.md）— 流出面を優先
 
-**方針**: PM 判断により、改竄（R5）より**流出**を優先。改竄向けの項目（出自の独立した
-第2系統・引用スパン照合・二段抽出・挙動指紋）は保留。
+**方針**: 流出面（層1〜3・監査・供給網固定）は実装済み。改竄側（R5・R8 の拡張・R13 —
+出自の独立した第2系統・引用スパン照合・二段抽出・挙動指紋）は、下記の R8 第2系統
+トリアージ（実装済み分）を除き **PM 判断で当面着手しない**。
 
-**完了**: ツール allow-list（`COMMAND_TOOLS`）/ 外向き通信 allow-list（`net_guard`、既定 warn）
-/ Box 共有リンクの `collaborators` 化 / pre-commit による不変条件の固定（lint 4 本）/ 認証境界の棚卸し
-（Slack Connect・ゲスト不在、パートナーチャンネルには非投稿、Box 実効 `company`）/
-**MCP Server（`pm_mcp_server.py`）の廃止** — チョークポイントは `agent_tools.py` の 1 箇所に集約。
+**完了**（実装の経緯・判断理由は LOG.md 参照）:
+- ツール allow-list（`COMMAND_TOOLS`）/ MCP Server 廃止（チョークポイント一本化）
+- 外向き通信 allow-list（`net_guard`）— デーモン・cron 5 本とも enforce 済み
+- Box 共有リンクの `collaborators` 化 / 認証境界の棚卸し
+- `tool_calls` + `reasoning_traces` 台帳（追記専用・ハッシュ連鎖、拒否呼び出しも記録）
+- 供給網固定（`model_pin.yaml`、本番構成に合わせ enforce 済み）
+- R8 第2系統トリアージ（`Llama-4-Scout-17B`、フラグ語のみ・欠落検出型に作り直し済み）
+- 出力ブローカー（Canvas / Box / Slack 全ファネル化・canary 検査・承認フロー・
+  外部アンカー `anchors` ブランチへの push）
+- 能力分離 5b（Read Plane、メンション + スラッシュコマンド、既定 ON）
+- canary の発行・植え付け・生存確認、`qa_index.db` の暗号化
+- pre-commit 5 lint（`no-box-open-company-access` / `net-guard-import-required` /
+  `no-slack-id-literals` / `no-mcp-server-registration` / `slack-egress-funnel`）
 
-> [!note] Kimi-K3 再開との関係（2026-08-01）
-> K3 の6提案のうち**優先度1（APIクライアント層の再設計）はこの節の `tool_calls` /
-> `reasoning_traces` と同一コードパス**であり、セキュリティ側の残作業と K3 側の第一歩が
-> 一致する。一方**優先度2（視覚入力）・優先度3（長時間自律）は Phase 5（5b）完了がゲート**で、
-> R8（改竄の集中リスク）も未着手。**「対策が完了したから K3」ではなく「K3 の本命機能を
-> 使うために 5b と R8 をやる」**という順序（設計文書 §6）。
+> [!note] Kimi-K3 再開との関係
+> K3 優先度1（API クライアント層再設計）は `tool_calls` / `reasoning_traces` と同一コードパス。
+> 優先度2（視覚入力）・優先度3（長時間自律）のゲートだった Phase 5（5b）は
+> **2026-08-03 に既定 ON へ移行済み**。R8 も実装済みだが**本番観測はこれから**。
+> K3 再開の可否自体は別途 PM 判断（LOG.md 2026-07-31）。
 
-**次にやること**（優先順）:
-1. **`config/network_allowlist.yaml` の実値化** — `ingest_plane`（docling `127.0.0.1:5001`）は
-   pm_box_update.sh の既定と pm_daemon.sh の bind 両方に一致することを確認済み（確定値）。
-   残りは read_plane / write_plane。`net_guard.py --print-env-hosts` で既知分を
-   埋める → qa 再起動 → **warn で 1 周**運転 → `cat logs/*.log | net_guard.py --summarize-log -`
-   で未知の宛先を `caller=` を確認しながら追加。
-   `stage=resolve` / `stage=connect` の両方で deny がゼロになったら `ARGUS_NETGUARD=enforce`。
-   **「1 周」の定義**: 月〜金限定の cron があるため**平日 1 周（実質 1 週間）が下限**。
-   加えて cron に載っていない経路は手で 1 回ずつ叩く必要がある — qa デーモンの各 `/argus-*` と
-   メンション応答、録音パイプライン（`pm_from_recording.sh`）、`/argus-narrate`（TTS。
-   `FISH_TTS_HOST` 系はこの経路でしか出ない）、Web UI 経由のジョブ（embed / xlsx / minutes publish）、
-   Canvas `--recreate`、Box 共有リンク作成。Patrol は 30 分間隔なので放置で出る。
-   **飛ばすと、稀にしか動かない経路が enforce 後に初めて落ちる**（warn 中は何も止まらないので
-   「1 周した」の判定はログでしかできない）
-
-   **warn 初日（2026-08-01、qa 再起動後）に出た起動時照合 NG 2 件 — enforce 前に必須で解消する**
-   （enforce では `EndpointMismatchError` で**デーモンが起動しない**）:
-   - `FISH_TTS_HOST` expected=`127.0.0.1:8080` actual=`localhost:8080` — 綴り不一致
-   - `DOCLING_SERVE_URL` expected=`127.0.0.1:5001` actual=`localhost:-` — 綴り不一致 + **ポート無し**
-   docling は `pm_box_update.sh` の既定（`http://127.0.0.1:5001`）とは一致するが、
-   **qa デーモンの環境では別の値（localhost・ポート無し）が入っている**。つまり
-   「127.0.0.1:5001 が確定値」は box crawl 経路についてのみ正しかった。
-   対処は (i) allow-list に `localhost` 綴りのエントリを併記するか、(ii) 環境変数側を
-   `http://127.0.0.1:5001` に正規化するかのどちらか。**(ii) を推奨**（許可対象が増えないため）
-2. ~~**`pm_web_fetch.py` の廃止**~~ → **2026-08-01 完了**（`pm_web_fetch.py` / 旧パス symlink /
-   `pm_web_update.sh` を削除。`web_articles.db` は保持し既存チャンクは検索可能のまま。
-   復活は `test_web_fetch_scripts_are_gone` が検出）。
-   **これで Argus の推論経路から認証境界の外へ出る経路は無くなった**
-3. **hostname canary + 監視** — 2 の後は `verdict=deny` が無条件に異常シグナルになる。
-   **機構は実装済み（2026-07-31）**: `canary_tokens` テーブル（pm.db）、`net_guard.py` の
-   `--plant-hostname-canary` / `--list-canaries` / `--revoke-canary`、`pm_selfcheck.py` の
-   `canary_hit` / `netguard_deny`（既に cron 06:30 平日で回っているジョブに同乗。違反時 exit 1）。
-   **残っている運用手順**:
-   - (a) ~~qa/web デーモンの再起動~~ → **qa は 2026-08-01 に再起動済み**（`[NETGUARD]` 行が
-     出始め、warn 期間が開始）。**`pm_api`（web、7/27 起動）は未再起動でフック無し** —
-     Web UI 経由のジョブ（embed / xlsx / minutes publish）は依然として観測できていない
-   - (b) 本番 pm.db への `canary_tokens` 作成（`--plant-hostname-canary` が自動で作る）
-   - (c) **canary の植え付け** — 発行したホスト名を「モデルが読む場所」に記載する。
-     人間向けレポートに出る場所（pm.db の action_items / decisions）に植えるには
-     先に `is_canary` 列と全レポート経路での除外が必要（§4.3）。除外漏れは PM の
-     レポートに架空項目を出すため、**box_docs 側から始める**のが安全
-   - (d) アラートの届け先 — 現状は exit 1 + `logs/pm_selfcheck.log` のみで、人が見に
-     行かないと気づけない。Slack への通知は Phase 3 のブローカー経由にする
-     （ここで場当たりの egress を足すと allow-list の意味が薄れる）
-   - (e) **canary の生存確認チェックが無い**（実装済みなのは発火検知だけ）。植えた行が
-     同名PDFクリーンアップで消える / `relevance='noise'` を付けられて索引から落ちる /
-     `pm_embed` の対象外になる — どれが起きても監視は「異常なし」を出し続ける。
-     **植えるなら「box_docs に存在し qa_index にチャンクがある」ことの検査を同時に入れる**
-   - **費用対効果の再評価（2026-08-01）**: 植え付けは (c) より先に `tool_calls` 記録
-     （下記 5）を入れる方が増分が大きい。理由は §4.3 の検知点②（出力・ツール引数）が
-     未実装で出力側を覆えていないこと、およびモデルが呼べる 13 ツールに URL 取得が無く
-     「餌に噛める口が無い」こと。未知の宛先への到達自体は canary 無しで
-     `netguard_deny` が拾う
-4. **Box 既存共有リンクの正規化** — 事前に「読ませたい人が全員 collaborator か」を Box 側で
+**残っている作業**（優先順）:
+1. **`network_allowlist.yaml` の実値化と enforce の拡大** — read_plane / write_plane の
+   実値が未確定。デーモン・cron は enforce 済みだが、手動実行の録音・TTS 系ラッパー、
+   Web UI 経由ジョブ、Canvas `--recreate`、Box 共有リンク作成など cron に載らない経路は
+   個別に叩いて `stage=resolve`/`connect` の deny 0 を確認してから対象に加える
+2. **canary 運用の残り** — 本番 pm.db への `canary_tokens` 作成、人間向けレポート経路
+   （action_items/decisions）への植え付け（`is_canary` 列と全レポート除外が先に必要）、
+   アラート届け先（現状 exit 1 + ログのみ）、生存確認の対象拡大（現状 box_docs 限定）
+3. **Box 既存共有リンクの正規化** — 事前に「読ませたい人が全員 collaborator か」を Box 側で
    揃える（順序を逆にすると一時的にリンク切れ）
-5. ~~`tool_calls` 記録~~ → **2026-08-01 実装**（pm.db `tool_calls`、ハッシュ連鎖＋追記専用
-   トリガ、`execute_tool` の唯一のチョークポイントで記録、`pm_selfcheck` に連鎖検証
-   `tool_call_chain` を追加）。**拒否された呼び出しも記録する**（モデルが何を試みたかが残る）。
-   **`reasoning_traces` も同日実装**（保持期間 既定90日、`tool_calls` は sha256 で参照、
-   canary 発火時は `keep_sessions` で保全）。**これで §4.3 の検知点②③が埋まった。**
-   残り: 外部アンカー（Phase 3 のブローカー待ち）。
-   ~~`top_k` 200→100→50 の被害半径実測~~ → **2026-08-02 実施**（`recall_eval.py exposure`。
-   `recall_eval.py exposure --k 50,100,200`）。**1 クエリの露出**は k=50 で 24 文書 /
-   k=100 で 40 / k=200 で 62。**17 問の union 到達率**はコーパス 3,498 文書に対し
-   7.1% / 10.1% / 14.6%。**取りこぼし**は k=50 で 19%、k=100 で 9.5%（k=200 比）。
-   **運用値 50 がコード既定になっていなかった**（環境変数任せ）ため既定を 200→50 に変更。
-   k=100 は「被害半径を半分に削りつつ取りこぼしを 1 割未満に抑える」候補だが、
-   RIKYU の 600 秒制約との兼ね合いは未評価。
-   **2026-08-02 に判明した重大な欠陥**: `_guard()` が `conn` 未指定時に canary 検査と
-   `tool_calls` 記録を丸ごとスキップしており、**Slack 経路では一度も動いていなかった**
-   （呼び出し 25 箇所すべてが未指定）。ファネル側が自分で pm.db を開く形に修正。
-   あわせて `record_tool_call` の prev_hash 読み取り〜INSERT を `BEGIN IMMEDIATE` で包み、
-   `ensure_*` の `executescript` が呼び出し側のトランザクションを暗黙 COMMIT する問題も直した。
-   **本番台帳の既存 78 行はテスト由来なので証拠にならない**（LOG.md 参照）。
-6. ~~供給網の固定（§4.6）~~ → **2026-08-01 実装**（`config/model_pin.yaml` + `scripts/utils/model_pin.py`）。
-   本番3モデル（glm-5.2 / Kimi-K2-Thinking / bge-m3）＋評価2モデルの id 照合が全て OK。
-   既定は warn、`ARGUS_MODEL_PIN=enforce` で拒否。**`declared_*`（revision / trust_remote_code /
-   engine）は検証不能なので判定に使わない** — 申告の記録として git 差分で変更を検知する（R12）。
-   **残り**: (a) 運用主体からのモデル更新通知の取り決め（Phase 0、技術ではなく合意）
-   (b) K3 の `declared_engine` / `declared_trust_remote_code` の確認 — **これが取れるまで
-   K3 は `production: false`**（§1.3 攻撃者2 に直接該当するため）(c) enforce への切り替え
-7. ~~**R8: 第2系統をトリアージへ（Phase 4）**~~ → **2026-08-01 実装**
-   （`config/sensitive_terms.yaml` + `ingest/slack.py` の `flag_sensitive_terms` /
-   `apply_second_opinion` + pm.db `triage_second_opinion`）。**フラグ語が立った項目だけ**に
-   非中国系モデル（Llama-4-Scout-17B）を当て、一致・不一致の両方を記録する。
-   **第2系統の判定で主系統を上書きしない** — 小型モデルの能力差による誤りが混ざるため、
-   自動で覆さずフラグを立てて人が見る。あわせて **`triage_items` の `missing_verdict` 既定を
-   `DROP` → `KEEP` に統一**（判定不能時に欠落を作らない。Phase 4 の明示項目）。
-   **2026-08-02 追記**: この配線は **production から一度も呼ばれていなかった**（呼び出し元は
-   テストのみ）。トリアージが `integrated` へ移行して後段の `triage_items` が消えていたため。
-   さらに integrated では DROP された項目が出力に現れないので、**生存項目の再審査では
-   欠落が原理的に見えない**（LOG.md 参照）。
-   **同日、欠落検出型へ作り直して 2 経路に配線した**: Pass 1 抽出（同じ生入力を第2系統に
-   独立抽出させ、主系統に無い項目を `kind=*_extraction` / `primary_verdict=MISSING` で記録）と
-   Box relevance（`noise` 判定のみ再審査。索引から落とす判定だけが欠落を作るため）。
-   **残り**: (a) 実運用での不一致率の観測 — 能力差による雑音がどれくらいかを実測してから
-   フラグ語の広さを調整する。**まだ 1 度も本番で走っていないので観測はこれから**
-8. **能力分離 5b（Phase 5）** — **2026-08-01 に第1スライス実装**。
-   `scripts/argus/pm_read_worker.py`（Read Plane プロセス）＋ `net_guard` の
-   `ARGUS_NETGUARD_PLANES`（平面単位で許可集合を絞る）。**ゲートは実測で達成**:
-   scrub した環境で起動した Read Plane プロセスから `slack.com` / `api.box.com` の
-   名前解決が遮断され、LLM エンドポイントのみ到達可能。トークンは environ から除き、
-   子プロセス側でも自己検査で二重に確認する（親が scrub を忘れても止まる）。
-   **2026-08-03 に既定 ON へ**（`pm_daemon.sh` の qa。退避は `ARGUS_READ_PLANE_SUBPROCESS=0`）。
-   **OFF に留めていた理由「調べながら中間結果を投稿する使い方が消える」は誤りだった** —
-   ①メンション経路には Bolt の `respond` が無い ②`run_agent` は L1050 で
-   `_make_progress_updater(None)` と**受け取った `respond` を握りつぶしていた**（2026-05-26 の
-   導入以来）。つまり調査ループの進捗更新は最初から存在していなかった。
-   **型: コードにある引数を、それが使われている証拠として扱った。**
-   あわせて `run_agent` の握りつぶしを修正し、親子で進捗を中継する仕組みを入れた
-   （子は stdout に `{"progress": ...}` を流し、**トークンを持つ親が代わりに投稿する**。
-   片方向で戻り値が要らないので完全な IPC ブローカーは不要）。
-   **被覆も狭かった**: `run_in_read_plane` の呼び出しはメンション経路 1 箇所だけで、
-   `/argus-investigate` は常に in-process だった。スラッシュコマンド経路にも通した。
-   **残り**: **`--file` スコープ（`run_document_qa`）は未分離**。`respond` と `record_ids` に
-   強く結びついているため今回は対象外にした
-   (c) **OS レベルの強制**（iptables / network namespace）— 現状は同一プロセスの
-   socket フックなので、subprocess とフック解除には効かない (d) ブローカーと Artifact
-   への流れの再構成（下記 9 と一体）
-
-   **(b) Patrol の Read Plane 分割は見送った（2026-08-02）**。理由を残す:
-   Patrol の LLM は**ツールを持たず、宛先も選べない**（送信先は config 由来、判定は
-   verdict 文字列を返すだけ）。つまり「読取能力と送信能力が同一プロセスに同居する」ことの
-   危険が investigate とは違って**モデルからは行使できない**。一方、分割には**親を
-   ブローカーにする IPC** が要る — 検出器は読取と送信が交互に走る構造で、送信の戻り値
-   （メッセージ ts）を承認フローが使うため、片方向の受け渡しでは成立しない。
-   **代わりに、実在した穴（LLM 判定が本番データを書き換えるのに記録が無い）を埋めた** —
-   `patrol/audit.py` で 3 つの LLM 判定と自動クローズを `tool_calls` / `reasoning_traces` に
-   記録する（本文は sha256 のみ、生応答は 90 日保持の `reasoning_traces` 側）。
-   **Patrol は cron から意図的に外してある**（PM 判断。2026-08-02 確認、最終実行 2026-07-30）。
-   **理由: Patrol はアクション保有者へ DM を送るが、その判定にまだ信頼が置けていない。
-   cron を止めていることが DM を保留する手段そのものである。**
-   したがって「Patrol は 30 分間隔なので放置で宛先が出る」という warn 期間の被覆前提は
-   **誤りだった**（動いていないものを被覆に数えていた）。
-   **Patrol への追加の手入れは、DM の信頼性の問題が片付いてから。** 本番実行での監査記録の
-   確認（`tool_calls` に `patrol_judge_completion` が入ること）も、実行すると自動クローズが
-   走るため**保留**。`--dry-run` は記録を残さない仕様なので代替にならない。
-9. **輸送層ブローカー（Phase 3・検知点①）** — **2026-08-01 に第1スライス実装**。
-   `scripts/argus/output_broker.py` + `config/egress_targets.yaml`。宛先は識別子で選ぶだけで
-   モデルは構築できない。送信前に **canary 検出（検出したら遮断）・ゼロ幅文字・自由文可否・
-   承認要否**を検査し、可否にかかわらず `tool_calls` に記録する（連鎖を1本に保つため
-   新テーブルは作らない）。
-   **実 ID は `egress_targets.yaml` に置かず `argus_config.yaml` への参照（`config_ref`）にした** —
-   origin が public で `no-slack-id-literals` があるため。方針（外部可視性・自由文可否・承認要否）
-   だけが git 差分に出る形。
-   **被覆率は Canvas と Box のみ**（既存ファネルがあるため安い）。**Slack は SDK 直叩き
-   25 箇所 / 7 モジュールの移送が未完了**で、`_dispatch` は slack を明示的に拒否する
-   （黙って成功させない）。**「ブローカーがあるから守られている」と読んではいけない**段階。
-   **Slack ファネルの新設と第1陣の移送は 2026-08-01 に完了**（`slack_post.py` に
-   `post_message` / `post_ephemeral` / `update_message` / `upload_file`）。
-   **設計文書が「輸送層ではない」と指摘した `slack_post.py` が輸送層になった。**
-   移送済みは**パイプライン型（自動投稿）** — `output_tools` / `patrol/actions`（2）/
-   `pm_argus`（録音進捗）/ `transcribe_pipeline`（2）/ `pm_minutes_import`。
-   設計文書が「出力量の大半かつ人間の介在なし」と名指しした側を先に通した。
-   **2026-08-01 に 25 箇所すべての移送が完了し、直叩きはゼロ**（`narrate.py` 10 /
-   `pm_qa_server.py` 4 / `transcribe_pipeline` 3 / `pm_argus` 3 / `patrol` 3 /
-   `output_tools` 1 / `pm_minutes_import` 1）。**pre-commit の `slack-egress-funnel` で
-   直叩きを禁止した**（移送が全部終わってから入れた。途中で入れると恒常的に落ち、
-   lint を無効化する方向に圧力がかかるため）。
-   **`/argus-narrate` の順序制約も実装**: TTS へ渡す前に `scan_text_for_egress` で
-   合成前テキストを検査する。mp3 になった後では canary もゼロ幅文字も検出できないため、
-   **テキスト以外の成果物は生成元テキストの検査をもって代える**（§4.2 の原則）。
-   **Canvas / Box も 2026-08-01 に対応済み** — ブローカー経由への全面移行ではなく、
-   **既存の単一ファネル**（`canvas_utils.post_to_canvas` / `box_cli.box_upload_or_version`）に
-   `guard_outbound_text` を入れる形にした。**2 箇所の編集で 8 / 9 モジュールを覆える**ため。
-   Box はテキスト系拡張子のみ中身を検査し、**xlsx/pptx 等は「検査した」と記録しない**
-   （検査できていないものを通過扱いにすると誤った根拠になる）。
-   **2026-08-03 に残り 3 項目を実装**:
-   - **層3（宛先粒度）** — `slack_post.configured_slack_destinations()` が
-     `argus_config.yaml` から正当な宛先集合（実測 **275 件**）を導出し、送信時に照合して
-     `tool_calls` に `dest_known` を記録する。**既定は warn**（`ARGUS_EGRESS_TARGETS`）—
-     `/argus-*` の ephemeral はコマンド実行チャンネルへ返るため、正当な宛先の集合を
-     いま確定できない。分布を観測してから enforce を判断する。
-     観測は `pm_selfcheck` の `egress_dest_unknown`（**違反にはしない**）
-   - **承認フロー** — Slack のボタン UI ではなく **CLI で完結する最小の受け皿**にした
-     （投稿先の決めが要らないため）。`pending_egress` 台帳 +
-     `output_broker.py --list-pending / --approve <id> / --reject <id>`。
-     滞留は `pm_selfcheck` の `pending_egress_stale`（7 日）が検知する
-   - **外部アンカー** — `pm_selfcheck.py --emit-anchor` が連鎖の頭を
-     `config/anchors/tool_call_anchor.jsonl` へ追記し（`data/` は gitignore のため config 側）、
-     `anchor_consistency` が過去のアンカーと現在の台帳の整合を検証する。
-     **2026-08-03、PM 判断で commit + push を運用に載せた。** `pm_selfcheck.sh` が
-     **git の plumbing のみ**（`hash-object` → `mktree` → `commit-tree` → `update-ref` → `push`）で
-     専用ブランチ `anchors` へ載せて push する。**作業ツリー・インデックス・`main` に一切触れない** —
-     `main` には未 push のコミットがあるため、素朴な `git push` では開発者の意図しない
-     コミットまで公開される。push 先は `anchors:anchors` を明示する。
-     **push されたかを `anchor_pushed` 検査が毎日確認する**（ローカルとリモートの ref が
-     一致しなければ違反。**ローカルにだけあるアンカーはアンカーではない**）。
-     公開されるのは `ts` / `rows` / `entry_hash` のみで本文は含まないが、**`rows` は活動量を露出する**
-     （public リポジトリなのでその程度は受容）。
-     **`git push` は subprocess なので `net_guard` の対象外**（`box` CLI と同じ）。
-     証明できるのは「**push 済みのアンカーより後に、それ以前の記録が書き換えられていない**」ことだけで、
-     **記録された内容が真実かどうかには何も言わない**
-   **残り**: 層3 の enforce 判断（観測待ち）
+4. **供給網固定の残り** — (a) 運用主体からのモデル更新通知の取り決め（Phase 0、合意事項）、
+   (b) K3 の `declared_engine` / `declared_trust_remote_code` の確認（取れるまで K3 は
+   `production: false`）
+5. **能力分離 5b の残り** — `--file` 経路（`run_document_qa`）は Read Plane 未分離
+   （`respond`/`record_ids` と強く結合しているため対象外）。OS レベルの強制
+   （iptables / network namespace）は **sudo が使えず着手不能** — `net_guard` は
+   同一プロセスの socket フックのみで box CLI 等の subprocess は覆えない
+6. **輸送層ブローカーの残り** — 層3（宛先粒度）の enforce 判断（観測待ち。`/argus-*`
+   ephemeral の正当な宛先集合がまだ確定できていない。`pm_selfcheck` の
+   `egress_dest_unknown` で観測中）
+7. **改竄側（R5・R8 の拡張・R13）— PM 判断で当面着手しない**。R8 の第2系統トリアージ
+   自体は実装済みで本番観測待ちだが、それ以上の拡張・独立した第2系統・引用スパン照合・
+   二段抽出・挙動指紋は保留する
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 
 HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0）。再発は pre-commit の
-4 lint（`no-box-open-company-access` / `net-guard-import-required` / `no-slack-id-literals` /
-`no-mcp-server-registration`）が防ぐ。
+5 lint（上記）が防ぐ。
 
 - **人名 — 当面そのまま（2026-07-31 PM 判断）。** 敬称つきで 18 件 / 7 ファイル。
-  **敬称なしの姓はパターンで検出できない**（例: `patrol/users.py` の docstring）。
+  敬称なしの姓はパターンで検出できない（例: `patrol/users.py` の docstring）。
   棚卸しには `docs/project.md` の名簿との突き合わせが必要（Claude は読めないため PM 実行）。
-  **lint も無いので今後も混入しうる**
-- **会議名 — 当面そのまま（2026-07-31 PM 判断）。** `docs/commands.md` 21 / `docs/argus_system.md` 15 /
-  `pm_minutes_import.py` 27 ほか。既定の会議種別としてコード全体に埋まっており設定化は広範囲
-- **公開履歴の除去 — 保留。** 2026-07-13 以降の履歴にアプリ名・Slack ID・`docs/decisions/` 等が残る。
-  除去には `filter-repo`（パス指定＋`--replace-text`）と force-push が必要で、全 SHA が変わるため
-  組織調整が前提。**上記 2 件を保留した結果、今実行しても部分的な除去にしかならない**（人名・
-  会議名は残る）。**後から追加で force-push を繰り返すのは public リポジトリでは悪手**なので、
-  除去範囲が確定してから 1 回で実施する
+  lint も無いので今後も混入しうる
+- **会議名 — 当面そのまま（2026-07-31 PM 判断）。** `docs/commands.md` 21 /
+  `docs/argus_system.md` 15 / `pm_minutes_import.py` 27 ほか。既定の会議種別として
+  コード全体に埋まっており設定化は広範囲
+- **公開履歴の除去 — 保留。** 2026-07-13 以降の履歴にアプリ名・Slack ID・
+  `docs/decisions/` 等が残る。除去には `filter-repo`（パス指定＋`--replace-text`）と
+  force-push が必要で、全 SHA が変わるため組織調整が前提。上記 2 件を保留した結果、
+  今実行しても部分的な除去にしかならない（人名・会議名は残る）。後から追加で
+  force-push を繰り返すのは public リポジトリでは悪手なので、除去範囲が確定してから
+  1 回で実施する
 
 **その他の懸案**:
-- ~~`data/qa_index.db` が平文~~ → **2026-08-01 に暗号化へ移行済み**（321MB / 29,313 チャンク）。
-  検索経路 6 箇所を `open_maybe_encrypted`（暗号化優先・平文なら WARNING）に切替。
-  **性能への影響は実測で FTS5 2.4→4.8ms、embedding 読み 23.5→33.9ms** で許容範囲。
-  **残る平文の機微データ**: `data/processing/` の会議録音 mp4（§1.2）と
-  `data/patrol_state.db`（設計上平文。機密を含まない前提）
-- ~~MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま~~ → **2026-07-31 に丸ごと廃止**
-  （チョークポイント 2 箇所目が閉じた。再登録は pre-commit の `no-mcp-server-registration` が防ぐ）
-- ~~`net_guard` の enforce が cron 経路に掛かっていない~~ → **2026-08-03 に展開完了**。
-  crontab の 5 本すべてに `ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"` を入れた。
-  根拠は観測修正後の実測 **1445 件すべて allow / deny 0**（宛先は `localhost:8001` /
-  `api.rikyu.r-ccs.riken.jp:443` / `llm.ai.r-ccs.riken.jp:11434` / `slack.com` /
-  `files.slack.com` / `127.0.0.1:5001`。いずれも allow-list 内）。
-  **書き忘れ防止に契約テストを入れた**（`tests/selfcheck/test_cron_env_contract.py`）—
-  python3 を起動する `scripts/bin/*.sh` は enforce を設定するか、**理由付きで除外リストに
-  載っている**かのどちらかであること。忘却と意図的な除外を区別させる。
-- ~~cron 経路の観測ギャップ~~ → **2026-08-02 修正**。`net_guard` の記録が出るかどうかが
-  エントリスクリプトの `basicConfig` 呼び出しに依存しており、**cron 5 本のうち
-  `pm_argus_daily` と `canvas_report` は NETGUARD 記録が 0 行**だった（遮断は効くが観測不能）。
-  `net_guard.install()` が自分でハンドラを付ける形にして解消。**修正の効果は本番で確認済み**
-  （`canvas_report` 0 → 98 行、`pm_argus_daily` 0 → 24 行）
+- `~/.claude/settings.json` の GitHub PAT 失効（PM 作業、未実施）
+- `argus_config.yaml` の `indices.pm-all.channels` は 55 件。旧ハードコード（57 件の
+  和集合）との差分 2 件は PM 判断で現状維持
 - **enforce の外に残っているもの**（「全経路が覆われた」と読まないこと）:
-  ① `box` CLI（Node の別プロセス）への通信は net_guard を通らない
+  ① `box` CLI（Node の別プロセス）— net_guard は subprocess を覆えない（根本対処は
+  OS レベルの強制。上記 5 と同一課題）
   ② 手動実行の録音・TTS 系ラッパー（観測が溜まっていないため除外リスト）
-  ③ Patrol（cron から意図的に外してある）
-- **`net_guard` は subprocess を覆えない**（2026-08-02 明記）。`box` CLI は Node の別プロセスなので
-  **Box への通信は net_guard を通っていない**。危険度は低い（認証境界の内側・宛先固定）が、
-  被覆範囲として docs/security-architecture.md §3.2 に記載した。根本対処は OS レベルの強制
-- **`silent_control`（`pm_selfcheck`）が本物の記録で意味を持つのは 2026-08-02 以降**。
-  それ以前の `tool_calls` は全 78 行がテスト由来（LOG.md）。台帳が観測期間より新しい間は
-  「判定不能」と出るので、`egress_other` / `read_tools` は当面その表示になる
-- `~/.claude/settings.json` の GitHub PAT 失効（PM 作業）
-- `argus_config.yaml` の `indices.pm-all.channels` は 55 件。旧ハードコード（57 件の和集合）との
-  差分 2 件は PM 判断で現状維持
+  ③ Patrol（cron から意図的に外してある。DM の信頼性の問題が別途未解決のため。
+  経緯は LOG.md 参照）
 
 ### 議事録生成への Kimi-K3 視覚入力の組み込み（2026-07-31 着手）
 

@@ -320,6 +320,173 @@ Canvas同期（`pm_sync_canvas.py`）およびマイルストーン紐づけ変�
 想定されている（`pm_selfcheck.py` の巻き戻りパターン検査は `xlsx_sync` 以外の任意の `source` を
 「解消済み」とみなす設計のため、コード側でこれらの文字列を強制してはいない）。
 
+### pm.db: セキュリティアーキテクチャ関連テーブル（2026-08-01〜08-03 追加）
+
+Argus セキュリティアーキテクチャ（`docs/security-architecture.md`）実装に伴い pm.db へ
+新設された5テーブル。DDL は `scripts/utils/db_utils.py` の `_PM_SCHEMA`（`tool_calls` /
+`reasoning_traces` / `canary_tokens` / `triage_second_opinion`）および個別の
+`ensure_*_table()` 関数（`pending_egress` は `_PM_SCHEMA` に含まれず遅延作成）で定義される。
+
+#### tool_calls（ツール呼び出し監査台帳、docs/security-architecture.md §4.4）
+
+LLM のツール呼び出しを1件ずつ追記する監査ログ。`audit_log`（DBの列がどう変わったか）
+では拾えない「ツール名・引数・結果」を残す。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `call_id` | TEXT | 呼び出しID（PK、uuid4） |
+| `session_id` | TEXT | セッションID |
+| `seq` | INTEGER | セッション内の呼び出し連番 |
+| `ts` | TEXT | 呼び出し日時（UTC ISO8601） |
+| `plane` | TEXT | `read` / `mutate` / `egress` |
+| `tool_name` | TEXT | 呼び出したツール名 |
+| `args_json` | TEXT | 引数（JSON、キーソート済み） |
+| `args_max_entropy` | REAL | 引数中の文字列値の最大シャノンエントロピー（`shannon_entropy()`、異常検知の補助情報であり判定ではない） |
+| `result_bytes` | INTEGER | 結果本文のバイト数（NULL可） |
+| `result_sha256` | TEXT | 結果本文のSHA256（本文自体は持たない） |
+| `model` | TEXT | 呼び出したモデル名（既定 `''`） |
+| `model_revision` | TEXT | モデルのリビジョン（既定 `''`） |
+| `reasoning_sha256` | TEXT | 対応する `reasoning_traces.trace_sha256` への参照（本体はここには持たない） |
+| `outcome` | TEXT | `ok` / `blocked` / `error` |
+| `block_reason` | TEXT | `blocked`/`error` 時の理由 |
+| `prev_hash` | TEXT | 直前エントリの `entry_hash`（先頭行は `GENESIS_HASH` = `'0'*64`） |
+| `entry_hash` | TEXT | `sha256(prev_hash \|\| call_id \|\| ts \|\| tool_name \|\| args_json \|\| outcome)` |
+
+インデックス: `idx_tool_calls_session(session_id, seq)`。
+
+書き込み: `record_tool_call()`（`BEGIN IMMEDIATE` でスレッド間・プロセス間を直列化し、
+`prev_hash` 読み取り〜INSERT〜commit を1トランザクションにまとめる）。
+読み取り: `verify_tool_call_chain()`（連鎖検証）、`tool_call_anchor()`（外部アンカー用の
+連鎖の頭取得）、`pm_selfcheck.py` 等の監査系。
+
+**制約・注意点**:
+- **append-only**。`tool_calls_no_update` / `tool_calls_no_delete` という2つの
+  `BEFORE UPDATE` / `BEFORE DELETE` トリガが `RAISE(ABORT, 'tool_calls is append-only')`
+  で UPDATE / DELETE を拒否する。トリガは `open_db()` のスキーマ初期化時に作られるが、
+  **過去に `str.split(";")` による素朴なDDL分割でトリガ本体（`CREATE TRIGGER ... BEGIN
+  ... END;`）が正しく解釈されず、テーブルは作られるのにトリガだけが欠落する不具合が
+  あった**（`open_db()` 側は `executescript()` に切り替え済みで修正済みだが、その状態で
+  作られた既存DBは残りうる）。そのため `ensure_tool_calls_table()` はテーブル存在だけでなく
+  2つのトリガの存在も確認し、いずれか欠けていれば DDL を再実行して修復する
+  （修復時は「トリガが欠落していたため再作成しました」と WARNING を出す）。
+- `entry_hash`/`prev_hash` による**ハッシュ連鎖**で過去エントリの改竄を検出できるが、
+  **検出できるのは事故による破損までであり、意図的な改竄は検出できない**。連鎖の
+  検証者（`verify_tool_call_chain()`）が改竄されうる側と同じ信頼領域（同じプロセス・
+  同じ UNIX ユーザ）で動くため、コード実行を取られればエントリと連鎖の頭を両方
+  書き換えられる。この弱点を補うのが `tool_call_anchor()` が返す連鎖の頭を外部の
+  追記専用の場所（`anchors` ブランチ）に日次で固定する仕組みで、両者は対で意味を持つ
+  （`anchors` 側に記録済みの過去の値と矛盾すれば、その日以降の改竄が確定する）。
+
+#### reasoning_traces（思考トレース、docs/security-architecture.md §4.4）
+
+LLM の思考過程（reasoning/thinking）そのものを保存する本体テーブル。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `id` | INTEGER | PK（AUTOINCREMENT） |
+| `session_id` | TEXT | セッションID |
+| `step` | INTEGER | セッション内のステップ番号 |
+| `ts` | TEXT | 記録日時（UTC ISO8601） |
+| `model` | TEXT | モデル名（既定 `''`） |
+| `model_revision` | TEXT | モデルのリビジョン（既定 `''`） |
+| `trace_sha256` | TEXT | `trace` のSHA256 |
+| `char_count` | INTEGER | `trace` の文字数 |
+| `trace` | TEXT | 思考過程の本文 |
+
+インデックス: `idx_reasoning_session(session_id, step)`、`idx_reasoning_ts(ts)`。
+
+書き込み: `record_reasoning_trace()`。読み取り: canary 発火時の調査、`purge_reasoning_traces()`。
+
+**制約・注意点**:
+- **本体（思考過程の全文）を持つのはこのテーブルだけ**であり、`tool_calls` 側は
+  `reasoning_sha256` で参照するだけで本体を持たない。分離している理由は**保持期間が
+  違う**ため — `reasoning_traces` は「モデルが見た機微データがそのまま入る」ストアで
+  既定 `REASONING_RETENTION_DAYS = 90` 日で `purge_reasoning_traces()` により削除される
+  （`keep_sessions` 指定でcanary発火セッション等は保持延長できる）のに対し、`tool_calls`
+  は append-only で無期限に残る監査台帳であるため、機微本文を混在させられない。
+- レポート系クエリからは除外する（機微データのため）。
+
+#### canary_tokens（canary 台帳、docs/security-architecture.md §4.3）
+
+「植えた canary が本来出てこない場所に現れたか」を検知するための正本。実際の検知は
+`pm_selfcheck.py` の canary_hit / netguard_deny チェックが行う（このテーブル自体は
+検知ロジックを持たない）。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `token` | TEXT | canary トークン文字列そのもの（PK）。`kind='hostname'` ならホスト名、`kind='text'` なら `ARGUS-CANARY-xxxx` 形式 |
+| `planted_in` | TEXT | 植えた先。`action_items` / `decisions` / `minutes` / `box_docs` / `slack` / `registry_only`（台帳登録のみでまだ未植え付け） |
+| `row_ref` | TEXT | 埋めた行への参照（未植え付けなら NULL） |
+| `planted_at` | TEXT | 植えた日時 |
+| `active` | INTEGER | 有効フラグ（既定1。`revoke_canary()` で0にする） |
+| `kind` | TEXT | `text` / `hostname` |
+| `notes` | TEXT | 備考 |
+
+書き込み: `plant_canary()` / `revoke_canary()`。読み取り: `list_canaries()` /
+`active_canary_tokens()`（`pm_selfcheck.py` のスキャン対象取得に使用）。
+
+インデックス・トリガなし。
+
+#### triage_second_opinion（第2系統判定記録、docs/security-architecture.md §4.9）
+
+フラグ語が立った項目に非中国系モデルを当てて行う第2系統（独立系統）の差分検査結果を
+記録する。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `id` | INTEGER | PK（AUTOINCREMENT） |
+| `ts` | TEXT | 判定日時 |
+| `kind` | TEXT | `action_items` / `decisions` |
+| `content_sha256` | TEXT | 対象本文のSHA256 |
+| `content_head` | TEXT | 対象本文の先頭のみ（全文は pm.db 本体側にある） |
+| `primary_verdict` | TEXT | 主系統の判定 |
+| `second_verdict` | TEXT | 第2系統の判定。`KEEP` / `DROP` / `UNKNOWN` |
+| `agreed` | INTEGER | 主系統と第2系統が一致したか（0/1） |
+| `flagged_terms` | TEXT | 検査契機となったフラグ語（カンマ区切り） |
+| `model` | TEXT | 第2系統に使ったモデル名（既定 `''`） |
+| `raw` | TEXT | 第2系統の生出力（任意） |
+
+インデックス: `idx_second_opinion_agreed(agreed, ts)`。
+
+書き込み: `record_second_opinion()`。
+
+**制約・注意点**:
+- **主系統を上書きしない。記録のみ**。第2系統は小型モデルであることが多く能力差による
+  誤りが混ざるため、自動で覆さずフラグを立てて人が見るに留める設計。
+- 一致・不一致の両方を記録する（不一致だけ残すと母数が分からず、雑音の割合を評価できない）。
+
+#### pending_egress（承認待ち外向き出力台帳、docs/security-architecture.md §4.2）
+
+出力ブローカー（`scripts/argus/output_broker.py`）がブロックした外向き出力を、人間の
+承認待ちとして保持する。`_PM_SCHEMA` には含まれず、`ensure_pending_egress_table()` に
+より必要になった時点で後付けされる（他の4テーブルは `_PM_SCHEMA` に含まれ `init_pm_db()`
+実行時に作られる）。
+
+| カラム | 型 | 説明 |
+|---|---|---|
+| `id` | INTEGER | PK（AUTOINCREMENT） |
+| `ts` | TEXT | 記録日時 |
+| `target` | TEXT | 送信先識別子 |
+| `content_sha256` | TEXT | `content` のSHA256 |
+| `content` | TEXT | 送信予定の本文そのもの |
+| `chars` | INTEGER | `content` の文字数 |
+| `block_reason` | TEXT | ブロック理由 |
+| `status` | TEXT | `pending` / `approved` / `rejected`（既定 `pending`） |
+| `decided_at` | TEXT | 承認/却下日時 |
+| `decided_by` | TEXT | 承認/却下した人 |
+
+インデックス: `idx_pending_egress_status(status, ts)`。
+
+書き込み: `record_pending_egress()`（`tool_calls` にも `plane='egress'` /
+`tool_name='broker:pending'` / `outcome='blocked'` で同時記録し、連鎖を1本に保つ）。
+読み取り・操作: CLI `python3 scripts/argus/output_broker.py --list-pending` /
+`--approve <ID>` / `--reject <ID>`（`--decided-by` で承認者名を指定）。
+
+**制約・注意点**:
+- **本文（`content`）をそのまま保持する**。`content_sha256` だけでは承認時に実際の
+  送信へ渡す本文が復元できないため。
+- `status` が既に `pending` でない行を再度承認/却下しようとすると拒否される（二重決定防止）。
+
 ### data/box_docs.db（BOX 本文ナレッジ）
 
 `pm_box_crawl.py` が `box_sources.yaml` のフォルダを走査して BOX のファイル一覧と本文を Markdown 化して保存する。`pm_box_relevance.py` がローカル LLM で relevance（core/related/noise/unknown）を判定して `box_files.relevance` 列を埋める。`pm_embed.py` は `relevance = 'noise'` のファイルを索引対象から自動除外する（NULL/空文字は索引対象に含まれる）。
