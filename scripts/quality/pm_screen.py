@@ -45,23 +45,28 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
 import sys
 from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from cli_utils import (
     add_db_arg,
+    add_dry_run_arg,
     add_no_encrypt_arg,
     add_output_arg,
     add_since_arg,
     make_logger,
     resolve_db_path,
 )
-from db_utils import open_db
+from db_utils import open_db, table_exists
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_MINUTES_DIR = REPO_ROOT / "data" / "minutes"
+DEFAULT_PROCESSING_DIR = REPO_ROOT / "data" / "processing"
 
 _SECTION_ACTIONS   = "# === アクションアイテム ==="
 _SECTION_DECISIONS = "# === 決定事項 ==="
@@ -787,6 +792,374 @@ def export_triage_csv(
     log(f"     python3 scripts/pm_relink.py --import {output_path}")
 
 
+# --------------------------------------------------------------------------- #
+# --second-opinion-minutes: 議事録経路への第2系統（独立系統）差分検査
+#   docs/security-architecture.md §4.9 対策3+5 / R8 の第2系統を議事録経路へ拡張したもの。
+#
+# 議事録生成 LLM（主系統: glm / DeepSeek / Qwen、いずれも同系統）が文字起こしにあった
+# 決定事項・アクションアイテムを静かに落としても、現状それを検出する手段がない。
+# Slack Pass 1 抽出（ingest/slack.py）・Box relevance 判定（pm_box_relevance.py）に続く
+# 3経路目として、議事録の文字起こし原文（data/processing/ に保存済み）を後から・
+# まとめて・過去に遡って第2系統（Llama-4-Scout, RiVault配信）に独立抽出させ、
+# 保存済みの決定事項・アクションアイテムと突合する。
+#
+# 何を捕まえないか（重要）:
+#   - 捕まえるのは欠落だけ。議事録に載っている内容が正しいかは検証しない
+#     （それは引用スパン照合という別の仕組み）
+#   - 両方の系統が同じように見落とした場合は検出できない
+#   - 第2系統は Llama-4-Scout（RiVault配信）で、主系統（glm/DeepSeek/Qwen、いずれも
+#     同系統）に対する唯一の独立系統である。K3 を主系統に足しても独立系統は1本のまま
+#   - **入力の階層によって検出できる欠落の範囲が変わる**（_resolve_transcript_for_meeting
+#     の優先順位参照）。vtt / whisper_raw は主系統の議事録生成パイプライン（Stage 1/2/3）
+#     より前段の独立入力のため Stage 1〜3 いずれの欠落も検出しうるが、combined.txt は
+#     主系統 Stage 1 の出力そのものであり、**Stage 1 で既に落ちた項目は combined.txt にも
+#     現れないため原理的に検出できない**（Stage 2/3 の欠落のみ検出対象になる）。
+#     どの階層を使ったかは record_second_opinion の content プレフィックスに残す
+#     （vtt / whisper_raw / combined_degraded）。
+#
+# 議事録DB・pm.db の action_items/decisions は一切書き換えない。記録は
+# pm.db の triage_second_opinion（record_second_opinion 経由）のみ。
+# --------------------------------------------------------------------------- #
+
+# generate_minutes_local.py の出力命名規則（同一 `now` から生成されるため ts が一致する）:
+#   {ts}-{basename}-minutes.md   … pm_minutes_import.py --no-llm がインポートする議事録
+#   {ts}-{basename}-combined.txt … Stage 1 抽出結果のキャッシュ（デバッグ・再実行用）
+# instances.file_path の stem からこの ts / basename を逆算し、data/processing/ 内の
+# 対応する文字起こし原文を探す。
+_MINUTES_STEM_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)-minutes$")
+
+_DEFAULT_SECOND_OPINION_SINCE_DAYS = 30
+_DEFAULT_SECOND_OPINION_LIMIT = 10
+
+# 入力階層の表示名（ログ・レポート用）
+_TIER_LABELS = {
+    "vtt": "VTT（Zoom生成、主系統から独立）",
+    "whisper_raw": "生Whisper文字起こし（主系統の議事録生成LLMより前段）",
+    "combined_degraded": "combined.txt（主系統Stage1出力、降格）",
+}
+
+# VTT ファイル名は mp4/combined.txt と共有する {basename} に解像度サフィックス
+# （`_1280x948` 等）やブラウザ重複DLサフィックス（` (1)` 等）が付くと、Zoom が実際に
+# 書き出す `{stem}.transcript.vtt` / `{stem}.vtt` と一致しなくなる。
+# pm_from_recording.sh（VTT自動検出）・scripts/recording/transcribe_pipeline.py の
+# download_vtt() と同じ stem 派生規則を踏襲する（新しい照合規則は作らない）。
+_RES_SUFFIX_RE = re.compile(r"_\d+x\d+$")
+_DUP_SUFFIX_RE = re.compile(r" ?\(\d+\)$")
+
+
+def _vtt_candidates_for_basename(basename: str) -> list[str]:
+    """basename から Zoom VTT のファイル名候補（解像度・重複DLサフィックス剥がし後の
+    バリアント × `.transcript.vtt`/`.vtt`）を列挙する。"""
+    stem_nores = _RES_SUFFIX_RE.sub("", basename)
+    stem_nodup = _DUP_SUFFIX_RE.sub("", basename)
+    stem_bare = _RES_SUFFIX_RE.sub("", stem_nodup)
+    variants: list[str] = []
+    for s in (basename, stem_nores, stem_nodup, stem_bare):
+        if s and s not in variants:
+            variants.append(s)
+    candidates: list[str] = []
+    for s in variants:
+        candidates.extend([f"{s}.transcript.vtt", f"{s}.vtt"])
+    return candidates
+
+# combined.txt は発話ごとのタイムスタンプを保持しないため generate_minutes_local.py の
+# chunk_transcript（セグメントの start/end 時刻が必要）が使えず、文字数分割にフォールバック
+# する。1800 は generate_minutes_local.py の target_chars 算出式
+# `min(6000, max(800, chunk_minutes * 60))` に chunk_minutes=30 を当てはめた値を踏襲する
+# （Stage 1 のチャンク要約1件がおおよそこの文字数になるよう生成されているため、
+# combined.txt 全体を同程度の大きさで割ることで擬似的に「30分チャンク」に近づける）。
+_COMBINED_CHUNK_CHARS = 1800
+
+
+def _default_second_opinion_since(days: int = _DEFAULT_SECOND_OPINION_SINCE_DAYS) -> str:
+    return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _resolve_transcript_for_meeting(
+    file_path: str | None, processing_dir: Path,
+) -> tuple[Path | None, str]:
+    """instances.file_path から対応する文字起こし原文を data/processing/ で探す。
+
+    優先順位（独立性が高い順）:
+      1. **VTT**（`{basename}.transcript.vtt` / `{basename}.vtt`、解像度・重複DL
+         サフィックス違いを含む。`_vtt_candidates_for_basename` 参照）— Zoom が
+         生成した生の文字起こし。Argus のパイプラインの外で作られたものであり、
+         主系統から完全に独立している。最優先で採用する
+      2. 生の文字起こし（{basename}.md / {basename}.txt）— 自前 Whisper の出力だが、
+         議事録生成 LLM（主系統）より前段のため独立性は保たれる
+      3. **降格扱い**: Stage 1 の combined.txt キャッシュ（{ts}-{basename}-combined.txt）
+         — 主系統自身の Stage 1 出力そのものであり、Stage 1 で落ちた項目はここにも
+         現れない（Stage 2/3 の欠落のみ検出できる）。生の文字起こしが通常クリーンアップ
+         済みのため、実データではこちらが主な経路になる
+
+    file_path が `{ts}-{basename}-minutes` の命名規則に一致しない場合
+    （pm_minutes_import.py への直接インポート等）は、stem そのものを basename として
+    VTT・生の文字起こしのみを探す（combined.txt は同じ ts 前提の対応関係が成立しないため探さない）。
+
+    戻り値: (見つかったパス, "vtt"|"whisper_raw"|"combined_degraded")。
+    見つからなければ (None, "")。
+    """
+    if not file_path:
+        return None, ""
+    stem = Path(file_path).stem
+    m = _MINUTES_STEM_RE.match(stem)
+    basename = m.group(2) if m else stem
+    ts = m.group(1) if m else None
+
+    for vtt_name in _vtt_candidates_for_basename(basename):
+        vtt_cand = processing_dir / vtt_name
+        if vtt_cand.is_file():
+            return vtt_cand, "vtt"
+
+    for ext in (".md", ".txt"):
+        cand = processing_dir / f"{basename}{ext}"
+        if cand.is_file():
+            return cand, "whisper_raw"
+
+    if ts:
+        cand = processing_dir / f"{ts}-{basename}-combined.txt"
+        if cand.is_file():
+            return cand, "combined_degraded"
+
+    return None, ""
+
+
+def _split_by_chars(text: str, size: int = _COMBINED_CHUNK_CHARS) -> list[str]:
+    text = text.strip()
+    if not text:
+        return []
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+def _chunk_meeting_text(path: Path, source_kind: str) -> list[str]:
+    """会議の文字起こし原文を主系統と同じ30分チャンクに分割する。
+
+    source_kind == "vtt": scripts/utils/transcript.py の parse_vtt をそのまま再利用する。
+    parse_vtt が返す start/end は "HH:MM:SS" 文字列のため、_ts_to_sec で秒数へ変換して
+    generate_minutes_local.py の chunk_transcript（デフォルト1800秒=30分）に渡す。
+
+    source_kind == "whisper_raw": generate_minutes_local.py の parse_transcript +
+    chunk_transcript をそのまま再利用する（Whisper VAD 形式・reconcile_transcript.py
+    出力形式の両方に対応済み）。
+
+    source_kind == "combined_degraded": Stage 1 の combined.txt キャッシュは発話ごとの
+    タイムスタンプを持たない要約テキストのため chunk_transcript が使えず、
+    文字数で分割する（_COMBINED_CHUNK_CHARS 参照）。
+    """
+    from recording.generate_minutes_local import chunk_transcript, format_transcript
+
+    if source_kind == "vtt":
+        from utils.transcript import _ts_to_sec, parse_vtt
+        vtt_segments = parse_vtt(str(path))
+        segments = [
+            {"speaker": s["speaker"], "start": _ts_to_sec(s["start"]),
+             "end": _ts_to_sec(s["end"]), "text": s["text"]}
+            for s in vtt_segments
+        ]
+        if segments:
+            return [format_transcript(c) for c in chunk_transcript(segments)]
+        # VTT形式に一致しない（空・壊れたファイル等）場合は文字数分割にフォールバック
+        return _split_by_chars(path.read_text(encoding="utf-8"))
+
+    if source_kind == "whisper_raw":
+        from recording.generate_minutes_local import parse_transcript
+        segments = parse_transcript(str(path))
+        if segments:
+            return [format_transcript(c) for c in chunk_transcript(segments)]
+        # 既知の2形式（Whisper VAD / reconcile_transcript.py 出力）に一致しない場合は
+        # 文字数分割にフォールバックする
+        return _split_by_chars(path.read_text(encoding="utf-8"))
+
+    return _split_by_chars(path.read_text(encoding="utf-8"))
+
+
+def _collect_meeting_candidates(
+    minutes_dir: Path, since: str, no_encrypt: bool, log,
+) -> list[dict]:
+    """data/minutes/*.db から since 以降の会議を列挙する。
+
+    各要素: {"kind", "meeting_id", "held_at", "file_path",
+             "decisions": [content...], "action_items": [content...]}
+    """
+    candidates: list[dict] = []
+    if not minutes_dir.is_dir():
+        return candidates
+
+    for db_path in sorted(minutes_dir.glob("*.db")):
+        kind = db_path.stem
+        try:
+            conn = open_db(db_path, encrypt=not no_encrypt)
+        except Exception as e:
+            log(f"[WARN] 議事録DBを開けませんでした ({db_path.name}): {e}")
+            continue
+        try:
+            if not table_exists(conn, "instances"):
+                continue
+            rows = conn.execute(
+                "SELECT meeting_id, held_at, file_path FROM instances"
+                " WHERE held_at >= ? ORDER BY held_at DESC",
+                (since,),
+            ).fetchall()
+            for r in rows:
+                meeting_id = r["meeting_id"]
+                decs = conn.execute(
+                    "SELECT content FROM decisions WHERE meeting_id=?", (meeting_id,)
+                ).fetchall()
+                ais = conn.execute(
+                    "SELECT content FROM action_items WHERE meeting_id=?", (meeting_id,)
+                ).fetchall()
+                candidates.append({
+                    "kind": kind,
+                    "meeting_id": meeting_id,
+                    "held_at": r["held_at"],
+                    "file_path": r["file_path"],
+                    "decisions": [d["content"] for d in decs],
+                    "action_items": [a["content"] for a in ais],
+                })
+        finally:
+            conn.close()
+    return candidates
+
+
+def run_second_opinion_minutes(
+    pm_conn,
+    *,
+    since: str | None,
+    limit: int,
+    dry_run: bool,
+    minutes_dir: Path,
+    processing_dir: Path,
+    no_encrypt: bool,
+    log,
+) -> None:
+    """議事録経路への第2系統差分検査バッチ本体。
+
+    議事録DB・pm.db の action_items/decisions は一切変更しない。記録先は
+    pm.db の triage_second_opinion（record_second_opinion 経由）のみ。
+
+    何を捕まえないか（重要）:
+      - 捕まえるのは欠落だけ。議事録に載っている内容が正しいかは検証しない
+        （それは引用スパン照合という別の仕組み）
+      - 両方の系統が同じように見落とした場合は検出できない
+      - 第2系統は Llama-4-Scout（RiVault配信）で、主系統（glm/DeepSeek/Qwen、
+        いずれも同系統）に対する唯一の独立系統である。K3 を主系統に足しても
+        独立系統は1本のまま
+      - **入力の階層で検出できる範囲が変わる**（_resolve_transcript_for_meeting 参照）。
+        vtt / whisper_raw は主系統の議事録生成（Stage 1〜3）より前段の独立入力なので
+        いずれの段の欠落も検出しうるが、combined.txt（"combined_degraded"）は主系統
+        Stage 1 自身の出力であり、**Stage 1 で落ちた項目はそこにも現れないため
+        原理的に検出できない**（Stage 2/3 の欠落のみ検出対象）。この会議は処理対象から
+        除外しない（Stage2/3はK3が入る段のため検出価値がある）が、その旨をWARNで
+        明示し、record_second_opinion の content にも階層タグを残す
+    """
+    if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
+        log("[INFO] ARGUS_SECOND_OPINION が無効のため第2系統検査をスキップします")
+        return
+
+    since = since or _default_second_opinion_since()
+    log(f"対象期間: {since} 以降")
+
+    candidates = _collect_meeting_candidates(minutes_dir, since, no_encrypt, log)
+    candidates.sort(key=lambda c: c["held_at"] or "", reverse=True)
+    log(f"対象会議数: {len(candidates)} 件")
+
+    resolved: list[tuple[dict, Path, str]] = []
+    tier_counts: dict[str, int] = {"vtt": 0, "whisper_raw": 0, "combined_degraded": 0}
+    n_not_found = 0
+    for c in candidates:
+        path, source_kind = _resolve_transcript_for_meeting(c["file_path"], processing_dir)
+        if path is None:
+            n_not_found += 1
+            continue
+        tier_counts[source_kind] += 1
+        resolved.append((c, path, source_kind))
+
+    log(f"文字起こしが見つかった会議: {len(resolved)} 件"
+        f" / 見つからなかった会議: {n_not_found} 件（黙って飛ばさず件数を報告）")
+    log("入力階層の内訳: "
+        + " / ".join(
+            f"{_TIER_LABELS[t]} {tier_counts[t]} 件" for t in ("vtt", "whisper_raw", "combined_degraded")
+        ))
+    if tier_counts["combined_degraded"]:
+        log(f"[WARN] うち {tier_counts['combined_degraded']} 件は"
+            " combined.txt（主系統のStage1出力）が入力です。"
+            "Stage1で落ちた項目は原理的に検出できません"
+            "（Stage2/3の欠落のみ検出対象。『全部見た』とは読めません）")
+
+    if len(resolved) > limit:
+        log(f"[WARN] 処理対象 {len(resolved)} 件が --limit {limit} を超えています。"
+            f"先頭（開催日が新しい順）{limit} 件のみ処理します"
+            "（黙って打ち切ると「全部見た」と誤読されるため明示します）")
+        resolved = resolved[:limit]
+
+    processed: list[tuple[dict, Path, str, list[str]]] = []
+    for c, path, source_kind in resolved:
+        try:
+            chunks = _chunk_meeting_text(path, source_kind)
+        except Exception as e:
+            log(f"[WARN] 文字起こしの読み込み・分割に失敗しました"
+                f"（この会議はスキップ）: {c['kind']}/{c['meeting_id']}: {e}")
+            continue
+        processed.append((c, path, source_kind, chunks))
+
+    total_calls = sum(len(chunks) for _c, _p, _k, chunks in processed)
+    log(f"推定LLM呼び出し回数: 対象会議 {len(processed)} 件 × チャンク数 合計 {total_calls} 回")
+
+    if dry_run:
+        log("[INFO] --dry-run のためLLM呼び出し・DB書き込みは行いません")
+        return
+
+    from db_utils import record_second_opinion
+    from ingest.slack import (
+        _call_second_opinion_extraction,
+        _load_second_opinion_config,
+        compare_extractions,
+        flag_sensitive_terms,
+    )
+
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    model = cfg.get("model") or ""
+
+    n_recorded = 0
+    for c, _path, source_kind, chunks in processed:
+        meeting_ref = f"[{c['kind']}/{c['meeting_id']}][{source_kind}]"
+        if source_kind == "combined_degraded":
+            log(f"[WARN] {meeting_ref} は combined.txt（主系統のStage1出力）を入力にしています。"
+                "Stage1で落ちた項目は検出できません（Stage2/3の欠落のみ検出対象）")
+
+        primary = {
+            "decisions": [{"content": x} for x in c["decisions"]],
+            "action_items": [{"content": x} for x in c["action_items"]],
+        }
+        seen: set[str] = set()
+        for chunk_text in chunks:
+            try:
+                second, raw = _call_second_opinion_extraction(chunk_text)
+            except Exception as e:
+                log(f"[WARN] 第2系統(minutes) の呼び出しに失敗（このチャンクはスキップ）: {e}")
+                continue
+            diff = compare_extractions(primary, second)
+            terms = flag_sensitive_terms(chunk_text)
+            for k in ("decisions", "action_items"):
+                for content in diff.get(k, []):
+                    if not content.strip() or content in seen:
+                        continue
+                    seen.add(content)
+                    record_second_opinion(
+                        pm_conn, kind="minutes_extraction",
+                        content=f"{meeting_ref} {content}",
+                        primary_verdict="MISSING", second_verdict="PRESENT",
+                        flagged_terms=terms, model=model, raw=raw,
+                    )
+                    n_recorded += 1
+        log(f"  {meeting_ref} チャンク{len(chunks)}件 処理完了")
+
+    log("")
+    log(f"完了: 第2系統が保存済みに無いと判定した項目 {n_recorded} 件を"
+        " triage_second_opinion に記録しました"
+        "（議事録DB・pm.dbのaction_items/decisionsは変更していません）")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="pm.db のアクションアイテム・決定事項をスクリーニング（重複・類似・曖昧を検出）"
@@ -822,6 +1195,18 @@ def main():
                              "対象に含める（デフォルト: open のみ）。"
                              "警告: closed 項目はゲート3（影響範囲）でほぼ DROP 判定になるため、"
                              "完了実績を誤って抹消対象にしてしまう恐れがある。通常は指定しないこと")
+    parser.add_argument("--second-opinion-minutes", action="store_true",
+                        help="議事録経路への第2系統（独立系統）差分検査バッチを実行。"
+                             "重複検出・--triage とは独立したモード。"
+                             "ARGUS_SECOND_OPINION=1/true/yes のときのみ動作する")
+    parser.add_argument("--limit", type=int, default=_DEFAULT_SECOND_OPINION_LIMIT,
+                        help="--second-opinion-minutes 時に処理する会議数の上限"
+                             f"（デフォルト: {_DEFAULT_SECOND_OPINION_LIMIT}）")
+    parser.add_argument("--minutes-dir", default=str(DEFAULT_MINUTES_DIR),
+                        help=f"議事録DBディレクトリ（デフォルト: {DEFAULT_MINUTES_DIR}）")
+    parser.add_argument("--processing-dir", default=str(DEFAULT_PROCESSING_DIR),
+                        help=f"文字起こし原文ディレクトリ（デフォルト: {DEFAULT_PROCESSING_DIR}）")
+    add_dry_run_arg(parser)
 
     args = parser.parse_args()
     db_path = resolve_db_path(args.db, REPO_ROOT / "data" / "pm.db")
@@ -835,6 +1220,21 @@ def main():
     if args.triage:
         output = args.output or "triage.csv"
         run_triage(conn, args.since, args.triage_include_closed, output, log)
+        conn.close()
+        close()
+        return
+
+    if args.second_opinion_minutes:
+        run_second_opinion_minutes(
+            conn,
+            since=args.since,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            minutes_dir=Path(args.minutes_dir),
+            processing_dir=Path(args.processing_dir),
+            no_encrypt=args.no_encrypt,
+            log=log,
+        )
         conn.close()
         close()
         return
