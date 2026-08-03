@@ -8,6 +8,19 @@
 # pm_screen.py --list-findings / --mark-reviewed、滞留検査は
 # pm_selfcheck.py の second_opinion_findings_stale が担う）。
 #
+# このバッチと録音経路（pm_from_recording.sh）の役割分担（2026-08 追加）:
+#   - 録音経路（Console / 手動）は pm_from_recording.sh の末尾（Step 6）で、
+#     処理した会議だけを --meeting-stem で絞り込んで即時検査する。所見が出る
+#     までの遅延をなくし、人が Console で議事録を確認しているタイミングで
+#     出すのが狙い。
+#   - この週1バッチは「取りこぼしの掃除」を担う。直接インポート経路
+#     （pm_minutes_import.py を単体で使う場合）、過去分、録音経路側で
+#     インラインの第2系統検査自体が失敗・タイムアウトした会議はここでしか
+#     拾えない。
+#   - 両方の経路が同じ会議を検査すると所見が二重に記録されうる。**現状それを
+#     防ぐ機構は無い**ため、レビュー時に重複が見えることがある
+#     （content 中の [kind/meeting_id][tier] タグ・content_sha256 で気づける）。
+#
 # --reader both にする理由: kind=minutes_extraction_recall（kimi-k3。
 # recall チェック専用の読み手）と kind=minutes_extraction（R8対策の第2系統、
 # Llama-4-Scout）は別系統・別目的であり、どちらか一方だけでは相手の

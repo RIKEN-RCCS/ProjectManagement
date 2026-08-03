@@ -46,6 +46,9 @@
     <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="ach">
       <span class="text-lg mr-1">🏆</span> 実績
     </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="opinion">
+      <span class="text-lg mr-1">🔎</span> 所見
+    </button>
     <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="minutes">
       <span class="text-lg mr-1">📄</span> Minutes
     </button>
@@ -196,6 +199,34 @@
     </div>
 
     <div id="grid-ach" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
+  </div>
+
+  <!-- Second Opinion (所見) Panel -->
+  <div id="panel-opinion" class="tab-panel flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
+    <div class="bg-yellow-900/40 border border-yellow-600 text-yellow-200 text-xs rounded px-3 py-2 flex-none">
+      これは<strong>主系統が落とした可能性がある項目</strong>であり、確定した欠落ではない。
+      第2系統の判定で主系統を上書きしていない。<strong>載せるべきかの判断は人が行う。</strong>
+    </div>
+
+    <div class="flex items-end gap-3 flex-none">
+      <label class="flex flex-col text-xs text-gray-400">
+        kind（部分一致）
+        <input id="f-op-kind" type="text" placeholder="例: minutes_extraction" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-56 text-gray-200">
+      </label>
+      <label class="flex items-center gap-1 text-xs text-gray-400 pb-1">
+        <input id="f-op-unreviewed" type="checkbox" class="rounded" checked>
+        未レビューのみ
+      </label>
+      <button onclick="loadSecondOpinion()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">検索</button>
+    </div>
+
+    <div class="flex items-center gap-2 flex-none">
+      <button onclick="markSecondOpinionReviewed()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">選択行をレビュー済みにする</button>
+      <button onclick="loadSecondOpinion()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">再読み込み</button>
+      <span id="opinion-count" class="text-xs text-gray-400"></span>
+    </div>
+
+    <div id="grid-opinion" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
   </div>
 
   <!-- Files Panel -->

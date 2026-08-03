@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 from quality import pm_screen
@@ -827,3 +828,137 @@ class TestExtraHaystackFromMinutesContent:
         breakdown = [m for m in logs if m.startswith("所見:")]
         assert "真の欠落候補 1 件" in breakdown[0]
         assert "本文にあり（除外） 0 件" in breakdown[0]
+
+
+# --------------------------------------------------------------------------- #
+# --meeting-stem: 録音経路（pm_from_recording.sh）が処理直後の会議だけを
+# 即時検査するための絞り込み。instances.file_path の拡張子抜きファイル名
+# （Path(file_path).stem）で一致させる。
+# --------------------------------------------------------------------------- #
+
+
+class TestMeetingStemFilter:
+    def test_only_matching_meeting_is_processed(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """--meeting-stem を指定すると、複数会議が対象期間内にあってもその1件
+        だけが処理される（他方の会議はLLMに渡されない）。"""
+        db_path = minutes_dir / "TestKind.db"
+        fp_a = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_StemA",
+            "=== 第1部（00:00:00〜00:30:00）===\n会議Aの要約テキスト。",
+        )
+        fp_b = _write_combined(
+            processing_dir, "2026-07-02-120000", "2026-07-01_StemB",
+            "=== 第1部（00:00:00〜00:30:00）===\n会議Bの要約テキスト。",
+        )
+        _make_minutes_db(db_path, [
+            {"meeting_id": "m_stem_a", "held_at": "2026-06-30", "file_path": fp_a,
+             "decisions": []},
+            {"meeting_id": "m_stem_b", "held_at": "2026-07-01", "file_path": fp_b,
+             "decisions": []},
+        ])
+
+        import utils.llm as llm_mod
+        prompts: list[str] = []
+
+        def fake(prompt, *a, **k):
+            prompts.append(prompt)
+            return '{"decisions": [], "action_items": []}'
+
+        monkeypatch.setattr(llm_mod, "call_rivault", fake)
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        target_stem = Path(fp_b).stem
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, meeting_stem=target_stem,
+        )
+        conn.close()
+
+        assert any("対象会議数: 1 件" in m for m in logs)
+        assert len(prompts) == 1
+        assert "会議Bの要約テキスト" in prompts[0]
+        assert "会議Aの要約テキスト" not in prompts[0]
+
+
+class TestMeetingStemNotFound:
+    def test_unknown_stem_warns_and_returns_without_error(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """存在しない会議を --meeting-stem に指定しても例外にせず、警告を出して
+        何も処理せずに正常終了する（録音ジョブ全体を落とさないため）。"""
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_StemUnknown",
+            "=== 第1部（00:00:00〜00:30:00）===\n会議の要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "m_stem_unknown", "held_at": "2026-06-30", "file_path": fp,
+            "decisions": [],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault", lambda *a, **k: pytest.fail("呼ばれてはいけない")
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        # 例外を送出しないことそのものがアサーション（送出されればテストが落ちる）
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, meeting_stem="not-a-real-meeting-stem",
+        )
+        rows = _triage_rows(conn)
+        conn.close()
+
+        assert rows == []
+        assert any(
+            "[WARN]" in m and "not-a-real-meeting-stem" in m for m in logs
+        )
+
+
+class TestMeetingStemIgnoresLimit:
+    def test_limit_is_ignored_when_meeting_stem_given(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """--meeting-stem 指定時は --limit を無視する（対象は常に高々1件）。
+        limit=0（通常なら1件でも超過扱いで打ち切られる値）を渡しても
+        --meeting-stem 指定時は打ち切られず処理されること。"""
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_StemLimit",
+            "=== 第1部（00:00:00〜00:30:00）===\n会議の要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "m_stem_limit", "held_at": "2026-06-30", "file_path": fp,
+            "decisions": [],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: '{"decisions": [{"content": "限定検査で見つかった項目"}],'
+                            ' "action_items": []}',
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        logs, log = _collector()
+        target_stem = Path(fp).stem
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=0, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, meeting_stem=target_stem,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 1
+        assert not any("--limit" in m and "超えています" in m for m in logs)

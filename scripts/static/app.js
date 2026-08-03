@@ -5,6 +5,7 @@
 let aiGrid = null;
 let decGrid = null;
 let achGrid = null;
+let opinionGrid = null;
 let filesGrid = null;
 let _filesLoaded = false;
 let milestones = {};
@@ -557,6 +558,83 @@ document.getElementById('form-ach-new').addEventListener('submit', async (e) => 
 });
 
 // ----------------------------------------------------------------
+// Second Opinion (所見) — triage_second_opinion のレビュー
+// ----------------------------------------------------------------
+// 第2系統（独立系統）が「主系統が落とした可能性がある項目」を記録したもの。
+// 確定した欠落ではなく、載せるべきかの判断は人が行う（画面上の注意書き参照）。
+const opinionKindLabels = {
+  minutes_extraction: 'R8対策 (Llama-4-Scout)',
+  minutes_extraction_recall: 'recallチェック (Kimi-K3)',
+  action_items_extraction: 'Slack抽出 (アクション)',
+  decisions_extraction: 'Slack抽出 (決定)',
+  box_relevance: 'Box noise判定',
+};
+
+const opinionKindColors = {
+  minutes_extraction: 'bg-blue-800 text-blue-100',
+  minutes_extraction_recall: 'bg-purple-800 text-purple-100',
+  action_items_extraction: 'bg-green-800 text-green-100',
+  decisions_extraction: 'bg-teal-800 text-teal-100',
+  box_relevance: 'bg-orange-800 text-orange-100',
+};
+
+function opinionKindRenderer(params) {
+  const kind = params.value || '';
+  const label = opinionKindLabels[kind] || kind;
+  const cls = opinionKindColors[kind] || 'bg-gray-700 text-gray-100';
+  return `<span class="rounded px-1.5 py-0.5 text-xs ${cls}" title="${escapeHtml(kind)}">${escapeHtml(label)}</span>`;
+}
+
+const opinionColumnDefs = [
+  { field: 'id', headerName: 'ID', width: 60,
+    checkboxSelection: true, headerCheckboxSelection: true },
+  { field: 'kind', headerName: 'kind', width: 180, cellRenderer: opinionKindRenderer },
+  { field: 'model', headerName: 'モデル', width: 130 },
+  { field: 'primary_verdict', headerName: '主系統', width: 90 },
+  { field: 'second_verdict', headerName: '第2系統', width: 90 },
+  { field: 'content_head', headerName: '内容（先頭）', width: 480,
+    wrapText: true, autoHeight: true },
+  { field: 'flagged_terms', headerName: 'フラグ語', width: 160 },
+  // cellDataType を明示しないと ag-Grid v31+ が dateString 型を推論し、
+  // ISO 形式以外の値が不正な日付として空欄表示される（achColumnDefs の achieved_on と同じ罠）
+  { field: 'ts', headerName: '記録日時', width: 150, cellDataType: 'text' },
+  { field: 'reviewed_at', headerName: 'レビュー日時', width: 150, cellDataType: 'text' },
+];
+
+function initOpinionGrid() {
+  const el = document.getElementById('grid-opinion');
+  opinionGrid = agGrid.createGrid(el, {
+    columnDefs: opinionColumnDefs,
+    defaultColDef: {
+      editable: false, resizable: true, sortable: true, filter: true,
+      wrapText: true, autoHeight: true,
+    },
+    domLayout: 'autoHeight',
+    rowData: [],
+    rowSelection: 'multiple',
+    suppressRowClickSelection: true,
+  });
+}
+
+async function loadSecondOpinion() {
+  const kind = document.getElementById('f-op-kind').value;
+  const unreviewedOnly = document.getElementById('f-op-unreviewed').checked;
+  const qs = new URLSearchParams({ kind, unreviewed_only: unreviewedOnly });
+  const data = await api('GET', '/second-opinion?' + qs);
+  opinionGrid.setGridOption('rowData', data.rows);
+  document.getElementById('opinion-count').textContent = `${data.rows.length} 件`;
+}
+
+async function markSecondOpinionReviewed() {
+  const selected = opinionGrid.getSelectedRows();
+  if (selected.length === 0) { toast('行を選択してください', 'info'); return; }
+  const ids = selected.map(r => r.id);
+  const res = await api('POST', '/second-opinion/mark-reviewed', { ids });
+  toast(`${res.updated} 件をレビュー済みにしました`, 'positive');
+  await loadSecondOpinion();
+}
+
+// ----------------------------------------------------------------
 // Files (AG Grid)
 // ----------------------------------------------------------------
 // チャンネル名は /api/filter-presets が返す channel_names を使う
@@ -846,16 +924,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   initAiGrid();
   initDecGrid();
   initAchGrid();
+  initOpinionGrid();
   initFilesGrid();
   initFilesChannelFilter();
   _updateSourceFilterButtonLabel('ai');
   _updateSourceFilterButtonLabel('dec');
   // 初期化後に admin.js のルーターが起動。editor ページの場合はここでデータ読み込み
   const initHash = location.hash.replace('#', '') || 'dashboard';
-  if (initHash === 'ai' || initHash === 'dec' || initHash === 'ach' || initHash === 'files') {
+  if (initHash === 'ai' || initHash === 'dec' || initHash === 'ach' || initHash === 'opinion' || initHash === 'files') {
     await loadActionItems();
     await loadDecisions();
     await loadAchievements();
+    await loadSecondOpinion();
     _filesLoaded = true;
     loadFiles();
   }

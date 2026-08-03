@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent))
-from db_utils import open_db
+from db_utils import list_second_opinion_findings, mark_second_opinion_reviewed, open_db
 from web_admin import (
     AdminJobQueue,
     delete_minutes_from_pm,
@@ -132,6 +132,9 @@ class NewGlossaryItemRequest(BaseModel):
     title: str
     content: str = ""
     category: str = ""
+
+class MarkSecondOpinionReviewedRequest(BaseModel):
+    ids: list[int]
 
 
 # --- DB endpoints --- #
@@ -457,6 +460,34 @@ def create_achievement(req: NewAchievementRequest):
         return {"ok": True, "id": row["id"] if row else None, "created": False}
     conn.commit()
     return {"ok": True, "id": cur.lastrowid, "created": True}
+
+
+# --- Second opinion (第2系統所見) endpoints --- #
+# triage_second_opinion（主系統が落とした可能性がある項目）を人が読んでレビュー済みに
+# する経路。CLI (pm_screen.py --list-findings / --mark-reviewed) しか無かったため追加。
+
+_SECOND_OPINION_SUPPRESSED_SUFFIXES = ("_pretune", "_t8192")
+
+
+@app.get("/api/second-opinion")
+def get_second_opinion(
+    kind: str = Query(""),
+    unreviewed_only: bool = Query(True),
+):
+    rows = list_second_opinion_findings(_get_conn(), unreviewed_only=unreviewed_only)
+    if kind:
+        rows = [r for r in rows if kind in r["kind"]]
+    # 調整前の試行記録（_pretune / _t8192 終わりの kind）は既定で除外する。
+    # kind クエリで明示的にそれらを指定したときだけ表示する。
+    if not (kind and kind.endswith(_SECOND_OPINION_SUPPRESSED_SUFFIXES)):
+        rows = [r for r in rows if not r["kind"].endswith(_SECOND_OPINION_SUPPRESSED_SUFFIXES)]
+    return {"rows": rows}
+
+
+@app.post("/api/second-opinion/mark-reviewed")
+def mark_second_opinion_reviewed_endpoint(req: MarkSecondOpinionReviewedRequest):
+    n = mark_second_opinion_reviewed(_get_conn(), req.ids)
+    return {"updated": n}
 
 
 # --- Minutes endpoint --- #

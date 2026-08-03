@@ -45,6 +45,10 @@ Usage:
     python3 scripts/pm_screen.py --second-opinion-minutes --reader k3 --dry-run
     python3 scripts/pm_screen.py --second-opinion-minutes --reader both
 
+    # 特定の会議1件だけを検査（--limit は無視される。録音経路からの即時検査用）
+    python3 scripts/pm_screen.py --second-opinion-minutes --reader both \
+        --meeting-stem 2026-07-01-120000-Leader_Meeting-minutes
+
     # 第2系統トリアージの所見レビュー（triage_second_opinion。誰も見ない検査は意味がない）
     python3 scripts/pm_screen.py --list-findings --unreviewed-only
     python3 scripts/pm_screen.py --list-findings --kind minutes_extraction_recall
@@ -879,6 +883,14 @@ def _resolve_readers(reader: str) -> list[str]:
 # 対応する文字起こし原文を探す。
 _MINUTES_STEM_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)-minutes$")
 
+
+def _stem_of_file_path(file_path: str | None) -> str:
+    """instances.file_path の拡張子抜きファイル名（Path(file_path).stem）を返す。
+
+    --meeting-stem による絞り込みで使う識別子。file_path が空なら空文字を返す。
+    """
+    return Path(file_path).stem if file_path else ""
+
 _DEFAULT_SECOND_OPINION_SINCE_DAYS = 30
 _DEFAULT_SECOND_OPINION_LIMIT = 10
 # 1会議（かつ1読み手）あたりの記録件数の上限。読み手の粒度が主系統より細かい場合
@@ -1098,6 +1110,7 @@ def run_second_opinion_minutes(
     log,
     reader: str = "second",
     max_findings_per_meeting: int = _DEFAULT_MAX_FINDINGS_PER_MEETING,
+    meeting_stem: str | None = None,
 ) -> None:
     """議事録経路への第2系統差分検査バッチ本体。
 
@@ -1126,6 +1139,15 @@ def run_second_opinion_minutes(
     max_findings_per_meeting: 1会議・1読み手あたりに記録する件数の上限
         （既定 _DEFAULT_MAX_FINDINGS_PER_MEETING）。超えた場合はチャンク処理順で
         上位N件のみ記録し、切り捨てた件数をWARNに残す（黙って打ち切らない）。
+
+    meeting_stem: 指定時は instances.file_path の拡張子抜きファイル名
+        （Path(file_path).stem。例: "{ts}-{basename}-minutes"）がこれと一致する
+        会議1件だけを検査する。録音経路（pm_from_recording.sh）が処理直後に
+        自分自身の会議だけを即時検査するための絞り込み。
+        --since によるウィンドウは無視し（過去分も含めて全件から探す）、
+        --limit も無視する（対象は常に高々1件のため）。一致する会議が見つから
+        ない場合は例外にせず警告を出して何もせず正常終了する（録音ジョブ全体を
+        落とさないため）。
     """
     if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
         log("[INFO] ARGUS_SECOND_OPINION が無効のため第2系統検査をスキップします")
@@ -1138,10 +1160,23 @@ def run_second_opinion_minutes(
             "未確認のままで、受容の経緯は config/model_pin.yaml の risk_accepted にある。"
             "R8 対策の第2系統（Llama-4-Scout）の代わりではない — 出自が主系統と同系統のため。")
 
-    since = since or _default_second_opinion_since()
-    log(f"対象期間: {since} 以降")
+    if meeting_stem:
+        since_effective = "1970-01-01"
+        log(f"[INFO] --meeting-stem 指定: {meeting_stem}"
+            "（--since ウィンドウ・--limit は無視し、過去分も含めて全件から探します）")
+    else:
+        since_effective = since or _default_second_opinion_since()
+    log(f"対象期間: {since_effective} 以降")
 
-    candidates = _collect_meeting_candidates(minutes_dir, since, no_encrypt, log)
+    candidates = _collect_meeting_candidates(minutes_dir, since_effective, no_encrypt, log)
+
+    if meeting_stem:
+        candidates = [c for c in candidates if _stem_of_file_path(c["file_path"]) == meeting_stem]
+        if not candidates:
+            log(f"[WARN] --meeting-stem に一致する会議が見つかりません: {meeting_stem}"
+                "（第2系統検査をスキップします。録音・議事録処理自体には影響ありません）")
+            return
+
     candidates.sort(key=lambda c: c["held_at"] or "", reverse=True)
     log(f"対象会議数: {len(candidates)} 件")
 
@@ -1168,7 +1203,9 @@ def run_second_opinion_minutes(
             "Stage1で落ちた項目は原理的に検出できません"
             "（Stage2/3の欠落のみ検出対象。『全部見た』とは読めません）")
 
-    if len(resolved) > limit:
+    if meeting_stem:
+        pass  # --meeting-stem 指定時は絞り込み済みのため --limit を適用しない
+    elif len(resolved) > limit:
         log(f"[WARN] 処理対象 {len(resolved)} 件が --limit {limit} を超えています。"
             f"先頭（開催日が新しい順）{limit} 件のみ処理します"
             "（黙って打ち切ると「全部見た」と誤読されるため明示します）")
@@ -1337,7 +1374,19 @@ def main():
                              "both=両方を実行")
     parser.add_argument("--limit", type=int, default=_DEFAULT_SECOND_OPINION_LIMIT,
                         help="--second-opinion-minutes 時に処理する会議数の上限"
-                             f"（デフォルト: {_DEFAULT_SECOND_OPINION_LIMIT}）")
+                             f"（デフォルト: {_DEFAULT_SECOND_OPINION_LIMIT}）。"
+                             "--meeting-stem 指定時は無視される")
+    parser.add_argument("--meeting-stem", default=None, metavar="STEM",
+                        help="--second-opinion-minutes の処理対象を1会議に絞り込む。"
+                             "instances.file_path の拡張子抜きファイル名"
+                             "（Path(file_path).stem。例: "
+                             "2026-07-01-120000-Leader_Meeting-minutes）と一致する"
+                             "会議のみを検査する。録音経路（pm_from_recording.sh）が"
+                             "処理直後にその会議だけを即時検査するためのオプション。"
+                             "指定時は --since ウィンドウ・--limit を無視する"
+                             "（対象は常に高々1件）。一致する会議が無い場合は"
+                             "エラーにせず警告を出して exit 0 で終了する"
+                             "（録音ジョブ全体を落とさないため）")
     parser.add_argument("--max-findings-per-meeting", type=int,
                         default=_DEFAULT_MAX_FINDINGS_PER_MEETING,
                         help="--second-opinion-minutes 時に1会議・1読み手あたり記録する"
@@ -1411,6 +1460,7 @@ def main():
             log=log,
             reader=args.reader,
             max_findings_per_meeting=args.max_findings_per_meeting,
+            meeting_stem=args.meeting_stem,
         )
         conn.close()
         close()

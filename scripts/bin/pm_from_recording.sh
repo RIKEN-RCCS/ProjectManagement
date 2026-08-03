@@ -28,6 +28,10 @@
 #
 # 環境変数:
 #   ARGUS_PREFER_RIVAULT=1  LLM バックエンドを RiVault に切替（デフォルト: ローカル vLLM）
+#   ARGUS_SECOND_OPINION=0  スクリプト末尾（Step 6）の第2系統（欠落検査）を無効化
+#                           （デフォルト: 有効。品質ゲートではなく議事録完成後の
+#                           追加検査のため、無効にしても議事録の保存・配布には
+#                           影響しない）
 #
 # 例:
 #   bash scripts/pm_from_recording.sh GMT20260302-032528_Recording.mp4 --meeting-name Leader_Meeting
@@ -84,6 +88,12 @@ PM_INGEST="$SCRIPT_DIR/ingest/pm_ingest.py"
 GENERATE_MINUTES_LOCAL="$SCRIPT_DIR/recording/generate_minutes_local.py"
 PM_MINUTES_CATALOG="$SCRIPT_DIR/minutes/pm_minutes_catalog.py"
 PM_MINUTES_PUBLISH="$SCRIPT_DIR/minutes/pm_minutes_publish.py"
+# scripts/pm_screen.py（旧パスの symlink）経由で起動すること。pm_screen.py は
+# Path(__file__).parent（resolve なし）で同階層の cli_utils.py/db_utils.py の
+# symlink を前提に import しており、実体パス（quality/pm_screen.py）を直接
+# 起動すると ModuleNotFoundError になる（tests/selfcheck/test_cli_help_smoke.py
+# のヘッダコメント参照）。
+PM_SCREEN="$SCRIPT_DIR/pm_screen.py"
 
 # --------------------------------------------------------------------------- #
 # 引数パース
@@ -157,9 +167,14 @@ trap 'rm -rf "$WORKDIR"' EXIT
 . ~/.secrets/hf_tokens.sh
 # RiVault トークン（Self-consistency の embedding 取得・ARGUS_PREFER_RIVAULT=1 時の LLM 呼び出しに必要）
 [ -f ~/.secrets/rivault_tokens.sh ] && . ~/.secrets/rivault_tokens.sh
+# RIKYU トークン（末尾の第2系統検査 --reader both の k3 読み手 route=k3 に必要）
+[ -f ~/.secrets/rikyu_token.sh ] && . ~/.secrets/rikyu_token.sh
 
 SUCCESS=0
 FAIL=0
+# 末尾（Step 6）で第2系統検査（--meeting-stem 絞り込み）にかける議事録の stem
+# （instances.file_path の拡張子抜きファイル名）を貯めておく配列。
+PROCESSED_STEMS=()
 
 for INPUT_FILE in "${FILES[@]}"; do
   INPUT_ABS=$(realpath "$INPUT_FILE")
@@ -537,6 +552,8 @@ print(infer_date_from_filename(Path('$(basename "$INPUT_ABS")')))
     $MINUTES_NO_TRIAGE_OPT
 
   if [[ $? -eq 0 ]]; then
+    # 末尾 Step 6（第2系統検査）で --meeting-stem に渡す識別子を rm 前に確保しておく
+    PROCESSED_STEMS+=("$(basename "$MINUTES_MD" .md)")
     rm -f "$BASENAME.md" "$MINUTES_MD"
     echo "[INFO] 文字起こし・議事録ファイルを議事録DB・pm.db に保存し削除しました"
 
@@ -601,6 +618,46 @@ print(f\"{1 if m.get('box_folder_id') else 0} {1 if m.get('catalog_canvas_id') e
   fi
 
 done
+
+# --------------------------------------------------------------------------- #
+# Step 6: 第2系統（欠落検査）— 議事録が完成した「直後」に追加で走らせる検査
+#
+#   ここは議事録の品質ゲートではない。ここで所見が出ても議事録は既に Box・
+#   pm.db・Canvas への保存・配布が完了済み（Step 0〜5 が全て終わった後、この
+#   スクリプトの最後でのみ呼ぶ）。目的は、人が Console で議事録を確認して
+#   いるタイミングで、K3(recall)・Llama-4-Scout(R8対策の第2系統) の所見を
+#   出すこと。処理した会議だけを --meeting-stem で絞り込み、--limit 5 で
+#   直近を再検査する週1バッチ（pm_second_opinion_minutes.sh）とは役割が違う
+#   （そちらは取りこぼしの掃除。ヘッダコメント参照）。
+#
+#   失敗・タイムアウトしてもこのスクリプト全体の終了コード・成功/失敗集計には
+#   一切影響させない。ただし黙って握りつぶさず ERROR/WARN を出す。
+# --------------------------------------------------------------------------- #
+if [[ "${ARGUS_SECOND_OPINION:-1}" == "0" ]]; then
+  echo ""
+  echo "[INFO] ARGUS_SECOND_OPINION=0 のため第2系統検査（Step 6）をスキップします"
+elif [[ ${#PROCESSED_STEMS[@]} -eq 0 ]]; then
+  echo ""
+  echo "[INFO] 第2系統検査（Step 6）対象の会議がありません（pm.db への転記まで成功した会議なし）"
+else
+  echo ""
+  echo "=============================="
+  echo "第2系統（欠落検査）: ${#PROCESSED_STEMS[@]} 会議"
+  echo "=============================="
+  for STEM in "${PROCESSED_STEMS[@]}"; do
+    echo "[INFO] 第2系統検査を実行中（最大30分）: $STEM"
+    set +e
+    timeout 1800 "$PYTHON3" -u "$PM_SCREEN" --second-opinion-minutes \
+      --reader both --meeting-stem "$STEM" --db "${DB_PATH:-data/pm.db}"
+    S2_STATUS=$?
+    set -e
+    if [[ $S2_STATUS -eq 124 ]]; then
+      echo "[WARN] 第2系統検査がタイムアウトしました（30分）: $STEM（議事録には影響ありません）"
+    elif [[ $S2_STATUS -ne 0 ]]; then
+      echo "[ERROR] 第2系統検査が失敗しました(exit=$S2_STATUS): $STEM（議事録には影響ありません）"
+    fi
+  done
+fi
 
 echo ""
 echo "=============================="

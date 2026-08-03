@@ -1003,7 +1003,10 @@ def list_second_opinion_findings(
     if not table_exists(conn, "triage_second_opinion"):
         return []
     ensure_second_opinion_reviewed_column(conn)
-    sql = "SELECT id, ts, kind, model, content_head, reviewed_at FROM triage_second_opinion"
+    sql = (
+        "SELECT id, ts, kind, model, primary_verdict, second_verdict,"
+        " content_head, flagged_terms, reviewed_at FROM triage_second_opinion"
+    )
     conds = []
     params: list = []
     if kind:
