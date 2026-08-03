@@ -59,6 +59,13 @@ else
 fi
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# scripts/pm_screen.py（旧パスの symlink）経由で起動すること。pm_screen.py は
+# Path(__file__).parent（resolve なし）で同階層の cli_utils.py/db_utils.py の
+# symlink を前提に import しており、実体パス（quality/pm_screen.py）を直接
+# 起動すると ModuleNotFoundError になる（tests/selfcheck/test_cli_help_smoke.py
+# のヘッダコメント参照）。
+PM_SCREEN="$SCRIPT_DIR/pm_screen.py"
+
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/pm_second_opinion_minutes.log"
@@ -73,7 +80,7 @@ echo "======== pm_second_opinion_minutes.sh 開始: $(date '+%Y-%m-%d %H:%M:%S')
 # 1実行が数十分かかるため、多重起動を防ぐ（pm_argus_patrol.sh と同じ形）。
 LOCKFILE="$REPO_ROOT/data/.pm_second_opinion_minutes.lock"
 flock -n "$LOCKFILE" \
-    "$PYTHON3" -u "$SCRIPT_DIR/quality/pm_screen.py" --second-opinion-minutes --reader both --limit 5
+    "$PYTHON3" -u "$PM_SCREEN" --second-opinion-minutes --reader both --limit 5
 STATUS=$?
 
 echo "======== pm_second_opinion_minutes.sh 完了: $(date '+%Y-%m-%d %H:%M:%S') (exit=$STATUS) ========"

@@ -18,6 +18,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BIN_DIR = REPO_ROOT / "scripts" / "bin"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 # --------------------------------------------------------------------------- #
 # 1. box CLI 依存 → PATH 補正行の必須化
@@ -292,4 +293,92 @@ def test_python3_script_sets_netguard_enforce_or_is_exempt(script: Path):
         f"（export ARGUS_NETGUARD=\"${{ARGUS_NETGUARD:-enforce}}\"）が設定されて"
         f"おらず、除外リスト（_NETGUARD_EXEMPT）にも理由が登録されていません。"
         f"enforce を追加するか、理由付きで除外リストに登録してください。"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 4. サブディレクトリ実体パス起動 → flat import 前提スクリプトの検出
+# --------------------------------------------------------------------------- #
+# pm_second_opinion_minutes.sh は実体パスから pm_screen.py（quality/pm_screen.py）
+# を起動しており、作成時から一度も成功していなかった（2026-08-04 に判明）。
+# cron に登録する前に気づけたが、登録していたら毎週静かに失敗し続けていた。
+#
+# pm_screen.py は sys.path.insert(0, str(Path(__file__).parent))（resolve なし）
+# で同階層の cli_utils.py/db_utils.py の symlink を前提に import しており、
+# scripts/<サブディレクトリ>/<name>.py の実体パスから直接起動すると
+# ModuleNotFoundError になる（tests/selfcheck/test_cli_help_smoke.py のヘッダ
+# コメントで列挙されている pm_api.py / pm_relink.py / pm_screen.py がこの型）。
+# 一方 pm_selfcheck.py 等は Path(__file__).resolve().parent.parent で scripts/ を
+# 直接指すため実体パス起動でも問題ない。
+#
+# そのため「scripts/ 直下に同名 symlink があるか」だけでは判定できない
+# （symlink は 2026-06-16 のリファクタ時の後方互換のため多数のスクリプトに
+# 残っており、canvas_report.sh 等は pm_xlsx_sync.py 等を実体パスから正常に
+# 起動できている）。この検査は起動先スクリプトの sys.path 設定パターンを
+# 直接見ることで、この誤検知を避ける。
+_SUBDIR_PY_INVOCATION_RE = re.compile(
+    r"\$SCRIPT_DIR/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+\.py)\b"
+)
+_FLAT_IMPORT_PATTERN = re.compile(
+    r"sys\.path\.insert\(0,\s*str\(Path\(__file__\)\.parent\)\)"
+)
+
+# 実体パス起動時に flat import が壊れることが分かっていて未修正の除外リスト。
+# 除外する場合は理由を必ず併記する。
+_SUBDIR_INVOCATION_EXEMPT: dict[str, str] = {}
+
+
+def _requires_flat_import(subdir: str, name: str) -> bool:
+    target = SCRIPTS_DIR / subdir / name
+    if not target.is_file():
+        return False
+    text = target.read_text(encoding="utf-8", errors="ignore")
+    return bool(_FLAT_IMPORT_PATTERN.search(text))
+
+
+def _subdir_invocation_violations(script: Path) -> list[str]:
+    text = _strip_heredocs(script.read_text(encoding="utf-8", errors="ignore"))
+    violations = []
+    seen = set()
+    for line in text.split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in _SUBDIR_PY_INVOCATION_RE.finditer(line):
+            subdir, name = m.group(1), m.group(2)
+            if (subdir, name) in seen:
+                continue
+            if _requires_flat_import(subdir, name):
+                seen.add((subdir, name))
+                violations.append(f"{subdir}/{name}")
+    return violations
+
+
+def _param_subdir_check(p: Path):
+    marks = []
+    if p.name in _SUBDIR_INVOCATION_EXEMPT:
+        marks.append(
+            pytest.mark.xfail(reason=_SUBDIR_INVOCATION_EXEMPT[p.name], strict=True)
+        )
+    return pytest.param(p, id=p.name, marks=marks)
+
+
+@pytest.mark.parametrize(
+    "script", [_param_subdir_check(p) for p in _bin_scripts()]
+)
+def test_subdir_invocation_of_flat_import_script_is_broken(script: Path):
+    """cron ラッパーが実体パス（scripts/<サブディレクトリ>/<name>.py）から起動
+    している Python スクリプトのうち、flat import 前提（symlink 経由の起動を
+    要求する）のものを検出する。
+
+    pm_second_opinion_minutes.sh は実体パスから pm_screen.py を起動しており、
+    作成時から一度も成功していなかった（2026-08-04 に判明）。cron に登録する
+    前に気づけたが、登録していたら毎週静かに失敗し続けていた。
+    """
+    violations = _subdir_invocation_violations(script)
+    assert not violations, (
+        f"{script.name}: 実体パスから起動していますが、起動先は flat import "
+        f"前提（sys.path.insert(0, str(Path(__file__).parent)) で symlink 経由の"
+        f"起動を要求する）のスクリプトです: {violations}。"
+        f"scripts/<name>.py（旧パスの symlink）経由で起動するよう修正するか、"
+        f"理由付きで _SUBDIR_INVOCATION_EXEMPT に登録してください。"
     )
