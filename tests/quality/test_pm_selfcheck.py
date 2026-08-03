@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +23,46 @@ def _isolate_anchor_path(tmp_path, monkeypatch):
     monkeypatch.setattr(
         pm_selfcheck, "_DEFAULT_ANCHOR_PATH", tmp_path / "tool_call_anchor.jsonl",
     )
+    yield
+
+
+def _make_git_fake(*, local_sha=None, remote_sha=None, ls_remote_fails=False,
+                    ls_remote_raises=None):
+    """rev-parse / ls-remote の呼び出しに応じた偽の subprocess.run を返す。"""
+
+    def _fake_run(args, cwd=None, capture_output=None, text=None, timeout=None):
+        if "rev-parse" in args:
+            if local_sha is None:
+                return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="")
+            return subprocess.CompletedProcess(args, returncode=0, stdout=f"{local_sha}\n", stderr="")
+        if "ls-remote" in args:
+            if ls_remote_raises is not None:
+                raise ls_remote_raises
+            if ls_remote_fails:
+                return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="fatal: unreachable")
+            if remote_sha is None:
+                return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                args, returncode=0, stdout=f"{remote_sha}\trefs/heads/anchors\n", stderr="",
+            )
+        raise AssertionError(f"unexpected git invocation: {args}")
+
+    return _fake_run
+
+
+@pytest.fixture(autouse=True)
+def _stub_git_subprocess(monkeypatch):
+    """`check_anchor_pushed` が本物の git / ネットワークを叩かないようにする。
+
+    `run_checks()` は無条件に `anchor_pushed` を実行する（他の検査と同じ形に
+    そろえるため）。それ以外の検査を見ているテストが実リポジトリ・実
+    ネットワークへ副作用を持たないよう、既定では「anchors がローカルにも
+    origin にも無い」（判定不能・違反なし）を返す偽の subprocess.run に
+    差し替える。`anchor_pushed` 自体を検証するテストは、各テスト内で
+    `monkeypatch.setattr(pm_selfcheck.subprocess, "run", _make_git_fake(...))`
+    により個別に上書きする。
+    """
+    monkeypatch.setattr(pm_selfcheck.subprocess, "run", _make_git_fake())
     yield
 
 
@@ -1309,3 +1350,63 @@ def test_run_checks_includes_pending_egress_stale(pm_db_path, tmp_path):
     )
     conn.close()
     assert any(v["check"] == "pending_egress_stale" for v in violations)
+
+
+# --------------------------------------------------------------------------- #
+# 15. アンカーの push 状態（anchor_pushed、docs/security-architecture.md §4.4）
+# --------------------------------------------------------------------------- #
+# subprocess.run は必ずモンキーパッチし、実際の git コマンドは実行しない
+# （本番リポジトリの ref を変更しない）。`_make_git_fake` はファイル先頭で定義済み。
+def test_check_anchor_pushed_no_violation_when_refs_match(monkeypatch):
+    monkeypatch.setattr(
+        pm_selfcheck.subprocess, "run",
+        _make_git_fake(local_sha="abc123", remote_sha="abc123"),
+    )
+    assert pm_selfcheck.check_anchor_pushed() == []
+
+
+def test_check_anchor_pushed_detects_mismatch(monkeypatch):
+    monkeypatch.setattr(
+        pm_selfcheck.subprocess, "run",
+        _make_git_fake(local_sha="abc123", remote_sha="def456"),
+    )
+    violations = pm_selfcheck.check_anchor_pushed()
+    assert len(violations) == 1
+    assert violations[0]["check"] == "anchor_pushed"
+    assert violations[0]["local"] == "abc123"
+    assert violations[0]["remote"] == "def456"
+
+
+def test_check_anchor_pushed_indeterminate_when_ls_remote_fails(monkeypatch, capsys):
+    monkeypatch.setattr(
+        pm_selfcheck.subprocess, "run",
+        _make_git_fake(local_sha="abc123", ls_remote_fails=True),
+    )
+    violations = pm_selfcheck.check_anchor_pushed()
+    assert violations == []
+    assert "判定できません" in capsys.readouterr().err
+
+
+def test_check_anchor_pushed_indeterminate_when_ls_remote_times_out(monkeypatch, capsys):
+    monkeypatch.setattr(
+        pm_selfcheck.subprocess, "run",
+        _make_git_fake(
+            local_sha="abc123",
+            ls_remote_raises=subprocess.TimeoutExpired(cmd="git ls-remote", timeout=10),
+        ),
+    )
+    violations = pm_selfcheck.check_anchor_pushed()
+    assert violations == []
+    assert "判定できません" in capsys.readouterr().err
+
+
+def test_check_anchor_pushed_indeterminate_when_neither_side_has_anchors(monkeypatch, capsys):
+    monkeypatch.setattr(
+        pm_selfcheck.subprocess, "run",
+        _make_git_fake(local_sha=None, remote_sha=None),
+    )
+    violations = pm_selfcheck.check_anchor_pushed()
+    assert violations == []
+    err = capsys.readouterr().err
+    assert "判定できません" in err
+    assert "まだ運用が始まっていません" in err

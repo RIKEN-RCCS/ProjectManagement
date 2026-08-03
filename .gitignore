@@ -58,3 +58,11 @@ scripts/eval/*
 !scripts/eval/minutes_ab.py
 scripts/ingest/*.bak
 scripts/data/voice_uploads.db
+
+# 外部アンカー（config/anchors/tool_call_anchor.jsonl）は main では追跡しない。
+# 日次 commit が main に載ると開発者の作業と衝突しノイズになるため、
+# 専用の `anchors` ブランチへ plumbing コマンドで commit+push する
+# （scripts/bin/pm_selfcheck.sh の publish_anchor_branch()）。
+# `git hash-object -w` は .gitignore の影響を受けないため、この除外は
+# publish の動作を妨げない。
+config/anchors/

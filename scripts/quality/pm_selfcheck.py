@@ -58,18 +58,29 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
  14. pending_egress_stale  — `pending_egress`（§4.2 の承認フロー）で
                              status='pending' のまま 7 日以上放置された行がある。
                              滞留は承認フローが機能していない証拠なので黙って溜めない。
+ 15. anchor_pushed         — ローカルの `anchors` ブランチ（外部アンカーの
+                             commit 先）が origin（github.com、SSH）へ push
+                             済みかを検査する（§4.4）。一致しなければ違反
+                             （push されていないアンカーは外部化されておらず、
+                             アンカーとして機能していない）。ローカル・
+                             リモートのどちらにも `anchors` が無ければ判定不能
+                             （まだ運用が始まっていない）。`git ls-remote` の
+                             失敗・タイムアウト（10秒）も判定不能。
 
 本ファイルの通常の検査（1〜14）は書き込みを一切行わない。値（channel/user ID 等）はログに出力しない
 （state_key_drift は event_type のキー名のみを出力する。canary_hit / netguard_deny は
 canary トークン・宛先ホスト・呼び出し元を出力するが、いずれも秘匿値ではない）。
-model_pin_drift のみ `/v1/models` への通信を行う（本ファイルは元来ネットワークに
-出ない読み取り専用の検査だったが、この検査だけ性格が異なる。`--skip-model-pin` で
-この検査だけを退避できる）。
+model_pin_drift と anchor_pushed のみネットワークに出る（本ファイルは元来
+ネットワークに出ない読み取り専用の検査だったが、この2つだけ性格が異なる。
+前者は `--skip-model-pin` で退避できる）。
 
-`--emit-anchor` は上記14検査とは独立した動作モードで、通常検査を一切行わず
+`--emit-anchor` は上記15検査とは独立した動作モードで、通常検査を一切行わず
 外部アンカーファイル（config/anchors/tool_call_anchor.jsonl）へ1行追記するだけで
 終了する。**このアンカーはファイルがこのマシンの外へ出て初めて意味を持つ**
-（詳細は `emit_anchor()` の docstring を参照）。
+（詳細は `emit_anchor()` の docstring を参照）。`scripts/bin/pm_selfcheck.sh` は
+`--emit-anchor` の直後に、追記されたアンカーファイルを `anchors` ブランチへ
+git の plumbing コマンドで commit+push する（`publish_anchor_branch()`）。
+anchor_pushed はその push が実際に届いているかを日次で確かめる。
 
 Usage:
     python3 scripts/quality/pm_selfcheck.py
@@ -89,6 +100,7 @@ import argparse
 import json
 import re
 import sqlite3
+import subprocess
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -947,9 +959,27 @@ def emit_anchor(
     **このアンカーは、ファイルがこのマシンの外へ出て初めて意味を持つ。**
     同じファイルシステム上にある限り、台帳を書き換えられる攻撃者はアンカーも書き換えられる。
     **git へコミットして push した時点で外部（third-party hosted・追記的）に出る。**
-    push は自動化していない（公開リポジトリへの自動 push は別の判断が要るため）。
-    したがって現状これが証明するのは「**push 済みのアンカーより後に過去分が
-    書き換えられていないこと**」に限られる。
+
+    **push は運用に載せている**（2026-08-03〜）。`scripts/bin/pm_selfcheck.sh` が
+    この関数の直後に、追記後のアンカーファイルを専用ブランチ `anchors` へ
+    git の低レベルコマンド（hash-object/mktree/commit-tree/update-ref、いずれも
+    作業ツリー・インデックス・main を一切変更しない）で commit し、
+    `git push origin anchors:anchors` する（`publish_anchor_branch()`、
+    `main` は日次コミットの対象から外してある）。push の成否は
+    `anchor_pushed` 検査（本ファイル）が日次で確かめる。
+
+    **公開されるのは `ts` / `rows` / `entry_hash` のみ**で、本文・チャンネル・
+    モデル名は一切含まれない。ただし `rows`（tool_calls の行数）は活動量を
+    露出する — public リポジトリへ載る以上、その程度は受容している。
+
+    **`git push` は subprocess 経由なので net_guard の対象外**である
+    （`box` CLI と同じ扱い。外向き通信の allow-list は github.com を
+    覆っていない）。
+
+    証明範囲は変わらない。push 済みのアンカーより後に、それ以前の記録が
+    書き換えられていないことしか証明しない。**記録された `tool_calls` の
+    内容が真実（実際にそのツールが呼ばれたか）かどうかには何も言わない** —
+    証明するのは連鎖の不変性であって、記録内容の真正性ではない。
 
     本文・チャンネル・モデル名などは一切含めない（ハッシュと件数だけ）。
     直前の行と `entry_hash` が同じなら追記しない（台帳が動いていない日は行を増やさない）。
@@ -1090,6 +1120,96 @@ def check_pending_egress_stale(
 
 
 # --------------------------------------------------------------------------- #
+# 15. アンカーの push 状態（docs/security-architecture.md §4.4）
+# --------------------------------------------------------------------------- #
+
+# git ls-remote / rev-parse のタイムアウト（秒）。cron を止めないための上限。
+_GIT_REMOTE_TIMEOUT = 10
+
+
+def _run_git(args: list[str], repo_root: Path) -> subprocess.CompletedProcess | Exception:
+    """git を subprocess で実行する（shell=True は使わない）。
+
+    タイムアウト・実行不能（git 未インストール等）はここで吸収し、例外を返す。
+    """
+    try:
+        return subprocess.run(
+            args, cwd=repo_root, capture_output=True, text=True,
+            timeout=_GIT_REMOTE_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return e
+
+
+def check_anchor_pushed(repo_root: Path = REPO_ROOT) -> list[dict]:
+    """ローカルの `anchors` ブランチが origin へ push 済みかを検査する（§4.4）。
+
+    外部アンカーは「ファイルがこのマシンの外へ出て初めて意味を持つ」
+    （`emit_anchor()` の docstring 参照）。ローカルの `refs/heads/anchors` だけが
+    あって origin に無ければ、台帳を書き換えられる攻撃者はローカルのアンカーも
+    一緒に書き換えられるため、アンカーとして機能していない。**一致しなければ
+    違反**とする。
+
+    ローカル・リモートのどちらにも `anchors` が無い場合は「まだ運用が始まって
+    いない」として判定不能（違反にしない）。`git ls-remote` が失敗・タイムアウト
+    した場合（ネットワーク不通等）も判定不能。黙って飛ばさず理由を標準出力に出す。
+
+    **この検査は `git ls-remote` で origin（github.com）へ通信する。**
+    model_pin_drift と並び、本ファイルの検査の中でネットワークに出る数少ない
+    例外である。
+    """
+    local_res = _run_git(
+        ["git", "rev-parse", "--verify", "--quiet", "refs/heads/anchors"], repo_root,
+    )
+    local_sha = None
+    if isinstance(local_res, subprocess.CompletedProcess) and local_res.returncode == 0:
+        local_sha = local_res.stdout.strip() or None
+
+    remote_res = _run_git(["git", "ls-remote", "origin", "anchors"], repo_root)
+    if not isinstance(remote_res, subprocess.CompletedProcess):
+        print(
+            f"[INFO] anchor_pushed: 判定できません"
+            f"（git ls-remote の実行に失敗しました: {remote_res}）",
+            file=sys.stderr,
+        )
+        return []
+    if remote_res.returncode != 0:
+        print(
+            f"[INFO] anchor_pushed: 判定できません"
+            f"（git ls-remote が失敗しました: {remote_res.stderr.strip()}）",
+            file=sys.stderr,
+        )
+        return []
+
+    remote_sha = None
+    lines = remote_res.stdout.strip().splitlines()
+    if lines:
+        remote_sha = lines[0].split()[0]
+
+    if local_sha is None and remote_sha is None:
+        print(
+            "[INFO] anchor_pushed: 判定できません"
+            "（anchors ブランチがローカルにも origin にもありません。"
+            "まだ運用が始まっていません）",
+            file=sys.stderr,
+        )
+        return []
+
+    if local_sha != remote_sha:
+        return [{
+            "check": "anchor_pushed",
+            "local": local_sha or "(none)",
+            "remote": remote_sha or "(none)",
+            "reason": (
+                "ローカルの anchors ブランチと origin の anchors ブランチが"
+                "一致しません（push されていないアンカーは外部化されておらず、"
+                "アンカーとして機能していません）"
+            ),
+        }]
+    return []
+
+
+# --------------------------------------------------------------------------- #
 # メイン
 # --------------------------------------------------------------------------- #
 def run_checks(
@@ -1121,6 +1241,7 @@ def run_checks(
     # logs_dir / --no-security-checks とは無関係な pm.db（＋アンカーファイル）
     # 単独の検査であり、無条件に実行する。
     violations += check_anchor_consistency(pm_conn, anchor_path or _DEFAULT_ANCHOR_PATH)
+    violations += check_anchor_pushed()
     violations += check_pending_egress_stale(pm_conn)
     if logs_dir is not None:
         # セキュリティ監視のログ走査は独立した窓（既定 1 日）で行う。データ検査の

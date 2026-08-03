@@ -204,11 +204,19 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    - **外部アンカー** — `pm_selfcheck.py --emit-anchor` が連鎖の頭を
      `config/anchors/tool_call_anchor.jsonl` へ追記し（`data/` は gitignore のため config 側）、
      `anchor_consistency` が過去のアンカーと現在の台帳の整合を検証する。
-     **このアンカーはファイルがマシンの外へ出て初めて意味を持つ** — 同じ FS 上にある限り、
-     台帳を書き換えられる攻撃者はアンカーも書き換えられる。**git へ commit + push した時点で
-     外部に出る。push は自動化していない**（公開リポジトリへの自動 push は別の判断）。
-     したがって現状証明できるのは「**push 済みのアンカーより後に過去分が書き換えられていない**」に限る
-   **残り**: 層3 の enforce 判断（観測待ち）。**アンカーの commit + push を運用に載せるかの判断**
+     **2026-08-03、PM 判断で commit + push を運用に載せた。** `pm_selfcheck.sh` が
+     **git の plumbing のみ**（`hash-object` → `mktree` → `commit-tree` → `update-ref` → `push`）で
+     専用ブランチ `anchors` へ載せて push する。**作業ツリー・インデックス・`main` に一切触れない** —
+     `main` には未 push のコミットがあるため、素朴な `git push` では開発者の意図しない
+     コミットまで公開される。push 先は `anchors:anchors` を明示する。
+     **push されたかを `anchor_pushed` 検査が毎日確認する**（ローカルとリモートの ref が
+     一致しなければ違反。**ローカルにだけあるアンカーはアンカーではない**）。
+     公開されるのは `ts` / `rows` / `entry_hash` のみで本文は含まないが、**`rows` は活動量を露出する**
+     （public リポジトリなのでその程度は受容）。
+     **`git push` は subprocess なので `net_guard` の対象外**（`box` CLI と同じ）。
+     証明できるのは「**push 済みのアンカーより後に、それ以前の記録が書き換えられていない**」ことだけで、
+     **記録された内容が真実かどうかには何も言わない**
+   **残り**: 層3 の enforce 判断（観測待ち）
 
 **public リポジトリの機微情報**（origin: RIKEN-RCCS/ProjectManagement）:
 
