@@ -54,6 +54,12 @@ fi
 PYTHON3="${HOME}/.venv_$(uname -m)/bin/python3"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# net_guard（外向き通信の allow-list、docs/security-architecture.md §4.7 層1）を
+# enforce にする。2026-08-02 の観測修正後、cron 5 本すべてで宛先が記録されるように
+# なり deny 0 件を確認した上で展開した。退避が必要なときは
+# ARGUS_NETGUARD=warn を付けて実行する。
+export ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"
+
 # --------------------------------------------------------------------------- #
 # ログ出力先
 # --------------------------------------------------------------------------- #

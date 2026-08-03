@@ -22,6 +22,13 @@ fi
 export PATH="$HOME/.nvm_arm64/versions/node/v20.19.5/bin:$PATH"
 command -v box >/dev/null 2>&1 || echo "[WARN] box CLI が PATH に見つかりません（nvm の node バージョン変更を確認）" >&2
 
+# net_guard（外向き通信の allow-list、docs/security-architecture.md §4.7 層1）を
+# enforce にする。2026-08-02 の観測修正後、cron 5 本すべてで宛先が記録されるように
+# なり deny 0 件を確認した上で展開した。退避が必要なときは
+# ARGUS_NETGUARD=warn を付けて実行する。
+# ここで export しておくことで、子プロセスの pm_from_slack.sh にも継承される。
+export ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"
+
 BASEDIR="/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement"
 LOGFILE="${BASEDIR}/logs/pm_from_slack_daily_$(date +%Y%m%d_%H%M%S).log"
 RUN="bash ${BASEDIR}/scripts/bin/pm_from_slack.sh"

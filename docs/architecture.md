@@ -388,12 +388,22 @@ crontab に無く、最後の実行は 2026-07-30。理由は Patrol がアク�
 月〜金限定のジョブがあるため、全 cron 経路を 1 周させるには**平日を通す（実質 1 週間）**必要がある。
 `net_guard` の warn フェーズで宛先を洗い出す際はこの周期が下限になる（`PLAN.md` 参照）。
 
-**`net_guard` の enforce は cron 経路には掛かっていない**（2026-08-02 時点）。
-`ARGUS_NETGUARD=enforce` を設定しているのは `pm_daemon.sh`（qa / web）だけで、
-`net_guard.py` の既定は `warn` である。上表の 5 本はいずれも enforce を設定しておらず、
-**遮断されるのは Argus のデーモン経路のみ、cron 経路は記録されるだけ**という状態。
-cron 側を enforce にするには各ラッパーが `source` している `~/.secrets/` 側に置くのが
-早いが、それは PM 作業（`PLAN.md` 参照）。
+**`net_guard` の enforce は cron 経路にも展開済み**（2026-08-03 時点）。上表の cron 5 本
+（`pm_box_update.sh` / `pm_selfcheck.sh` / `canvas_report.sh` / `pm_argus_daily.sh` /
+`pm_from_slack_daily.sh`）はいずれも python3 起動前に `ARGUS_NETGUARD=enforce`
+（`pm_daemon.sh` の qa / web と同じ既定）を設定している。2026-08-02 の観測修正
+（エントリスクリプトの `basicConfig` 依存で INFO ログが捨てられていた欠陥の修正）後、
+5 本合計 1445 件の NETGUARD 記録を実測し deny 0 件を確認した上で展開した。
+退避が必要な場合は `ARGUS_NETGUARD=warn` を付けて実行すれば既定を上書きできる。
+
+**ただし全経路が覆われたわけではない**。以下は enforce の対象外のまま残る:
+- `box` CLI（Node 製の別プロセス）への通信は `net_guard` を通らない（OS レベルの
+  強制が必要。§3.2 参照）
+- 録音・TTS 系の手動実行ラッパー（`pm_from_recording.sh` / `pm_from_recording_auto.sh` /
+  `slack_post_minutes.sh` / `fish_seed_sweep.sh` 等）は cron 未登録で観測が溜まって
+  おらず、除外リスト（`tests/selfcheck/test_cron_env_contract.py` の
+  `_NETGUARD_EXEMPT`）に理由付きで残したまま
+- `pm_argus_patrol.sh` は前述の通り cron から意図的に外してあるため対象外
 
 ---
 

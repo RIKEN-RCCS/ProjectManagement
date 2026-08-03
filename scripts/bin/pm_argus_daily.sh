@@ -9,6 +9,12 @@ else
     echo "Unknown architecture: $_arch"; exit 1
 fi
 
+# net_guard（外向き通信の allow-list、docs/security-architecture.md §4.7 層1）を
+# enforce にする。2026-08-02 の観測修正後、cron 5 本すべてで宛先が記録されるように
+# なり deny 0 件を確認した上で展開した。退避が必要なときは
+# ARGUS_NETGUARD=warn を付けて実行する。
+export ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"
+
 LOGFILE="/lvs0/rccs-nghpcadu/hikaru.inoue/ProjectManagement/logs/pm_argus_daily_$(date +%Y%m%d_%H%M%S).log"
 
 touch $LOGFILE

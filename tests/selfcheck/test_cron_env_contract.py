@@ -188,3 +188,108 @@ def test_python3_invocation_follows_venv_activate(script: Path):
         f"{script.name}: venv activate 前に生の python3 呼び出しがあります"
         f"（ALLOWLIST 未登録）: {unexpected}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 3. python3 起動 → ARGUS_NETGUARD=enforce 既定の必須化
+# --------------------------------------------------------------------------- #
+# 2026-08-02 時点の実測: crontab に載っている 5 本（pm_box_update.sh /
+# pm_selfcheck.sh / canvas_report.sh / pm_argus_daily.sh /
+# pm_from_slack_daily.sh）は観測修正後に全経路で宛先が記録され deny 0 件だった
+# ため、ARGUS_NETGUARD=enforce（pm_daemon.sh の qa/web と同じ既定）に展開した。
+_NETGUARD_ENFORCE_RE = re.compile(r"export ARGUS_NETGUARD=")
+_PY3_ANY_RE = re.compile(r"python3", re.IGNORECASE)
+
+# python3 を起動するが enforce を付けない除外リスト。ここに載せず enforce も
+# 無い場合はテストが落ちる。除外する場合は理由を必ず併記する
+# （「書き忘れ」と「意図的な除外」を区別するため）。
+_NETGUARD_EXEMPT: dict[str, str] = {
+    "pm_argus_patrol.sh": (
+        "cron から意図的に外してある（crontab では該当行がコメントアウト済み）。"
+        "Patrol がアクション保有者へ DM を送る挙動を伴うため PM 判断で保留中。"
+        "動かしていないため宛先の観測が無い。"
+    ),
+    "pm_from_recording.sh": (
+        "録音・議事録生成の手動実行ラッパー。cron 未登録で観測が溜まっていない。"
+        "singularity コンテナ実行を含む長時間ジョブのため、fail-closed で"
+        "作業中に落ちると再実行コストが大きい。"
+    ),
+    "pm_from_recording_auto.sh": (
+        "pm_from_recording.sh の自動投入版だが実 crontab には未登録。"
+        "同上の理由（録音パイプライン・観測なし）で除外。"
+    ),
+    "slack_post_minutes.sh": (
+        "pm_from_recording_auto.sh からのみ呼ばれる議事録Slack投稿ラッパー"
+        "（手動実行も想定）。録音パイプラインの一部として同じ理由で除外。"
+    ),
+    "fish_seed_sweep.sh": (
+        "fish-speech TTS の聴き比べ用手動開発ツール。cron 未登録・DB/LLM 呼び出し"
+        "なし（python3 -c は JSON ペイロード生成のみ）。"
+    ),
+    "pm_argus_daily_summary.sh": (
+        "cron 未登録（docs/architecture.md『cron に載っていないスクリプト』）。"
+        "動かしていないため観測が無い。"
+    ),
+    "pm_nvidia_collab_update.sh": (
+        "ヘッダコメントに cron 登録例はあるが実 crontab には未登録。"
+        "動かしていないため観測が無い。"
+    ),
+    "run_full_reextract.sh": (
+        "全チャンネル再抽出用の手動一括実行ツール。cron 未登録・観測なし。"
+        "長時間ジョブのため fail-closed で作業中に落ちる影響が大きい。"
+    ),
+    "pm_from_slack.sh": (
+        "cron 経路では pm_from_slack_daily.sh の子プロセスとして呼ばれ、"
+        "親スクリプトが export 済みの ARGUS_NETGUARD を bash の子プロセスとして"
+        "継承する（export 変数は子プロセスに引き継がれるため、この経路では"
+        "実質 enforce）。docs/commands.md にある通り単一チャンネルの手動実行にも"
+        "使われ、その場合は net_guard 既定の warn になる。"
+    ),
+}
+
+
+def _netguard_dependent_scripts() -> list[Path]:
+    result = []
+    for p in _bin_scripts():
+        if p.name in _LIBRARY_EXEMPT:
+            continue
+        text = _strip_heredocs(p.read_text(encoding="utf-8", errors="ignore"))
+        for line in text.split("\n"):
+            if line.lstrip().startswith("#"):
+                continue
+            if _PY3_ANY_RE.search(line):
+                result.append(p)
+                break
+    return result
+
+
+def test_netguard_exempt_entries_are_documented():
+    """除外リストのエントリが実在し、理由コメントが空でないことを保証する。"""
+    for name, reason in _NETGUARD_EXEMPT.items():
+        assert (BIN_DIR / name).exists(), (
+            f"除外リストの {name} が scripts/bin/ に存在しません（削除された"
+            f"スクリプトはエントリごと消すこと）"
+        )
+        assert reason.strip(), f"{name} の除外理由が空です"
+
+
+@pytest.mark.parametrize(
+    "script", [pytest.param(p, id=p.name) for p in _netguard_dependent_scripts()]
+)
+def test_python3_script_sets_netguard_enforce_or_is_exempt(script: Path):
+    """新しい cron ラッパーを足したときに enforce の設定を忘れると、その経路だけ
+    静かに遮断されない状態になる。呼び出し側の作法に依存した制御が1箇所の
+    書き忘れで無効化されるという失敗を、このリポジトリでは 2026-08 に繰り返し
+    踏んでいる（Slack出力ファネルの canary検査・第2系統・監査台帳のトリガ・
+    観測ログ）。除外するなら理由を明示させることで、忘却と意図的な除外を
+    区別する。
+    """
+    if script.name in _NETGUARD_EXEMPT:
+        return
+    text = script.read_text(encoding="utf-8", errors="ignore")
+    assert _NETGUARD_ENFORCE_RE.search(text), (
+        f"{script.name} は python3 を起動しますが ARGUS_NETGUARD の enforce 既定"
+        f"（export ARGUS_NETGUARD=\"${{ARGUS_NETGUARD:-enforce}}\"）が設定されて"
+        f"おらず、除外リスト（_NETGUARD_EXEMPT）にも理由が登録されていません。"
+        f"enforce を追加するか、理由付きで除外リストに登録してください。"
+    )

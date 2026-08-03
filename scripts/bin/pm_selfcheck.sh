@@ -20,6 +20,12 @@ else
     echo "Unknown architecture: $ARCH"; exit 1
 fi
 
+# net_guard（外向き通信の allow-list、docs/security-architecture.md §4.7 層1）を
+# enforce にする。2026-08-02 の観測修正後、cron 5 本すべてで宛先が記録されるように
+# なり deny 0 件を確認した上で展開した。退避が必要なときは
+# ARGUS_NETGUARD=warn を付けて実行する。
+export ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"
+
 _BASH_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$(basename "$_BASH_SELF_DIR")" == "bin" ]]; then
   SCRIPT_DIR="$(cd "$_BASH_SELF_DIR/.." && pwd)"

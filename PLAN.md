@@ -212,17 +212,23 @@ HEAD からは除去済み（アプリ名 0 / Slack ID 0 / 機微ファイル 0�
   `data/patrol_state.db`（設計上平文。機密を含まない前提）
 - ~~MCP 経路（`pm_mcp_server`）は EGRESS を公開したまま~~ → **2026-07-31 に丸ごと廃止**
   （チョークポイント 2 箇所目が閉じた。再登録は pre-commit の `no-mcp-server-registration` が防ぐ）
-- **`net_guard` の enforce が cron 経路に掛かっていない**（2026-08-02 確認）。`ARGUS_NETGUARD=enforce`
-  を設定しているのは `pm_daemon.sh`（qa / web）だけで、`net_guard.py` の既定は `warn`。
-  cron 5 本は**記録されるだけで遮断されない**。各ラッパーが `source` している `~/.secrets/` 側に
-  置くのが早いが PM 作業。**Patrol を enforce で dry-run した結果は deny 0 件**（宛先は RIKYU と
-  localhost:8001 のみ）なので、Patrol に限れば enforce にしても落ちない見込み。
-  **ただし enforce にする前に、下記の観測ギャップが埋まってからの平日 1 周が要る**
+- ~~`net_guard` の enforce が cron 経路に掛かっていない~~ → **2026-08-03 に展開完了**。
+  crontab の 5 本すべてに `ARGUS_NETGUARD="${ARGUS_NETGUARD:-enforce}"` を入れた。
+  根拠は観測修正後の実測 **1445 件すべて allow / deny 0**（宛先は `localhost:8001` /
+  `api.rikyu.r-ccs.riken.jp:443` / `llm.ai.r-ccs.riken.jp:11434` / `slack.com` /
+  `files.slack.com` / `127.0.0.1:5001`。いずれも allow-list 内）。
+  **書き忘れ防止に契約テストを入れた**（`tests/selfcheck/test_cron_env_contract.py`）—
+  python3 を起動する `scripts/bin/*.sh` は enforce を設定するか、**理由付きで除外リストに
+  載っている**かのどちらかであること。忘却と意図的な除外を区別させる。
 - ~~cron 経路の観測ギャップ~~ → **2026-08-02 修正**。`net_guard` の記録が出るかどうかが
   エントリスクリプトの `basicConfig` 呼び出しに依存しており、**cron 5 本のうち
   `pm_argus_daily` と `canvas_report` は NETGUARD 記録が 0 行**だった（遮断は効くが観測不能）。
-  `net_guard.install()` が自分でハンドラを付ける形にして解消（実測 0 件 → 4 件）。
-  **これで初めて「warn で 1 周」が全経路で成立する。平日 1 周させてから enforce を検討すること**
+  `net_guard.install()` が自分でハンドラを付ける形にして解消。**修正の効果は本番で確認済み**
+  （`canvas_report` 0 → 98 行、`pm_argus_daily` 0 → 24 行）
+- **enforce の外に残っているもの**（「全経路が覆われた」と読まないこと）:
+  ① `box` CLI（Node の別プロセス）への通信は net_guard を通らない
+  ② 手動実行の録音・TTS 系ラッパー（観測が溜まっていないため除外リスト）
+  ③ Patrol（cron から意図的に外してある）
 - **`net_guard` は subprocess を覆えない**（2026-08-02 明記）。`box` CLI は Node の別プロセスなので
   **Box への通信は net_guard を通っていない**。危険度は低い（認証境界の内側・宛先固定）が、
   被覆範囲として docs/security-architecture.md §3.2 に記載した。根本対処は OS レベルの強制
