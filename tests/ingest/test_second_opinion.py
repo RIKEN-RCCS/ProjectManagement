@@ -129,6 +129,58 @@ class TestCompareExtractions:
         assert diff["second_counts"]["decisions"] == 2
 
 
+class TestExtractionItemContents:
+    """LLM が指示した `{"content": ...}` 形式に従わない場合の正規化。
+
+    2026-08-04 に Llama-4-Scout が `{"decisions": ["文字列", ...]}` を返し、
+    `item.get("content")` が AttributeError になって**第2系統検査が会議単位で
+    丸ごと落ちた**（Console 起動の議事録作成、logs/admin_job_25725851.log）。
+    """
+
+    def test_bare_string_items_are_accepted(self):
+        primary = {"decisions": [], "action_items": []}
+        second = {"decisions": ["計算資源の追加割当を9月末までに行う"], "action_items": []}
+        diff = ing.compare_extractions(primary, second)
+        assert diff["decisions"] == ["計算資源の追加割当を9月末までに行う"]
+        assert diff["second_counts"]["decisions"] == 1
+
+    def test_bare_string_items_still_match_primary(self):
+        """素の文字列でも突合は効く（欠落として誤検出しない）。"""
+        primary = {"decisions": [{"content": "ベンチ環境を更新する"}], "action_items": []}
+        second = {"decisions": ["ベンチ環境の更新"], "action_items": []}
+        assert ing.compare_extractions(primary, second)["decisions"] == []
+
+    def test_alternative_content_key_is_read(self):
+        second = {"decisions": [{"decision": "会場を来週までに予約する"}], "action_items": []}
+        diff = ing.compare_extractions({"decisions": [], "action_items": []}, second)
+        assert diff["decisions"] == ["会場を来週までに予約する"]
+
+    def test_dict_without_any_content_key_is_empty_not_crash(self):
+        second = {"decisions": [{"owner": "誰か", "due": "9/30"}], "action_items": []}
+        diff = ing.compare_extractions({"decisions": [], "action_items": []}, second)
+        assert diff["decisions"] == []          # 空 content は突合対象外
+        assert diff["second_counts"]["decisions"] == 1  # 件数だけは失わない
+
+    def test_string_instead_of_list_is_split_into_lines(self):
+        second = {"decisions": "決定Aを行う\n決定Bを行う", "action_items": []}
+        diff = ing.compare_extractions({"decisions": [], "action_items": []}, second)
+        assert diff["decisions"] == ["決定Aを行う", "決定Bを行う"]
+
+    def test_non_dict_second_is_treated_as_empty(self):
+        """top-level が配列で返っても例外にしない（検査全体を落とさない）。"""
+        diff = ing.compare_extractions({"decisions": [], "action_items": []},
+                                       [{"content": "何か"}])
+        assert diff["decisions"] == [] and diff["action_items"] == []
+
+    def test_none_and_scalar_items_are_skipped(self):
+        second = {"decisions": [None, 123, {"content": "有効な決定を行う"}], "action_items": []}
+        diff = ing.compare_extractions({"decisions": [], "action_items": []}, second)
+        assert diff["decisions"] == ["有効な決定を行う"]
+
+    def test_direct_helper_on_none_is_empty(self):
+        assert ing.extraction_item_contents(None) == []
+
+
 class TestNormalizeForExtractionMatch:
     def test_strips_whitespace_and_punctuation(self):
         a = ing.normalize_for_extraction_match("議事録を確認する。")

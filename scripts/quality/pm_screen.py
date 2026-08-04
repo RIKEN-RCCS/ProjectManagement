@@ -1263,6 +1263,11 @@ def run_second_opinion_minutes(
     # 落としていないか」を後から検証できるよう、除外した件数も必ずログに出す。
     n_excluded_in_haystack = 0
     n_excluded_in_table = 0
+    # スキップしたチャンク数。**0 件でないなら「全部見た」と言ってはいけない**ため、
+    # 最後の要約で必ず出す（LLM 呼び出しの失敗と突合の失敗を分けて数える）。
+    n_call_errors = 0
+    n_chunk_errors = 0
+    n_chunks_total = 0
     for c, _path, source_kind, chunks in processed:
         base_ref = f"[{c['kind']}/{c['meeting_id']}][{source_kind}]"
         if source_kind == "combined_degraded":
@@ -1281,25 +1286,41 @@ def run_second_opinion_minutes(
             # （切り捨てた件数を正しくWARNに出すため、実際に見つかった総数が必要）。
             findings: list[dict] = []
             for chunk_text in chunks:
+                n_chunks_total += 1
                 try:
                     second, raw = _call_second_opinion_extraction(
                         chunk_text, model=spec["model"], route=spec["route"],
                     )
                 except Exception as e:
+                    n_call_errors += 1
                     log(f"[WARN] 第2系統(minutes, route={spec['route']}) の呼び出しに失敗"
                         f"（このチャンクはスキップ）: {e}")
                     continue
-                diff = compare_extractions(primary, second, extra_haystack=extra_haystack)
-                terms = flag_sensitive_terms(chunk_text)
-                for k in ("decisions", "action_items"):
-                    n_excluded_in_table += diff.get("matched_in_table_counts", {}).get(k, 0)
-                    n_excluded_in_haystack += diff.get("matched_in_haystack_counts", {}).get(k, 0)
-                    for content in diff.get(k, []):
-                        if not content.strip() or content in seen:
-                            continue
-                        seen.add(content)
-                        findings.append({"kind": spec["kind"], "content": content,
-                                          "terms": terms, "raw": raw})
+                # 突合・記録側の失敗もチャンク単位で閉じ込める。LLM 呼び出しだけを
+                # try で囲っていた結果、2026-08-04 に第2系統の応答形式の逸脱
+                # （素の文字列配列）が AttributeError になり、**会議1件の検査が
+                # 丸ごと落ちて後続の読み手も走らなかった**。1チャンクの異常で
+                # 全体を失わないようにする。**黙って飛ばさず件数を最後に必ず報告する**。
+                try:
+                    diff = compare_extractions(primary, second,
+                                               extra_haystack=extra_haystack)
+                    terms = flag_sensitive_terms(chunk_text)
+                    for k in ("decisions", "action_items"):
+                        n_excluded_in_table += diff.get(
+                            "matched_in_table_counts", {}).get(k, 0)
+                        n_excluded_in_haystack += diff.get(
+                            "matched_in_haystack_counts", {}).get(k, 0)
+                        for content in diff.get(k, []):
+                            if not content.strip() or content in seen:
+                                continue
+                            seen.add(content)
+                            findings.append({"kind": spec["kind"], "content": content,
+                                             "terms": terms, "raw": raw})
+                except Exception as e:
+                    n_chunk_errors += 1
+                    log(f"[ERROR] {base_ref} の突合に失敗（このチャンクはスキップ）: "
+                        f"{type(e).__name__}: {e}")
+                    continue
 
             if len(findings) > max_findings_per_meeting:
                 n_over = len(findings) - max_findings_per_meeting
@@ -1321,6 +1342,14 @@ def run_second_opinion_minutes(
     log("")
     log(f"所見: 真の欠落候補 {n_recorded} 件 / 本文にあり（除外） {n_excluded_in_haystack} 件"
         f" / 抽出表にあり（除外） {n_excluded_in_table} 件")
+    n_skipped = n_call_errors + n_chunk_errors
+    if n_skipped:
+        log(f"[WARN] 検査したチャンク {n_chunks_total} 件のうち {n_skipped} 件を"
+            f"スキップしました（LLM呼び出し失敗 {n_call_errors} 件 / 突合失敗 "
+            f"{n_chunk_errors} 件）。**この会議の検査は網羅的ではありません** — "
+            "スキップしたチャンクにあった欠落は検出できていません")
+    else:
+        log(f"検査したチャンク {n_chunks_total} 件すべてを処理しました（スキップ 0 件）")
     log(f"完了: 読み手が保存済みに無いと判定した項目 {n_recorded} 件を"
         " triage_second_opinion に記録しました"
         "（議事録DB・pm.dbのaction_items/decisionsは変更していません）")

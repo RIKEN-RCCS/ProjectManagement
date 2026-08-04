@@ -486,6 +486,35 @@ def extract_json(text: str) -> dict:
 # --------------------------------------------------------------------------- #
 # トリアージ（抽出候補の2次審査）
 # --------------------------------------------------------------------------- #
+def _index_triaged_items(triaged, kind: str) -> dict:
+    """トリアージ応答（LLM）を content → 判定dict の索引にする。
+
+    素の文字列や content 欠落・型違いで落ちないようにする。**判定が読み取れない
+    項目は verdict を持たない dict として索引に入れる** — 呼び出し側の
+    「verdict が不明 → KEEP」という保守的フェイルセーフに乗せるのが狙いで、
+    ここで例外を投げてチャンクごと捨てるより取りこぼしが少ない
+    （応答形式の逸脱は実測済み。`extraction_item_contents` の docstring 参照）。
+    """
+    if not isinstance(triaged, dict):
+        print(f"[WARN] トリアージ応答が dict ではありません（判定なしとして扱います）: "
+              f"{type(triaged).__name__}", file=sys.stderr)
+        return {}
+    idx: dict = {}
+    n_bare = 0
+    for item in triaged.get(kind) or []:
+        if isinstance(item, str):
+            n_bare += 1
+            idx[item] = {"content": item}
+        elif isinstance(item, dict):
+            idx[item.get("content")] = item
+        else:
+            n_bare += 1
+    if n_bare:
+        print(f"[WARN] トリアージ応答の {kind} に判定を読み取れない項目が {n_bare} 件"
+              "ありました（該当候補は KEEP 扱いになります）", file=sys.stderr)
+    return idx
+
+
 def triage_items(
     extracted: dict,
     milestones: list[dict],
@@ -545,7 +574,7 @@ def triage_items(
     # --- action_items: KEEP のみ残す ---
     kept_a = []
     verdicts_a = []
-    triaged_a = {item.get("content"): item for item in triaged.get("action_items", []) or []}
+    triaged_a = _index_triaged_items(triaged, "action_items")
     for item in a_items:
         content = item.get("content")
         t = triaged_a.get(content)
@@ -572,7 +601,7 @@ def triage_items(
     # --- decisions: KEEP のみ残す ---
     kept_d = []
     verdicts_d = []
-    triaged_d = {item.get("content"): item for item in triaged.get("decisions", []) or []}
+    triaged_d = _index_triaged_items(triaged, "decisions")
     for item in d_items:
         content = item.get("content")
         t = triaged_d.get(content)
@@ -916,6 +945,91 @@ def _extraction_texts_match(a: str, b: str) -> bool:
     return _is_contained_match(a, b)
 
 
+_EXTRACTION_CONTENT_KEYS = (
+    "content", "text", "item", "title", "summary", "description",
+    "decision", "action_item", "action", "task",
+)
+
+
+def extraction_item_contents(value) -> list[str]:
+    """抽出結果の1種別（decisions / action_items）を content 文字列のリストへ正規化する。
+
+    **LLM は指示した形式に従わないことがある**。実測した逸脱:
+
+    - `[{"content": "..."}]` … 指示どおり
+    - `["..."]`              … 素の文字列の配列（2026-08-04 実測、Llama-4-Scout）
+    - `"..."`                … 配列にせず1本の文字列
+    - `[{"decision": "..."}]`… キー名違い
+
+    以前は `item.get("content")` を直接呼んでいたため、素の文字列が返ると
+    `AttributeError: 'str' object has no attribute 'get'` で**第2系統検査そのものが
+    落ちていた**（会議1件の検査が丸ごと失われ、後続の読み手も走らなかった）。
+    形式の逸脱で検出機会を失うのは本末転倒なので、拾えるものは拾う。
+
+    ただし**黙って拾わない** — 逸脱があった場合は stderr に1行warnを出す。
+    「モデルが指示に従っていない」ことはプロンプト側で直すべき情報であり、
+    正規化で見えなくしてはいけない。
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        # 配列にせず1本の文字列を返してきたケース。改行区切りの箇条書きの
+        # 可能性があるため行に割る（先頭の "- " 等は突合時の正規化で落ちる）。
+        lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
+        if lines:
+            print("[WARN] 抽出結果が配列ではなく文字列で返りました"
+                  f"（{len(lines)} 行として扱います）", file=sys.stderr)
+        return lines
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        print(f"[WARN] 抽出結果が想定外の型です（無視します）: {type(value).__name__}",
+              file=sys.stderr)
+        return []
+
+    contents: list[str] = []
+    n_bare_str = 0
+    n_alt_key = 0
+    n_dropped = 0
+    for item in value:
+        if isinstance(item, str):
+            n_bare_str += 1
+            contents.append(item)
+            continue
+        if isinstance(item, dict):
+            c = item.get("content")
+            if isinstance(c, str) and c.strip():
+                contents.append(c)
+                continue
+            for k in _EXTRACTION_CONTENT_KEYS:
+                v = item.get(k)
+                if isinstance(v, str) and v.strip():
+                    n_alt_key += 1
+                    contents.append(v)
+                    break
+            else:
+                # content 相当のキーが1つも無い dict。空の content は
+                # compare_extractions 側で除外されるため空文字を入れておく
+                # （件数の整合を保つ）。
+                contents.append("")
+            continue
+        if item is None:
+            contents.append("")
+            continue
+        n_dropped += 1
+    if n_bare_str:
+        print(f"[WARN] 抽出結果に素の文字列が {n_bare_str} 件ありました"
+              "（{\"content\": ...} 形式を指示しているが従っていない。そのまま突合します）",
+              file=sys.stderr)
+    if n_alt_key:
+        print(f"[WARN] 抽出結果に content 以外のキーで本文を返した項目が {n_alt_key} 件"
+              "ありました（代替キーから読み取りました）", file=sys.stderr)
+    if n_dropped:
+        print(f"[WARN] 抽出結果の {n_dropped} 件は文字列でも dict でもないため無視しました",
+              file=sys.stderr)
+    return contents
+
+
 def compare_extractions(primary: dict, second: dict, *, extra_haystack: str = "") -> dict:
     """主系統・第2系統の抽出結果を突き合わせ、**第2系統にあって主系統に無い**項目を返す。
 
@@ -928,22 +1042,30 @@ def compare_extractions(primary: dict, second: dict, *, extra_haystack: str = ""
     既定は空文字列で、その場合は従来どおり抽出表のみで判定する（Slack Pass 1 抽出・
     Box の既存呼び出しの挙動は変わらない）。
 
+    primary / second の各項目は `extraction_item_contents` で正規化する
+    （LLM が `{"content": ...}` 形式に従わない場合があるため。同関数の docstring 参照）。
+
     戻り値: {"decisions": [未一致content...], "action_items": [...],
              "primary_counts": {...}, "second_counts": {...},
              "matched_in_table_counts": {...}, "matched_in_haystack_counts": {...}}
     """
+    # dict 以外（LLM が top-level を配列で返した等）は空扱いにする。ここで
+    # AttributeError を投げると呼び出し元の検査全体が落ちるため。
+    if not isinstance(primary, dict):
+        primary = {}
+    if not isinstance(second, dict):
+        print(f"[WARN] 第2系統の抽出結果が dict ではありません（空として扱います）: "
+              f"{type(second).__name__}", file=sys.stderr)
+        second = {}
+
     result: dict = {}
     primary_counts: dict = {}
     second_counts: dict = {}
     matched_in_table_counts: dict = {}
     matched_in_haystack_counts: dict = {}
     for kind in ("decisions", "action_items"):
-        primary_contents = [
-            (item or {}).get("content", "") or "" for item in (primary.get(kind) or [])
-        ]
-        second_contents = [
-            (item or {}).get("content", "") or "" for item in (second.get(kind) or [])
-        ]
+        primary_contents = extraction_item_contents(primary.get(kind))
+        second_contents = extraction_item_contents(second.get(kind))
         primary_counts[kind] = len(primary_contents)
         second_counts[kind] = len(second_contents)
 

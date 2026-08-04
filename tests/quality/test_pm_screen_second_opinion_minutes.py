@@ -458,6 +458,98 @@ class TestMissingItemRecorded:
         assert rows[0]["second_verdict"] == "PRESENT"
 
 
+class TestBareStringResponseDoesNotAbort:
+    """第2系統が `{"decisions": ["文字列"]}`（content dict でない）を返しても
+    検査が落ちず、所見として記録されること。
+
+    2026-08-04 の実障害の再現（logs/admin_job_25725851.log）: Llama-4-Scout が
+    素の文字列配列を返し、`item.get("content")` が AttributeError となって
+    **会議1件の第2系統検査が丸ごと落ち、後続の読み手（k3）も走らなかった**。
+    """
+
+    def test_bare_string_items_are_recorded_not_crashed(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        db_path = minutes_dir / "TestKind.db"
+        file_path = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_BareStr",
+            "=== 第1部（00:00:00〜00:30:00）===\n会議の内容についての要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "2026-07-01-120000-2026-06-30_BareStr-minutes",
+            "held_at": "2026-06-30",
+            "file_path": file_path,
+            "decisions": ["既存の決定事項A"],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: '{"decisions": ["第2系統だけが見つけた決定事項B"],'
+                            ' "action_items": []}',
+        )
+
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=lambda *_a, **_k: None,
+        )
+        rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
+        conn.close()
+
+        assert len(rows) == 1
+        assert "第2系統だけが見つけた決定事項B" in rows[0]["content_head"]
+
+
+class TestChunkErrorIsIsolatedAndReported:
+    """突合段で予期しない例外が出ても会議全体を落とさず、スキップ件数を必ず出す。"""
+
+    def test_compare_failure_is_logged_and_counted(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        db_path = minutes_dir / "TestKind.db"
+        file_path = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_ChunkErr",
+            "=== 第1部（00:00:00〜00:30:00）===\n会議の内容についての要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "2026-07-01-120000-2026-06-30_ChunkErr-minutes",
+            "held_at": "2026-06-30",
+            "file_path": file_path,
+            "decisions": ["既存の決定事項A"],
+        }])
+
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: '{"decisions": [], "action_items": []}',
+        )
+        # pm_screen は関数内で `from ingest.slack import compare_extractions` して
+        # いるため、差し替えは import 元（ingest.slack）側に当てる。
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(
+            ing_mod, "compare_extractions",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        logs: list[str] = []
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=lambda m="", *_a, **_k: logs.append(str(m)),
+        )
+        rows = _triage_rows(conn)
+        conn.close()
+
+        assert rows == []                                  # 記録は無い
+        assert any("突合に失敗" in m for m in logs)          # 黙って飛ばさない
+        assert any("網羅的ではありません" in m for m in logs)  # 「全部見た」と言わない
+
+
 class TestSynonymousItemNotRecorded:
     def test_matching_item_is_not_recorded(
         self, pm_db_path, minutes_dir, processing_dir, monkeypatch
