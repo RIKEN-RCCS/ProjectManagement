@@ -231,3 +231,127 @@ class TestCheckEndpoints:
         monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
         rows = {r["model"]: r for r in model_pin.check_endpoints()}
         assert rows["no-endpoint"]["status"] == "skip"
+
+
+# --------------------------------------------------------------------------- #
+# unknown_served（実在 → 宣言の逆向き。2026-08-04 追加）
+# --------------------------------------------------------------------------- #
+class TestUnknownServed:
+    """配信されているのに pin に載っていないモデルを報告する。
+
+    `check_endpoints` は「宣言 → 実在」しか見ないため、**知らないモデルが増えても
+    違反にならなかった**。2026-08-04 に RiVault へ Kimi-K3 / GLM-5.2 / GLM-OCR /
+    RiVault 自製 6 本が加わったが `--check` は全件 OK のままで、気づいたのは
+    人からの連絡だった。
+    """
+
+    def test_new_model_is_reported_as_unknown(self, endpoints_pin, monkeypatch):
+        def fake_fetch(base_url, api_key=None, timeout=10):
+            if "rikyu" in base_url:
+                return [{"id": "glm-5.2"}]
+            # RiVault 側に宣言していないモデルが増えた
+            return [{"id": "Kimi-K2-Thinking"}, {"id": "moonshotai/Kimi-K3"},
+                    {"id": "zai-org/GLM-5.2"}]
+
+        monkeypatch.setattr(model_pin, "fetch_served_models", fake_fetch)
+        rows = {r["endpoint_env"]: r for r in model_pin.unknown_served()}
+        assert rows["FAKE_RIKYU_URL"]["status"] == "ok"
+        rv = rows["FAKE_RIVAULT_URL"]
+        assert rv["status"] == "unknown"
+        assert rv["unknown"] == ["moonshotai/Kimi-K3", "zai-org/GLM-5.2"]
+        assert rv["n_served"] == 3
+
+    def test_observed_not_used_entries_are_accepted(self, tmp_path, monkeypatch):
+        """observed_not_used に人が書いたものは unknown にしない
+        （「見たことを認めた」記録。使ってよいという意味ではない）。"""
+        p = tmp_path / "pin.yaml"
+        p.write_text(
+            """
+models:
+  glm-5.2:
+    served_model_name: glm-5.2
+    endpoint_env: [FAKE_URL]
+    production: true
+    verified_at: "2026-08-01"
+observed_not_used:
+  zai-org/GLM-OCR:
+    first_observed: "2026-08-04"
+    note: 未使用
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ARGUS_MODEL_PIN_PATH", str(p))
+        monkeypatch.setenv("FAKE_URL", "http://fake.invalid/v1")
+        monkeypatch.setattr(
+            model_pin, "fetch_served_models",
+            lambda *a, **k: [{"id": "glm-5.2"}, {"id": "zai-org/GLM-OCR"}],
+        )
+        rows = model_pin.unknown_served()
+        assert [r["status"] for r in rows] == ["ok"]
+
+    def test_unreachable_is_error_not_violation(self, endpoints_pin, monkeypatch):
+        """到達不能は「判定不能」であり unknown 0 件（=問題なし）と混同しない。"""
+        monkeypatch.setattr(
+            model_pin, "fetch_served_models",
+            lambda *a, **k: (_ for _ in ()).throw(TimeoutError("だめ")),
+        )
+        statuses = {r["endpoint_env"]: r["status"] for r in model_pin.unknown_served()}
+        assert statuses["FAKE_RIKYU_URL"] == "error"
+        assert statuses["FAKE_RIVAULT_URL"] == "error"
+
+    def test_unset_endpoint_env_is_skip(self, endpoints_pin, monkeypatch):
+        monkeypatch.setattr(model_pin, "fetch_served_models", lambda *a, **k: [{"id": "x"}])
+        statuses = {r["endpoint_env"]: r["status"] for r in model_pin.unknown_served()}
+        assert statuses["FAKE_UNSET_URL"] == "skip"
+
+    def test_duplicate_endpoint_is_queried_once(self, tmp_path, monkeypatch):
+        """同じ base_url を指す endpoint_env が複数あっても1回しか叩かない
+        （RIKYU_URL / LOCAL_LLM_URL / ARGUS_ONESHOT_LLM_URL が同一の実運用に対応）。"""
+        p = tmp_path / "pin.yaml"
+        p.write_text(
+            """
+models:
+  a:
+    served_model_name: a
+    endpoint_env: [DUP_ONE, DUP_TWO]
+    production: true
+    verified_at: "2026-08-01"
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ARGUS_MODEL_PIN_PATH", str(p))
+        monkeypatch.setenv("DUP_ONE", "http://same.invalid/v1")
+        monkeypatch.setenv("DUP_TWO", "http://same.invalid/v1")
+        calls = []
+        monkeypatch.setattr(
+            model_pin, "fetch_served_models",
+            lambda base, *a, **k: calls.append(base) or [{"id": "a"}],
+        )
+        rows = {r["endpoint_env"]: r for r in model_pin.unknown_served()}
+        assert len(calls) == 1
+        assert rows["DUP_TWO"]["status"] == "skip"
+        assert "同じエンドポイント" in rows["DUP_TWO"]["detail"]
+
+
+class TestRealPinObservedNotUsed:
+    def test_newly_served_rivault_models_are_recorded(self):
+        """2026-08-04 に見えるようになったモデルが observed_not_used に記録されていること。
+
+        トークンのスコープが広がって初めて見えた 9 件（K3 / GLM-5.2 / GLM-OCR /
+        RiVault 自製 6 本）。**pin に無いモデルが配信されている状態を放置しない**。
+        """
+        obs = model_pin.observed_not_used()
+        for model_id in ("moonshotai/Kimi-K3", "zai-org/GLM-5.2", "zai-org/GLM-OCR",
+                         "RiVault-Reasoning-Large", "RiVault-Instruction-Tiny"):
+            assert model_id in obs, f"{model_id} が observed_not_used に無い"
+            assert obs[model_id].get("first_observed")
+
+    def test_observed_not_used_does_not_grant_production(self):
+        """observed_not_used に載っていても本番では使えない（enforce で拒否される）。"""
+        import os
+        os.environ["ARGUS_MODEL_PIN"] = "enforce"
+        try:
+            with pytest.raises(model_pin.ModelPinError):
+                model_pin.assert_model_allowed("zai-org/GLM-OCR")
+        finally:
+            os.environ.pop("ARGUS_MODEL_PIN", None)

@@ -1110,8 +1110,14 @@ def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
         集中リスク）対策の第2系統であり、**出自が主系統と独立していること**が本質。
 
         "k3" は `config/sensitive_terms.yaml` の `quality_reader.model`（kimi-k3）を
-        `call_local_llm` で呼ぶ（K3 は RIKYU 配信で RiVault にはいないため `call_rivault`
-        では呼べない）。**これは R8 の独立系統ではない** — K3（Moonshot）は主系統の
+        `call_local_llm` で呼ぶ（`LOCAL_LLM_URL` = RIKYU 経由）。
+        **2026-08-04 に RiVault 側にも `moonshotai/Kimi-K3` が入った**ため「RiVault には
+        いないから call_rivault では呼べない」は既に成り立たない。それでも RIKYU 経由を
+        使い続けているのは、読み手として実測した（`max_tokens=16384` / 所要時間 / 成功率）
+        のがこの経路であり、**経路を変えれば実測をやり直す必要がある**ため。
+        同じモデルが2経路にあることは `config/model_pin.yaml` の
+        `observed_not_used: moonshotai/Kimi-K3` に記録してある。
+        **これは R8 の独立系統ではない** — K3（Moonshot）は主系統の
         glm/DeepSeek/Qwen と同じ「本番経路の主要モデルが一系統に寄っている」構図の外には
         出られない。狙いは出自の分散ではなく、K3 の読解・網羅（recall）の高さを議事録の
         欠落検出に使うことだけ（`scripts/quality/pm_screen.py` の

@@ -44,6 +44,16 @@ LOG.md に記録された以下のバグクラスの再発を検出する:
                              一方でネットワークに出ないため、宣言と実際のズレは
                              この日次検査だけが検知できる。**この検査だけは
                              ネットワークに出る**（他は全て読み取り専用）。
+                             **見ているのは「宣言 → 実在」の向きだけ**（下記 17 と対）。
+ 17. model_pin_unknown_served
+                           — 逆向き（実在 → 宣言）。配信されているのに pin に
+                             載っていないモデル id を報告する。11 は宣言した
+                             モデルの実在しか見ないため、**知らないモデルが増えても
+                             違反にならなかった**（2026-08-04 に RiVault へ 9 本
+                             増えたが全件 OK のままで、気づいたのは人からの連絡）。
+                             **観測であり違反ではない**（配信内容は運用主体の判断）。
+                             限界: 見えるのは**トークンのスコープ内だけ**（同じ RiVault が
+                             旧トークンで 15 件・更新後 24 件を返した実測がある）。
  12. egress_dest_unknown   — 設定に無い宛先（層3、docs/security-architecture.md
                              §4.7）への送信件数・宛先種類数の観測。層3はまだ
                              warn 段階（`ARGUS_EGRESS_TARGETS`）のため、
@@ -870,6 +880,61 @@ def check_model_pin_drift() -> list[dict]:
     return violations
 
 
+def check_model_pin_unknown_served() -> list[dict]:
+    """エンドポイントが配信しているモデルのうち、pin に載っていない id を報告する。
+
+    `model_pin_drift` は「宣言 → 実在」の向きしか見ないため、**知らないモデルが
+    増えても違反にならなかった**。2026-08-04 に RiVault へ Kimi-K3 / GLM-5.2 /
+    GLM-OCR / RiVault 自製 6 本が加わったが `--check` は全件 OK のままで、
+    **気づいたのは人からの連絡**だった。net_guard 層3 の `egress_dest_unknown`
+    （知らない宛先を報告する）と同じ形をモデル側に置く。
+
+    **これは観測であり違反ではない**（`egress_dest_unknown` と同じ扱いで exit code に
+    影響させない）。新しいモデルが配信されること自体は運用主体の判断であり、Argus 側の
+    不変条件の破れではない。求めているのは「増えたことに気づく」ことだけで、
+    気づいたら `config/model_pin.yaml` の `models:` か `observed_not_used:` に人が
+    追記して認める（追記が git の diff に残るのが変更検知になる）。
+
+    **限界（P10）**: 見えるのはトークンのスコープ内だけ。2026-08-04 実測で同じ RiVault が
+    旧トークンでは 15 件、更新後は 24 件を返した。**「unknown 0 件」は「配信されているのは
+    宣言したものだけ」を意味しない。** 判定不能（未設定・到達不能）は違反にせず理由を出す。
+    """
+    try:
+        from utils.model_pin import unknown_served
+    except Exception as e:
+        print(f"[WARN] model_pin_unknown_served: model_pin の読み込みに失敗しました"
+              f"（この検査をスキップします）: {e}", file=sys.stderr)
+        return []
+    try:
+        rows = unknown_served(timeout=10)
+    except Exception as e:
+        print(f"[WARN] model_pin_unknown_served: 実行に失敗しました"
+              f"（この検査をスキップします）: {e}", file=sys.stderr)
+        return []
+
+    out = []
+    for row in rows:
+        status = row.get("status")
+        if status == "ok":
+            continue
+        if status == "unknown":
+            out.append({
+                "check": "model_pin_unknown_served",
+                "endpoint_env": row.get("endpoint_env"),
+                "count": len(row.get("unknown") or []),
+                "n_served": row.get("n_served"),
+                "unknown": row.get("unknown"),
+                "note": ("pin に無いモデルが配信されています。models: か "
+                         "observed_not_used: に追記して認めてください"
+                         "（**見えているのはトークンのスコープ内だけ**であり、"
+                         "0 件は「宣言したものだけ」を意味しません）"),
+            })
+            continue
+        print(f"[INFO] model_pin_unknown_served: {row.get('endpoint_env')} は判定できません"
+              f"（status={status}）: {row.get('detail')}", file=sys.stderr)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 12. 宛先粒度（層3）の未知送信の観測（docs/security-architecture.md §4.7）
 # --------------------------------------------------------------------------- #
@@ -1336,6 +1401,10 @@ def run_checks(
     # ネットワークに出る検査のため、--skip-model-pin で個別に退避できるようにする。
     if security_checks_enabled and model_pin_enabled:
         violations += check_model_pin_drift()
+        # 逆向き（実在 → 宣言）。--skip-model-pin で drift と一緒に退避できる
+        # （どちらも同じ /v1/models を叩くため、ネットワークに出したくない場合の
+        # 退避路を分けても意味がない）。
+        violations += check_model_pin_unknown_served()
     return violations
 
 
@@ -1463,11 +1532,17 @@ def main() -> int:
     #
     # egress_dest_unknown は観測であり違反ではない（層3は warn 段階）。
     # --silence-strict を付けても exit code には一切影響させない。
+    # model_pin_unknown_served も観測（新しいモデルの配信は運用主体の判断であり、
+    # Argus 側の不変条件の破れではない）。egress_dest_unknown と同じ扱いにする。
     silent_violations = [v for v in violations if v["check"] == "silent_control"]
     egress_dest_violations = [v for v in violations if v["check"] == "egress_dest_unknown"]
+    model_unknown_violations = [
+        v for v in violations if v["check"] == "model_pin_unknown_served"
+    ]
     hard_violations = [
         v for v in violations
-        if v["check"] not in ("silent_control", "egress_dest_unknown")
+        if v["check"] not in ("silent_control", "egress_dest_unknown",
+                              "model_pin_unknown_served")
     ]
     exit_violations = hard_violations + (silent_violations if args.silence_strict else [])
 
@@ -1492,6 +1567,12 @@ def main() -> int:
                     extra.append(
                         f"{len(egress_dest_violations)} 件の宛先未知観測"
                         "（enforceへ進める判断材料、違反ではない）"
+                    )
+                if model_unknown_violations:
+                    extra.append(
+                        f"{len(model_unknown_violations)} 件のモデル未記載観測"
+                        "（pin に無いモデルが配信されている。model_pin.yaml へ"
+                        "追記して認めること。違反ではない）"
                     )
                 if extra:
                     print(

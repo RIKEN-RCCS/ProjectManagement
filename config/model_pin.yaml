@@ -267,3 +267,105 @@ models:
     declared_engine: null              # ★未確認（vllm または sglang であること）
     declared_by: null
     declared_at: null
+
+# ---------------------------------------------------------------------------
+# 配信されているが Argus では使わないモデル（2026-08-04 追加）
+# ---------------------------------------------------------------------------
+# ★ ここに載っていることは「見たことを人が確認済み」の意味しかない ★
+# **使ってよいという意味ではない。** 使用の許可は models: 側の production: true が決める。
+#
+# なぜこの節が必要か: `--check` は「宣言 → 実在」の向きしか見ないため、**知らないモデルが
+# 増えても違反にならなかった**。2026-08-04 に RiVault へ Kimi-K3 / GLM-5.2 / GLM-OCR /
+# RiVault 自製 6 本が加わったが `--check` は全件 OK のままで、**気づいたのは人からの連絡**
+# だった。`--list-served`（model_pin.py）と pm_selfcheck の model_pin_unknown_served が
+# 逆向きを見るようになり、この節が「一度は人が見て認めた」記録になる。追記が git の
+# diff に残ることが変更検知になる（このファイルの declared_* と同じ扱い）。
+#
+# ★重要（P10）: `/v1/models` の応答は**トークンのスコープに依存する** ★
+# 2026-08-04 実測: 同じ RiVault に対し旧トークンでは 15 件、更新後のトークンでは 24 件。
+# **旧トークンでの「OK・15件」は、配信 24 件のうち 9 件が見えていなかった状態**である
+# （見えないものは照合もされない）。「unknown 0 件」は「配信されているのは宣言した
+# ものだけ」を意味しない。
+observed_not_used:
+  # --- RiVault（2026-08-04 に初めて見えた 9 件を含む） ---
+  moonshotai/Kimi-K3:
+    first_observed: "2026-08-04"
+    note: >-
+      RiVault にも K3 が入った（Moonshot）。**Argus の読み手は RIKYU 側の kimi-k3 を使う**
+      （models: の kimi-k3 エントリ）。同じモデルが2経路になったため、使う経路を
+      endpoint_env の順序で決めている状態は危うい。R8 の観点では RiVault 側に
+      Moonshot が入ったことで、RiVault の集中（Zhipu/DeepSeek/Alibaba/Moonshot）が深まった。
+  zai-org/GLM-5.2:
+    first_observed: "2026-08-04"
+    note: >-
+      主系統の glm-5.2 と同じ系列（Zhipu）が RiVault にも入った。Argus は RIKYU 側の
+      glm-5.2 を使う。RiVault 経由で主系統モデルが呼べる状態になったことは R8 の集中を
+      深める（第2系統の置き場である RiVault に主系統と同系列が増えた）。
+  zai-org/GLM-OCR:
+    first_observed: "2026-08-04"
+    note: OCR 用途（Zhipu）。スライド OCR はローカルのマルチモーダル経路を使うため未使用。
+  RiVault-Instruction-Tiny:
+    first_observed: "2026-08-04"
+    note: >-
+      運用主体自身のモデルと読める。**R8 に対して最も出自が独立した候補**であり、
+      第2系統（現行 Llama-4-Scout）の差し替え先として実測する価値がある（未検証）。
+  RiVault-Instruction-Small:
+    first_observed: "2026-08-04"
+    note: 同上（RiVault 自製と読める。未検証）
+  RiVault-Instruction-Medium:
+    first_observed: "2026-08-04"
+    note: 同上（RiVault 自製と読める。未検証）
+  RiVault-Reasoning-Small:
+    first_observed: "2026-08-04"
+    note: 同上（RiVault 自製と読める。未検証）
+  RiVault-Reasoning-Medium:
+    first_observed: "2026-08-04"
+    note: 同上（RiVault 自製と読める。未検証）
+  RiVault-Reasoning-Large:
+    first_observed: "2026-08-04"
+    note: 同上（RiVault 自製と読める。未検証）
+  # --- 以前から配信されていたが pin 未記載だったもの（2026-08-04 に棚卸し） ---
+  K2-Think:
+    first_observed: "2026-08-04"
+    note: >-
+      MBZUAI（UAE）系と読める。中国系・主系統の外にあるため、Scout に代わる第2系統の
+      候補になり得る（未検証）。
+  Qwen/Qwen3.6-27B-FP8:
+    first_observed: "2026-08-04"
+    note: Alibaba 系。主系統と同系統のため第2系統には使えない。未使用。
+  zai-org/GLM-4.7-FP8:
+    first_observed: "2026-08-04"
+    note: Zhipu 系。未使用（マイルストーン紐づけ等で使う GLM-4.7-Flash とは別エントリ）。
+  zai-org/GLM-4.7-Flash:
+    first_observed: "2026-08-04"
+    note: >-
+      Zhipu 系。pm_link_milestones.py の docstring が言及するが、実経路は
+      call_argus_llm のルーティングに従うため直接指定はしていない。
+  google/translategemma-27b-it:
+    first_observed: "2026-08-04"
+    note: 翻訳特化（Google）。未使用。出自は主系統の外。
+  codellama:7b:
+    first_observed: "2026-08-04"
+    note: コード生成（Meta）。Argus の経路では未使用。
+  llava:7b:
+    first_observed: "2026-08-04"
+    note: 視覚言語（未使用）。スライド OCR はローカル経路を使う。
+  qwen3-coder:30b:
+    first_observed: "2026-08-04"
+    note: コード生成（Alibaba）。未使用。
+  qwen3:8b:
+    first_observed: "2026-08-04"
+    note: Alibaba 系。未使用。
+  # --- RIKYU ---
+  kimi-k2.6:
+    first_observed: "2026-08-04"
+    note: >-
+      RIKYU 配信（Moonshot）。Argus は未使用。RIKYU 側は glm-5.2 / kimi-k2.6 / kimi-k3 /
+      qwen3.6-35b の 4 本で、**すべて中国系**である（R8 の集中はここでも解消していない）。
+  bge-m3:567m:
+    first_observed: "2026-08-04"
+    note: >-
+      RiVault 配信の embedding（BAAI）。**Argus の embedding はローカル vLLM
+      （EMBED_API_BASE、id は BAAI/bge-m3）を使う**ため、この RiVault 側の id は未使用。
+      models: の bge-m3 エントリとは id が違う（`bge-m3:567m` vs `BAAI/bge-m3`）ので
+      別項目として認める必要がある。

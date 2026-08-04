@@ -9,6 +9,16 @@
   - 宣言されていないモデルに黙って切り替わっていないこと（enforce 時）
 
 証明しない:
+  - **エンドポイントが実際に配信しているモデルの全体像。** `--check` は
+    「宣言 → 実在」の向きだけを見る。宣言していないモデルが増えても違反にならない。
+    逆向き（実在 → 宣言）は `unknown_served()` / `--list-served` と
+    `pm_selfcheck.py` の `model_pin_unknown_served` が担う（2026-08-04 追加）。
+  - **トークンで見える範囲を超えたこと。** `/v1/models` の応答は**資格情報の
+    スコープに依存する**。2026-08-04 実測: 同じ RiVault に対し、旧トークンでは 15 件、
+    更新後のトークンでは 24 件が返った。**旧トークンでの「OK・15件」は、配信されている
+    24 件のうち 9 件が見えていない状態だった**（見えないものは照合もされない）。
+    したがってこの検査が言えるのは「**このトークンで見える範囲では**宣言と一致する」
+    までであり、「配信されているのはこれだけ」ではない（P10）。
   - **チェックポイントが宣言どおりのものであること。** OpenAI 互換の `/v1/models` は
     `id` の他に一部エンドポイントで `max_input_tokens` / `max_output_tokens` を返すが、
     revision（sha）を Argus 側から取得する手段は無い。
@@ -271,6 +281,96 @@ def check_endpoints(path: Path | None = None, timeout: int = 10) -> list[dict]:
     return results
 
 
+def observed_not_used(path: Path | None = None) -> dict:
+    """`observed_not_used`（配信されているが Argus では使わないモデル）を返す。
+
+    ここに載っているのは「見たことを人が確認済み」の意味しかない。**使ってよいという
+    意味ではない**（使用の許可は `models:` 側の `production: true` が決める）。
+    """
+    return (load_pin(path).get("observed_not_used") or {})
+
+
+def unknown_served(path: Path | None = None, timeout: int = 10) -> list[dict]:
+    """各エンドポイントの `/v1/models` を列挙し、**pin に載っていない id** を報告する。
+
+    `check_endpoints()` は「宣言 → 実在」の向きしか見ないため、**知らないモデルが
+    増えても違反にならない**。2026-08-04 に RiVault へ Kimi-K3 / GLM-5.2 / GLM-OCR /
+    RiVault 自製モデル 6 本が加わったが、`--check` は全件 OK のままだった
+    （気づいたのは人からの連絡）。net_guard 層3 の `egress_dest_unknown`
+    （知らない宛先を報告する）と同じ形をモデル側にも置く。
+
+    「知らない」= `models:` にも `observed_not_used:` にも無い id。新しいモデルは
+    **一度は人が yaml に書いて認める**必要があり、その追記が git の diff に残る
+    （このファイルの他の申告値と同じ扱い）。
+
+    **限界**: 見えるのはトークンのスコープ内だけ（モジュール docstring 参照）。
+    「unknown 0 件」は「配信されているのは宣言したものだけ」を意味しない。
+
+    戻り値: [{"endpoint_env", "base", "status", "unknown": [id...], "n_served": int,
+              "detail": str}, ...]
+    """
+    known = set()
+    for key, entry in models(path).items():
+        known.add(key)
+        if isinstance(entry, dict) and entry.get("served_model_name"):
+            known.add(entry["served_model_name"])
+    known |= set(observed_not_used(path).keys())
+
+    # endpoint_env をモデル宣言から集める（同じエンドポイントを1回だけ叩く）。
+    env_names: list[str] = []
+    for entry in models(path).values():
+        if not isinstance(entry, dict):
+            continue
+        for e in entry.get("endpoint_env") or []:
+            if e not in env_names:
+                env_names.append(e)
+
+    results: list[dict] = []
+    seen_bases: dict[str, str] = {}
+    for env in env_names:
+        base = os.environ.get(env)
+        if not base:
+            results.append({"endpoint_env": env, "base": None, "status": "skip",
+                            "unknown": [], "n_served": 0,
+                            "detail": f"{env} が未設定（照合しません）"})
+            continue
+        if base in seen_bases:
+            results.append({"endpoint_env": env, "base": base, "status": "skip",
+                            "unknown": [], "n_served": 0,
+                            "detail": f"{seen_bases[base]} と同じエンドポイント（重複のためスキップ）"})
+            continue
+        seen_bases[base] = env
+
+        api_key = None
+        for entry in models(path).values():
+            if not isinstance(entry, dict) or env not in (entry.get("endpoint_env") or []):
+                continue
+            token_envs = entry.get("token_env") or []
+            if isinstance(token_envs, str):
+                token_envs = [token_envs]
+            api_key = next((os.environ[t] for t in token_envs if os.environ.get(t)), None)
+            if api_key:
+                break
+        try:
+            served = fetch_served_models(base, api_key, timeout=timeout)
+        except Exception as e:
+            results.append({"endpoint_env": env, "base": base, "status": "error",
+                            "unknown": [], "n_served": 0,
+                            "detail": f"取得失敗（判定不能）: {str(e)[:120]}"})
+            continue
+        ids = sorted(m["id"] for m in served)
+        unknown = [i for i in ids if i not in known]
+        results.append({
+            "endpoint_env": env, "base": base,
+            "status": "unknown" if unknown else "ok",
+            "unknown": unknown, "n_served": len(ids),
+            "detail": (f"配信 {len(ids)} 件のうち pin 未記載 {len(unknown)} 件: "
+                       + ", ".join(unknown)) if unknown
+                      else f"配信 {len(ids)} 件すべて pin に記載あり",
+        })
+    return results
+
+
 def _format_list(path: Path | None = None) -> str:
     out = []
     for key, e in models(path).items():
@@ -291,12 +391,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--list", action="store_true", help="宣言内容を表示する")
     parser.add_argument("--check", action="store_true",
-                        help="/v1/models と served_model_name を照合する")
+                        help="/v1/models と served_model_name を照合する（宣言→実在）")
+    parser.add_argument("--list-served", action="store_true",
+                        help="各エンドポイントの /v1/models を列挙し、pin に載っていない "
+                             "id を報告する（実在→宣言）。見えるのはトークンのスコープ内だけ")
     args = parser.parse_args(argv)
 
     if args.list:
         print(_format_list())
         return 0
+    if args.list_served:
+        rows = unknown_served()
+        bad = 0
+        for r in rows:
+            mark = {"ok": "OK", "unknown": "★NEW", "error": "ERR", "skip": "--"}[r["status"]]
+            print(f"{mark:<5} {r['endpoint_env']:<24} {r['detail']}")
+            if r["status"] == "unknown":
+                bad += 1
+        print()
+        print("※ 見えるのは**トークンのスコープ内だけ**である（2026-08-04 実測: 同じ RiVault で "
+              "旧トークン 15 件 / 更新後 24 件）。unknown 0 件は「配信されているのは宣言した "
+              "ものだけ」を意味しない。新しい id は config/model_pin.yaml の models: か "
+              "observed_not_used: に人が追記して認めること（追記が git の diff に残る）。")
+        return 1 if bad else 0
     if args.check:
         rows = check_endpoints()
         bad = 0
