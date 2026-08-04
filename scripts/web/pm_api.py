@@ -473,8 +473,15 @@ _SECOND_OPINION_SUPPRESSED_SUFFIXES = ("_pretune", "_t8192")
 def get_second_opinion(
     kind: str = Query(""),
     unreviewed_only: bool = Query(True),
+    include_gate_dropped: bool = Query(False),
 ):
-    rows = list_second_opinion_findings(_get_conn(), unreviewed_only=unreviewed_only)
+    # 既定は3ゲート審査が DROP と判定した所見を出さない（**件数ではなく内容で絞る**）。
+    # 未審査（gate_verdict IS NULL）は隠さない — 審査が動いていないことに気づけなく
+    # なるため（list_second_opinion_findings の keep_only の docstring 参照）。
+    rows = list_second_opinion_findings(
+        _get_conn(), unreviewed_only=unreviewed_only,
+        keep_only=not include_gate_dropped,
+    )
     if kind:
         rows = [r for r in rows if kind in r["kind"]]
     # 調整前の試行記録（_pretune / _t8192 終わりの kind）は既定で除外する。

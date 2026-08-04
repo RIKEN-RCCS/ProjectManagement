@@ -1140,6 +1140,136 @@ def _existing_finding_bodies(pm_conn, *, kind: str, meeting_id: str) -> list[tup
     return out
 
 
+def _gate_findings(findings: list[dict], milestones: list[dict], *, meeting_ref: str,
+                   log) -> list[dict]:
+    """所見をマイルストーン基準の3ゲート審査にかけ、`gate` キー（KEEP/DROP と理由）を付ける。
+
+    **件数で絞るのではなく内容で絞る**ための段（2026-08-04 追加）。読み手のプロンプトにも
+    3ゲート基準は入っているが、実測では守られず 26 件が上がってきた（事務連絡・日程調整・
+    「議論した」だけの項目を含む）。読み手に自制させるより、**別の段で明示的に審査して
+    判定を列に残す**方が確実で、後から「なぜ落ちたか」を検証できる。
+
+    審査は `ingest.slack.triage_items_batched` に委譲する（minutes 転記時トリアージ・
+    `--triage` と同じ3ゲートを共用。プロンプトを複製しない）。判定が取れなかった項目は
+    KEEP 扱いにする（`missing_verdict="KEEP"`）— **審査の失敗で実在の欠落を隠さない**。
+
+    重要な弱点: この審査は主系統のLLM（`call_argus_llm`）が行う。つまり
+    **主系統が落とした項目を主系統自身に「重要でない」と判定させている**。R8 の独立性を
+    部分的に損なうため、DROP でも行は消さず（表示の既定から外すだけ）件数を必ずログに出す。
+
+    戻り値: findings と同じ順序・同じ長さのリスト。各要素に
+    `"gate": {"verdict": "KEEP"|"DROP", "reason": str}` が入る。
+    """
+    from ingest.slack import triage_items_batched
+
+    if not findings:
+        return findings
+    if not milestones:
+        log(f"  [WARN] {meeting_ref} マイルストーン未登録のため3ゲート審査を行いません"
+            "（gate_verdict は NULL=未審査のまま記録します。**未審査は KEEP ではありません**）")
+        return findings
+
+    # triage_items_batched は content キーを持つ dict のリストを期待する。
+    # 元の findings への写像を保つため、id を content に紐づけて戻す。
+    dec_items = [{"content": f["content"]} for f in findings if f["item_kind"] == "decisions"]
+    ai_items = [{"content": f["content"]} for f in findings if f["item_kind"] == "action_items"]
+    try:
+        batched = triage_items_batched(
+            ai_items, dec_items, milestones,
+            context_note=("以下は会議の文字起こしから第2の読み手が拾った候補で、"
+                          "保存済み議事録に載っていなかったものです。"
+                          "プロジェクト推進に欠かせないものだけを KEEP にしてください。"),
+            missing_verdict="KEEP", log=log,
+        )
+    except Exception as e:
+        log(f"  [WARN] {meeting_ref} 3ゲート審査に失敗しました（未審査として記録します）: "
+            f"{type(e).__name__}: {e}")
+        return findings
+
+    if batched.get("n_skipped_chunks"):
+        log(f"  [WARN] {meeting_ref} 3ゲート審査で {batched['n_skipped_chunks']} チャンクが"
+            "失敗しました。該当項目は KEEP 扱いです（審査の失敗で欠落を隠さないため）")
+
+    verdict_by_content: dict[str, tuple[str, str]] = {}
+    for key in ("action_items", "decisions"):
+        for item, verdict, reason in batched.get(key, []):
+            verdict_by_content[(item or {}).get("content", "")] = (verdict, reason or "")
+
+    n_drop = 0
+    for f in findings:
+        verdict, reason = verdict_by_content.get(f["content"], ("KEEP", "審査結果に無し"))
+        if verdict == "DROP":
+            n_drop += 1
+        f["gate"] = {"verdict": verdict, "reason": reason}
+    log(f"  {meeting_ref} 3ゲート審査: KEEP {len(findings) - n_drop} 件 / "
+        f"DROP {n_drop} 件（DROP も台帳には残し、既定の表示から外します）")
+    return findings
+
+
+def run_gate_backfill(pm_conn, *, regate: bool, log) -> None:
+    """既に記録済みの所見に3ゲート審査を後から当てる（`--gate-backfill`）。
+
+    ゲートの判定基準を直したら、過去の所見にも当て直せる必要がある
+    （基準を変えたのに古い行が古い判定のまま残ると、一覧の意味が混ざる）。
+    `regate=True` で既に判定がある行も対象にする（判定を上書きする）。
+
+    調整試行の kind（`_pretune` / `_t8192`）は対象外。本文は content_head の
+    タグ列を除いたものを使う（先頭200文字までしか残っていないため、長い所見は
+    途中までで審査されることに注意）。
+    """
+    from db_utils import ensure_second_opinion_gate_columns, table_exists
+    from ingest.slack import fetch_milestones
+
+    if not table_exists(pm_conn, "triage_second_opinion"):
+        log("所見がありません（triage_second_opinion 未作成）")
+        return
+    ensure_second_opinion_gate_columns(pm_conn)
+    cond = "" if regate else " AND gate_verdict IS NULL"
+    rows = pm_conn.execute(
+        "SELECT id, content_head FROM triage_second_opinion"
+        " WHERE kind LIKE 'minutes_extraction%'"
+        " AND kind NOT LIKE '%\\_pretune' ESCAPE '\\'"
+        " AND kind NOT LIKE '%\\_t8192' ESCAPE '\\'"
+        + cond + " ORDER BY id"
+    ).fetchall()
+    log(f"審査対象の所見: {len(rows)} 件"
+        + ("（既に判定がある行も再審査します）" if regate else "（未審査のみ）"))
+    if not rows:
+        return
+
+    milestones = fetch_milestones(pm_conn)
+    log(f"マイルストーン: {len(milestones)} 件")
+    if not milestones:
+        log("[WARN] マイルストーンが取れないため審査しません（未審査のまま）")
+        return
+
+    findings = [{
+        "content": _TRIAGE_REF_TAG_RE.sub("", r["content_head"] or "").strip(),
+        "item_kind": "decisions",  # 台帳には決定/アクションの区別が残っていない
+        "_id": r["id"],
+    } for r in rows]
+    findings = _gate_findings(findings, milestones, meeting_ref="(backfill)", log=log)
+
+    n_keep = n_drop = 0
+    for f in findings:
+        g = f.get("gate") or {}
+        verdict = g.get("verdict")
+        if verdict is None:
+            continue
+        pm_conn.execute(
+            "UPDATE triage_second_opinion SET gate_verdict = ?, gate_reason = ?"
+            " WHERE id = ?", (verdict, g.get("reason") or "", f["_id"]),
+        )
+        if verdict == "DROP":
+            n_drop += 1
+            log(f"  DROP [{f['_id']}] {f['content'][:50]} — {(g.get('reason') or '')[:40]}")
+        else:
+            n_keep += 1
+    pm_conn.commit()
+    log(f"結果: KEEP {n_keep} 件 / DROP {n_drop} 件（**行は消していません** — "
+        "既定の表示から外れるだけで、--include-gate-dropped / Console のトグルで見られます）")
+
+
 def run_second_opinion_minutes(
     pm_conn,
     *,
@@ -1154,6 +1284,7 @@ def run_second_opinion_minutes(
     max_findings_per_meeting: int = _DEFAULT_MAX_FINDINGS_PER_MEETING,
     meeting_stem: str | None = None,
     dedup_existing: bool = True,
+    gate: bool = True,
 ) -> None:
     """議事録経路への第2系統差分検査バッチ本体。
 
@@ -1189,6 +1320,11 @@ def run_second_opinion_minutes(
         読ませて検出を積み増す使い方が有効で、その際に台帳が重複で埋まるのを防ぐ。
         照合は `_extraction_texts_match`（表現の揺れを吸収する）で行う。
         再現性そのものを測りたい場合は False にする（`--no-dedup-existing`）。
+
+    gate: 記録前にマイルストーン基準の3ゲート審査をかけ、`gate_verdict` 列に
+        KEEP / DROP を残す（既定 True。`--no-gate` で無効化）。**件数ではなく内容で
+        絞るための段** — DROP でも行は消さず、既定の表示から外すだけ。
+        詳細は `_gate_findings` / `db_utils.ensure_second_opinion_gate_columns` 参照。
 
     meeting_stem: 指定時は instances.file_path の拡張子抜きファイル名
         （Path(file_path).stem。例: "{ts}-{basename}-minutes"）がこれと一致する
@@ -1320,6 +1456,17 @@ def run_second_opinion_minutes(
     n_chunk_errors = 0
     n_chunks_total = 0
     n_dup_existing = 0
+    n_gate_drop = 0
+    # 3ゲート審査に使うマイルストーン（ゲート1の基準）。1回だけ読む。
+    milestones: list[dict] = []
+    if gate:
+        from ingest.slack import fetch_milestones
+
+        milestones = fetch_milestones(pm_conn)
+        if not milestones:
+            log("[WARN] マイルストーンが pm.db に登録されていないため3ゲート審査を"
+                "行いません（所見は gate_verdict=NULL=未審査で記録します。"
+                "**未審査は KEEP ではありません** — 内容での絞り込みは効きません）")
     for c, _path, source_kind, chunks in processed:
         base_ref = f"[{c['kind']}/{c['meeting_id']}][{source_kind}]"
         if source_kind == "combined_degraded":
@@ -1366,7 +1513,10 @@ def run_second_opinion_minutes(
                             if not content.strip() or content in seen:
                                 continue
                             seen.add(content)
+                            # item_kind（decisions / action_items）は3ゲート審査で
+                            # 決定事項とアクションアイテムを別プロンプトに分けるために持つ。
                             findings.append({"kind": spec["kind"], "content": content,
+                                             "item_kind": k,
                                              "terms": terms, "raw": raw})
                 except Exception as e:
                     n_chunk_errors += 1
@@ -1404,6 +1554,15 @@ def run_second_opinion_minutes(
                         f"新規 {len(kept)} 件")
                     findings = kept
 
+            # 内容で絞る段。**件数で絞ると本当に要る項目が落ちる**ため、
+            # マイルストーン基準の3ゲート審査を通し、判定を列に残す（_gate_findings 参照）。
+            if gate and findings:
+                findings = _gate_findings(findings, milestones,
+                                          meeting_ref=meeting_ref, log=log)
+                n_gate_drop += sum(
+                    1 for f in findings if (f.get("gate") or {}).get("verdict") == "DROP"
+                )
+
             if len(findings) > max_findings_per_meeting:
                 n_over = len(findings) - max_findings_per_meeting
                 log(f"[WARN] {meeting_ref} で {max_findings_per_meeting} 件を超えました"
@@ -1414,11 +1573,13 @@ def run_second_opinion_minutes(
                     "（黙って打ち切ると『全部見た』と誤読されるため明示します）")
 
             for f in findings[:max_findings_per_meeting]:
+                g = f.get("gate") or {}
                 record_second_opinion(
                     pm_conn, kind=f["kind"],
                     content=f"{meeting_ref} {f['content']}",
                     primary_verdict="MISSING", second_verdict="PRESENT",
                     flagged_terms=f["terms"], model=spec["model"], raw=f["raw"],
+                    gate_verdict=g.get("verdict"), gate_reason=g.get("reason"),
                 )
                 n_recorded += 1
             log(f"  {meeting_ref} チャンク{len(chunks)}件 処理完了")
@@ -1436,6 +1597,15 @@ def run_second_opinion_minutes(
             "スキップしたチャンクにあった欠落は検出できていません")
     else:
         log(f"検査したチャンク {n_chunks_total} 件すべてを処理しました（スキップ 0 件）")
+    if gate:
+        log(f"3ゲート審査: 記録 {n_recorded} 件のうち DROP 判定 {n_gate_drop} 件"
+            f"（レビュー対象は KEEP {n_recorded - n_gate_drop} 件）。"
+            "**DROP も台帳には残してある** — 表示の既定から外しただけで、"
+            "`--list-findings`（keep_only なし）や Console のトグルで見られる。"
+            "審査は主系統のLLMが行うため、主系統が落とした項目を主系統自身に"
+            "『重要でない』と判定させている点に注意（DROP 件数が増え続けるなら疑うべき）")
+    else:
+        log("[INFO] 3ゲート審査は無効（--no-gate）。gate_verdict は NULL=未審査で記録しました")
     log(f"完了: 読み手が保存済みに無いと判定した項目 {n_recorded} 件を"
         " triage_second_opinion に記録しました"
         "（議事録DB・pm.dbのaction_items/decisionsは変更していません）")
@@ -1509,6 +1679,12 @@ def main():
                              f"（デフォルト: {_DEFAULT_MAX_FINDINGS_PER_MEETING}）。"
                              "既定値は妥当な件数ではなく事故防止の last resort であり、"
                              "到達したら読み手か突合が壊れている兆候として扱う")
+    parser.add_argument("--no-gate", action="store_true",
+                        help="--second-opinion-minutes 時に、記録前のマイルストーン基準"
+                             "3ゲート審査を行わない。既定では審査し gate_verdict 列に"
+                             "KEEP/DROP を残す（**件数ではなく内容で絞る**ための段。"
+                             "DROP でも行は消さず、既定の表示から外すだけ）。"
+                             "指定すると gate_verdict は NULL=未審査になる")
     parser.add_argument("--no-dedup-existing", action="store_true",
                         help="--second-opinion-minutes 時に、既に記録済みの所見"
                              "（同じ会議・同じ読み手）との重複排除を行わない。"
@@ -1528,6 +1704,18 @@ def main():
                              "（例: minutes_extraction_recall）")
     parser.add_argument("--unreviewed-only", action="store_true",
                         help="--list-findings で reviewed_at が未設定の行のみ表示する")
+    parser.add_argument("--include-gate-dropped", action="store_true",
+                        help="--list-findings で3ゲート審査が DROP と判定した所見も表示する。"
+                             "既定は KEEP と未審査（NULL）のみ"
+                             "（**未審査は隠さない** — 審査が動いていないことに"
+                             "気づけなくなるため）")
+    parser.add_argument("--gate-backfill", action="store_true",
+                        help="既に記録済みの所見に3ゲート審査を後から当てる"
+                             "（未審査の行のみ。--regate で既判定も再審査）。"
+                             "審査基準を直したときに過去分へ当て直すためのモード")
+    parser.add_argument("--regate", action="store_true",
+                        help="--gate-backfill 時に、既に gate_verdict がある行も"
+                             "再審査して上書きする")
     parser.add_argument("--mark-reviewed", default=None, metavar="ID[,ID...]",
                         help="指定した triage_second_opinion.id の reviewed_at を"
                              "現在時刻で埋める（カンマ区切りで複数指定可）")
@@ -1544,6 +1732,7 @@ def main():
     if args.list_findings:
         rows = list_second_opinion_findings(
             conn, kind=args.kind, unreviewed_only=args.unreviewed_only,
+            keep_only=not args.include_gate_dropped,
         )
         if not rows:
             log("所見はありません")
@@ -1551,7 +1740,21 @@ def main():
             for r in rows:
                 head = (r["content_head"] or "")[:120]
                 log(f"id={r['id']} ts={r['ts']} kind={r['kind']} model={r['model']}"
-                    f" reviewed_at={r['reviewed_at']} content_head={head!r}")
+                    f" reviewed_at={r['reviewed_at']} gate={r.get('gate_verdict') or '未審査'}"
+                    f" content_head={head!r}")
+        if not args.include_gate_dropped:
+            n_dropped = len(list_second_opinion_findings(
+                conn, kind=args.kind, unreviewed_only=args.unreviewed_only,
+            )) - len(rows)
+            if n_dropped:
+                log(f"（3ゲート審査で DROP と判定された所見 {n_dropped} 件は"
+                    "表示していません。--include-gate-dropped で表示できます）")
+        conn.close()
+        close()
+        return
+
+    if args.gate_backfill:
+        run_gate_backfill(conn, regate=args.regate, log=log)
         conn.close()
         close()
         return
@@ -1585,6 +1788,7 @@ def main():
             max_findings_per_meeting=args.max_findings_per_meeting,
             meeting_stem=args.meeting_stem,
             dedup_existing=not args.no_dedup_existing,
+            gate=not args.no_gate,
         )
         conn.close()
         close()

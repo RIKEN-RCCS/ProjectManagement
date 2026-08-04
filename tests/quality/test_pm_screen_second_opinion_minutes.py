@@ -503,6 +503,161 @@ class TestBareStringResponseDoesNotAbort:
         assert "第2系統だけが見つけた決定事項B" in rows[0]["content_head"]
 
 
+class TestGateFilter:
+    """所見を**件数ではなく内容で**絞る3ゲート審査（gate_verdict 列）。
+
+    PM から「30 件は多すぎる。このままだと見ない。件数で絞るのではなく本当に
+    プロジェクト推進に欠かせない内容だけに絞るべき」との指摘（2026-08-04）。
+    """
+
+    def _setup(self, pm_db_path, minutes_dir, processing_dir, *, with_milestones=True):
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_Gate",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "2026-07-01-120000-2026-06-30_Gate-minutes",
+            "held_at": "2026-06-30", "file_path": fp, "decisions": [],
+        }])
+        if with_milestones:
+            conn = sqlite3.connect(str(pm_db_path))
+            # fetch_milestones の SELECT に合わせる（milestone_id / name / due_date /
+            # area、status='active' のみ対象）。列名を間違えると except で空リストが
+            # 返り「マイルストーン未登録」の経路に落ちるため、実装に合わせること。
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS milestones (milestone_id TEXT PRIMARY KEY,"
+                " name TEXT, due_date TEXT, area TEXT, status TEXT)")
+            conn.execute(
+                "INSERT INTO milestones (milestone_id, name, due_date, area, status)"
+                " VALUES ('M1', '性能測定の完了', '2026-09-30', 'perf', 'active')")
+            conn.commit()
+            conn.close()
+
+    def _run(self, pm_db_path, minutes_dir, processing_dir, **kw):
+        logs, log = _collector()
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, **kw,
+        )
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, content_head, gate_verdict, gate_reason"
+            " FROM triage_second_opinion ORDER BY id")]
+        conn.close()
+        return rows, logs
+
+    def test_dropped_finding_is_recorded_but_marked_drop(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """DROP でも**行は消さない**（表示の既定から外すだけ）。"""
+        self._setup(pm_db_path, minutes_dir, processing_dir)
+        import ingest.slack as ing_mod
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: json.dumps({
+            "decisions": [{"content": "測定項目を8月14日までに登録する"},
+                          {"content": "次回の日程を調整する"}],
+            "action_items": [],
+        }, ensure_ascii=False))
+        monkeypatch.setattr(ing_mod, "triage_items_batched", lambda ai, dec, ms, **k: {
+            "action_items": [],
+            "decisions": [
+                ({"content": "測定項目を8月14日までに登録する"}, "KEEP", ""),
+                ({"content": "次回の日程を調整する"}, "DROP", "日程調整は事務連絡"),
+            ],
+            "n_chunks": 1, "n_skipped_chunks": 0,
+        })
+
+        rows, logs = self._run(pm_db_path, minutes_dir, processing_dir)
+        assert len(rows) == 2                       # 行は両方残る
+        verdicts = {r["gate_verdict"] for r in rows}
+        assert verdicts == {"KEEP", "DROP"}
+        dropped = next(r for r in rows if r["gate_verdict"] == "DROP")
+        assert dropped["gate_reason"] == "日程調整は事務連絡"
+        assert any("DROP 1 件" in m for m in logs)
+
+    def test_keep_only_listing_hides_drop_but_not_unjudged(self, pm_db_path):
+        """一覧の既定は DROP を隠すが、**未審査（NULL）は隠さない**。"""
+        sys_path_conn = sqlite3.connect(str(pm_db_path))
+        sys_path_conn.row_factory = sqlite3.Row
+        from db_utils import list_second_opinion_findings, record_second_opinion
+        for content, verdict in [
+            ("[m][vtt] KEEPの所見", "KEEP"),
+            ("[m][vtt] DROPの所見", "DROP"),
+            ("[m][vtt] 未審査の所見", None),
+        ]:
+            record_second_opinion(
+                sys_path_conn, kind="minutes_extraction", content=content,
+                primary_verdict="MISSING", second_verdict="PRESENT", flagged_terms=[],
+                gate_verdict=verdict,
+            )
+        kept = list_second_opinion_findings(sys_path_conn, keep_only=True)
+        heads = " ".join(r["content_head"] for r in kept)
+        assert "KEEPの所見" in heads
+        assert "未審査の所見" in heads  # 未審査は隠さない
+        assert "DROPの所見" not in heads
+        assert len(list_second_opinion_findings(sys_path_conn)) == 3  # 行は3件ある
+        sys_path_conn.close()
+
+    def test_no_milestones_records_as_unjudged(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """マイルストーン未登録なら審査せず NULL（未審査）で記録し、WARN を出す。"""
+        self._setup(pm_db_path, minutes_dir, processing_dir, with_milestones=False)
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: json.dumps({
+            "decisions": [{"content": "測定項目を8月14日までに登録する"}],
+            "action_items": [],
+        }, ensure_ascii=False))
+
+        rows, logs = self._run(pm_db_path, minutes_dir, processing_dir)
+        assert len(rows) == 1
+        assert rows[0]["gate_verdict"] is None
+        assert any("マイルストーン" in m and "未審査" in m for m in logs)
+
+    def test_gate_failure_keeps_findings(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """審査そのものが失敗しても所見は失わない（未審査として記録）。"""
+        self._setup(pm_db_path, minutes_dir, processing_dir)
+        import ingest.slack as ing_mod
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: json.dumps({
+            "decisions": [{"content": "測定項目を8月14日までに登録する"}],
+            "action_items": [],
+        }, ensure_ascii=False))
+        monkeypatch.setattr(
+            ing_mod, "triage_items_batched",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("gate boom")),
+        )
+
+        rows, logs = self._run(pm_db_path, minutes_dir, processing_dir)
+        assert len(rows) == 1
+        assert rows[0]["gate_verdict"] is None
+        assert any("3ゲート審査に失敗" in m for m in logs)
+
+    def test_no_gate_flag_skips_judgement(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        self._setup(pm_db_path, minutes_dir, processing_dir)
+        import ingest.slack as ing_mod
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: json.dumps({
+            "decisions": [{"content": "測定項目を8月14日までに登録する"}],
+            "action_items": [],
+        }, ensure_ascii=False))
+        called = []
+        monkeypatch.setattr(ing_mod, "triage_items_batched",
+                            lambda *a, **k: called.append(1) or {})
+
+        rows, logs = self._run(pm_db_path, minutes_dir, processing_dir, gate=False)
+        assert called == []                     # 審査のLLMを呼ばない
+        assert rows[0]["gate_verdict"] is None
+        assert any("--no-gate" in m for m in logs)
+
+
 class TestDedupAgainstExistingFindings:
     """同じ会議を2回検査したときに所見が二重に並ばないこと。
 

@@ -1252,10 +1252,17 @@ def check_second_opinion_findings_stale(
         )
         return []
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    # 3ゲート審査で DROP と判定された所見はレビュー対象に数えない（既定の表示から
+    # 外れているものを「読まれていない」と責めるのは筋が違う）。**未審査（NULL）は
+    # 数える** — 審査が動いていない状態を滞留として検出したいため。
+    # gate_verdict 列がまだ無い pm.db でも動くよう、列の有無で条件を切り替える。
+    gate_cond = " AND (gate_verdict IS NULL OR gate_verdict != 'DROP')" \
+        if "gate_verdict" in cols else ""
     rows = pm_conn.execute(
         "SELECT id, ts, kind FROM triage_second_opinion"
         " WHERE kind LIKE 'minutes_extraction%' AND reviewed_at IS NULL AND ts < ?"
-        " ORDER BY ts ASC",
+        + gate_cond
+        + " ORDER BY ts ASC",
         (cutoff,),
     ).fetchall()
     rows = [r for r in rows if not r["kind"].endswith(_SECOND_OPINION_EXEMPT_KIND_SUFFIXES)]

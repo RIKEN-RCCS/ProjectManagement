@@ -206,6 +206,10 @@
     <div class="bg-yellow-900/40 border border-yellow-600 text-yellow-200 text-xs rounded px-3 py-2 flex-none">
       これは<strong>主系統が落とした可能性がある項目</strong>であり、確定した欠落ではない。
       第2系統の判定で主系統を上書きしていない。<strong>載せるべきかの判断は人が行う。</strong>
+      既定では<strong>3ゲート審査（マイルストーン関連性・代替可能性・影響範囲）で KEEP と
+      判定されたものと未審査のみ</strong>を表示する。DROP の行も台帳には残してあり、
+      上のチェックで見られる。<strong>審査は主系統のLLMが行う</strong>ため、
+      主系統が落とした項目を主系統自身が「重要でない」と判定しうる点に注意。
     </div>
 
     <div class="flex items-end gap-3 flex-none">
@@ -216,6 +220,10 @@
       <label class="flex items-center gap-1 text-xs text-gray-400 pb-1">
         <input id="f-op-unreviewed" type="checkbox" class="rounded" checked>
         未レビューのみ
+      </label>
+      <label class="flex items-center gap-1 text-xs text-gray-400 pb-1" title="3ゲート審査（マイルストーン関連性・代替可能性・影響範囲）で DROP と判定された所見も表示する。行は消していない">
+        <input id="f-op-gate-dropped" type="checkbox" class="rounded">
+        審査でDROPしたものも表示
       </label>
       <button onclick="loadSecondOpinion()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">検索</button>
     </div>

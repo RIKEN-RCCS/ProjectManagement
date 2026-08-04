@@ -942,11 +942,15 @@ def record_second_opinion(
     conn: "_sqlite3.Connection", *, kind: str, content: str,
     primary_verdict: str, second_verdict: str, flagged_terms: list[str],
     model: str = "", raw: str | None = None,
+    gate_verdict: str | None = None, gate_reason: str | None = None,
 ) -> None:
     """第2系統の判定結果を記録する（§4.9 対策3+5）。
 
     一致・不一致の**両方**を残す。不一致だけ記録すると「何件中の不一致か」が
     分からず、能力差による雑音の割合を後から評価できないため。
+
+    gate_verdict / gate_reason: マイルストーン基準の3ゲート審査の結果（省略時 NULL=未審査）。
+    詳細は `ensure_second_opinion_gate_columns` の docstring 参照。
     """
     import hashlib
     from datetime import UTC, datetime
@@ -961,16 +965,24 @@ def record_second_opinion(
             "content_sha256 TEXT NOT NULL, content_head TEXT NOT NULL,"
             "primary_verdict TEXT NOT NULL, second_verdict TEXT NOT NULL,"
             "agreed INTEGER NOT NULL, flagged_terms TEXT NOT NULL,"
-            "model TEXT NOT NULL DEFAULT '', raw TEXT);"
+            "model TEXT NOT NULL DEFAULT '', raw TEXT,"
+            "gate_verdict TEXT, gate_reason TEXT);"
         )
+    else:
+        # 既存 pm.db には gate_* 列が無いため後付けする（新規作成時は上の DDL に含まれる）。
+        # **NULL を入れる場合も必要** — INSERT の列名に gate_verdict を書くため、
+        # 列が無ければ「no column named gate_verdict」で失敗する。
+        # 判定が無いときだけ後付けを省く実装にして実際に踏んだ（2026-08-04）。
+        ensure_second_opinion_gate_columns(conn)
     conn.execute(
         "INSERT INTO triage_second_opinion (ts, kind, content_sha256, content_head,"
-        " primary_verdict, second_verdict, agreed, flagged_terms, model, raw)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        " primary_verdict, second_verdict, agreed, flagged_terms, model, raw,"
+        " gate_verdict, gate_reason)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (datetime.now(UTC).isoformat(), kind,
          hashlib.sha256(content.encode("utf-8")).hexdigest(), content[:200],
          primary_verdict, second_verdict, int(primary_verdict == second_verdict),
-         ",".join(flagged_terms), model, raw),
+         ",".join(flagged_terms), model, raw, gate_verdict, gate_reason),
     )
     conn.commit()
 
@@ -996,16 +1008,51 @@ def ensure_second_opinion_reviewed_column(conn: "_sqlite3.Connection") -> None:
     conn.commit()
 
 
+def ensure_second_opinion_gate_columns(conn: "_sqlite3.Connection") -> None:
+    """triage_second_opinion に gate_verdict / gate_reason 列を後付けする（冪等）。
+
+    所見を**件数ではなく内容で絞る**ための列（2026-08-04 追加）。
+    マイルストーン基準の3ゲート審査の結果を持つ:
+      - `gate_verdict='KEEP'`  … プロジェクト推進に欠かせないと判定された所見
+      - `gate_verdict='DROP'`  … 事務連絡・日程調整など、載っていなくても後続に影響しない
+      - `NULL`                 … 審査を通していない（この列より前に記録された既存行、
+                                  マイルストーン未登録時、審査自体が失敗した場合）
+
+    **DROP の行も消さない。** 表示の既定から外すだけで、行は台帳に残す。
+    ゲート審査は主系統のLLM（`call_argus_llm`）が行うため、**主系統が落とした項目を
+    主系統自身に「重要でない」と判定させる**という弱点が原理的にある（R8 の独立性を
+    部分的に損なう）。行を残し DROP 件数を常にログ・UI から見えるようにしてあるのは、
+    その抑圧が起きたときに観測できるようにするため。既定 NULL は「未審査」であり
+    「KEEP」ではない — 審査していないものを審査済みに見せない。
+    """
+    if not table_exists(conn, "triage_second_opinion"):
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_second_opinion)").fetchall()}
+    if "gate_verdict" not in cols:
+        conn.execute("ALTER TABLE triage_second_opinion ADD COLUMN gate_verdict TEXT")
+    if "gate_reason" not in cols:
+        conn.execute("ALTER TABLE triage_second_opinion ADD COLUMN gate_reason TEXT")
+    conn.commit()
+
+
 def list_second_opinion_findings(
     conn: "_sqlite3.Connection", *, kind: str | None = None, unreviewed_only: bool = False,
+    keep_only: bool = False,
 ) -> list[dict]:
-    """triage_second_opinion の所見を新しい順に返す（`pm_screen.py --list-findings`）。"""
+    """triage_second_opinion の所見を新しい順に返す（`pm_screen.py --list-findings`）。
+
+    keep_only: True のとき、3ゲート審査で DROP と判定された行を除く
+        （`gate_verdict='DROP'`）。**未審査（NULL）は除かない** — 審査していない行を
+        「重要でない」として隠すと、審査が動いていないことに気づけなくなる。
+    """
     if not table_exists(conn, "triage_second_opinion"):
         return []
     ensure_second_opinion_reviewed_column(conn)
+    ensure_second_opinion_gate_columns(conn)
     sql = (
         "SELECT id, ts, kind, model, primary_verdict, second_verdict,"
-        " content_head, flagged_terms, reviewed_at FROM triage_second_opinion"
+        " content_head, flagged_terms, reviewed_at, gate_verdict, gate_reason"
+        " FROM triage_second_opinion"
     )
     conds = []
     params: list = []
@@ -1014,6 +1061,8 @@ def list_second_opinion_findings(
         params.append(kind)
     if unreviewed_only:
         conds.append("reviewed_at IS NULL")
+    if keep_only:
+        conds.append("(gate_verdict IS NULL OR gate_verdict != 'DROP')")
     if conds:
         sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY ts DESC"

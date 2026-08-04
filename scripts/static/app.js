@@ -595,6 +595,12 @@ const opinionColumnDefs = [
   { field: 'content_head', headerName: '内容（先頭）', width: 480,
     wrapText: true, autoHeight: true },
   { field: 'flagged_terms', headerName: 'フラグ語', width: 160 },
+  // 3ゲート審査の判定。NULL は「未審査」— KEEP と区別して見せる
+  // （審査していないものを審査済みに見せない）。
+  { field: 'gate_verdict', headerName: '審査', width: 90, cellDataType: 'text',
+    valueFormatter: p => p.value || '未審査' },
+  { field: 'gate_reason', headerName: '審査理由', width: 260,
+    wrapText: true, autoHeight: true },
   // cellDataType を明示しないと ag-Grid v31+ が dateString 型を推論し、
   // ISO 形式以外の値が不正な日付として空欄表示される（achColumnDefs の achieved_on と同じ罠）
   { field: 'ts', headerName: '記録日時', width: 150, cellDataType: 'text' },
@@ -619,7 +625,10 @@ function initOpinionGrid() {
 async function loadSecondOpinion() {
   const kind = document.getElementById('f-op-kind').value;
   const unreviewedOnly = document.getElementById('f-op-unreviewed').checked;
-  const qs = new URLSearchParams({ kind, unreviewed_only: unreviewedOnly });
+  const includeGateDropped = document.getElementById('f-op-gate-dropped').checked;
+  const qs = new URLSearchParams({
+    kind, unreviewed_only: unreviewedOnly, include_gate_dropped: includeGateDropped,
+  });
   const data = await api('GET', '/second-opinion?' + qs);
   opinionGrid.setGridOption('rowData', data.rows);
   document.getElementById('opinion-count').textContent = `${data.rows.length} 件`;
