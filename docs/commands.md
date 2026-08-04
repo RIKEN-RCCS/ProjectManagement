@@ -1026,6 +1026,48 @@ python3 scripts/pm_screen.py --triage --triage-include-closed --output triage.cs
 
 `--triage` 指定時は `--output` が進捗ログではなく出力CSVのパスとして使われる（デフォルト: `triage.csv`）。マイルストーン未登録時はゲート1が機能しないためトリアージ自体をスキップし全件 KEEP 扱いにする。1グループ内のチャンク（最大20件）呼び出しが例外を投げた場合はそのチャンクのみスキップし、他チャンク・他グループの結果は保持したまま処理を継続する。出力CSVは `pm_relink.py --import --dry-run` で確認してから適用する。
 
+**`--second-opinion-minutes`: 議事録の欠落検査**（重複検出・`--triage` とは独立したモード）
+
+保存済み議事録に載っていない項目を、独立した読み手に文字起こし原文から拾わせて
+`pm.db.triage_second_opinion` に記録する。**議事録DB・pm.db の action_items / decisions は
+一切変更しない**（記録のみ）。`ARGUS_SECOND_OPINION=1/true/yes` のときだけ動作する。
+
+入力は VTT（Zoom 生成）を優先し、無ければ生 Whisper 文字起こし、最後に `combined.txt`
+（主系統 Stage 1 の出力＝**Stage 1 で落ちた項目は原理的に検出できない**ため WARN を出す）。
+
+```sh
+# 直近30日の会議を両方の読み手で検査（週1バッチ相当）
+python3 scripts/pm_screen.py --second-opinion-minutes --reader both --limit 5
+
+# 1会議だけ即時検査（録音経路が処理直後に自分の会議を検査するのと同じ）
+python3 scripts/pm_screen.py --second-opinion-minutes --reader both \
+    --meeting-stem 2026-07-01-120000-Leader_Meeting-minutes
+
+# 所見のレビュー（未レビューのみ一覧 → 確認済みにする）
+python3 scripts/pm_screen.py --list-findings --unreviewed-only
+python3 scripts/pm_screen.py --mark-reviewed 145,146,147
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--second-opinion-minutes` | - | このモードを有効化 |
+| `--reader {second,k3,both}` | `second` | `second`=R8 対策の第2系統（Llama-4-Scout、RiVault 配信。**出自が主系統と独立していること**が本質、`kind=minutes_extraction`）。`k3`=kimi-k3 による recall チェック（**R8 の独立系統ではない**。品質目的のみ、`kind=minutes_extraction_recall`）。`both`=両方 |
+| `--limit N` | 10 | 処理する会議数の上限（`--meeting-stem` 指定時は無視） |
+| `--meeting-stem STEM` | なし | `instances.file_path` の stem が一致する1会議のみ検査。`--since`/`--limit` を無視。一致無しは警告して exit 0 |
+| `--max-findings-per-meeting N` | 100 | 1会議・1読み手あたりの記録上限。**妥当な件数ではなく事故防止の last resort**（到達したら読み手か突合が壊れている兆候）。超過分は件数を WARN に出して記録しない |
+| `--no-dedup-existing` | - | 既存所見との重複排除を無効化。既定では同じ会議・同じ読み手の既存所見と突合し重複を記録しない（**読み手の抽出は再現しない**ため同じ会議を複数回読ませて検出を積み増す使い方の前提）。再現性を測るときに指定する |
+| `--list-findings` | - | 所見を一覧表示（`--kind` / `--unreviewed-only` で絞り込み） |
+| `--mark-reviewed ID[,ID...]` | - | 指定した所見の `reviewed_at` を埋める |
+
+**何を捕まえないか**: 捕まえるのは欠落だけで、議事録に載っている内容の正しさは検証しない。
+両方の系統が同じように見落とした項目も検出できない。読み手の抽出は実行ごとに変わる
+（実測: 同一会議・同一モデルで 18 件 → 26 件、共通 3 件）ため、**1 回の実行は「読み手の読みの一部」**。
+
+レビューは Console の「所見」タブでもできる（複数選択 → レビュー済み）。未レビューの滞留は
+`pm_selfcheck.py` の `second_opinion_findings_stale` が検査する。定期実行は
+`scripts/bin/pm_second_opinion_minutes.sh`（週1想定）、録音経路は `pm_from_recording.sh`
+の末尾で処理した会議だけを即時検査する。
+
 ### 16. マイルストーン遡及紐づけ（pm_link_milestones.py）
 
 `milestone_id IS NULL` の既存アクションアイテムに対し、LLM + 埋め込みでマイルストーンを推定して紐づける。

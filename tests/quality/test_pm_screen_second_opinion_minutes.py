@@ -503,6 +503,110 @@ class TestBareStringResponseDoesNotAbort:
         assert "第2系統だけが見つけた決定事項B" in rows[0]["content_head"]
 
 
+class TestDedupAgainstExistingFindings:
+    """同じ会議を2回検査したときに所見が二重に並ばないこと。
+
+    2026-08-04 実測: 同一会議・同一VTT・同一モデル（kimi-k3）で検出数が 18 → 26 に
+    変わり、共通していたのは 3 件だけだった。**読み手の抽出は再現しない**ため、
+    重要な会議を複数回読ませて検出を積み増す使い方が有効で、その前提として
+    既存所見との重複排除が要る。
+    """
+
+    def _setup(self, minutes_dir, processing_dir):
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_Dedup",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "2026-07-01-120000-2026-06-30_Dedup-minutes",
+            "held_at": "2026-06-30", "file_path": fp, "decisions": [],
+        }])
+
+    def _run(self, pm_db_path, minutes_dir, processing_dir, **kw):
+        logs, log = _collector()
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, **kw,
+        )
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, content_head FROM triage_second_opinion ORDER BY id")]
+        conn.close()
+        return rows, logs
+
+    def test_second_run_records_only_new_items(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        self._setup(minutes_dir, processing_dir)
+        import utils.llm as llm_mod
+
+        # 1回目: 2件
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: json.dumps({
+            "decisions": [{"content": "計算資源の追加割当を9月末までに実施する"},
+                          {"content": "測定項目を8月14日までに登録する"}],
+            "action_items": [],
+        }, ensure_ascii=False))
+        rows1, _ = self._run(pm_db_path, minutes_dir, processing_dir)
+        assert len(rows1) == 2
+
+        # 2回目: 1件は表現を変えた同一項目、もう1件は完全に新しい項目
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: json.dumps({
+            "decisions": [{"content": "計算資源の追加割当を9月末までに実施すること"},
+                          {"content": "ネットワーク感度分析のフォーマットを担当者間で調整する"}],
+            "action_items": [],
+        }, ensure_ascii=False))
+        rows2, logs = self._run(pm_db_path, minutes_dir, processing_dir)
+
+        assert len(rows2) == 3  # 2 + 新規1件のみ
+        assert any("ネットワーク感度分析" in r["content_head"] for r in rows2)
+        assert any("[重複]" in m for m in logs)
+        assert any("既存所見と重複（除外） 1 件" in m for m in logs)
+
+    def test_no_dedup_flag_records_duplicates(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """--no-dedup-existing 相当（再現性の測定用）では重複も記録する。"""
+        self._setup(minutes_dir, processing_dir)
+        import utils.llm as llm_mod
+        payload = json.dumps({
+            "decisions": [{"content": "計算資源の追加割当を9月末までに実施する"}],
+            "action_items": [],
+        }, ensure_ascii=False)
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: payload)
+
+        self._run(pm_db_path, minutes_dir, processing_dir, dedup_existing=False)
+        rows, logs = self._run(pm_db_path, minutes_dir, processing_dir,
+                               dedup_existing=False)
+        assert len(rows) == 2  # 同じ内容が2行
+        assert any("重複排除は無効" in m for m in logs)
+
+    def test_other_reader_kind_is_not_deduped_against(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """読み手が違えば（kind が違えば）同じ内容でも別に記録する。
+
+        Scout（R8 対策）と K3（recall）は別系統・別集計であり、片方の所見を
+        もう片方の重複として消してはいけない。
+        """
+        self._setup(minutes_dir, processing_dir)
+        import utils.llm as llm_mod
+        payload = json.dumps({
+            "decisions": [{"content": "計算資源の追加割当を9月末までに実施する"}],
+            "action_items": [],
+        }, ensure_ascii=False)
+        monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: payload)
+        monkeypatch.setattr(llm_mod, "call_local_llm", lambda *a, **k: payload)
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:9/v1")
+
+        self._run(pm_db_path, minutes_dir, processing_dir, reader="second")
+        rows, _ = self._run(pm_db_path, minutes_dir, processing_dir, reader="k3")
+        assert len(rows) == 2
+        assert sum("[reader=k3]" in r["content_head"] for r in rows) == 1
+
+
 class TestChunkErrorIsIsolatedAndReported:
     """突合段で予期しない例外が出ても会議全体を落とさず、スキップ件数を必ず出す。"""
 
@@ -756,7 +860,10 @@ class TestMaxFindingsPerMeeting:
 
         assert len(rows) == cap
         assert any(
-            "[WARN]" in m and str(cap) in m and str(n_found) in m and "粒度" in m
+            "[WARN]" in m and str(cap) in m and str(n_found) in m
+            # 上限は「妥当な件数」ではなく事故防止の last resort である旨を出すこと
+            # （2026-08-04 に 25 → 100 へ上げた際に文面を変更した）
+            and "last resort" in m
             for m in logs
         )
         # 切り捨てた件数（n_found - cap = 5）も明示されていること

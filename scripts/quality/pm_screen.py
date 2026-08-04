@@ -897,14 +897,18 @@ _DEFAULT_SECOND_OPINION_LIMIT = 10
 # （例: K3が日程調整・事務連絡まで拾う）、突合の閾値の粗さと相まって大量の
 # 「欠落」誤検出を作ってしまうため、上位N件で打ち切りWARNを出す（2026-08 追加）。
 #
-# 10 → 25 に引き上げた（2026-08-04）。実データで両読み手が上限に張り付いた:
-# 同一会議で K3 が 18 件・Scout が 26 件を検出し、**44 件のうち 24 件を捨てていた**。
-# 打ち切りは件数しかログに残らず**本文はどこにも保存されない**ため、後から
-# 「何を捨てたか」を検証できない。粒度の調整は記録が残る所見の側（レビューで
-# 落とす・読み手のプロンプトを直す）で行うべきで、記録段で消してはいけない。
-# 上限そのものを外さないのは、突合が壊れたときに全件が「欠落」になって
-# 台帳を埋め尽くす事故を止める last resort として要るため。
-_DEFAULT_MAX_FINDINGS_PER_MEETING = 25
+# 10 → 25 → 100 と引き上げた（いずれも 2026-08-04）。**上限に張り付いている限り
+# 「全部見た」と言えない**というのが引き上げの理由で、25 でも足りなかった
+# （同一会議で K3 が 26 件、Scout が 26 件を検出。10 の時点では 44 件中 24 件を
+# 捨てていた）。打ち切りは件数しかログに残らず**本文はどこにも保存されない**ため、
+# 後から「何を捨てたか」を検証できない。
+#
+# **100 は「妥当な件数」ではなく事故防止の last resort** — 突合が壊れて全件が
+# 「欠落」判定になったときに台帳を埋め尽くすのを止めるためだけの値。量の制御は
+# 記録が残る側（レビューで落とす・読み手のプロンプトを直す・重複排除）で行う。
+# 1 会議で 100 件に達したら、それは読み手か突合のどちらかが壊れている兆候として
+# WARN を読むべきで、上限をさらに上げて対処してよいものではない。
+_DEFAULT_MAX_FINDINGS_PER_MEETING = 100
 
 # 入力階層の表示名（ログ・レポート用）
 _TIER_LABELS = {
@@ -1106,6 +1110,36 @@ def _collect_meeting_candidates(
     return candidates
 
 
+_TRIAGE_REF_TAG_RE = re.compile(r"^(?:\[[^\]]*\]\s*)+")
+
+
+def _existing_finding_bodies(pm_conn, *, kind: str, meeting_id: str) -> list[tuple[int, str]]:
+    """同じ会議・同じ読み手（kind）について既に記録済みの所見本文を返す。
+
+    `record_second_opinion` は content を `"[kind/meeting_id][tier][reader=..] 本文"`
+    の形で保存するため、先頭の `[...]` タグ列を取り除いて本文だけを取り出す。
+    tier タグ（vtt / combined_degraded）は照合条件に入れない — 入力階層が変わっても
+    同じ項目は同じ項目なので、階層違いで二重に記録したくない。
+
+    戻り値: [(id, 本文), ...]。テーブル未作成なら空リスト。
+    """
+    from db_utils import table_exists
+
+    if not table_exists(pm_conn, "triage_second_opinion"):
+        return []
+    rows = pm_conn.execute(
+        "SELECT id, content_head FROM triage_second_opinion"
+        " WHERE kind = ? AND content_head LIKE ?",
+        (kind, f"%{meeting_id}%"),
+    ).fetchall()
+    out: list[tuple[int, str]] = []
+    for r in rows:
+        head = (r[1] if not hasattr(r, "keys") else r["content_head"]) or ""
+        rid = r[0] if not hasattr(r, "keys") else r["id"]
+        out.append((rid, _TRIAGE_REF_TAG_RE.sub("", head).strip()))
+    return out
+
+
 def run_second_opinion_minutes(
     pm_conn,
     *,
@@ -1119,6 +1153,7 @@ def run_second_opinion_minutes(
     reader: str = "second",
     max_findings_per_meeting: int = _DEFAULT_MAX_FINDINGS_PER_MEETING,
     meeting_stem: str | None = None,
+    dedup_existing: bool = True,
 ) -> None:
     """議事録経路への第2系統差分検査バッチ本体。
 
@@ -1147,6 +1182,13 @@ def run_second_opinion_minutes(
     max_findings_per_meeting: 1会議・1読み手あたりに記録する件数の上限
         （既定 _DEFAULT_MAX_FINDINGS_PER_MEETING）。超えた場合はチャンク処理順で
         上位N件のみ記録し、切り捨てた件数をWARNに残す（黙って打ち切らない）。
+        **既定値は「妥当な件数」ではなく事故防止の last resort**（定数のコメント参照）。
+
+    dedup_existing: 既に記録済みの所見（同じ会議・同じ読み手 kind）と重複する項目を
+        記録しない（既定 True）。**読み手の抽出は再現しない**ため同じ会議を複数回
+        読ませて検出を積み増す使い方が有効で、その際に台帳が重複で埋まるのを防ぐ。
+        照合は `_extraction_texts_match`（表現の揺れを吸収する）で行う。
+        再現性そのものを測りたい場合は False にする（`--no-dedup-existing`）。
 
     meeting_stem: 指定時は instances.file_path の拡張子抜きファイル名
         （Path(file_path).stem。例: "{ts}-{basename}-minutes"）がこれと一致する
@@ -1240,6 +1282,7 @@ def run_second_opinion_minutes(
     from db_utils import record_second_opinion
     from ingest.slack import (
         _call_second_opinion_extraction,
+        _extraction_texts_match,
         _load_second_opinion_config,
         compare_extractions,
         flag_sensitive_terms,
@@ -1276,6 +1319,7 @@ def run_second_opinion_minutes(
     n_call_errors = 0
     n_chunk_errors = 0
     n_chunks_total = 0
+    n_dup_existing = 0
     for c, _path, source_kind, chunks in processed:
         base_ref = f"[{c['kind']}/{c['meeting_id']}][{source_kind}]"
         if source_kind == "combined_degraded":
@@ -1330,10 +1374,42 @@ def run_second_opinion_minutes(
                         f"{type(e).__name__}: {e}")
                     continue
 
+            # 既に記録済みの所見と重複するものを落とす。**同じ会議を2回検査すると
+            # 所見が二重に並ぶ**問題への対策（2026-08-04 実測: 同一会議・同一VTT・
+            # 同一モデルで検出数が 18 → 26 に変わり、共通は 3 件だけだった。
+            # K3 の抽出は再現しないため、重要な会議を複数回読ませて検出を積み増す
+            # 使い方が有効で、その前提として重複排除が要る）。
+            # 突合は content_sha256 ではなく `_extraction_texts_match`（ratio または
+            # 12文字以上の共通部分文字列）を使う — 表現が揺れるので完全一致では
+            # 重複を捕まえられない。
+            if dedup_existing and findings:
+                existing = _existing_finding_bodies(
+                    pm_conn, kind=spec["kind"], meeting_id=c["meeting_id"],
+                )
+                if existing:
+                    kept: list[dict] = []
+                    for f in findings:
+                        hit = next(
+                            (rid for rid, body in existing
+                             if _extraction_texts_match(f["content"], body)), None,
+                        )
+                        if hit is None:
+                            kept.append(f)
+                            continue
+                        n_dup_existing += 1
+                        log(f"  [重複] {meeting_ref} 既存 id={hit} と一致するため"
+                            f"記録しません: {f['content'][:60]}")
+                    log(f"  {meeting_ref} 既存所見 {len(existing)} 件と突合: "
+                        f"重複 {len(findings) - len(kept)} 件を除外、"
+                        f"新規 {len(kept)} 件")
+                    findings = kept
+
             if len(findings) > max_findings_per_meeting:
                 n_over = len(findings) - max_findings_per_meeting
                 log(f"[WARN] {meeting_ref} で {max_findings_per_meeting} 件を超えました"
-                    f"（実際 {len(findings)} 件）。読み手の粒度が主系統より細かい可能性があります。"
+                    f"（実際 {len(findings)} 件）。**上限は妥当な件数ではなく事故防止の"
+                    "last resort** です（読み手か突合のどちらかが壊れている兆候として"
+                    "読むこと。上限を上げて対処するものではありません）。"
                     f"上位 {max_findings_per_meeting} 件のみ記録し、残り {n_over} 件は記録しません"
                     "（黙って打ち切ると『全部見た』と誤読されるため明示します）")
 
@@ -1349,7 +1425,9 @@ def run_second_opinion_minutes(
 
     log("")
     log(f"所見: 真の欠落候補 {n_recorded} 件 / 本文にあり（除外） {n_excluded_in_haystack} 件"
-        f" / 抽出表にあり（除外） {n_excluded_in_table} 件")
+        f" / 抽出表にあり（除外） {n_excluded_in_table} 件"
+        + (f" / 既存所見と重複（除外） {n_dup_existing} 件" if dedup_existing else
+           " / 既存所見との重複排除は無効（--no-dedup-existing）"))
     n_skipped = n_call_errors + n_chunk_errors
     if n_skipped:
         log(f"[WARN] 検査したチャンク {n_chunks_total} 件のうち {n_skipped} 件を"
@@ -1428,7 +1506,15 @@ def main():
                         default=_DEFAULT_MAX_FINDINGS_PER_MEETING,
                         help="--second-opinion-minutes 時に1会議・1読み手あたり記録する"
                              "件数の上限。超えた場合は上位N件のみ記録しWARNを出す"
-                             f"（デフォルト: {_DEFAULT_MAX_FINDINGS_PER_MEETING}）")
+                             f"（デフォルト: {_DEFAULT_MAX_FINDINGS_PER_MEETING}）。"
+                             "既定値は妥当な件数ではなく事故防止の last resort であり、"
+                             "到達したら読み手か突合が壊れている兆候として扱う")
+    parser.add_argument("--no-dedup-existing", action="store_true",
+                        help="--second-opinion-minutes 時に、既に記録済みの所見"
+                             "（同じ会議・同じ読み手）との重複排除を行わない。"
+                             "既定では重複を記録しない（読み手の抽出は再現しないため、"
+                             "同じ会議を複数回読ませて検出を積み増せるようにするための"
+                             "前提）。読み手の再現性そのものを測るときに指定する")
     parser.add_argument("--minutes-dir", default=str(DEFAULT_MINUTES_DIR),
                         help=f"議事録DBディレクトリ（デフォルト: {DEFAULT_MINUTES_DIR}）")
     parser.add_argument("--processing-dir", default=str(DEFAULT_PROCESSING_DIR),
@@ -1498,6 +1584,7 @@ def main():
             reader=args.reader,
             max_findings_per_meeting=args.max_findings_per_meeting,
             meeting_stem=args.meeting_stem,
+            dedup_existing=not args.no_dedup_existing,
         )
         conn.close()
         close()
