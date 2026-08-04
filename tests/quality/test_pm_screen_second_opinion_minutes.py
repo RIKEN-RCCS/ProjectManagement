@@ -733,9 +733,14 @@ class TestMaxFindingsPerMeeting:
             "decisions": [],
         }])
 
+        # 既定値そのものをテストに書かない（2026-08-04 に 10 → 25 へ変更した際、
+        # 15 件固定のペイロードでは打ち切りが起きなくなった）。定数から導出する。
+        cap = pm_screen._DEFAULT_MAX_FINDINGS_PER_MEETING
+        n_found = cap + 5
+
         import utils.llm as llm_mod
         monkeypatch.setattr(
-            llm_mod, "call_rivault", lambda *a, **k: self._second_opinion_payload(15),
+            llm_mod, "call_rivault", lambda *a, **k: self._second_opinion_payload(n_found),
         )
 
         conn = sqlite3.connect(str(pm_db_path))
@@ -749,11 +754,12 @@ class TestMaxFindingsPerMeeting:
         rows = [dict(r) for r in conn.execute("SELECT * FROM triage_second_opinion")]
         conn.close()
 
-        assert len(rows) == pm_screen._DEFAULT_MAX_FINDINGS_PER_MEETING
+        assert len(rows) == cap
         assert any(
-            "[WARN]" in m and "10" in m and "15" in m and "粒度" in m for m in logs
+            "[WARN]" in m and str(cap) in m and str(n_found) in m and "粒度" in m
+            for m in logs
         )
-        # 切り捨てた件数（15-10=5）も明示されていること
+        # 切り捨てた件数（n_found - cap = 5）も明示されていること
         assert any("5" in m and "記録しません" in m for m in logs)
 
     def test_custom_cap_param_is_respected(
