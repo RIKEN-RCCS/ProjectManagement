@@ -816,6 +816,10 @@ def apply_second_opinion(results: dict, milestones: list[dict], *,
     log = log or _default_batch_log
     if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
         return []
+    hold = second_opinion_hold()
+    if hold:
+        log(f"[WARN] {_hold_message(hold)} トリアージ結果の差分検査は行いません")
+        return []
     cfg = (_load_second_opinion_config().get("second_opinion") or {})
     cap = int(cfg.get("max_flagged_per_run") or 30)
 
@@ -1096,6 +1100,32 @@ def compare_extractions(primary: dict, second: dict, *, extra_haystack: str = ""
     return result
 
 
+class SecondOpinionOnHold(RuntimeError):
+    """第2系統（R8 対策）が保留中なのに呼ばれた。
+
+    呼び出し側は本来 `second_opinion_hold()` を見て**呼ぶ前に**飛ばすべきで、
+    この例外は取り逃がしたときの backstop である。**空の結果を返さない**のが要点 —
+    「0 件の不一致」と「そもそも検査していない」を混同させてはいけない。
+    """
+
+
+def second_opinion_hold() -> dict | None:
+    """第2系統が保留中なら保留情報（since / decided_by / reason）を返す。
+
+    保留は `config/sensitive_terms.yaml` の `second_opinion.on_hold` で宣言する。
+    **保留中は R8 対策が存在しない** — 「実装済み」と読まないこと（同ファイルのコメント参照）。
+    """
+    cfg = (_load_second_opinion_config().get("second_opinion") or {})
+    hold = cfg.get("on_hold")
+    return hold if isinstance(hold, dict) and hold else None
+
+
+def _hold_message(hold: dict) -> str:
+    return (f"第2系統（R8 対策）は保留中です（since={hold.get('since')} "
+            f"decided_by={hold.get('decided_by')}）。**この間 R8 対策は存在しません**。"
+            f"理由: {(hold.get('reason') or '').strip()[:120]}")
+
+
 def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
                                     model: str | None = None,
                                     route: str = "rivault") -> tuple[dict, str]:
@@ -1129,6 +1159,12 @@ def _call_second_opinion_extraction(thread_text: str, *, context: str = "",
     if route == "k3":
         model = model or (cfg_root.get("quality_reader") or {}).get("model")
     else:
+        # 保留中の第2系統をここで止める（backstop。呼び出し側は second_opinion_hold()
+        # を見て呼ぶ前に飛ばすこと）。**空の結果を返さず例外にする** —
+        # 「0 件の不一致」と「検査していない」を混同させないため。
+        hold = second_opinion_hold()
+        if hold:
+            raise SecondOpinionOnHold(_hold_message(hold))
         model = model or (cfg_root.get("second_opinion") or {}).get("model")
     # 2026-08 粒度調整: 主系統（EXTRACT_PROMPT_INTEGRATED）と同じ3ゲート基準
     # （_TRIAGE_GATES_SECTION、複製せず参照）を入れ、日程調整・事務連絡のような
@@ -1242,6 +1278,15 @@ def apply_second_opinion_extraction(
     """
     log = log or _default_batch_log
     if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
+        return []
+    hold = second_opinion_hold()
+    if hold:
+        # 保留中は LLM を呼ばない。**黙って飛ばさない** — 呼ばれなかったことを
+        # 必ず出す（何も記録されないと「不一致なし」に見えてしまう）。
+        if not (state or {}).get("hold_warned"):
+            log(f"[WARN] {_hold_message(hold)} Slack Pass 1 抽出の差分検査は行いません")
+            if state is not None:
+                state["hold_warned"] = True
         return []
 
     terms = flag_sensitive_terms(thread_text)

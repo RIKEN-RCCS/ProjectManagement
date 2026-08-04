@@ -218,6 +218,15 @@ def apply_second_opinion_box_relevance(
     log = log or (lambda msg: print(msg, file=sys.stderr))
     if os.environ.get("ARGUS_SECOND_OPINION", "1").strip() not in ("1", "true", "yes"):
         return []
+    # 第2系統が保留中なら LLM を呼ばない（ingest/slack.py の second_opinion_hold が
+    # 単一の宣言元）。**黙って飛ばさない** — 記録が無いことを「不一致なし」と
+    # 読まれないよう、必ず WARN を出す。
+    from ingest.slack import _hold_message, second_opinion_hold
+
+    hold = second_opinion_hold()
+    if hold:
+        log(f"[WARN] {_hold_message(hold)} Box relevance の差分検査は行いません")
+        return []
 
     cfg = (_load_second_opinion_config().get("second_opinion") or {})
     cap = int(cfg.get("max_flagged_per_run") or 30)

@@ -1340,6 +1340,22 @@ def run_second_opinion_minutes(
         return
 
     readers = _resolve_readers(reader)
+    # 第2系統（R8 対策）が保留中なら second の読み手を外す。**保留中は R8 対策が
+    # 存在しない**（config/sensitive_terms.yaml の on_hold 参照）。黙って外さず、
+    # 読み手が減ったことを必ず出す — 記録が無いことを「欠落が無い」と読まれないため。
+    # LLM 呼び出し回数の見積りより前に外すこと（見積りが実態と食い違う）。
+    from ingest.slack import _hold_message, second_opinion_hold
+
+    _hold = second_opinion_hold()
+    if _hold and "second" in readers:
+        log(f"[WARN] {_hold_message(_hold)}")
+        log("[WARN] --reader の second（R8 対策の第2系統）を外して実行します"
+            "（記録されないのは『欠落が無い』からではなく『検査していない』からです）")
+        readers = [r for r in readers if r != "second"]
+        if not readers:
+            log("[WARN] 実行できる読み手が残らないため第2系統検査を終了します"
+                "（--reader k3 を指定すれば K3 の recall チェックだけを回せます）")
+            return
     if "k3" in readers:
         log("[INFO] --reader k3: kimi-k3 は読み手（recall 確認）専用として "
             "production: true（PM 判断 2026-08-03）。declared_trust_remote_code は"

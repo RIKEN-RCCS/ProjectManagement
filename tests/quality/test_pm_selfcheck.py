@@ -368,12 +368,35 @@ def test_check_state_key_drift_allows_historical_keys(tmp_path):
 # --------------------------------------------------------------------------- #
 # run_checks 統合
 # --------------------------------------------------------------------------- #
+def _data_violations(violations: list[dict]) -> list[dict]:
+    """観測系の報告（違反ではないもの）を除いてデータ検査の結果だけを返す。
+
+    `second_opinion_on_hold` は第2系統が保留中である限り**毎回必ず出る**
+    （保留を忘れないためにそう作った。exit code には影響しない）。
+    データ検査の期待値にこれを混ぜると、保留の有無でテストが揺れる。
+    """
+    observational = {"second_opinion_on_hold", "egress_dest_unknown",
+                     "model_pin_unknown_served"}
+    return [v for v in violations if v["check"] not in observational]
+
+
 def test_run_checks_returns_no_violations_for_clean_db(pm_db_path):
     conn = _open_plain(pm_db_path)
     _insert_action_item(conn, extracted_at="2026-06-01", status="open")
     violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-07-27")
     conn.close()
-    assert violations == []
+    assert _data_violations(violations) == []
+
+
+def test_run_checks_reports_second_opinion_hold(pm_db_path):
+    """第2系統が保留中なら run_checks が必ず報告する（保留を忘れないため）。"""
+    conn = _open_plain(pm_db_path)
+    violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-07-27")
+    conn.close()
+    holds = [v for v in violations if v["check"] == "second_opinion_on_hold"]
+    assert len(holds) == 1
+    assert holds[0]["since"] == "2026-08-04"
+    assert "R8" in holds[0]["note"]
 
 
 # --------------------------------------------------------------------------- #
@@ -515,7 +538,7 @@ def test_run_checks_skips_security_checks_without_logs_dir(pm_db_path, tmp_path)
     _insert_canary(conn, "docs-0badf00d.internal-check.invalid")
     violations = pm_selfcheck.run_checks(conn, None, days=7, today="2026-07-31")
     conn.close()
-    assert violations == []
+    assert _data_violations(violations) == []
 
 
 # --------------------------------------------------------------------------- #

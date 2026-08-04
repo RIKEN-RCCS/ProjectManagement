@@ -14,6 +14,19 @@ import pytest
 from quality import pm_screen
 
 
+@pytest.fixture(autouse=True)
+def _clear_second_opinion_hold(monkeypatch):
+    """第2系統の保留（config/sensitive_terms.yaml の on_hold）を外して機構をテストする。
+
+    2026-08-04 に PM 判断で Scout が保留になった（能力不足のため）。保留は運用の判断で
+    あり、突合・重複排除・3ゲート審査・上限といった**機構のテストは保留と独立に
+    維持する**（保留を解いたときに壊れていては意味がない）。
+    保留そのものの挙動は TestSecondOpinionHold で別に固定する。
+    """
+    from ingest import slack as ing_mod
+    monkeypatch.setattr(ing_mod, "second_opinion_hold", lambda: None)
+
+
 def _triage_rows(conn) -> list:
     """triage_second_opinion は record_second_opinion 初回呼び出しまで存在しないため、
     未作成なら空リストを返す。"""
@@ -1322,3 +1335,121 @@ class TestMeetingStemIgnoresLimit:
 
         assert len(rows) == 1
         assert not any("--limit" in m and "超えています" in m for m in logs)
+
+
+class TestSecondOpinionHold:
+    """第2系統（R8 対策）が保留中のときの挙動（2026-08-04、PM 判断）。
+
+    **保留は「対策が無い」状態である。** 黙って 0 件を返して「欠落なし」に見せては
+    いけない、というのがこのクラスで固定したいこと。
+    """
+
+    _HOLD = {"since": "2026-08-04", "decided_by": "PM", "reason": "Scout は役割に耐えず"}
+
+    def _setup(self, minutes_dir, processing_dir):
+        db_path = minutes_dir / "TestKind.db"
+        fp = _write_combined(
+            processing_dir, "2026-07-01-120000", "2026-06-30_Hold",
+            "=== 第1部（00:00:00〜00:30:00）===\n要約テキスト。",
+        )
+        _make_minutes_db(db_path, [{
+            "meeting_id": "2026-07-01-120000-2026-06-30_Hold-minutes",
+            "held_at": "2026-06-30", "file_path": fp, "decisions": [],
+        }])
+
+    def test_reader_second_is_skipped_without_calling_llm(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        self._setup(minutes_dir, processing_dir)
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(ing_mod, "second_opinion_hold", lambda: dict(self._HOLD))
+        import utils.llm as llm_mod
+        calls = []
+        monkeypatch.setattr(llm_mod, "call_rivault",
+                            lambda *a, **k: calls.append(1) or "{}")
+
+        logs, log = _collector()
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, reader="second",
+        )
+        rows = _triage_rows(conn)
+        conn.close()
+
+        assert calls == []          # LLM を呼ばない
+        assert rows == []
+        assert any("保留中" in m for m in logs)
+        # 記録が無い理由が「欠落が無い」ではないことを明示しているか
+        assert any("検査していない" in m for m in logs)
+
+    def test_reader_both_still_runs_k3(
+        self, pm_db_path, minutes_dir, processing_dir, monkeypatch
+    ):
+        """both のときは second だけ外し、K3 の recall チェックは走る。"""
+        self._setup(minutes_dir, processing_dir)
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(ing_mod, "second_opinion_hold", lambda: dict(self._HOLD))
+        import utils.llm as llm_mod
+        rivault_calls, local_calls = [], []
+        monkeypatch.setattr(llm_mod, "call_rivault",
+                            lambda *a, **k: rivault_calls.append(1) or "{}")
+        monkeypatch.setattr(
+            llm_mod, "call_local_llm",
+            lambda *a, **k: local_calls.append(1) or
+            '{"decisions": [{"content": "K3だけが見つけた決定事項"}], "action_items": []}',
+        )
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:9/v1")
+
+        logs, log = _collector()
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        pm_screen.run_second_opinion_minutes(
+            conn, since="2026-01-01", limit=10, dry_run=False,
+            minutes_dir=minutes_dir, processing_dir=processing_dir,
+            no_encrypt=True, log=log, reader="both", gate=False,
+        )
+        rows = [dict(r) for r in conn.execute(
+            "SELECT kind, content_head FROM triage_second_opinion")]
+        conn.close()
+
+        assert rivault_calls == []           # 第2系統は呼ばない
+        assert len(local_calls) >= 1         # K3 は呼ぶ
+        assert [r["kind"] for r in rows] == ["minutes_extraction_recall"]
+
+    def test_chokepoint_raises_rather_than_returning_empty(self, monkeypatch):
+        """呼び出し側が取り逃がしても、空の結果ではなく例外になる（backstop）。"""
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(ing_mod, "second_opinion_hold", lambda: dict(self._HOLD))
+        with pytest.raises(ing_mod.SecondOpinionOnHold):
+            ing_mod._call_second_opinion_extraction("本文", route="rivault")
+
+    def test_k3_route_is_unaffected_by_the_hold(self, monkeypatch):
+        """保留は R8 対策の第2系統だけに掛かる（K3 は品質目的の別系統）。"""
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(ing_mod, "second_opinion_hold", lambda: dict(self._HOLD))
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "call_local_llm",
+                            lambda *a, **k: '{"decisions": [], "action_items": []}')
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:9/v1")
+        parsed, _raw = ing_mod._call_second_opinion_extraction("本文", route="k3")
+        assert parsed == {"decisions": [], "action_items": []}
+
+
+class TestRealConfigDeclaresHold:
+    def test_repository_config_has_the_hold_recorded(self):
+        """実際の config に保留が宣言されていること（2026-08-04 の PM 判断）。
+
+        保留を解くときはこのテストを一緒に落とす（宣言を消せば落ちる）ので、
+        「いつの間にか保留が解けていた／保留のままだった」を防げる。
+        """
+        # autouse の _clear_second_opinion_hold が second_opinion_hold を差し替えて
+        # いるため、ここは yaml を直接読む（実ファイルの内容を検査したいテスト）。
+        from ingest.slack import _load_second_opinion_config
+        hold = (_load_second_opinion_config().get("second_opinion") or {}).get("on_hold")
+        assert hold is not None, "config/sensitive_terms.yaml に on_hold が無い"
+        assert hold.get("since") == "2026-08-04"
+        assert hold.get("decided_by") == "PM"
+        assert (hold.get("reason") or "").strip()

@@ -14,6 +14,19 @@ import pm_box_relevance as pbr
 import pytest
 from db_utils import init_pm_db, open_db
 
+
+@pytest.fixture(autouse=True)
+def _clear_second_opinion_hold(monkeypatch):
+    """第2系統の保留（config/sensitive_terms.yaml の on_hold）を外して機構をテストする。
+
+    2026-08-04 に PM 判断で Scout が保留になった（能力不足のため）。保留は運用の判断で
+    あり、**機構のテストは保留と独立に維持する**（保留を解いたときに壊れていては
+    意味がない）。保留中に Box 経路が LLM を呼ばず WARN を出すことは
+    TestSecondOpinionHoldSkipsBoxPath で固定する。
+    """
+    from ingest import slack as ing_mod
+    monkeypatch.setattr(ing_mod, "second_opinion_hold", lambda: None)
+
 _BOX_DOCS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS box_files (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,3 +251,38 @@ class TestCmdJudgeDoesNotOverwriteRelevance:
         assert so_rows[0]["kind"] == "box_relevance"
         assert so_rows[0]["primary_verdict"] == "noise"
         assert so_rows[0]["second_verdict"] == "core"
+
+
+class TestSecondOpinionHoldSkipsBoxPath:
+    """第2系統が保留中のとき、Box 経路は LLM を呼ばず WARN を出す（2026-08-04）。
+
+    **記録が無いことを「不一致なし」と読ませない**のが要点。保留は「対策が無い」状態で
+    あり、黙って 0 件を返すと noise 判定が誰にも検査されていないことが見えなくなる。
+    """
+
+    def test_hold_skips_llm_and_warns(self, pm_db_path, monkeypatch):
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(
+            ing_mod, "second_opinion_hold",
+            lambda: {"since": "2026-08-04", "decided_by": "PM", "reason": "Scout 能力不足"},
+        )
+        import utils.llm as llm_mod
+        calls = []
+        monkeypatch.setattr(llm_mod, "call_rivault",
+                            lambda *a, **k: calls.append(1) or "core\n本質的")
+
+        row = _make_row("200", content_md="中国製モデルの輸出規制に関するメモ")
+        logs = []
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        dis = pbr.apply_second_opinion_box_relevance(
+            [row], {"200": ("noise", "雑談添付")}, conn_pm=conn,
+            log=lambda m: logs.append(str(m)),
+        )
+        rows = list(conn.execute("SELECT * FROM triage_second_opinion"))
+        conn.close()
+
+        assert calls == []          # LLM を呼ばない
+        assert dis == [] and rows == []
+        assert any("保留中" in m for m in logs)
+        assert any("行いません" in m for m in logs)

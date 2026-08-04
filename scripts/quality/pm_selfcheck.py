@@ -880,6 +880,37 @@ def check_model_pin_drift() -> list[dict]:
     return violations
 
 
+def check_second_opinion_on_hold() -> list[dict]:
+    """第2系統（R8 対策）が保留中であることを毎回報告する。
+
+    **保留は「対策が無い」状態である。** 黙っていると保留が忘れられ、恒久的に欠けた
+    対策になる（今日その型を何度も踏んだ: 実装したが効いていない制御を 8 件見つけた）。
+    毎回出し続けることだけが、保留を「一時的」に保つ手段である。
+
+    **観測であり違反ではない** — 保留は PM の判断であって Argus の不変条件の破れでは
+    ないため exit code に影響させない。保留を解いたら（`config/sensitive_terms.yaml` の
+    `second_opinion.on_hold` を消せば）この報告も自動で止まる。
+    """
+    try:
+        from ingest.slack import second_opinion_hold
+    except Exception as e:
+        print(f"[WARN] second_opinion_on_hold: 読み込みに失敗しました"
+              f"（この検査をスキップします）: {e}", file=sys.stderr)
+        return []
+    hold = second_opinion_hold()
+    if not hold:
+        return []
+    return [{
+        "check": "second_opinion_on_hold",
+        "since": hold.get("since"),
+        "decided_by": hold.get("decided_by"),
+        "note": ("第2系統（R8 対策の独立系統）は保留中です。**この間 R8 対策は存在しません** — "
+                 "主系統（Zhipu / DeepSeek / Alibaba / Moonshot）に対する出自の独立した"
+                 "検査は行われていません。保留の理由と解除条件は "
+                 "config/sensitive_terms.yaml の second_opinion.on_hold にあります"),
+    }]
+
+
 def check_model_pin_unknown_served() -> list[dict]:
     """エンドポイントが配信しているモデルのうち、pin に載っていない id を報告する。
 
@@ -1393,6 +1424,10 @@ def run_checks(
     # 沈黙してしまう）。--no-security-checks では従来どおり一緒にスキップする。
     if security_checks_enabled:
         violations += check_silent_control(pm_conn, silence_days)
+        # 保留の報告はネットワークにも pm.db にも依存しない（yaml を読むだけ）。
+        # **保留を忘れないためだけに存在する**検査なので、他の検査の都合で
+        # 止まらない位置に置く。
+        violations += check_second_opinion_on_hold()
         # egress_dest_unknown も pm.db だけで完結し logs_dir とは無関係
         # （silent_control と同じ扱い）。観測であり違反ではないため main() 側で
         # 常に exit code から除外する。
@@ -1539,10 +1574,13 @@ def main() -> int:
     model_unknown_violations = [
         v for v in violations if v["check"] == "model_pin_unknown_served"
     ]
+    # second_opinion_on_hold も観測（保留は PM の判断であり不変条件の破れではない）。
+    # ただし**毎回出し続ける**ことが目的なので、他の観測と同様に必ず表示する。
+    on_hold_violations = [v for v in violations if v["check"] == "second_opinion_on_hold"]
     hard_violations = [
         v for v in violations
         if v["check"] not in ("silent_control", "egress_dest_unknown",
-                              "model_pin_unknown_served")
+                              "model_pin_unknown_served", "second_opinion_on_hold")
     ]
     exit_violations = hard_violations + (silent_violations if args.silence_strict else [])
 
@@ -1573,6 +1611,12 @@ def main() -> int:
                         f"{len(model_unknown_violations)} 件のモデル未記載観測"
                         "（pin に無いモデルが配信されている。model_pin.yaml へ"
                         "追記して認めること。違反ではない）"
+                    )
+                if on_hold_violations:
+                    extra.append(
+                        "第2系統（R8 対策）は保留中"
+                        f"（since={on_hold_violations[0].get('since')}）。"
+                        "**この間 R8 対策は存在しない**"
                     )
                 if extra:
                     print(

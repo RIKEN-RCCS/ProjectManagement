@@ -8,6 +8,19 @@ import pytest
 from ingest import slack as ing
 
 
+@pytest.fixture(autouse=True)
+def _clear_second_opinion_hold(monkeypatch):
+    """第2系統の保留（config/sensitive_terms.yaml の on_hold）を外して機構をテストする。
+
+    2026-08-04 に PM 判断で Scout が保留になった（能力不足のため）。保留は運用の判断で
+    あり、突合・記録・プロンプト内容といった**機構のテストは保留と独立に維持する**
+    （保留を解いたときに壊れていては意味がない）。保留そのものの挙動は
+    tests/quality/test_pm_screen_second_opinion_minutes.py の TestSecondOpinionHold
+    で固定している。
+    """
+    monkeypatch.setattr(ing, "second_opinion_hold", lambda: None)
+
+
 class TestFlagSensitiveTerms:
     def test_detects_geopolitical_term(self):
         assert "中国" in ing.flag_sensitive_terms("中国製モデルの採用を検討する")
