@@ -230,7 +230,8 @@ class TestCmdJudgeDoesNotOverwriteRelevance:
         import utils.llm as llm_mod
         monkeypatch.setattr(llm_mod, "call_rivault", lambda *a, **k: "core\n本質的な設計資料である")
 
-        args = argparse.Namespace(force=False, index_name=None, dry_run=False, no_encrypt=True)
+        args = argparse.Namespace(force=False, force_human=False, index_name=None,
+                                  dry_run=False, no_encrypt=True, reader="second")
         logger = logging.getLogger("test-pm-box-relevance")
         pbr.cmd_judge(args, logger)
 
@@ -286,3 +287,429 @@ class TestSecondOpinionHoldSkipsBoxPath:
         assert dis == [] and rows == []
         assert any("保留中" in m for m in logs)
         assert any("行いません" in m for m in logs)
+
+
+# --------------------------------------------------------------------------- #
+# --reader k3（recall チェック） / --recheck-noise / relevance_source
+# --------------------------------------------------------------------------- #
+
+
+def _judge_args(**over) -> argparse.Namespace:
+    base = dict(force=False, force_human=False, index_name=None, dry_run=False,
+                no_encrypt=True, reader="second", rejudge_relevance=None)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _recheck_args(**over) -> argparse.Namespace:
+    base = dict(index_name=None, dry_run=False, no_encrypt=True, reader="k3", limit=50)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _setup_box_db(tmp_path, rows: list[tuple[str, str, str]]):
+    """rows: [(box_file_id, name, content_md)] を noise 判定済みで作る。"""
+    box_docs_path = tmp_path / "box_docs.db"
+    conn = open_db(box_docs_path, encrypt=False, schema=_BOX_DOCS_SCHEMA)
+    for fid, name, content in rows:
+        conn.execute(
+            "INSERT INTO box_files (box_file_id, box_folder_id, name, file_format,"
+            " folder_path, index_name, source_name, registered_at, relevance)"
+            " VALUES (?, 'F1', ?, 'pdf', '/tmp', 'pm', 'box', '2026-08-01', 'noise')",
+            (fid, name),
+        )
+        conn.execute(
+            "INSERT INTO doc_content (box_file_id, content_md, extracted_at)"
+            " VALUES (?, ?, '2026-08-01')", (fid, content),
+        )
+    conn.commit()
+    conn.close()
+    return box_docs_path
+
+
+class TestParseBoxVerdict:
+    """先頭行だけを見ると、前置きを書くモデル（K3 等）で判定を取りこぼす。"""
+
+    def test_first_line_verdict(self):
+        assert pbr._parse_box_verdict("core\n設計資料である") == "core"
+
+    def test_verdict_after_preamble(self):
+        raw = "判定は以下の通りです。\nrelated\n参考資料である"
+        assert pbr._parse_box_verdict(raw) == "related"
+
+    def test_no_verdict_falls_back_to_unknown(self):
+        # **noise に寄せない** — 索引から落とす方向の誤りだけが不可視の欠落を作る。
+        assert pbr._parse_box_verdict("判定できませんでした") == "unknown"
+        assert pbr._parse_box_verdict("") == "unknown"
+        assert pbr._parse_box_verdict(None) == "unknown"
+
+
+class TestReaderK3:
+    """k3 は call_local_llm 経由で、kind は box_relevance_recall（R8 とは別集計）。"""
+
+    def _patch_k3(self, monkeypatch, reply: str, calls: list | None = None):
+        monkeypatch.setenv("ARGUS_SKIP_LLM_SECRETS", "1")
+        monkeypatch.setenv("LOCAL_LLM_URL", "http://localhost:9999/v1")
+        import utils.llm as llm_mod
+        monkeypatch.setattr(llm_mod, "load_llm_secrets", lambda: None)
+        monkeypatch.setattr(llm_mod, "_token_for_base", lambda *a, **k: "dummy")
+
+        def fake(*a, **k):
+            if calls is not None:
+                calls.append(k)
+            return reply
+
+        monkeypatch.setattr(llm_mod, "call_local_llm", fake)
+        monkeypatch.setattr(
+            llm_mod, "call_rivault",
+            lambda *a, **k: pytest.fail("k3 経路で call_rivault を呼んではいけない"),
+        )
+
+    def test_k3_route_uses_local_llm_with_large_max_tokens(self, monkeypatch):
+        calls: list = []
+        self._patch_k3(monkeypatch, "core\n設計資料", calls)
+        verdict, raw = pbr.second_opinion_box_verdict("doc", route="k3")
+        assert verdict == "core"
+        # K3 は thinking を無効化できないため、第2系統向けの 256 を流用すると
+        # 本文に到達する前に切れる（全部 unknown に落ちて壊れたことに気づけない）。
+        assert calls[0]["max_tokens"] >= 16384
+
+    def test_k3_kind_is_separate_from_r8(self, pm_db_path, monkeypatch):
+        self._patch_k3(monkeypatch, "core\n設計資料")
+        row = _make_row("400", content_md="中国製モデルの輸出規制に関するメモ")
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        pbr.apply_second_opinion_box_relevance(
+            [row], {"400": ("noise", "雑談")}, conn_pm=conn,
+            log=lambda *_: None, reader="k3",
+        )
+        kinds = [r["kind"] for r in conn.execute("SELECT kind FROM triage_second_opinion")]
+        conn.close()
+        assert kinds == ["box_relevance_recall"]
+
+    def test_hold_does_not_block_k3(self, pm_db_path, monkeypatch):
+        """保留は R8 の第2系統に対する判断。K3 の recall チェックは別物なので止めない。"""
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(
+            ing_mod, "second_opinion_hold",
+            lambda: {"since": "2026-08-04", "decided_by": "PM", "reason": "Scout 能力不足"},
+        )
+        self._patch_k3(monkeypatch, "core\n設計資料")
+        row = _make_row("401", content_md="中国製モデルの輸出規制に関するメモ")
+        conn = sqlite3.connect(str(pm_db_path))
+        conn.row_factory = sqlite3.Row
+        dis = pbr.apply_second_opinion_box_relevance(
+            [row], {"401": ("noise", "雑談")}, conn_pm=conn,
+            log=lambda *_: None, reader="k3",
+        )
+        conn.close()
+        assert len(dis) == 1
+
+    def test_hold_still_blocks_second_route(self, monkeypatch):
+        """route=second は保留中に**空を返さず例外**（検査済みと混同させない）。"""
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(
+            ing_mod, "second_opinion_hold",
+            lambda: {"since": "2026-08-04", "decided_by": "PM", "reason": "x"},
+        )
+        with pytest.raises(pbr.SecondOpinionOnHold):
+            pbr.second_opinion_box_verdict("doc", route="second")
+
+
+class TestRecheckNoise:
+    """既存の noise 判定を掘り返す経路（--judge は「今判定した行」しか見ない）。"""
+
+    def _run(self, tmp_path, monkeypatch, box_path, reply="core\n設計資料である", **over):
+        pm_path = tmp_path / "pm.db"
+        if not pm_path.exists():
+            init_pm_db(pm_path)
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        monkeypatch.setattr(pbr, "PM_DB", pm_path)
+        TestReaderK3()._patch_k3(monkeypatch, reply)
+        pbr.cmd_recheck_noise(_recheck_args(**over), logging.getLogger("t"))
+        return pm_path
+
+    def test_records_disagreement_without_overwriting_relevance(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [("500", "a.pptx", "設計資料の本文")])
+        pm_path = self._run(tmp_path, monkeypatch, box_path)
+
+        box_conn = sqlite3.connect(str(box_path))
+        rel = box_conn.execute(
+            "SELECT relevance FROM box_files WHERE box_file_id='500'"
+        ).fetchone()[0]
+        box_conn.close()
+        assert rel == "noise"  # 読み手の判定で上書きしない
+
+        pm_conn = open_db(pm_path, encrypt=True)
+        rows = [dict(r) for r in pm_conn.execute("SELECT * FROM triage_second_opinion")]
+        pm_conn.close()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "box_relevance_recall"
+        assert rows[0]["second_verdict"] == "core"
+
+    def test_agreement_is_also_recorded(self, tmp_path, monkeypatch):
+        """一致も残さないと「何件中の不一致か」が分からず率として読めない。"""
+        box_path = _setup_box_db(tmp_path, [("501", "b.pptx", "無関係な雑談")])
+        pm_path = self._run(tmp_path, monkeypatch, box_path, reply="noise\n雑談である")
+        pm_conn = open_db(pm_path, encrypt=True)
+        rows = [dict(r) for r in pm_conn.execute("SELECT * FROM triage_second_opinion")]
+        pm_conn.close()
+        assert len(rows) == 1
+        assert rows[0]["second_verdict"] == "noise"
+        assert rows[0]["agreed"] == 1
+
+    def test_no_flag_terms_still_checked(self, tmp_path, monkeypatch):
+        """recall チェックはフラグ語で絞らない（絞ると大多数が検査対象外になる）。"""
+        box_path = _setup_box_db(tmp_path, [("502", "c.pptx", "次回までにベンチマークをまとめる")])
+        pm_path = self._run(tmp_path, monkeypatch, box_path)
+        pm_conn = open_db(pm_path, encrypt=True)
+        n = pm_conn.execute("SELECT COUNT(*) FROM triage_second_opinion").fetchone()[0]
+        pm_conn.close()
+        assert n == 1
+
+    def test_second_run_advances_to_next_items(self, tmp_path, monkeypatch):
+        """同じ先頭 N 件を舐め直すと山の奥に永久に到達しない。"""
+        box_path = _setup_box_db(
+            tmp_path, [("600", "x.pptx", "本文x"), ("601", "y.pptx", "本文y")],
+        )
+        pm_path = self._run(tmp_path, monkeypatch, box_path, limit=1)
+        self._run(tmp_path, monkeypatch, box_path, limit=1)
+
+        pm_conn = open_db(pm_path, encrypt=True)
+        heads = [r[0] for r in pm_conn.execute(
+            "SELECT content_head FROM triage_second_opinion ORDER BY id"
+        )]
+        pm_conn.close()
+        assert len(heads) == 2
+        assert "box_file_id=600" in heads[0]
+        assert "box_file_id=601" in heads[1]   # 2回目は次の行へ進む
+
+    def test_only_noise_rows_are_targeted(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [("700", "z.pptx", "本文z")])
+        conn = sqlite3.connect(str(box_path))
+        conn.execute("UPDATE box_files SET relevance='core' WHERE box_file_id='700'")
+        conn.commit()
+        conn.close()
+        pm_path = self._run(tmp_path, monkeypatch, box_path)
+        pm_conn = open_db(pm_path, encrypt=True)
+        n = pm_conn.execute("SELECT COUNT(*) FROM triage_second_opinion").fetchone()[0]
+        pm_conn.close()
+        assert n == 0
+
+    def test_dry_run_makes_no_llm_call(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [("800", "w.pptx", "本文w")])
+        pm_path = tmp_path / "pm.db"
+        init_pm_db(pm_path)
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        monkeypatch.setattr(pbr, "PM_DB", pm_path)
+        monkeypatch.setenv("ARGUS_SKIP_LLM_SECRETS", "1")
+        import utils.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, "call_local_llm",
+            lambda *a, **k: pytest.fail("--dry-run で LLM を呼んではいけない"),
+        )
+        pbr.cmd_recheck_noise(_recheck_args(dry_run=True), logging.getLogger("t"))
+
+    def test_reader_second_on_hold_aborts_with_message(self, tmp_path, monkeypatch, capsys):
+        from ingest import slack as ing_mod
+        monkeypatch.setattr(
+            ing_mod, "second_opinion_hold",
+            lambda: {"since": "2026-08-04", "decided_by": "PM", "reason": "x"},
+        )
+        box_path = _setup_box_db(tmp_path, [("900", "v.pptx", "本文v")])
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        pbr.cmd_recheck_noise(_recheck_args(reader="second"), logging.getLogger("t"))
+        out = capsys.readouterr().out
+        assert "保留中" in out
+        assert "--reader k3" in out
+
+
+class TestRelevanceSourceProtection:
+    """人手で直した relevance を LLM が黙って上書きしないこと（--force でも）。"""
+
+    def test_import_marks_human(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [("1000", "a.pptx", "本文a")])
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        csv_path = tmp_path / "screen.csv"
+        csv_path.write_text(
+            "box_file_id,final_relevance,name,folder_path\n1000,core,a.pptx,/tmp\n",
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(import_csv=str(csv_path), dry_run=False, no_encrypt=True)
+        pbr.cmd_import(args, logging.getLogger("t"))
+
+        conn = sqlite3.connect(str(box_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT relevance, relevance_source FROM box_files WHERE box_file_id='1000'"
+        ).fetchone()
+        conn.close()
+        assert row["relevance"] == "core"
+        assert row["relevance_source"] == "human"
+
+    def test_force_does_not_rejudge_human_rows(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [("1001", "b.pptx", "本文b")])
+        conn = sqlite3.connect(str(box_path))
+        conn.execute("ALTER TABLE box_files ADD COLUMN relevance_source TEXT")
+        conn.execute(
+            "UPDATE box_files SET relevance='core', relevance_source='human'"
+            " WHERE box_file_id='1001'"
+        )
+        conn.commit()
+        conn.close()
+
+        pm_path = tmp_path / "pm.db"
+        init_pm_db(pm_path)
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        monkeypatch.setattr(pbr, "PM_DB", pm_path)
+        monkeypatch.setattr(
+            pbr, "judge_batch",
+            lambda rows, logger: pytest.fail("人手修正行を再判定してはいけない"),
+        )
+        pbr.cmd_judge(_judge_args(force=True), logging.getLogger("t"))
+
+        conn = sqlite3.connect(str(box_path))
+        rel = conn.execute(
+            "SELECT relevance FROM box_files WHERE box_file_id='1001'"
+        ).fetchone()[0]
+        conn.close()
+        assert rel == "core"
+
+    def test_force_human_overrides_protection(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [("1002", "c.pptx", "本文c")])
+        conn = sqlite3.connect(str(box_path))
+        conn.execute("ALTER TABLE box_files ADD COLUMN relevance_source TEXT")
+        conn.execute(
+            "UPDATE box_files SET relevance='core', relevance_source='human'"
+            " WHERE box_file_id='1002'"
+        )
+        conn.commit()
+        conn.close()
+
+        pm_path = tmp_path / "pm.db"
+        init_pm_db(pm_path)
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        monkeypatch.setattr(pbr, "PM_DB", pm_path)
+        monkeypatch.setattr(pbr, "judge_batch", lambda rows, logger: {"1002": ("noise", "雑談")})
+        pbr.cmd_judge(_judge_args(force=True, force_human=True), logging.getLogger("t"))
+
+        conn = sqlite3.connect(str(box_path))
+        row = conn.execute(
+            "SELECT relevance, relevance_source FROM box_files WHERE box_file_id='1002'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "noise"
+        assert row[1] == "llm"
+
+    def test_judge_marks_llm(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [("1003", "d.pptx", "本文d")])
+        conn = sqlite3.connect(str(box_path))
+        conn.execute("UPDATE box_files SET relevance=NULL WHERE box_file_id='1003'")
+        conn.commit()
+        conn.close()
+
+        pm_path = tmp_path / "pm.db"
+        init_pm_db(pm_path)
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        monkeypatch.setattr(pbr, "PM_DB", pm_path)
+        monkeypatch.setattr(pbr, "judge_batch", lambda rows, logger: {"1003": ("core", "設計資料")})
+        pbr.cmd_judge(_judge_args(), logging.getLogger("t"))
+
+        conn = sqlite3.connect(str(box_path))
+        row = conn.execute(
+            "SELECT relevance, relevance_source FROM box_files WHERE box_file_id='1003'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "core"
+        assert row[1] == "llm"
+
+    def test_existing_null_rows_are_not_treated_as_human(self, tmp_path, monkeypatch):
+        """由来不明（NULL）を 'human' に丸めない — 保護対象を広げすぎると再判定が回らない。"""
+        box_path = _setup_box_db(tmp_path, [("1004", "e.pptx", "本文e")])
+        pm_path = tmp_path / "pm.db"
+        init_pm_db(pm_path)
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        monkeypatch.setattr(pbr, "PM_DB", pm_path)
+        seen: list = []
+        monkeypatch.setattr(
+            pbr, "judge_batch",
+            lambda rows, logger: seen.append([r["box_file_id"] for r in rows]) or {},
+        )
+        pbr.cmd_judge(_judge_args(force=True), logging.getLogger("t"))
+        assert seen and "1004" in seen[0]
+
+
+class TestRejudgeRelevance:
+    """--rejudge-relevance: 実行単位の事故から、健全な判定を巻き込まずに復旧する。"""
+
+    def _setup(self, tmp_path, monkeypatch):
+        box_path = _setup_box_db(tmp_path, [
+            ("2000", "bad1.pptx", "本文1"),
+            ("2001", "bad2.pptx", "本文2"),
+            ("2002", "ok.pptx", "本文3"),
+        ])
+        conn = sqlite3.connect(str(box_path))
+        conn.execute("UPDATE box_files SET relevance='core' WHERE box_file_id='2002'")
+        conn.commit()
+        conn.close()
+        pm_path = tmp_path / "pm.db"
+        init_pm_db(pm_path)
+        monkeypatch.setattr(pbr, "BOX_DOCS_DB", box_path)
+        monkeypatch.setattr(pbr, "PM_DB", pm_path)
+        return box_path
+
+    def test_targets_only_the_given_relevance(self, tmp_path, monkeypatch):
+        box_path = self._setup(tmp_path, monkeypatch)
+        seen: list = []
+
+        def fake_judge(rows, logger):
+            seen.extend(r["box_file_id"] for r in rows)
+            return {r["box_file_id"]: ("core", "設計資料") for r in rows}
+
+        monkeypatch.setattr(pbr, "judge_batch", fake_judge)
+        pbr.cmd_judge(_judge_args(rejudge_relevance="noise"), logging.getLogger("t"))
+
+        assert sorted(seen) == ["2000", "2001"]   # core の行は触らない
+
+        conn = sqlite3.connect(str(box_path))
+        conn.row_factory = sqlite3.Row
+        rows = {r["box_file_id"]: (r["relevance"], r["relevance_source"])
+                for r in conn.execute(
+                    "SELECT box_file_id, relevance, relevance_source FROM box_files")}
+        conn.close()
+        assert rows["2000"] == ("core", "llm")
+        assert rows["2001"] == ("core", "llm")
+        assert rows["2002"] == ("core", None)     # 元から core、再判定されていない
+
+    def test_human_rows_still_protected(self, tmp_path, monkeypatch):
+        """事故からの復旧でも、人手で直した行は巻き込まない。"""
+        box_path = self._setup(tmp_path, monkeypatch)
+        conn = sqlite3.connect(str(box_path))
+        conn.execute("ALTER TABLE box_files ADD COLUMN relevance_source TEXT")
+        conn.execute("UPDATE box_files SET relevance_source='human' WHERE box_file_id='2000'")
+        conn.commit()
+        conn.close()
+
+        seen: list = []
+        monkeypatch.setattr(
+            pbr, "judge_batch",
+            lambda rows, logger: seen.extend(r["box_file_id"] for r in rows) or {},
+        )
+        pbr.cmd_judge(_judge_args(rejudge_relevance="noise"), logging.getLogger("t"))
+        assert seen == ["2001"]
+
+    def test_absent_option_keeps_unjudged_only_behaviour(self, tmp_path, monkeypatch):
+        """既定（オプション無し）は従来どおり未判定のみ。"""
+        box_path = self._setup(tmp_path, monkeypatch)
+        conn = sqlite3.connect(str(box_path))
+        conn.execute("UPDATE box_files SET relevance=NULL WHERE box_file_id='2001'")
+        conn.commit()
+        conn.close()
+
+        seen: list = []
+        monkeypatch.setattr(
+            pbr, "judge_batch",
+            lambda rows, logger: seen.extend(r["box_file_id"] for r in rows) or {},
+        )
+        pbr.cmd_judge(_judge_args(), logging.getLogger("t"))
+        assert seen == ["2001"]

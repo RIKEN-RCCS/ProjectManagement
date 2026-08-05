@@ -785,28 +785,83 @@ python3 scripts/pm_box_relevance.py --judge
 python3 scripts/pm_box_relevance.py --judge --force
 python3 scripts/pm_box_relevance.py --judge --index-name pm
 
+# 既存の noise 判定を読み手に再審査させる（relevance は上書きしない）
+python3 scripts/pm_box_relevance.py --recheck-noise --reader k3 --limit 50
+python3 scripts/pm_box_relevance.py --recheck-noise --reader k3 --dry-run
+
 # CSV にエクスポート（noise を先頭に並べ、人手で final_relevance を上書き可能）
 python3 scripts/pm_box_relevance.py --export --output screen.csv
 
-# 精査後のCSVをDBに反映
+# 精査後のCSVをDBに反映（この経路の更新は relevance_source='human' になる）
 python3 scripts/pm_box_relevance.py --import screen.csv
 
-# relevance分布の集計
+# relevance分布の集計（判定の由来 human/llm/由来不明 も表示）
 python3 scripts/pm_box_relevance.py --stats
 ```
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--judge` | — | 未判定 (`relevance` が空) のファイルをLLM判定 |
+| `--recheck-noise` | — | 既存の `noise` 判定を読み手に再審査させ、結果を `pm.db.triage_second_opinion` に記録する（`relevance` は**上書きしない**）|
 | `--export` | — | CSV にエクスポート（`noise` 優先表示） |
-| `--import PATH` | — | CSV をインポートして `relevance` を上書き |
+| `--import PATH` | — | CSV をインポートして `relevance` を上書き（`relevance_source='human'`）|
 | `--stats` | — | relevance 分布を集計表示 |
 | `--index-name NAME` | 全インデックス | 特定インデックスのみ |
-| `--force` | — | `--judge` で判定済みも再判定 |
+| `--force` | — | `--judge` で判定済みも再判定（**人手修正行は除く**）|
+| `--rejudge-relevance VALUE` | — | 現在この判定値の行**だけ**を再判定する（`--judge`）。実行単位の事故からの復旧用で、健全な判定を巻き込まない。人手修正行は除く |
+| `--force-human` | — | `--judge --force` で人手修正 (`relevance_source='human'`) も上書きする |
+| `--reader {second,k3,both}` | `second` | 読み手。`second`=R8対策の第2系統（現在保留中）、`k3`=Kimi-K3 の recall チェック |
+| `--limit N` | `50` | `--recheck-noise` の1回あたり対象件数 |
 | `--output PATH` | `docs_screen.csv` | `--export` の出力先 |
 | `--dry-run` / `--no-encrypt` | — | 共通 |
 
 **FTS5 連携**: `pm_embed.py` は `box_files.relevance = 'noise'` のファイルを索引対象から除外する（`COALESCE(bf.relevance, '') != 'noise'`）。NULL/空文字のファイル（未判定）は索引対象に含まれる。
+
+##### noise 判定の再審査（`--recheck-noise`）
+
+**誤りの非対称性**: `core`/`related` の誤りは検索すればいずれ気づくが、`noise` は索引から
+落とすため二度と検索結果に出てこない。「出なかったこと」には気づけないので、**noise の
+誤判定だけが永久に不可視の欠落を作る**。再審査を noise に限定しているのはこのため。
+
+`--judge` に同梱された差分検査は「今まさに判定した行」しか見ないため、既に `noise` で
+確定している山は何度 `--judge` を回しても再審査されない。`--recheck-noise` がその掘り返し用の入口。
+
+- `relevance` は**書き換えない**。記録先は `pm.db.triage_second_opinion`（Console の「所見」タブで読める）。戻す場合は `--export` → 編集 → `--import`
+- **一致・不一致の両方を記録する** — 不一致だけ残すと「何件中の不一致か」が分からず率として読めない
+- 記録済みの `box_file_id` は次回スキップするので、同じコマンドを繰り返せば山の続きから進む
+- R8 の第2系統（`--reader second`）と違い、フラグ語で対象を絞らない。狙いが違う（R8 =「特定の話題が狙って落とされていないか」、recall =「読み落としで落ちていないか」）
+
+**`--reader k3` は R8 対策ではない。** Kimi-K3（Moonshot）は主系統の GLM/DeepSeek/Qwen と
+同じ供給元クラスタの内側にあり、出自の独立性は得られない。使うのは K3 の読解・網羅（recall）の
+高さだけで、第2系統の代わりにはならない。
+
+##### Argus Console「Box文書」タブ（推奨経路）
+
+2,000 件規模を CSV で往復するのは実用に耐えないため、Console に編集画面を用意した
+（`#boxdocs`）。CLI の `--export`/`--import` は残してあるが、通常はこちらを使う。
+
+- 既定で **noise を先に表示**する（落とした山を先に見るため）
+- `relevance` はセル編集、複数行選択して **一括で core/related/noise** に変更できる
+- **読み手(K3) 列** — `--recheck-noise` の結果を突き合わせて表示。「主系統が noise・
+  読み手が core/related」の行は強調表示する（見るべき順序の提示）
+- **本文字数** 列 — 極端に短い行は本文抽出の失敗で「情報不足」→ noise に倒れている
+  可能性がある。relevance の誤りか抽出の誤りかを見分ける手掛かり
+- 保存した行は `relevance_source='human'` になる（CLI と同じ規約）
+- **値が変わった行だけ**を書く。画面を開いて何も触らず保存しても全件が human に
+  ならない（そうなると LLM の再判定対象から永久に外れてしまう）
+- **索引への反映は次回の Embed 実行時**（毎晩 02:00 の Box 更新、または Ingest タブの Embed）。
+  `pm_embed.py` の box 索引は差分ではなく毎回 `relevance != 'noise'` を取り直す全面
+  再構築なので、relevance を直せば自動的に検索へ復帰する
+
+##### 人手修正の保護（`relevance_source`）
+
+`--import` で入った判定は `relevance_source='human'` を立て、`--judge --force` の再判定対象から
+外す。**人間の最終判断を LLM が黙って上書きしない**ための列（議事録側の human_kept と同じ原則）。
+上書きするには `--force-human` の明示が要る。
+
+既存行は `NULL`（由来不明）のまま残し、`'llm'` とはみなさない。実際には CSV 経由で人が直した行が
+混じっている可能性があり、遡って区別する手段がないため。**由来不明の行は保護されない**
+（`--stats` の「判定の由来」で件数を確認できる）。
 
 #### ステップD: 一括実行シェル（pm_box_update.sh）
 
@@ -873,7 +928,7 @@ sources:
 
 詳細は `docs/schema.md` の「data/box_docs.db」セクションを参照。要点:
 
-- `box_files`: メタデータ（`box_file_id` UNIQUE、`folder_path`・`index_name`・`source_name` 等）+ `pm_box_relevance.py` が埋める `relevance` / `relevance_reason` / `relevance_judged_at`
+- `box_files`: メタデータ（`box_file_id` UNIQUE、`folder_path`・`index_name`・`source_name` 等）+ `pm_box_relevance.py` が埋める `relevance` / `relevance_reason` / `relevance_judged_at` / `relevance_source`（`human`=人手修正・`llm`=LLM判定・NULL=由来不明）
 - `doc_content`: 本文 Markdown（`box_file_id` UNIQUE、`content_md`・`content_hash`・`convert_method` 等）
 - `box_files` と `doc_content` は `box_file_id` で 1:1。`--remove` 時は両テーブルから削除される
 
