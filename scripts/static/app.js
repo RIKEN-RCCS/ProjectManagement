@@ -6,6 +6,7 @@ let aiGrid = null;
 let decGrid = null;
 let achGrid = null;
 let opinionGrid = null;
+let boxDocsGrid = null;
 let filesGrid = null;
 let _filesLoaded = false;
 let milestones = {};
@@ -567,7 +568,8 @@ const opinionKindLabels = {
   minutes_extraction_recall: 'recallチェック (Kimi-K3)',
   action_items_extraction: 'Slack抽出 (アクション)',
   decisions_extraction: 'Slack抽出 (決定)',
-  box_relevance: 'Box noise判定',
+  box_relevance: 'Box noise判定 (R8対策)',
+  box_relevance_recall: 'Box recallチェック (Kimi-K3)',
 };
 
 const opinionKindColors = {
@@ -576,6 +578,7 @@ const opinionKindColors = {
   action_items_extraction: 'bg-green-800 text-green-100',
   decisions_extraction: 'bg-teal-800 text-teal-100',
   box_relevance: 'bg-orange-800 text-orange-100',
+  box_relevance_recall: 'bg-amber-800 text-amber-100',
 };
 
 function opinionKindRenderer(params) {
@@ -641,6 +644,130 @@ async function markSecondOpinionReviewed() {
   const res = await api('POST', '/second-opinion/mark-reviewed', { ids });
   toast(`${res.updated} 件をレビュー済みにしました`, 'positive');
   await loadSecondOpinion();
+}
+
+// ----------------------------------------------------------------
+// Box Documents — relevance（索引に残すか）の編集
+// ----------------------------------------------------------------
+// noise にした文書は pm_embed.py が索引から外すため二度と検索に出てこない。
+// **落とした側の誤りは観測できない**（出なかったことには気づけない）ので、
+// この画面は noise 既定表示で、まず「落とした山」を人が見るための入口になっている。
+const BOX_RELEVANCE_COLORS = {
+  core: 'bg-green-800 text-green-100',
+  related: 'bg-blue-800 text-blue-100',
+  noise: 'bg-red-900 text-red-200',
+  unknown: 'bg-gray-700 text-gray-200',
+};
+
+function boxRelevanceRenderer(params) {
+  const v = params.value || '(未判定)';
+  const cls = BOX_RELEVANCE_COLORS[v] || 'bg-gray-700 text-gray-300';
+  return `<span class="rounded px-1.5 py-0.5 text-xs ${cls}">${escapeHtml(v)}</span>`;
+}
+
+function boxRecallRenderer(params) {
+  const v = params.value || '';
+  if (!v) return '<span class="text-gray-600 text-xs">—</span>';
+  // 主系統が noise・読み手が core/related の行は目立たせる（見るべき順序の提示）
+  const disagrees = params.data && params.data.recall_disagrees;
+  const cls = disagrees ? 'bg-amber-700 text-amber-50 font-bold' : 'bg-gray-700 text-gray-300';
+  return `<span class="rounded px-1.5 py-0.5 text-xs ${cls}">${escapeHtml(v)}</span>`;
+}
+
+function boxNameRenderer(params) {
+  const name = params.value || '';
+  const url = params.data && params.data.box_url;
+  if (!url) return escapeHtml(name);
+  return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener"
+    class="text-blue-400 hover:underline">${escapeHtml(name)}</a>`;
+}
+
+const boxDocsColumnDefs = [
+  { field: 'box_file_id', headerName: 'ID', width: 130, editable: false, pinned: 'left',
+    checkboxSelection: true, headerCheckboxSelection: true },
+  { field: 'relevance', headerName: 'relevance', width: 120, pinned: 'left',
+    editable: true, cellRenderer: boxRelevanceRenderer,
+    cellEditor: 'agSelectCellEditor',
+    cellEditorParams: { values: ['core', 'related', 'noise', 'unknown'] } },
+  { field: 'recall_verdict', headerName: '読み手(K3)', width: 110, editable: false,
+    cellRenderer: boxRecallRenderer,
+    headerTooltip: '--recheck-noise で Kimi-K3 が再審査した結果。主系統が noise・読み手が core/related の行は強調表示' },
+  { field: 'relevance_source', headerName: '由来', width: 90, editable: false,
+    headerTooltip: 'human=人手修正（LLM の再判定から外れる） / llm=LLM判定 / 空=由来不明（保護されない）' },
+  { field: 'name', headerName: 'ファイル名', width: 360, editable: false,
+    cellRenderer: boxNameRenderer, tooltipField: 'name' },
+  { field: 'folder_path', headerName: 'フォルダ', width: 260, editable: false,
+    tooltipField: 'folder_path' },
+  { field: 'relevance_reason', headerName: '判定理由', width: 320, editable: false,
+    wrapText: true, autoHeight: true, tooltipField: 'relevance_reason' },
+  { field: 'content_chars', headerName: '本文字数', width: 100, editable: false,
+    headerTooltip: '抽出できた本文の長さ。極端に短い行は「情報不足」で noise に倒れている可能性がある' },
+  { field: 'file_format', headerName: '形式', width: 80, editable: false },
+  { field: 'modified_at', headerName: '更新日', width: 110, editable: false, cellDataType: 'text' },
+  { field: 'relevance_judged_at', headerName: '判定日時', width: 150, editable: false, cellDataType: 'text' },
+  { field: 'index_name', headerName: 'index', width: 140, editable: false },
+  { field: 'recall_disagrees', hide: true },
+  { field: 'box_url', hide: true },
+];
+
+function initBoxDocsGrid() {
+  const el = document.getElementById('grid-boxdocs');
+  boxDocsGrid = agGrid.createGrid(el, {
+    columnDefs: boxDocsColumnDefs,
+    defaultColDef: {
+      editable: false, resizable: true, sortable: true, filter: true,
+      wrapText: true, autoHeight: true,
+    },
+    domLayout: 'autoHeight',
+    rowData: [],
+    rowSelection: 'multiple',
+    suppressRowClickSelection: true,
+    stopEditingWhenCellsLoseFocus: true,
+    singleClickEdit: true,
+  });
+}
+
+async function loadBoxDocs() {
+  const qs = new URLSearchParams({
+    relevance: document.getElementById('f-box-relevance').value,
+    source: document.getElementById('f-box-source').value,
+    index_name: document.getElementById('f-box-index').value,
+    q: document.getElementById('f-box-q').value,
+    recall_only: document.getElementById('f-box-recall').checked,
+  });
+  const data = await api('GET', '/box-documents?' + qs);
+  if (!data || data.error) { toast(data && data.error ? data.error : '取得に失敗しました', 'negative'); return; }
+  boxDocsGrid.setGridOption('rowData', data.rows);
+  const n = data.rows.length;
+  const flagged = data.rows.filter(r => r.recall_disagrees).length;
+  document.getElementById('boxdocs-count').textContent =
+    `${n} 件` + (flagged ? `（うち読み手が noise を覆したもの ${flagged} 件）` : '');
+}
+
+async function saveBoxDocs() {
+  boxDocsGrid.stopEditing();
+  const rows = [];
+  boxDocsGrid.forEachNode(node => rows.push({
+    box_file_id: node.data.box_file_id, relevance: node.data.relevance,
+  }));
+  const res = await api('POST', '/box-documents/save', { rows });
+  if (res.error) { toast(res.error, 'negative'); return; }
+  if (res.updated > 0) {
+    toast(`${res.updated} 件を更新しました（索引への反映は次回の Embed 実行時）`, 'positive');
+  } else {
+    toast('変更はありませんでした', 'info');
+  }
+  if (res.invalid && res.invalid.length > 0) {
+    toast(`不正な relevance 値のため保存しなかった行が ${res.invalid.length} 件あります`, 'warning');
+  }
+  await loadBoxDocs();
+}
+
+function bulkSetBoxRelevance(value) {
+  const selected = boxDocsGrid.getSelectedNodes();
+  if (selected.length === 0) { toast('行を選択してください', 'info'); return; }
+  selected.forEach(node => node.setDataValue('relevance', value));
+  toast(`選択 ${selected.length} 件を ${value} にしました（保存で確定）`, 'info');
 }
 
 // ----------------------------------------------------------------
@@ -934,17 +1061,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   initDecGrid();
   initAchGrid();
   initOpinionGrid();
+  initBoxDocsGrid();
   initFilesGrid();
   initFilesChannelFilter();
   _updateSourceFilterButtonLabel('ai');
   _updateSourceFilterButtonLabel('dec');
   // 初期化後に admin.js のルーターが起動。editor ページの場合はここでデータ読み込み
   const initHash = location.hash.replace('#', '') || 'dashboard';
-  if (initHash === 'ai' || initHash === 'dec' || initHash === 'ach' || initHash === 'opinion' || initHash === 'files') {
+  if (initHash === 'ai' || initHash === 'dec' || initHash === 'ach' || initHash === 'opinion'
+      || initHash === 'boxdocs' || initHash === 'files') {
     await loadActionItems();
     await loadDecisions();
     await loadAchievements();
     await loadSecondOpinion();
+    await loadBoxDocs();
     _filesLoaded = true;
     loadFiles();
   }

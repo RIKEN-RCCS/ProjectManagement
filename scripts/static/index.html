@@ -49,6 +49,9 @@
     <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="opinion">
       <span class="text-lg mr-1">🔎</span> 所見
     </button>
+    <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="boxdocs">
+      <span class="text-lg mr-1">🗂️</span> Box文書
+    </button>
     <button class="admin-nav-btn px-4 py-2 font-medium text-sm text-gray-400" data-page="minutes">
       <span class="text-lg mr-1">📄</span> Minutes
     </button>
@@ -235,6 +238,66 @@
     </div>
 
     <div id="grid-opinion" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
+  </div>
+
+  <!-- Box Documents (relevance 編集) Panel -->
+  <div id="panel-boxdocs" class="tab-panel flex-col flex-1 min-h-0 p-2 gap-1 overflow-y-auto hidden">
+    <div class="bg-orange-900/40 border border-orange-600 text-orange-200 text-xs rounded px-3 py-2 flex-none">
+      <strong>relevance は「検索インデックスに残すか」を決める。</strong>
+      <strong>noise にした文書は索引から外れ、二度と検索に出てこない。</strong>
+      core/related の誤りは検索すればいずれ気づくが、noise の誤りは「出なかったこと」に
+      気づけないため<strong>永久に不可視の欠落</strong>になる。迷ったら noise にしないこと。
+      ここでの変更は <code>relevance_source=human</code> になり、<strong>LLM の再判定
+      （<code>--judge --force</code>）から外れる</strong>。
+      索引への反映は次回の <strong>Embed 実行（毎晩 02:00 の Box 更新、または Ingest タブの Embed）</strong>。
+    </div>
+
+    <div class="flex items-end gap-3 flex-none flex-wrap">
+      <label class="flex flex-col text-xs text-gray-400">
+        relevance
+        <select id="f-box-relevance" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-36 text-gray-200">
+          <option value="">すべて</option>
+          <option value="noise" selected>noise</option>
+          <option value="core">core</option>
+          <option value="related">related</option>
+          <option value="unknown">unknown</option>
+          <option value="(未判定)">(未判定)</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-400">
+        判定の由来
+        <select id="f-box-source" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-36 text-gray-200">
+          <option value="">すべて</option>
+          <option value="human">human（人手）</option>
+          <option value="llm">llm</option>
+          <option value="(由来不明)">(由来不明)</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-gray-400">
+        index_name
+        <input id="f-box-index" type="text" placeholder="例: pm" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-28 text-gray-200">
+      </label>
+      <label class="flex flex-col text-xs text-gray-400">
+        ファイル名・フォルダ（部分一致）
+        <input id="f-box-q" type="text" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm w-64 text-gray-200">
+      </label>
+      <label class="flex items-center gap-1 text-xs text-gray-400 pb-1" title="読み手（Kimi-K3）が再審査した行だけを表示する。--recheck-noise を実行した分だけ存在する">
+        <input id="f-box-recall" type="checkbox" class="rounded">
+        読み手が再審査した行のみ
+      </label>
+      <button onclick="loadBoxDocs()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">検索</button>
+    </div>
+
+    <div class="flex items-center gap-2 flex-none flex-wrap">
+      <button onclick="saveBoxDocs()" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-1 text-sm font-medium">保存</button>
+      <button onclick="bulkSetBoxRelevance('core')" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">選択行を core に</button>
+      <button onclick="bulkSetBoxRelevance('related')" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">選択行を related に</button>
+      <button onclick="bulkSetBoxRelevance('noise')" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">選択行を noise に</button>
+      <button onclick="loadBoxDocs()" class="bg-gray-600 hover:bg-gray-500 text-white rounded px-3 py-1 text-sm">再読み込み</button>
+      <span id="boxdocs-count" class="text-xs text-gray-400"></span>
+    </div>
+
+    <div id="grid-boxdocs" class="ag-theme-quartz-dark flex-1 min-h-0"></div>
   </div>
 
   <!-- Files Panel -->

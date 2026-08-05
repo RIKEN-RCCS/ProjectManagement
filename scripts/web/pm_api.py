@@ -497,6 +497,158 @@ def mark_second_opinion_reviewed_endpoint(req: MarkSecondOpinionReviewedRequest)
     return {"updated": n}
 
 
+# --- Box relevance（索引に残す/落とす）endpoints --- #
+#
+# `box_files.relevance` は「検索インデックスに残すか」を決める。noise にした文書は
+# `pm_embed.py` が索引から外すため**二度と検索に出てこない**。core/related の誤りは
+# 検索すればいずれ気づくが、noise の誤りは「出なかったこと」に気づけないので
+# **永久に不可視の欠落**になる。CSV 往復（--export/--import）しか修正経路が無く、
+# 2,000 件規模を人が見るには実用に耐えなかったため画面を足した。
+#
+# 画面からの更新は `relevance_source='human'` を立てる。`--judge --force` の再判定から
+# 外れ、人間の最終判断を LLM が黙って上書きしない（CLI 側と同じ規約）。
+
+_BOX_DOCS_DB = Path(__file__).resolve().parent.parent.parent / "data" / "box_docs.db"
+_VALID_RELEVANCE = ("core", "related", "noise", "unknown")
+
+
+class SaveBoxRelevanceRequest(BaseModel):
+    rows: list[dict]
+
+
+def _open_box_docs_db():
+    return open_db(_BOX_DOCS_DB, encrypt=not _state["no_encrypt"])
+
+
+def _recall_verdicts() -> dict[str, str]:
+    """pm.db の box_relevance_recall 所見から {box_file_id: 読み手の判定}。
+
+    別 DB（pm.db / box_docs.db）にまたがるため SQL の JOIN ではなく辞書で合流する。
+    「主系統が noise、読み手は core」の行を画面で先に見せるための材料。
+    """
+    import re as _re2
+    out: dict[str, str] = {}
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT content_head, second_verdict FROM triage_second_opinion"
+            " WHERE kind='box_relevance_recall' ORDER BY id"
+        ).fetchall()
+    except Exception:
+        return out          # 台帳が無い/読めないのは異常ではない（未実行なら空）
+    for r in rows:
+        m = _re2.search(r"box_file_id=(\d+)", r["content_head"] or "")
+        if m:
+            out[m.group(1)] = r["second_verdict"] or ""
+    return out
+
+
+@app.get("/api/box-documents")
+def get_box_documents(
+    relevance: str = Query(""),
+    source: str = Query(""),
+    index_name: str = Query(""),
+    q: str = Query(""),
+    recall_only: bool = Query(False),
+    limit: int = Query(2000),
+):
+    if not _BOX_DOCS_DB.exists():
+        return JSONResponse({"error": f"box_docs.db がありません: {_BOX_DOCS_DB}"},
+                            status_code=404)
+    conn = _open_box_docs_db()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(box_files)")}
+        src_col = ("relevance_source" if "relevance_source" in cols else "NULL") \
+            + " AS relevance_source"
+        where, params = [], []
+        if relevance == "(未判定)":
+            where.append("COALESCE(bf.relevance,'') = ''")
+        elif relevance:
+            where.append("bf.relevance = ?")
+            params.append(relevance)
+        if source == "(由来不明)" and "relevance_source" in cols:
+            where.append("COALESCE(bf.relevance_source,'') = ''")
+        elif source and "relevance_source" in cols:
+            where.append("bf.relevance_source = ?")
+            params.append(source)
+        if index_name:
+            where.append("bf.index_name LIKE ?")
+            params.append(f'%"{index_name}"%')
+        if q:
+            where.append("(bf.name LIKE ? OR COALESCE(bf.folder_path,'') LIKE ?)")
+            params += [f"%{q}%", f"%{q}%"]
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = conn.execute(
+            "SELECT bf.box_file_id, bf.name, bf.folder_path, bf.file_format,"
+            " bf.modified_at, bf.index_name, bf.source_name, bf.relevance,"
+            " bf.relevance_reason, bf.relevance_judged_at, " + src_col +
+            ", LENGTH(COALESCE(dc.content_md,'')) AS content_chars"
+            " FROM box_files bf LEFT JOIN doc_content dc"
+            " ON bf.box_file_id = dc.box_file_id"
+            + where_sql +
+            " ORDER BY bf.relevance, bf.name LIMIT ?", (*params, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    recall = _recall_verdicts()
+    out = []
+    for r in rows:
+        fid = str(r["box_file_id"])
+        rec = recall.get(fid, "")
+        if recall_only and not rec:
+            continue
+        d = dict(r)
+        d["box_file_id"] = fid
+        d["recall_verdict"] = rec
+        # 「主系統が落としたが読み手は残すと言った」— 画面で最優先に見るべき行
+        d["recall_disagrees"] = bool(rec and rec in ("core", "related")
+                                     and (r["relevance"] or "") == "noise")
+        d["box_url"] = f"https://app.box.com/file/{fid}"
+        out.append(d)
+    return {"rows": out, "total": len(out)}
+
+
+@app.post("/api/box-documents/save")
+def save_box_documents(req: SaveBoxRelevanceRequest):
+    """画面で編集された relevance を保存する（`relevance_source='human'`）。
+
+    **値が変わった行だけ**を書く。全行 UPDATE にすると、画面を開いて何も触らずに
+    保存しただけで全件が human 扱いになり、LLM の再判定対象から永久に外れてしまう。
+    """
+    if not _BOX_DOCS_DB.exists():
+        return JSONResponse({"error": "box_docs.db がありません"}, status_code=404)
+    conn = _open_box_docs_db()
+    updated, invalid = 0, []
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(box_files)")}
+        if "relevance_source" not in cols:
+            conn.execute("ALTER TABLE box_files ADD COLUMN relevance_source TEXT")
+        now = datetime.now().isoformat()
+        for row in req.rows:
+            fid = str(row.get("box_file_id") or "").strip()
+            rel = (row.get("relevance") or "").strip().lower()
+            if not fid:
+                continue
+            if rel not in _VALID_RELEVANCE:
+                invalid.append({"box_file_id": fid, "relevance": row.get("relevance")})
+                continue
+            cur = conn.execute(
+                "SELECT relevance FROM box_files WHERE box_file_id=?", (fid,)
+            ).fetchone()
+            if cur is None or (cur["relevance"] or "") == rel:
+                continue
+            conn.execute(
+                "UPDATE box_files SET relevance=?, relevance_judged_at=?,"
+                " relevance_source='human' WHERE box_file_id=?", (rel, now, fid),
+            )
+            updated += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return {"updated": updated, "invalid": invalid}
+
+
 # --- Minutes endpoint --- #
 
 @app.get("/api/minutes")

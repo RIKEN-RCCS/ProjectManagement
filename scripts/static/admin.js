@@ -48,18 +48,25 @@ function navigateTo(page) {
     }
   });
 
-  const isEditorPage = page === 'ai' || page === 'dec' || page === 'ach' || page === 'opinion' || page === 'files';
+  const isEditorPage = page === 'ai' || page === 'dec' || page === 'ach' || page === 'opinion' || page === 'boxdocs' || page === 'files';
 
   if (isEditorPage) {
     const panel = document.getElementById('panel-' + page);
     panel.classList.remove('hidden');
     panel.classList.add('flex');
+    // Box文書は初回表示時に自動で読み込む（2,000 件規模を「検索」ボタン待ちに
+    // すると、空のグリッドを見て「データが無い」と誤読されるため）。
+    if (page === 'boxdocs' && !window._boxDocsLoaded && typeof loadBoxDocs === 'function') {
+      window._boxDocsLoaded = true;
+      loadBoxDocs().catch(() => { window._boxDocsLoaded = false; });
+    }
     // Trigger grid resize (delay for layout settle)
     setTimeout(() => {
       const grid = page === 'ai' ? window.aiGrid
         : (page === 'dec' ? window.decGrid
         : (page === 'ach' ? window.achGrid
-        : (page === 'opinion' ? window.opinionGrid : window.filesGrid)));
+        : (page === 'opinion' ? window.opinionGrid
+        : (page === 'boxdocs' ? window.boxDocsGrid : window.filesGrid))));
       if (grid) grid.sizeColumnsToFit();
     }, 50);
   } else {
@@ -93,7 +100,8 @@ function handleHashChange() {
   const hash = location.hash.replace('#', '') || 'dashboard';
   if (hash === 'editor' || hash === '') {
     navigateTo('dashboard');
-  } else if (hash === 'ai' || hash === 'dec' || hash === 'ach' || hash === 'opinion' || hash === 'files') {
+  } else if (hash === 'ai' || hash === 'dec' || hash === 'ach' || hash === 'opinion'
+             || hash === 'boxdocs' || hash === 'files') {
     navigateTo(hash);
   } else if (adminPages[hash]) {
     navigateTo(hash);
