@@ -46,6 +46,14 @@ In-flight な実装計画と保留中の構想だけを置く。運用ルール�
    （候補: `RiVault-Reasoning-*`＝運用主体自身のモデルと読め最も独立 / `K2-Think`。
    いずれも未検証。2026-08-04 に見えるようになった）② Scout 自身を `max_tokens` を
    上げて測り直し、上記 3 点が解消する（1024 で打ち切られている可能性は未検証）
+0b. **Box relevance の noise 誤判定の棚卸し（2026-08-05 着手、実行は PM）**
+   `pm_box_relevance.py --recheck-noise --reader k3 --limit 50` を繰り返し、noise 1,661 件を
+   Kimi-K3 に再審査させる（記録は `triage_second_opinion` の `box_relevance_recall`。
+   `relevance` は上書きしないので Console の「所見」タブで読んでから `--export`/`--import` で戻す）。
+   **初回 6 件は 6 件とも noise を覆した**（core 5 / related 1）。WG 資料・キックオフ議事メモ
+   まで落ちており、GLM-5.2 の noise 判定は過剰な疑いが濃い。**率が確定するまで主系統モデルの
+   差し替えはしない**（測る前に替えるのは根拠が無い。K3 への差し替えを見送った理由は LOG.md）。
+   `--reader k3` は **R8 対策ではない**（出自は主系統と同じ側）。上記 0 の保留は続いている。
 1. **`network_allowlist.yaml` の実値化と enforce の拡大** — read_plane / write_plane の
    実値が未確定。デーモン・cron は enforce 済みだが、手動実行の録音・TTS 系ラッパー、
    Web UI 経由ジョブ、Canvas `--recreate`、Box 共有リンク作成など cron に載らない経路は

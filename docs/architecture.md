@@ -42,20 +42,20 @@
 │  qa_server.py (Socket Mode) → ルーティング                                │
 │                                                                         │
 │  /argus-brief                                                           │
-│    ├─ [並列Worker] PMデータ / Slack会話 / 議事録                          │
+│    ├─ 全文脈方式 single-shot（検索なし・期間内全データ投入）                │
 │    │  + 背景知識: pm.db.decisions の rationale 付き上位 30 件             │
-│    └─ [Orchestrator] 3視点を統合 → 5件のアクション                        │
+│    └─ → 5件のアクション（LLM はツールを持たない）                          │
 │                                                                         │
 │  /argus-risk                                                            │
-│    ├─ [並列Worker] PMデータ / Slack会話 / 議事録                          │
+│    ├─ 全文脈方式 single-shot（検索なし・期間内全データ投入）                │
 │    │  + 背景知識: pm.db.decisions の rationale 付き上位 30 件             │
-│    └─ [Orchestrator] 3視点を統合 → リスク一覧                            │
+│    └─ → リスク一覧（LLM はツールを持たない）                              │
 │                                                                         │
-│  /argus-investigate                                                     │
-│    ├─ マルチステップ agent ループ                                        │
+│  /argus-investigate  ★ 本システム唯一の agent ループ                     │
+│    ├─ Read Plane（外部トークンを持たない別プロセス）で実行                  │
 │    ├─ 各ステップ内の tool_call を並列実行 (ThreadPool)                     │
-│    ├─ ツール: search_text / search_decisions / get_slack_messages /     │
-│    │          get_milestone_progress / get_unacknowledged_decisions ... │
+│    ├─ ツール: search_text_hybrid / search_decisions / read_document /   │
+│    │          get_milestone_progress / search_mentions ...（全16個）    │
 │    └─ ハイブリッド検索 (FTS5 RRF + embedding cosine similarity)          │
 │                                                                         │
 │  /argus-today / /argus-draft / /argus-transcribe                       │
@@ -251,32 +251,42 @@ pm_qa_server.py (Socket Mode デーモン)
   │
   ├── ThreadPoolExecutor(max_workers=4)
   │
-  ├── /argus-investigate ──→ マルチステップ Agent
-  │
-  ├── /argus-brief      ──→ Orchestrator-Worker パターン
-  │   ├─ Worker A: PMデータ → アクション候補
-  │   ├─ Worker B: Slack会話 → アクション候補
-  │   ├─ Worker C: 議事録   → アクション候補
-  │   └─ Orchestrator: 統合 → 5件に絞り込み
-  │
-  ├── /argus-risk       ──→ Orchestrator-Worker パターン
-  │   ├─ Worker A: PMデータ
-  │   ├─ Worker B: Slack会話
-  │   ├─ Worker C: 議事録
-  │   └─ Orchestrator: 統合 → リスク報告
-  │     (背景知識として pm.db.decisions の rationale 付き上位を同梱)
-  │
-  ├── /argus-investigate ──→ マルチステップ Agent
+  ├── /argus-investigate ──→ マルチステップ Agent（唯一の agent ループ）
+  │   ├─ run_agent() @ pm_argus_agent.py
   │   ├─ ツール並列実行 (ThreadPoolExecutor)
   │   ├─ ハイブリッド検索 (FTS5 + embedding RRF)
-  │   ├─ max 5 steps / 480s timeout
+  │   ├─ max 20 steps / 480s timeout (ARGUS_INVESTIGATE_TIMEOUT)
+  │   ├─ Read Plane 分離: pm_read_worker.py が別プロセスで実行し、
+  │   │   投稿は親（Write Plane）が行う
   │   └─ コンテキスト圧縮機構
+  │
+  ├── @Argus メンション ──→ 上と同じ run_agent()
+  │     (_run_mention_investigate_impl @ pm_qa_server.py)
+  │
+  ├── /argus-brief      ──→ 全文脈方式 single-shot
+  │   ├─ 期間内の PMデータ / Slack会話 / 議事録を切り詰めず 1 プロンプトに投入
+  │   ├─ 背景知識として pm.db.decisions の rationale 付き上位を同梱
+  │   └─ 生成失敗時は従来の切り詰め single-shot で 1 回だけ再試行
+  │
+  ├── /argus-risk       ──→ 全文脈方式 single-shot（brief と同じ構造）
   │
   ├── /argus-today      ──→ 日次サマリー（メンション抽出付き）
   ├── /argus-draft      ──→ アジェンダ/レポート草案
+  ├── /argus-direction  ──→ 方向性の提示
   ├── /argus-transcribe ──→ 録音 → 議事録パイプライン
   └── /argus-narrate    ──→ TTS ナレーション (PPTX/PDF → mp4)
 ```
+
+**「エージェント」と呼べるのは investigate 系だけ**。brief / risk はかつて
+Orchestrator-Worker（PMデータ / Slack / 議事録の 3 Worker + 統合）だったが、
+2026-07-23 の盲検 A/B を経て全文脈 single-shot に置き換え、旧コードは削除した
+（経緯は LOG.md）。それ以外のコマンドは決め打ちのデータ収集 + LLM 呼び出しで、
+LLM がツールを選ぶことはない。Patrol の検出も SQL ルールで、LLM は判定と文面
+生成に単発で使うだけである。
+
+この非対称性はセキュリティ上重要で、**LLM が自分で行動を選ぶ箇所が
+`run_agent()` の 1 箇所に閉じている**からこそ、allow-list 判定・plane 制限・
+`tool_calls` 台帳への記録をそこだけに置けば済む（詳細は security-architecture.md）。
 
 ### 検索パイプライン (investigate / ask)
 
@@ -337,11 +347,15 @@ pm_qa_server.py (Socket Mode デーモン)
 | Actions (ag-Grid) | アクションアイテム一覧・編集・保存 | pm.db → (保存時) Box XLSX 自動更新 |
 | Decisions (ag-Grid) | 決定事項一覧・編集・保存 | pm.db → (保存時) Box XLSX 自動更新 |
 | 実績 (ag-Grid) | アプリ別実績台帳の一覧・status(confirmed/rejected) 編集・保存 | pm.db.achievements → (保存時) Box XLSX 自動更新 |
+| 所見 (ag-Grid) | 第2系統・読み手の所見をレビュー済みにする | pm.db.triage_second_opinion |
+| Box文書 (ag-Grid) | relevance(core/related/noise/unknown) の一覧・編集・一括変更。読み手(K3)の再審査結果を突き合わせ表示 | box_docs.db.box_files → (次回 Embed 時) qa_index.db |
 | Recording | 録音ファイルアップロード → 議事録パイプライン | processing/ → minutes/*.db |
-| Ingest | Slack/minutes/goals 取り込み実行 | AdminJobQueue → pm_ingest.py |
-| Knowledge | Embed (FTS5 索引再構築) 実行 | AdminJobQueue → pm_embed.py |
+| Ingest | Slack/minutes/goals 取り込み実行 + Embed (FTS5 索引再構築) 実行 | AdminJobQueue → pm_ingest.py / pm_embed.py |
 | Reports | 週次レポート / 洞察 / XLSX 生成 | AdminJobQueue → pm_report.py |
 | Minutes | 議事録一覧・編集・削除 | minutes/*.db → (保存時) pm.db + Box 自動更新 |
+| Terminology | 用語集の編集 | pm.db.terminology |
+| Glossary | 構造化テキスト（コデザイン項目・ルール等）の編集 | pm.db.glossary |
+| Quality | 重複検出プレビュー・一括削除・relink CSV 取り込み | pm_screen / pm_relink → pm.db |
 | Services | デーモン状態確認・起動停止・ログ閲覧 | pm_daemon.sh |
 
 ---
